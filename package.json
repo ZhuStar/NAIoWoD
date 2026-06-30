@@ -1,0 +1,12 @@
+{
+  "name": "naiowod",
+  "version": "0.1.0",
+  "private": true,
+  "description": "World of Darkness (Dark Ages) character system for NovelAI scripting",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build ./src/wod.ts --outfile ./dist/wod.novelai.js --target browser"
+  }
+}

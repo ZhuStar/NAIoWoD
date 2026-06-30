@@ -1,0 +1,1056 @@
+// =============================================================================
+// NAIoWoD - World of Darkness (Dark Ages) character system for NovelAI scripting
+// -----------------------------------------------------------------------------
+// Single-file module: at runtime inside NovelAI the host injects a global `api`
+// object; locally (and in tests) the mock below is used instead. Everything is
+// exported so the test suite can import it; for a NovelAI deployment you can run
+// the `build` script (or simply strip the `export` keywords and the mock).
+//
+// Mechanics target the classic Storyteller system (Dark Ages flavour): d10 dice
+// pools, 7-level health tracks with bashing/lethal/aggravated damage, soak rolls
+// whose rules vary by template, and resource pools (Willpower, Blood, Resolve,
+// Quintessence, Torment, ...) plus optional Roads/Virtues. Where a rule has
+// multiple table interpretations the choice is noted in a comment.
+// =============================================================================
+
+// --- API CONTRACT ---
+interface WodApi {
+  v1: {
+    script: { id: string };
+    storyStorage: { set: (key: string, value: unknown) => void };
+    lorebook: { entries: () => Array<{ displayName: string; category: string }> };
+  };
+}
+
+// --- API MOCK (yields to a real host-provided `api` when one exists) ---
+const __host = globalThis as unknown as { api?: WodApi };
+const api: WodApi = __host.api ?? {
+  v1: {
+    script: { id: "a1b2c3d4-script-uuid" },
+    storyStorage: {
+      set: (key: string, value: unknown) => {
+        Log(`[STORAGE SAVE] Key: ${key} | Data:`, value);
+      }
+    },
+    lorebook: {
+      entries: () => [
+        { displayName: "srd:ability:talent:brawl", category: "srd:ability" },
+        { displayName: "srd:ability:skill:drive", category: "srd:ability" },
+        { displayName: "srd:ability:knowledge:occult", category: "srd:ability" },
+        { displayName: "srd:background:none:generation", category: "srd:background" }
+      ]
+    }
+  }
+};
+
+// --- UTILITIES & CONSTANTS ---
+export function Log(...args: unknown[]): void { console.log(...args); }
+
+export class StringUtil {
+  static normalize(str: string): string {
+    return str.toLowerCase().trim().replace(/\s+/g, '-');
+  }
+
+  // Parses srd:ability:talent:brawl -> { kind: "ability", sub: "talent", name: "brawl" }
+  static parseSrdName(srdString: string): { kind: string, subCategory: string, name: string } {
+    const parts = srdString.toLowerCase().split(':');
+    if (parts[0] !== 'srd' || parts.length < 4) return { kind: "unknown", subCategory: "none", name: srdString };
+    return { kind: parts[1], subCategory: parts[2], name: parts.slice(3).join('-') };
+  }
+
+  // "blood-potency" / "self_control" -> "Blood Potency" / "Self Control"
+  static toTitleCase(str: string): string {
+    return str
+      .replace(/[-_]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(w => w.length > 0)
+      .map(w => w[0].toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+  }
+}
+
+export type CategoryType =
+  | "physical" | "social" | "mental"
+  | "talent" | "skill" | "knowledge"
+  | "background" | "tracker" | "virtue" | "morality" | "vital";
+export class Category {
+  static readonly PHYSICAL = new Category("physical");
+  static readonly SOCIAL = new Category("social");
+  static readonly MENTAL = new Category("mental");
+  static readonly TALENT = new Category("talent");
+  static readonly SKILL = new Category("skill");
+  static readonly KNOWLEDGE = new Category("knowledge");
+  static readonly BACKGROUND = new Category("background");
+  static readonly TRACKER = new Category("tracker");
+  static readonly VIRTUE = new Category("virtue");
+  static readonly MORALITY = new Category("morality");
+  static readonly VITAL = new Category("vital");
+
+  public readonly Name: string;
+  private constructor(name: CategoryType) {
+    this.Name = name;
+    Object.freeze(this);
+  }
+}
+
+export type PointSourceType = "base" | "freebie" | "experience" | "downtime";
+export class PointSource {
+  static readonly BASE = new PointSource("base");
+  static readonly FREEBIE = new PointSource("freebie");
+  static readonly EXPERIENCE = new PointSource("experience");
+  static readonly DOWNTIME = new PointSource("downtime");
+
+  public readonly Name: string;
+  private constructor(name: PointSourceType) {
+    this.Name = name;
+    Object.freeze(this);
+  }
+}
+
+// --- CONFIGURATION ---
+export class RulesetConfig {
+  constructor(
+    public readonly AttrFreebieCost: number,
+    public readonly AbilityFreebieCost: number,
+    public readonly AttrXPMultiplier: number,
+    public readonly AbilityXPMultiplier: number,
+    public readonly UsesDowntime: boolean,
+    public readonly AttrDowntimeCost: number = 0,
+    public readonly AbilityDowntimeCost: number = 0
+  ) {
+    Object.freeze(this);
+  }
+
+  // Example rulesets
+  static readonly VAMPIRE = new RulesetConfig(5, 2, 4, 2, true, 5, 2);
+  static readonly MAGE = new RulesetConfig(5, 2, 4, 2, false);
+}
+
+// --- STATS, MODIFIERS & TRACKERS ---
+export class LedgerEntry {
+  constructor(
+    public readonly Source: PointSource,
+    public readonly AmountAdded: number,
+    public readonly CostIncurred: number
+  ) { Object.freeze(this); }
+}
+
+export class StatModifier {
+  constructor(
+    public readonly Amount: number,
+    public readonly IsPermanent: boolean,
+    public readonly IgnoresCap: boolean,
+    public readonly Description: string
+  ) { Object.freeze(this); }
+}
+
+export class Stat {
+  protected readonly _name: string;
+  protected readonly _category: Category;
+  protected readonly _isImmutable: boolean;
+  protected _creationCap: number;
+  protected _absoluteCap: number;
+  protected readonly _ledger: LedgerEntry[] = [];
+  protected _modifiers: StatModifier[] = [];
+
+  constructor(name: string, category: Category, baseValue: number, creationCap: number = 5, absoluteCap: number = 5, isImmutable: boolean = false) {
+    this._name = StringUtil.normalize(name);
+    this._category = category;
+    this._creationCap = creationCap;
+    this._absoluteCap = absoluteCap;
+    this._isImmutable = isImmutable;
+
+    if (baseValue > 0) this._ledger.push(new LedgerEntry(PointSource.BASE, baseValue, 0));
+  }
+
+  get Name(): string { return this._name; }
+  get Category(): Category { return this._category; }
+
+  // The actual dots bought on the sheet
+  get Value(): number { return this._ledger.reduce((sum, entry) => sum + entry.AmountAdded, 0); }
+
+  // The pool used for rolling (Value + Buffs - Debuffs)
+  get EffectiveValue(): number {
+    let eff = this.Value;
+    let bypassesCap = false;
+
+    for (const mod of this._modifiers) {
+      eff += mod.Amount;
+      if (mod.IgnoresCap) bypassesCap = true;
+    }
+
+    if (!bypassesCap && eff > this._absoluteCap) return this._absoluteCap;
+    if (eff < 0) return 0;
+    return eff;
+  }
+
+  get AuditLog(): LedgerEntry[] { return [...this._ledger]; }
+
+  Allocate(source: PointSource, amount: number, cost: number = 0, bypassCaps: boolean = false): void {
+    if (this._isImmutable) throw new Error(`Cannot modify immutable stat: ${this._name}`);
+
+    const isCreationPhase = (source === PointSource.BASE || source === PointSource.FREEBIE);
+    const activeCap = isCreationPhase ? this._creationCap : this._absoluteCap;
+
+    if (!bypassCaps && this.Value + amount > activeCap) {
+      throw new Error(`Stat ${this._name} cannot exceed cap of ${activeCap} via ${source.Name}.`);
+    }
+    this._ledger.push(new LedgerEntry(source, amount, cost));
+  }
+
+  AddModifier(mod: StatModifier) { this._modifiers.push(mod); }
+  RemoveModifierByDesc(desc: string) {
+    this._modifiers = this._modifiers.filter(m => m.Description !== desc);
+  }
+}
+
+// Extends Stat to handle temporary spendable points (Willpower, Resolve, ...)
+export class Tracker extends Stat {
+  private _tempValue: number;
+
+  constructor(name: string, category: Category, baseValue: number, creationCap: number = 10, absoluteCap: number = 10) {
+    super(name, category, baseValue, creationCap, absoluteCap);
+    this._tempValue = baseValue;
+  }
+
+  get Temporary(): number { return this._tempValue; }
+
+  // Sync temporary points when permanent rating increases
+  override Allocate(source: PointSource, amount: number, cost: number = 0, bypassCaps: boolean = false): void {
+    super.Allocate(source, amount, cost, bypassCaps);
+    this._tempValue += amount;
+  }
+
+  Spend(amount: number) {
+    if (amount < 0) throw new Error("Cannot spend a negative amount.");
+    if (this._tempValue < amount) throw new Error(`Not enough temporary ${this._name} to spend.`);
+    this._tempValue -= amount;
+  }
+
+  Regain(amount: number, canExceedPermanent: boolean = false) {
+    if (amount < 0) throw new Error("Cannot regain a negative amount.");
+    this._tempValue += amount;
+    if (!canExceedPermanent && this._tempValue > this.Value) {
+      this._tempValue = this.Value;
+    }
+  }
+}
+
+// =============================================================================
+// DICE - auditable Storyteller (World of Darkness) dice roller
+// =============================================================================
+
+// Random integer in [min, max]. Uses Math.random by default; an injectable Rng
+// (returning a float in [0,1)) keeps rolls deterministic under test.
+export type Rng = () => number;
+const __defaultRng: Rng = () => Math.random();
+export function Random(min: number, max: number, rng: Rng = __defaultRng): number {
+  if (max < min) { const t = min; min = max; max = t; }
+  return min + Math.floor(rng() * (max - min + 1));
+}
+
+export interface RollTrait { name: string; value: number; }
+export interface RollOptions {
+  difficulty?: number;   // default 6
+  nAgain?: number;       // default 10 (10-again). 11 disables, 9 explodes 9s & 10s.
+  rng?: Rng;
+  label?: string;        // header label when rolling a raw pool
+}
+export interface RollDie {
+  face: number;
+  symbol: string;        // bomb / explode / hit / miss
+  isSuccess: boolean;
+  isOne: boolean;
+  explodes: boolean;
+  fromExplosion: boolean;
+}
+export type RollOutcome = "botch" | "failure" | "success";
+export interface RollResult {
+  traits: RollTrait[];
+  pool: number;
+  difficulty: number;
+  nAgain: number;
+  dice: RollDie[];
+  successes: number;     // dice meeting difficulty (incl. explosions)
+  ones: number;          // dice showing a 1 (incl. explosions)
+  net: number;           // successes - ones
+  isBotch: boolean;
+  outcome: RollOutcome;
+  message: string;
+}
+
+const DIE_BOMB = "\u{1F4A3}";    // bomb -> a rolled 1
+const DIE_EXPLODE = "\u{1F4A5}"; // collision -> a die that explodes (n-again)
+const DIE_HIT = "✅";        // check -> a success
+const DIE_MISS = "❌";       // cross -> a failure
+const MAX_DICE = 200;            // safety valve against pathological explosion chains
+
+export class Dice {
+  // Accepts either a raw pool size or a list of named traits (one or two are
+  // typical, but any number is summed). Returns a fully auditable result.
+  static roll(input: number | RollTrait[], options: RollOptions = {}): RollResult {
+    const difficulty = options.difficulty ?? 6;
+    const nAgain = Math.max(2, options.nAgain ?? 10); // never explode on faces < 2
+    const rng = options.rng ?? __defaultRng;
+
+    const traits: RollTrait[] = typeof input === "number"
+      ? [{ name: options.label ?? "Pool", value: input }]
+      : input;
+    const pool = Math.max(0, traits.reduce((s, t) => s + Math.max(0, t.value), 0));
+
+    const dice: RollDie[] = [];
+    let pending = pool;   // remaining dice from the initial pool
+    let extra = 0;        // dice queued by explosions
+    let rolled = 0;
+
+    const rollOne = (fromExplosion: boolean): void => {
+      const face = Random(1, 10, rng);
+      const isOne = face === 1;
+      const isSuccess = face >= difficulty;
+      const explodes = face >= nAgain;
+      let symbol = DIE_MISS;
+      if (isOne) symbol = DIE_BOMB;
+      else if (explodes) symbol = DIE_EXPLODE;
+      else if (isSuccess) symbol = DIE_HIT;
+      dice.push({ face, symbol, isSuccess, isOne, explodes, fromExplosion });
+      if (explodes) extra++;
+    };
+
+    while ((pending > 0 || extra > 0) && rolled < MAX_DICE) {
+      if (pending > 0) { pending--; rollOne(false); }
+      else { extra--; rollOne(true); }
+      rolled++;
+    }
+
+    const successes = dice.filter(d => d.isSuccess).length;
+    const ones = dice.filter(d => d.isOne).length;
+    const net = successes - ones;
+
+    // A botch is judged on the INITIAL roll only: zero successes and >= 1 one.
+    // (If a success is present but cancelled by a 1, it is a failure, not a botch.)
+    const initial = dice.filter(d => !d.fromExplosion);
+    const initialSuccesses = initial.filter(d => d.isSuccess).length;
+    const initialOnes = initial.filter(d => d.isOne).length;
+    const isBotch = initialSuccesses === 0 && initialOnes >= 1;
+
+    const outcome: RollOutcome = isBotch ? "botch" : (net > 0 ? "success" : "failure");
+
+    const header = traits.map(t => `${StringUtil.toTitleCase(t.name)} (${t.value})`).join(" + ");
+    const faces = dice.map(d => `${d.symbol}${d.face}`).join(" ");
+    let resultLine: string;
+    if (isBotch) resultLine = `${DIE_BOMB} BOTCH!`;
+    else if (net > 0) resultLine = `${DIE_HIT} ${net} success${net === 1 ? "" : "es"}`;
+    else resultLine = `${DIE_MISS} Failure`;
+    const message = `${header} vs diff ${difficulty} [${faces}] -> ${resultLine}`;
+
+    return { traits, pool, difficulty, nAgain, dice, successes, ones, net, isBotch, outcome, message };
+  }
+}
+
+// =============================================================================
+// HEALTH - damage tracks & wound penalties
+// =============================================================================
+
+export type DamageKind = "bashing" | "lethal" | "aggravated";
+export class DamageType {
+  static readonly BASHING = new DamageType("bashing", 0);
+  static readonly LETHAL = new DamageType("lethal", 1);
+  static readonly AGGRAVATED = new DamageType("aggravated", 2);
+  private constructor(public readonly Name: DamageKind, public readonly Severity: number) { Object.freeze(this); }
+  static fromName(name: DamageKind): DamageType {
+    switch (name) {
+      case "bashing": return DamageType.BASHING;
+      case "lethal": return DamageType.LETHAL;
+      case "aggravated": return DamageType.AGGRAVATED;
+      default: throw new Error(`Unknown damage type: ${name}`);
+    }
+  }
+}
+
+export interface HealthLevelDef { name: string; penalty: number; }
+
+// Standard 7-level Storyteller health track.
+export const STANDARD_HEALTH_LEVELS: HealthLevelDef[] = [
+  { name: "Bruised", penalty: 0 },
+  { name: "Hurt", penalty: -1 },
+  { name: "Injured", penalty: -1 },
+  { name: "Wounded", penalty: -2 },
+  { name: "Mauled", penalty: -2 },
+  { name: "Crippled", penalty: -5 },
+  { name: "Incapacitated", penalty: -5 },
+];
+
+export interface HealthSummary {
+  bashing: number; lethal: number; aggravated: number;
+  filled: number; capacity: number; overkill: number;
+  penalty: number; level: string;
+  isIncapacitated: boolean; isDead: boolean;
+}
+
+export class HealthTrack {
+  private _bashing = 0;
+  private _lethal = 0;
+  private _aggravated = 0;
+  private _overkill = 0; // damage that spills past a fully-aggravated track
+  private readonly _levels: HealthLevelDef[];
+  private readonly _log: Array<{ type: DamageKind; amount: number }> = [];
+
+  constructor(levels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS) {
+    if (levels.length === 0) throw new Error("Health track needs at least one level.");
+    this._levels = levels.map(l => ({ ...l }));
+  }
+
+  get Capacity(): number { return this._levels.length; }
+  get Bashing(): number { return this._bashing; }
+  get Lethal(): number { return this._lethal; }
+  get Aggravated(): number { return this._aggravated; }
+  get Overkill(): number { return this._overkill; }
+  get Filled(): number { return this._bashing + this._lethal + this._aggravated; }
+
+  // Wound penalty = penalty of the deepest filled level.
+  get Penalty(): number {
+    const filled = this.Filled;
+    if (filled <= 0) return 0;
+    const idx = Math.min(filled, this.Capacity) - 1;
+    return this._levels[idx].penalty;
+  }
+
+  get Level(): string {
+    const filled = this.Filled;
+    if (filled <= 0) return "Healthy";
+    const idx = Math.min(filled, this.Capacity) - 1;
+    return this._levels[idx].name;
+  }
+
+  get IsIncapacitated(): boolean { return this.Filled >= this.Capacity; }
+
+  // Destroyed: track full of aggravated, or damage spilled beyond it.
+  get IsDead(): boolean { return this._overkill > 0 || this._aggravated >= this.Capacity; }
+
+  ApplyDamage(type: DamageType | DamageKind, amount: number): void {
+    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
+    if (amount < 0) throw new Error("Damage amount cannot be negative.");
+    if (amount === 0) return;
+    this._log.push({ type: dt.Name, amount });
+    for (let i = 0; i < amount; i++) this._applyOne(dt);
+  }
+
+  // One point of damage. On a full track the wrap-around upgrade rule applies:
+  // a more-severe hit replaces the least-severe existing wound; otherwise the
+  // least-severe wound is upgraded a step (bashing -> lethal -> aggravated).
+  private _applyOne(dt: DamageType): void {
+    if (this.Filled < this.Capacity) { this._add(dt, 1); return; }
+
+    let leastSev: number;
+    if (this._bashing > 0) leastSev = 0;
+    else if (this._lethal > 0) leastSev = 1;
+    else leastSev = 2;
+
+    if (dt.Severity > leastSev) {
+      this._removeSev(leastSev, 1);
+      this._add(dt, 1);
+    } else if (leastSev === 0) {
+      this._bashing--; this._lethal++;        // bashing wraps to lethal
+    } else if (leastSev === 1) {
+      this._lethal--; this._aggravated++;     // lethal wraps to aggravated
+    } else {
+      this._overkill++;                       // aggravated track full -> overkill
+    }
+  }
+
+  private _add(dt: DamageType, n: number): void {
+    if (dt === DamageType.BASHING) this._bashing += n;
+    else if (dt === DamageType.LETHAL) this._lethal += n;
+    else this._aggravated += n;
+  }
+
+  private _removeSev(sev: number, n: number): void {
+    if (sev === 0) this._bashing -= n;
+    else if (sev === 1) this._lethal -= n;
+    else this._aggravated -= n;
+  }
+
+  // Heals up to `amount` boxes of the given damage type; returns how many healed.
+  Heal(type: DamageType | DamageKind, amount: number): number {
+    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
+    if (amount < 0) throw new Error("Heal amount cannot be negative.");
+    const before = dt === DamageType.BASHING ? this._bashing : dt === DamageType.LETHAL ? this._lethal : this._aggravated;
+    const healed = Math.min(before, amount);
+    this._removeSev(dt.Severity, healed);
+    return healed;
+  }
+
+  Reset(): void { this._bashing = this._lethal = this._aggravated = this._overkill = 0; }
+
+  Summary(): HealthSummary {
+    return {
+      bashing: this._bashing, lethal: this._lethal, aggravated: this._aggravated,
+      filled: this.Filled, capacity: this.Capacity, overkill: this._overkill,
+      penalty: this.Penalty, level: this.Level,
+      isIncapacitated: this.IsIncapacitated, isDead: this.IsDead,
+    };
+  }
+}
+
+// =============================================================================
+// SOAK - per-template rules for resisting damage
+// =============================================================================
+export interface SoakTypeRule { soakable: boolean; pool: string[]; }
+export interface SoakSpec {
+  bashing: SoakTypeRule;
+  lethal: SoakTypeRule;
+  aggravated: SoakTypeRule;
+  difficulty: number;
+}
+
+// Mortals soak bashing with Stamina only; lethal/aggravated bypass them.
+export const MORTAL_SOAK: SoakSpec = {
+  bashing: { soakable: true, pool: ["stamina"] },
+  lethal: { soakable: false, pool: [] },
+  aggravated: { soakable: false, pool: [] },
+  difficulty: 6,
+};
+// Vampires soak bashing & lethal with Stamina (+Fortitude); aggravated needs
+// Fortitude alone (no Fortitude trait -> empty pool -> nothing soaked).
+export const VAMPIRE_SOAK: SoakSpec = {
+  bashing: { soakable: true, pool: ["stamina", "fortitude"] },
+  lethal: { soakable: true, pool: ["stamina", "fortitude"] },
+  aggravated: { soakable: true, pool: ["fortitude"] },
+  difficulty: 6,
+};
+// Mages innately soak like mortals (their real defence is magic, not modelled).
+export const MAGE_SOAK: SoakSpec = {
+  bashing: { soakable: true, pool: ["stamina"] },
+  lethal: { soakable: false, pool: [] },
+  aggravated: { soakable: false, pool: [] },
+  difficulty: 6,
+};
+// Demons (manifested) soak all three with Stamina.
+export const DEMON_SOAK: SoakSpec = {
+  bashing: { soakable: true, pool: ["stamina"] },
+  lethal: { soakable: true, pool: ["stamina"] },
+  aggravated: { soakable: true, pool: ["stamina"] },
+  difficulty: 6,
+};
+
+// =============================================================================
+// RESOURCE POOLS - Blood, Quintessence, Paradox, ... (free-floating counters)
+// =============================================================================
+export class Pool {
+  private _current: number;
+  private _max: number;
+  private readonly _name: string;
+  private readonly _perTurn: number;
+  private readonly _log: Array<{ delta: number; reason: string }> = [];
+
+  constructor(name: string, max: number, start?: number, perTurnLimit: number = Infinity) {
+    this._name = StringUtil.normalize(name);
+    this._max = max;
+    this._perTurn = perTurnLimit;
+    this._current = Math.max(0, Math.min(start ?? max, max));
+  }
+
+  get Name(): string { return this._name; }
+  get Current(): number { return this._current; }
+  get Max(): number { return this._max; }
+  get PerTurnLimit(): number { return this._perTurn; }
+  get AuditLog(): Array<{ delta: number; reason: string }> { return [...this._log]; }
+
+  // Resize the pool (e.g. a vampire lowering generation via diablerie).
+  SetMax(max: number, keepRatio: boolean = false): void {
+    if (max < 0) throw new Error("Pool max cannot be negative.");
+    if (keepRatio && this._max > 0) this._current = Math.round((this._current / this._max) * max);
+    this._max = max;
+    if (this._current > max) this._current = max;
+  }
+
+  Spend(amount: number, reason: string = ""): void {
+    if (amount < 0) throw new Error("Cannot spend a negative amount.");
+    if (amount > this._perTurn) throw new Error(`Cannot spend more than ${this._perTurn} ${this._name} per turn.`);
+    if (amount > this._current) throw new Error(`Not enough ${this._name}: have ${this._current}, need ${amount}.`);
+    this._current -= amount;
+    this._log.push({ delta: -amount, reason });
+  }
+
+  Gain(amount: number, reason: string = ""): number {
+    if (amount < 0) throw new Error("Cannot gain a negative amount.");
+    const before = this._current;
+    this._current = Math.min(this._max, this._current + amount);
+    const gained = this._current - before;
+    this._log.push({ delta: gained, reason });
+    return gained;
+  }
+
+  Refill(): void { this._current = this._max; }
+}
+
+export interface BloodStats { max: number; perTurn: number; }
+// Vampire blood pool by generation (standard table; clamped to 3rd-15th).
+const BLOOD_BY_GENERATION: Record<number, BloodStats> = {
+  3: { max: 100, perTurn: 20 },
+  4: { max: 50, perTurn: 10 },
+  5: { max: 40, perTurn: 8 },
+  6: { max: 30, perTurn: 6 },
+  7: { max: 20, perTurn: 4 },
+  8: { max: 15, perTurn: 3 },
+  9: { max: 14, perTurn: 2 },
+  10: { max: 13, perTurn: 1 },
+  11: { max: 12, perTurn: 1 },
+  12: { max: 11, perTurn: 1 },
+  13: { max: 10, perTurn: 1 },
+  14: { max: 10, perTurn: 1 },
+  15: { max: 10, perTurn: 1 },
+};
+export function bloodForGeneration(generation: number): BloodStats {
+  const g = Math.max(3, Math.min(15, Math.round(generation)));
+  return { ...BLOOD_BY_GENERATION[g] };
+}
+
+// =============================================================================
+// MORALITY - Roads / Humanity (optional; Mages have none)
+// =============================================================================
+export interface RoadDefinition {
+  name: string;                       // e.g. "Road of Humanity"
+  virtues: [string, string, string];  // the three Virtues this Road uses
+  ratingVirtues: [string, string];    // which two sum to the starting rating
+}
+
+export const ROAD_OF_HUMANITY: RoadDefinition = {
+  name: "Road of Humanity",
+  virtues: ["conscience", "self-control", "courage"],
+  ratingVirtues: ["conscience", "self-control"],
+};
+export const ROAD_OF_KINGS: RoadDefinition = {
+  name: "Road of Kings",
+  virtues: ["conviction", "self-control", "courage"],
+  ratingVirtues: ["conviction", "self-control"],
+};
+export const ROAD_OF_THE_BEAST: RoadDefinition = {
+  name: "Road of the Beast",
+  virtues: ["conviction", "instinct", "courage"],
+  ratingVirtues: ["conviction", "instinct"],
+};
+
+export class MoralityTrait {
+  private _value: number;
+  private readonly _max: number;
+  private readonly _log: Array<{ delta: number; reason: string; value: number }> = [];
+
+  constructor(public readonly RoadName: string, value: number, max: number = 10) {
+    this._max = max;
+    this._value = Math.max(0, Math.min(value, max));
+  }
+
+  get Value(): number { return this._value; }
+  get Max(): number { return this._max; }
+  get Category(): Category { return Category.MORALITY; }
+  get AuditLog(): Array<{ delta: number; reason: string; value: number }> { return [...this._log]; }
+
+  // Failing a Virtue roll after a sin: lose rating.
+  Degenerate(amount: number = 1, reason: string = "degeneration"): void {
+    this._change(-Math.abs(amount), reason);
+  }
+  // Penance / redemption: regain rating (XP-gated by the ST elsewhere).
+  Improve(amount: number = 1, reason: string = "penance"): void {
+    this._change(Math.abs(amount), reason);
+  }
+
+  private _change(delta: number, reason: string): void {
+    const next = Math.max(0, Math.min(this._value + delta, this._max));
+    const applied = next - this._value;
+    this._value = next;
+    this._log.push({ delta: applied, reason, value: this._value });
+  }
+}
+
+// =============================================================================
+// TEMPLATES - per-splat configuration including starting values
+// =============================================================================
+export type PoolKind = "tracker" | "pool";
+export interface PoolDef {
+  name: string;
+  kind: PoolKind;
+  start: number;            // default starting value
+  startMin?: number;        // inclusive lower bound for a chosen start
+  startMax?: number;        // inclusive upper bound for a chosen start
+  startOptions?: number[];  // discrete allowed starts (overrides min/max if set)
+  max: number;              // permanent cap (tracker) / capacity (pool)
+  perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
+  fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
+}
+
+export class TemplateConfig {
+  constructor(
+    public readonly Name: string,
+    public readonly Rules: RulesetConfig,
+    public readonly Pools: PoolDef[],
+    public readonly Soak: SoakSpec,
+    public readonly HasMorality: boolean,
+    public readonly DefaultRoad: RoadDefinition | null,
+    public readonly HasVirtues: boolean,
+    public readonly HealthLevels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS
+  ) {}
+
+  GetPool(name: string): PoolDef | undefined {
+    const n = StringUtil.normalize(name);
+    return this.Pools.find(p => StringUtil.normalize(p.name) === n);
+  }
+}
+
+export const TEMPLATE_MORTAL = new TemplateConfig(
+  "Mortal",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [{ name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 }],
+  MORTAL_SOAK,
+  true, ROAD_OF_HUMANITY, true
+);
+
+export const TEMPLATE_THRALL = new TemplateConfig(
+  "Thrall",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [
+    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    // A thrall's bond grants only a flicker of Resolve: it must start at 1.
+    { name: "resolve", kind: "tracker", start: 1, startMin: 1, startMax: 1, max: 10 },
+  ],
+  MORTAL_SOAK,
+  true, ROAD_OF_HUMANITY, true
+);
+
+export const TEMPLATE_VAMPIRE = new TemplateConfig(
+  "Vampire (Dark Ages)",
+  RulesetConfig.VAMPIRE,
+  [
+    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    { name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1, fromGeneration: true },
+  ],
+  VAMPIRE_SOAK,
+  true, ROAD_OF_HUMANITY, true
+);
+
+export const TEMPLATE_MAGE = new TemplateConfig(
+  "Mage (Dark Ages)",
+  RulesetConfig.MAGE,
+  [
+    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    { name: "quintessence", kind: "pool", start: 0, max: 20 },
+    { name: "paradox", kind: "pool", start: 0, max: 20 },
+  ],
+  MAGE_SOAK,
+  false, null, false   // Mages have no Road/Humanity and no Virtues
+);
+
+export const TEMPLATE_DEMON = new TemplateConfig(
+  "Demon",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [
+    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    // Resolve (the demon's spiritual power): a fledgling starts in the 3-5 band.
+    { name: "resolve", kind: "tracker", start: 3, startMin: 3, startMax: 5, max: 10 },
+    // Torment: corruption meter, optional and demon-specific.
+    { name: "torment", kind: "tracker", start: 3, startMin: 0, startMax: 10, max: 10 },
+  ],
+  DEMON_SOAK,
+  false, null, false   // Demons track Torment instead of a Road / Virtues
+);
+
+export const TEMPLATES: Record<string, TemplateConfig> = {
+  mortal: TEMPLATE_MORTAL,
+  thrall: TEMPLATE_THRALL,
+  vampire: TEMPLATE_VAMPIRE,
+  mage: TEMPLATE_MAGE,
+  demon: TEMPLATE_DEMON,
+};
+
+// --- LOREBOOK PARSER ---
+export class LorebookParser {
+  static ParseFromApi(): { abilities: Map<string, Stat>, backgrounds: Map<string, Stat> } {
+    const abilities = new Map<string, Stat>();
+    const backgrounds = new Map<string, Stat>();
+
+    const rawEntries = api.v1.lorebook.entries();
+
+    rawEntries.forEach(entry => {
+      const parsed = StringUtil.parseSrdName(entry.displayName);
+
+      // Map the parsed subCategory string back to our strict Category constants
+      let catObj: Category = Category.KNOWLEDGE; // fallback
+      if (parsed.subCategory === 'talent') catObj = Category.TALENT;
+      if (parsed.subCategory === 'skill') catObj = Category.SKILL;
+      if (parsed.kind === 'background') catObj = Category.BACKGROUND;
+
+      if (catObj === Category.BACKGROUND) {
+        backgrounds.set(parsed.name, new Stat(parsed.name, catObj, 0));
+      } else {
+        abilities.set(parsed.name, new Stat(parsed.name, catObj, 0));
+      }
+    });
+
+    return { abilities, backgrounds };
+  }
+}
+
+// --- LIVE CHARACTER SHEET ---
+export interface DamageReport {
+  type: DamageKind;
+  incoming: number;
+  soaked: number;
+  applied: number;
+  soakRoll: RollResult | null;
+  health: HealthSummary;
+}
+export interface SoakReport {
+  soakable: boolean;
+  pool: number;
+  soaked: number;
+  roll: RollResult | null;
+}
+
+export class LiveCharacter {
+  private _xpRemaining: number = 0;
+  private _downtimeRemaining: number = 0;
+
+  // Extended state (populated by CharacterFactory; safe defaults keep the
+  // original 7-argument constructor backwards compatible).
+  public Health: HealthTrack = new HealthTrack();
+  public Pools: Map<string, Pool> = new Map();
+  public Virtues: Map<string, Stat> = new Map();
+  public Traits: Map<string, Stat> = new Map(); // misc rated traits (e.g. Fortitude)
+  public Morality?: MoralityTrait;
+  public Soak: SoakSpec = MORTAL_SOAK;
+
+  constructor(
+    public readonly Name: string,
+    public readonly Template: string,
+    public readonly Rules: RulesetConfig,
+    public readonly Attributes: Map<string, Stat>,
+    public readonly Abilities: Map<string, Stat>,
+    public readonly Backgrounds: Map<string, Stat>,
+    public readonly Trackers: Map<string, Tracker>
+  ) { }
+
+  AwardXP(amount: number) { this._xpRemaining += amount; }
+  AwardDowntime(amount: number) { this._downtimeRemaining += amount; }
+  get XPRemaining(): number { return this._xpRemaining; }
+  get DowntimeRemaining(): number { return this._downtimeRemaining; }
+
+  SpendXPOnAttribute(statName: string) {
+    const stat = this.Attributes.get(StringUtil.normalize(statName));
+    if (!stat) throw new Error(`Attribute ${statName} not found.`);
+    const cost = stat.Value * this.Rules.AttrXPMultiplier;
+    if (this._xpRemaining < cost) throw new Error("Not enough XP.");
+    stat.Allocate(PointSource.EXPERIENCE, 1, cost);
+    this._xpRemaining -= cost;
+  }
+
+  SpendDowntimeOnAttribute(statName: string) {
+    if (!this.Rules.UsesDowntime) throw new Error(`${this.Template} does not use Downtime points.`);
+    const stat = this.Attributes.get(StringUtil.normalize(statName));
+    if (!stat) throw new Error(`Attribute ${statName} not found.`);
+    const cost = this.Rules.AttrDowntimeCost;
+    if (this._downtimeRemaining < cost) throw new Error("Not enough Downtime.");
+    stat.Allocate(PointSource.DOWNTIME, 1, cost);
+    this._downtimeRemaining -= cost;
+  }
+
+  // --- Trait lookup (used by soak and ad-hoc rolls) -----------------------
+  TraitValue(name: string): number {
+    const n = StringUtil.normalize(name);
+    const s = this.Attributes.get(n) ?? this.Abilities.get(n) ?? this.Backgrounds.get(n)
+      ?? this.Virtues.get(n) ?? this.Traits.get(n);
+    return s ? s.EffectiveValue : 0;
+  }
+
+  // --- Health & soak -------------------------------------------------------
+  get WoundPenalty(): number { return this.Health.Penalty; }
+
+  SoakPoolFor(type: DamageType | DamageKind): number {
+    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
+    const rule = this.Soak[dt.Name];
+    if (!rule.soakable) return 0;
+    return rule.pool.reduce((sum, t) => sum + this.TraitValue(t), 0);
+  }
+
+  RollSoak(type: DamageType | DamageKind, rng?: Rng): SoakReport {
+    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
+    const rule = this.Soak[dt.Name];
+    if (!rule.soakable) return { soakable: false, pool: 0, soaked: 0, roll: null };
+    const pool = this.SoakPoolFor(dt);
+    if (pool <= 0) return { soakable: true, pool: 0, soaked: 0, roll: null };
+    const roll = Dice.roll(pool, { difficulty: this.Soak.difficulty, rng, label: `${dt.Name} soak` });
+    return { soakable: true, pool, soaked: Math.max(0, roll.net), roll };
+  }
+
+  // Soak (when allowed) then apply the remaining damage to the health track.
+  TakeDamage(type: DamageType | DamageKind, amount: number, opts: { soak?: boolean; rng?: Rng } = {}): DamageReport {
+    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
+    const doSoak = opts.soak ?? true;
+    let soaked = 0;
+    let soakRoll: RollResult | null = null;
+    if (doSoak) {
+      const r = this.RollSoak(dt, opts.rng);
+      soaked = r.soaked;
+      soakRoll = r.roll;
+    }
+    const applied = Math.max(0, amount - soaked);
+    this.Health.ApplyDamage(dt, applied);
+    return { type: dt.Name, incoming: amount, soaked, applied, soakRoll, health: this.Health.Summary() };
+  }
+
+  Heal(type: DamageType | DamageKind, amount: number): number { return this.Health.Heal(type, amount); }
+
+  // --- Resource pools ------------------------------------------------------
+  private _tracker(name: string): Tracker {
+    const t = this.Trackers.get(StringUtil.normalize(name));
+    if (!t) throw new Error(`Tracker ${name} not found.`);
+    return t;
+  }
+
+  GetPool(name: string): Pool {
+    const p = this.Pools.get(StringUtil.normalize(name));
+    if (!p) throw new Error(`Pool ${name} not found.`);
+    return p;
+  }
+
+  SpendWillpower(amount: number = 1): void { this._tracker("willpower").Spend(amount); }
+  RegainWillpower(amount: number = 1): void { this._tracker("willpower").Regain(amount); }
+  SpendPool(name: string, amount: number, reason: string = ""): void { this.GetPool(name).Spend(amount, reason); }
+  GainPool(name: string, amount: number, reason: string = ""): number { return this.GetPool(name).Gain(amount, reason); }
+
+  // --- Storage serialization ----------------------------------------------
+  SaveToStory() {
+    const storageKey = `${api.v1.script.id}_char_${StringUtil.normalize(this.Name)}`;
+
+    // Extracting just the data needed for persistence to avoid circular JSON issues
+    const serializedData = {
+      name: this.Name,
+      template: this.Template,
+      xp: this._xpRemaining,
+      downtime: this._downtimeRemaining,
+      attributes: Array.from(this.Attributes.entries()).map(([k, v]) => ({ name: k, value: v.Value, effective: v.EffectiveValue })),
+      abilities: Array.from(this.Abilities.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
+      backgrounds: Array.from(this.Backgrounds.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
+      trackers: Array.from(this.Trackers.entries()).map(([k, v]) => ({ name: k, perm: v.Value, temp: v.Temporary })),
+      pools: Array.from(this.Pools.entries()).map(([k, v]) => ({ name: k, current: v.Current, max: v.Max })),
+      virtues: Array.from(this.Virtues.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
+      traits: Array.from(this.Traits.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
+      morality: this.Morality ? { road: this.Morality.RoadName, value: this.Morality.Value } : null,
+      health: this.Health.Summary(),
+    };
+
+    api.v1.storyStorage.set(storageKey, serializedData);
+    return serializedData;
+  }
+}
+
+// =============================================================================
+// CHARACTER FACTORY - build a LiveCharacter from a TemplateConfig
+// =============================================================================
+export interface CharacterCreationOptions {
+  generation?: number;                   // Vampire blood-pool sizing
+  road?: RoadDefinition;                 // override the template's default Road
+  attributes?: Record<string, number>;   // optional seed (name -> dots)
+  abilities?: Record<string, number>;
+  backgrounds?: Record<string, number>;
+  virtues?: Record<string, number>;       // Virtue dots (default 1 each)
+  poolStarts?: Record<string, number>;    // chosen starting values for pools/trackers
+  traits?: Record<string, number>;        // misc rated traits (e.g. fortitude)
+}
+
+export class CharacterFactory {
+  static create(template: TemplateConfig, name: string, opts: CharacterCreationOptions = {}): LiveCharacter {
+    const attributes = CharacterFactory._statMap(opts.attributes, Category.PHYSICAL);
+    const abilities = CharacterFactory._statMap(opts.abilities, Category.SKILL);
+    const backgrounds = CharacterFactory._statMap(opts.backgrounds, Category.BACKGROUND);
+    const traits = CharacterFactory._statMap(opts.traits, Category.VITAL);
+    const virtuesProvided = opts.virtues !== undefined;
+    const road = opts.road ?? template.DefaultRoad ?? ROAD_OF_HUMANITY;
+
+    // Virtues (1-5) - only for templates that use them.
+    const virtues = new Map<string, Stat>();
+    if (template.HasVirtues) {
+      for (const v of road.virtues) {
+        const key = StringUtil.normalize(v);
+        const dots = opts.virtues?.[v] ?? opts.virtues?.[key] ?? 1;
+        virtues.set(key, new Stat(v, Category.VIRTUE, dots, 5, 5));
+      }
+    }
+
+    // Trackers & pools, honouring per-template starting-value constraints.
+    const trackers = new Map<string, Tracker>();
+    const pools = new Map<string, Pool>();
+    for (const def of template.Pools) {
+      const key = StringUtil.normalize(def.name);
+      const explicit = opts.poolStarts?.[def.name] ?? opts.poolStarts?.[key];
+      const chosen = CharacterFactory._resolveStart(def, explicit);
+      if (def.kind === "tracker") {
+        trackers.set(key, new Tracker(def.name, Category.TRACKER, chosen, def.max, def.max));
+      } else {
+        let max = def.max;
+        let perTurn = def.perTurnLimit ?? Infinity;
+        let start = chosen;
+        if (def.fromGeneration && opts.generation !== undefined) {
+          const bs = bloodForGeneration(opts.generation);
+          max = bs.max;
+          perTurn = bs.perTurn;
+          start = explicit !== undefined ? chosen : max; // default to a full pool
+        }
+        pools.set(key, new Pool(def.name, max, start, perTurn));
+      }
+    }
+
+    // Derived start (Dark Ages): Willpower = Courage when the player set Virtues.
+    if (template.HasVirtues && virtuesProvided && trackers.has("willpower")
+        && opts.poolStarts?.["willpower"] === undefined) {
+      const courage = virtues.get("courage");
+      if (courage) trackers.set("willpower", new Tracker("willpower", Category.TRACKER, courage.Value, 10, 10));
+    }
+
+    const character = new LiveCharacter(
+      name, template.Name, template.Rules, attributes, abilities, backgrounds, trackers
+    );
+    character.Pools = pools;
+    character.Virtues = virtues;
+    character.Traits = traits;
+    character.Soak = template.Soak;
+    character.Health = new HealthTrack(template.HealthLevels);
+
+    // Morality (Road / Humanity) - derive starting rating from the two rating
+    // Virtues when the player engaged with Virtues; otherwise a sane default.
+    if (template.HasMorality) {
+      let rating = 5;
+      if (template.HasVirtues && virtuesProvided) {
+        const [a, b] = road.ratingVirtues;
+        rating = (virtues.get(StringUtil.normalize(a))?.Value ?? 0) + (virtues.get(StringUtil.normalize(b))?.Value ?? 0);
+      }
+      character.Morality = new MoralityTrait(road.name, rating);
+    }
+
+    return character;
+  }
+
+  private static _statMap(src: Record<string, number> | undefined, cat: Category): Map<string, Stat> {
+    const m = new Map<string, Stat>();
+    if (src) {
+      for (const [k, v] of Object.entries(src)) {
+        m.set(StringUtil.normalize(k), new Stat(k, cat, v, Math.max(5, v), Math.max(5, v)));
+      }
+    }
+    return m;
+  }
+
+  // Validates a chosen starting value against the PoolDef constraints.
+  private static _resolveStart(def: PoolDef, chosen: number | undefined): number {
+    if (chosen === undefined) return def.start;
+    if (def.startOptions && !def.startOptions.includes(chosen)) {
+      throw new Error(`${def.name} must start at one of [${def.startOptions.join(", ")}], got ${chosen}.`);
+    }
+    const min = def.startMin ?? 0;
+    const max = def.startMax ?? def.max;
+    if (chosen < min || chosen > max) {
+      throw new Error(`${def.name} must start between ${min} and ${max}, got ${chosen}.`);
+    }
+    return chosen;
+  }
+}

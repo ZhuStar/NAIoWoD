@@ -1054,3 +1054,11 @@ export class CharacterFactory {
     return chosen;
   }
 }
+
+api.v1.hooks.register("onTextAdventureInput", (params: Parameters<OnTextAdventureInput>[0]) => {
+    let parsedText = params.rawInputText.replace(/\[\[(.*?)\]\]/g, (match, commandBody) => {
+        return CommandRouter.route(commandBody);
+    });
+
+    return { inputText: parsedText };
+});

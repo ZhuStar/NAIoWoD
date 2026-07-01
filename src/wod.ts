@@ -14,11 +14,16 @@
 // =============================================================================
 
 // --- API CONTRACT ---
+// NovelAI's text-adventure input hook: the host hands the player's raw input to
+// the registered handler each turn and uses the returned `inputText`.
+export type OnTextAdventureInput = (params: { rawInputText: string }) => { inputText: string };
+
 interface WodApi {
   v1: {
     script: { id: string };
     storyStorage: { set: (key: string, value: unknown) => void };
     lorebook: { entries: () => Array<{ displayName: string; category: string }> };
+    hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
   };
 }
 
@@ -39,6 +44,13 @@ const api: WodApi = __host.api ?? {
         { displayName: "srd:ability:knowledge:occult", category: "srd:ability" },
         { displayName: "srd:background:none:generation", category: "srd:background" }
       ]
+    },
+    // Off-host there is no engine to fire hooks; registering just records that a
+    // handler exists (and keeps import-time `hooks.register(...)` from throwing).
+    hooks: {
+      register: (event: "onTextAdventureInput", _handler: OnTextAdventureInput) => {
+        Log(`[HOOK REGISTER] ${event}`);
+      }
     }
   }
 };
@@ -349,24 +361,195 @@ export class Dice {
 }
 
 // =============================================================================
-// HEALTH - damage tracks & wound penalties
+// DAMAGE - severity, kind, intensity, source, and self-describing packets
+// -----------------------------------------------------------------------------
+// A hit is a DamagePacket. Four *independent* facts describe it:
+//
+//   * Severity  - bashing / lethal / aggravated: how hard it is to soak & heal.
+//   * Intensity - the plain *number* of health levels the hit threatens.
+//   * Kind(s)   - open-ended descriptors, in the spirit of D&D's energy/damage
+//                 types: "piercing", "slashing", "silver", "fire", "sunlight"...
+//                 A packet may carry several (a silver bullet is piercing+silver).
+//   * Source    - where it came from ("gunshot", "claw", "fangs", "fall"); kept
+//                 for flavour and future rules that key off the attack itself.
+//
+// Crucially, SEVERITY IS NOT INTRINSIC TO THE ATTACK. One gunshot (piercing,
+// lethal) is lethal to a mortal, only *bashing* to a vampire (no organs to
+// destroy, no blood to lose) and shrugged off entirely by a werewolf - unless
+// the round is *silver*, which no amount of regeneration will soak. The target,
+// not the weapon, has the final say: every character runs an incoming packet
+// through its own DamageReactions - rewriting or ignoring parts of it - *before*
+// it soaks and marks its health track.
 // =============================================================================
 
-export type DamageKind = "bashing" | "lethal" | "aggravated";
-export class DamageType {
-  static readonly BASHING = new DamageType("bashing", 0);
-  static readonly LETHAL = new DamageType("lethal", 1);
-  static readonly AGGRAVATED = new DamageType("aggravated", 2);
-  private constructor(public readonly Name: DamageKind, public readonly Severity: number) { Object.freeze(this); }
-  static fromName(name: DamageKind): DamageType {
+// --- SEVERITY (the bashing / lethal / aggravated axis) ---
+export type SeverityName = "bashing" | "lethal" | "aggravated";
+export class Severity {
+  static readonly BASHING = new Severity("bashing", 0);
+  static readonly LETHAL = new Severity("lethal", 1);
+  static readonly AGGRAVATED = new Severity("aggravated", 2);
+
+  // Rank orders the three so the health track's wrap-around upgrade rule works
+  // and reactions can ask for "at least this bad".
+  private constructor(public readonly Name: SeverityName, public readonly Rank: number) { Object.freeze(this); }
+
+  static fromName(name: SeverityName): Severity {
     switch (name) {
-      case "bashing": return DamageType.BASHING;
-      case "lethal": return DamageType.LETHAL;
-      case "aggravated": return DamageType.AGGRAVATED;
-      default: throw new Error(`Unknown damage type: ${name}`);
+      case "bashing": return Severity.BASHING;
+      case "lethal": return Severity.LETHAL;
+      case "aggravated": return Severity.AGGRAVATED;
+      default: throw new Error(`Unknown severity: ${name}`);
     }
   }
+  static coerce(s: Severity | SeverityName): Severity {
+    return typeof s === "string" ? Severity.fromName(s) : s;
+  }
+
+  IsAtLeast(other: Severity): boolean { return this.Rank >= other.Rank; }
+  // The worse (higher-ranked) of two severities.
+  Max(other: Severity): Severity { return this.Rank >= other.Rank ? this : other; }
 }
+
+// --- KIND & SOURCE (open descriptor sets; any normalized string is valid) ---
+export type DamageKind = string;
+export type DamageSource = string;
+
+// Common descriptors, surfaced as constants purely for discoverability and to
+// dodge typos. The type is still `string`, so homebrew kinds need no ceremony.
+export const Kind = {
+  BLUDGEONING: "bludgeoning", PIERCING: "piercing", SLASHING: "slashing",
+  SILVER: "silver", COLD_IRON: "cold-iron", FIRE: "fire", SUNLIGHT: "sunlight",
+  COLD: "cold", ELECTRICITY: "electricity", POISON: "poison", ACID: "acid",
+} as const;
+export const Source = {
+  GUNSHOT: "gunshot", BLADE: "blade", FIST: "fist", CLAW: "claw", FANGS: "fangs",
+  FALL: "fall", FIRE: "fire", SUNLIGHT: "sunlight",
+} as const;
+
+export interface DamagePacketInit {
+  intensity: number;
+  severity: Severity | SeverityName;
+  kinds?: Iterable<DamageKind>;
+  source?: DamageSource | null;
+  // Whether this packet may be soaked at all. Reactions can force `false`
+  // (e.g. silver against a werewolf) to punch straight through a soak that
+  // would otherwise apply.
+  soakable?: boolean;
+}
+
+// An immutable description of one incoming hit. Every mutator returns a *copy*,
+// so a reaction pipeline can rewrite a packet without disturbing the original.
+export class DamagePacket {
+  public readonly Intensity: number;
+  public readonly Severity: Severity;
+  public readonly Kinds: ReadonlySet<DamageKind>;
+  public readonly Source: DamageSource | null;
+  public readonly Soakable: boolean;
+
+  constructor(init: DamagePacketInit) {
+    this.Intensity = Math.max(0, Math.floor(init.intensity));
+    this.Severity = Severity.coerce(init.severity);
+    const kinds = new Set<DamageKind>();
+    for (const k of init.kinds ?? []) {
+      const n = StringUtil.normalize(k);
+      if (n) kinds.add(n);
+    }
+    this.Kinds = kinds;
+    this.Source = init.source ? StringUtil.normalize(init.source) : null;
+    this.Soakable = init.soakable ?? true;
+    Object.freeze(this);
+  }
+
+  static of(init: DamagePacketInit): DamagePacket { return new DamagePacket(init); }
+
+  HasKind(kind: DamageKind): boolean { return this.Kinds.has(StringUtil.normalize(kind)); }
+  HasAnyKind(...kinds: DamageKind[]): boolean { return kinds.some(k => this.HasKind(k)); }
+
+  private _init(): DamagePacketInit {
+    return {
+      intensity: this.Intensity, severity: this.Severity,
+      kinds: this.Kinds, source: this.Source, soakable: this.Soakable,
+    };
+  }
+  With(patch: Partial<DamagePacketInit>): DamagePacket { return new DamagePacket({ ...this._init(), ...patch }); }
+  WithSeverity(sev: Severity | SeverityName): DamagePacket { return this.With({ severity: sev }); }
+  WithIntensity(n: number): DamagePacket { return this.With({ intensity: n }); }
+  AddKind(kind: DamageKind): DamagePacket { return this.With({ kinds: [...this.Kinds, kind] }); }
+  RemoveKind(kind: DamageKind): DamagePacket {
+    const n = StringUtil.normalize(kind);
+    return this.With({ kinds: [...this.Kinds].filter(k => k !== n) });
+  }
+  Unsoakable(): DamagePacket { return this.Soakable ? this.With({ soakable: false }) : this; }
+
+  describe(): string {
+    const kinds = this.Kinds.size ? ` {${[...this.Kinds].join(", ")}}` : "";
+    const src = this.Source ? ` from ${this.Source}` : "";
+    const soak = this.Soakable ? "" : " (unsoakable)";
+    return `${this.Intensity} ${this.Severity.Name}${kinds}${src}${soak}`;
+  }
+}
+
+// --- DAMAGE REACTIONS - a target's veto/rewrite of an incoming packet ---
+// Folded left-to-right over the packet before soak; return the packet unchanged
+// to pass. Ordering matters: put severity/kind rewrites before mitigation.
+export interface DamageReaction {
+  readonly Label: string;
+  Apply(packet: DamagePacket, character: LiveCharacter): DamagePacket;
+}
+
+// Undead (vampires): no organs to rupture, no blood to bleed out. Piercing and
+// ballistic wounds that would kill the living do only bashing; fire and sunlight
+// are the classic aggravated exceptions and are never talked down.
+export class UndeadPhysiology implements DamageReaction {
+  readonly Label = "Undead physiology";
+  Apply(packet: DamagePacket): DamagePacket {
+    if (packet.HasAnyKind(Kind.FIRE, Kind.SUNLIGHT)) {
+      return packet.WithSeverity(packet.Severity.Max(Severity.AGGRAVATED));
+    }
+    const piercing = packet.HasAnyKind(Kind.PIERCING) || packet.Source === Source.GUNSHOT;
+    if (piercing && packet.Severity === Severity.LETHAL) {
+      return packet.WithSeverity(Severity.BASHING);
+    }
+    return packet;
+  }
+}
+
+// Regenerators (werewolves & kin): silver (and fire) slip past the healing
+// factor - that damage is aggravated and cannot be soaked away. Everything else
+// is left for their all-round Stamina soak to simply absorb.
+export class SilverVulnerability implements DamageReaction {
+  readonly Label = "Silver/fire vulnerability";
+  constructor(private readonly kinds: DamageKind[] = [Kind.SILVER, Kind.FIRE]) {}
+  Apply(packet: DamagePacket): DamagePacket {
+    if (packet.HasAnyKind(...this.kinds)) {
+      return packet.WithSeverity(packet.Severity.Max(Severity.AGGRAVATED)).Unsoakable();
+    }
+    return packet;
+  }
+}
+
+// Worn protection: flat damage reduction against the kinds (or source) it
+// actually stops - a ballistic vest turns a lethal gunshot survivable. A
+// deliberate simplification of the tabletop "extra soak dice", chosen so that
+// `intensity` alone tells the story of how much got through.
+export class ArmorReaction implements DamageReaction {
+  readonly Label: string;
+  private readonly _covers: Set<DamageKind>;
+  constructor(name: string, private readonly rating: number, covers: DamageKind[]) {
+    this.Label = `Armor (${name})`;
+    this._covers = new Set(covers.map(k => StringUtil.normalize(k)));
+  }
+  Apply(packet: DamagePacket): DamagePacket {
+    if (this.rating <= 0) return packet;
+    const stops = [...packet.Kinds].some(k => this._covers.has(k))
+      || (packet.Source !== null && this._covers.has(packet.Source));
+    return stops ? packet.WithIntensity(Math.max(0, packet.Intensity - this.rating)) : packet;
+  }
+}
+
+// =============================================================================
+// HEALTH - damage tracks & wound penalties
+// =============================================================================
 
 export interface HealthLevelDef { name: string; penalty: number; }
 
@@ -394,7 +577,7 @@ export class HealthTrack {
   private _aggravated = 0;
   private _overkill = 0; // damage that spills past a fully-aggravated track
   private readonly _levels: HealthLevelDef[];
-  private readonly _log: Array<{ type: DamageKind; amount: number }> = [];
+  private readonly _log: Array<{ severity: SeverityName; intensity: number }> = [];
 
   constructor(levels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS) {
     if (levels.length === 0) throw new Error("Health track needs at least one level.");
@@ -428,56 +611,56 @@ export class HealthTrack {
   // Destroyed: track full of aggravated, or damage spilled beyond it.
   get IsDead(): boolean { return this._overkill > 0 || this._aggravated >= this.Capacity; }
 
-  ApplyDamage(type: DamageType | DamageKind, amount: number): void {
-    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
-    if (amount < 0) throw new Error("Damage amount cannot be negative.");
-    if (amount === 0) return;
-    this._log.push({ type: dt.Name, amount });
-    for (let i = 0; i < amount; i++) this._applyOne(dt);
+  ApplyDamage(severity: Severity | SeverityName, intensity: number): void {
+    const sev = Severity.coerce(severity);
+    if (intensity < 0) throw new Error("Damage intensity cannot be negative.");
+    if (intensity === 0) return;
+    this._log.push({ severity: sev.Name, intensity });
+    for (let i = 0; i < intensity; i++) this._applyOne(sev);
   }
 
-  // One point of damage. On a full track the wrap-around upgrade rule applies:
+  // One level of damage. On a full track the wrap-around upgrade rule applies:
   // a more-severe hit replaces the least-severe existing wound; otherwise the
   // least-severe wound is upgraded a step (bashing -> lethal -> aggravated).
-  private _applyOne(dt: DamageType): void {
-    if (this.Filled < this.Capacity) { this._add(dt, 1); return; }
+  private _applyOne(sev: Severity): void {
+    if (this.Filled < this.Capacity) { this._add(sev, 1); return; }
 
-    let leastSev: number;
-    if (this._bashing > 0) leastSev = 0;
-    else if (this._lethal > 0) leastSev = 1;
-    else leastSev = 2;
+    let leastRank: number;
+    if (this._bashing > 0) leastRank = 0;
+    else if (this._lethal > 0) leastRank = 1;
+    else leastRank = 2;
 
-    if (dt.Severity > leastSev) {
-      this._removeSev(leastSev, 1);
-      this._add(dt, 1);
-    } else if (leastSev === 0) {
+    if (sev.Rank > leastRank) {
+      this._removeRank(leastRank, 1);
+      this._add(sev, 1);
+    } else if (leastRank === 0) {
       this._bashing--; this._lethal++;        // bashing wraps to lethal
-    } else if (leastSev === 1) {
+    } else if (leastRank === 1) {
       this._lethal--; this._aggravated++;     // lethal wraps to aggravated
     } else {
       this._overkill++;                       // aggravated track full -> overkill
     }
   }
 
-  private _add(dt: DamageType, n: number): void {
-    if (dt === DamageType.BASHING) this._bashing += n;
-    else if (dt === DamageType.LETHAL) this._lethal += n;
+  private _add(sev: Severity, n: number): void {
+    if (sev === Severity.BASHING) this._bashing += n;
+    else if (sev === Severity.LETHAL) this._lethal += n;
     else this._aggravated += n;
   }
 
-  private _removeSev(sev: number, n: number): void {
-    if (sev === 0) this._bashing -= n;
-    else if (sev === 1) this._lethal -= n;
+  private _removeRank(rank: number, n: number): void {
+    if (rank === 0) this._bashing -= n;
+    else if (rank === 1) this._lethal -= n;
     else this._aggravated -= n;
   }
 
-  // Heals up to `amount` boxes of the given damage type; returns how many healed.
-  Heal(type: DamageType | DamageKind, amount: number): number {
-    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
+  // Heals up to `amount` boxes of the given severity; returns how many healed.
+  Heal(severity: Severity | SeverityName, amount: number): number {
+    const sev = Severity.coerce(severity);
     if (amount < 0) throw new Error("Heal amount cannot be negative.");
-    const before = dt === DamageType.BASHING ? this._bashing : dt === DamageType.LETHAL ? this._lethal : this._aggravated;
+    const before = sev === Severity.BASHING ? this._bashing : sev === Severity.LETHAL ? this._lethal : this._aggravated;
     const healed = Math.min(before, amount);
-    this._removeSev(dt.Severity, healed);
+    this._removeRank(sev.Rank, healed);
     return healed;
   }
 
@@ -528,6 +711,16 @@ export const MAGE_SOAK: SoakSpec = {
 };
 // Demons (manifested) soak all three with Stamina.
 export const DEMON_SOAK: SoakSpec = {
+  bashing: { soakable: true, pool: ["stamina"] },
+  lethal: { soakable: true, pool: ["stamina"] },
+  aggravated: { soakable: true, pool: ["stamina"] },
+  difficulty: 6,
+};
+// Werewolves regenerate: they soak every severity with Stamina and shrug off
+// most punishment outright. Silver and fire are the exception - the
+// SilverVulnerability reaction marks those packets Unsoakable, so this generous
+// spec never even gets consulted for them.
+export const WEREWOLF_SOAK: SoakSpec = {
   bashing: { soakable: true, pool: ["stamina"] },
   lethal: { soakable: true, pool: ["stamina"] },
   aggravated: { soakable: true, pool: ["stamina"] },
@@ -689,7 +882,11 @@ export class TemplateConfig {
     public readonly HasMorality: boolean,
     public readonly DefaultRoad: RoadDefinition | null,
     public readonly HasVirtues: boolean,
-    public readonly HealthLevels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS
+    public readonly HealthLevels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS,
+    // Innate damage reactions granted to every character of this template
+    // (e.g. a vampire's undead physiology). Copied onto the character at build
+    // time so per-character armour can be appended without touching the template.
+    public readonly Reactions: DamageReaction[] = []
   ) {}
 
   GetPool(name: string): PoolDef | undefined {
@@ -726,7 +923,9 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
     { name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1, fromGeneration: true },
   ],
   VAMPIRE_SOAK,
-  true, ROAD_OF_HUMANITY, true
+  true, ROAD_OF_HUMANITY, true,
+  STANDARD_HEALTH_LEVELS,
+  [new UndeadPhysiology()]   // bullets & blades to bashing; fire/sunlight stay aggravated
 );
 
 export const TEMPLATE_MAGE = new TemplateConfig(
@@ -755,12 +954,31 @@ export const TEMPLATE_DEMON = new TemplateConfig(
   false, null, false   // Demons track Torment instead of a Road / Virtues
 );
 
+// A modern-WoD illustration (not Dark Ages canon) kept here so the kind/severity
+// system has a regenerator to show off: everything is soaked with Stamina, but
+// the SilverVulnerability reaction makes silver and fire aggravated *and*
+// unsoakable - the "good luck" case.
+export const TEMPLATE_WEREWOLF = new TemplateConfig(
+  "Werewolf",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [
+    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    { name: "rage", kind: "pool", start: 1, max: 10 },
+    { name: "gnosis", kind: "pool", start: 1, max: 10 },
+  ],
+  WEREWOLF_SOAK,
+  false, null, false,   // Renown/Rage/Gnosis, not a Road or Virtues
+  STANDARD_HEALTH_LEVELS,
+  [new SilverVulnerability()]
+);
+
 export const TEMPLATES: Record<string, TemplateConfig> = {
   mortal: TEMPLATE_MORTAL,
   thrall: TEMPLATE_THRALL,
   vampire: TEMPLATE_VAMPIRE,
   mage: TEMPLATE_MAGE,
   demon: TEMPLATE_DEMON,
+  werewolf: TEMPLATE_WEREWOLF,
 };
 
 // --- LOREBOOK PARSER ---
@@ -792,12 +1010,18 @@ export class LorebookParser {
 }
 
 // --- LIVE CHARACTER SHEET ---
+// One line of "what a reaction did to the packet", for auditability.
+export interface ReactionTrace { reaction: string; from: string; to: string; }
 export interface DamageReport {
-  type: DamageKind;
-  incoming: number;
+  severity: SeverityName;  // the severity finally marked on the track
+  incoming: number;        // packet intensity as it arrived (pre-reaction)
+  intensity: number;       // packet intensity after reactions (what soak faced)
   soaked: number;
   applied: number;
   soakRoll: RollResult | null;
+  original: string;        // packet.describe() before reactions
+  resolved: string;        // packet.describe() after reactions
+  trace: ReactionTrace[];  // every reaction that changed the packet, in order
   health: HealthSummary;
 }
 export interface SoakReport {
@@ -819,6 +1043,11 @@ export class LiveCharacter {
   public Traits: Map<string, Stat> = new Map(); // misc rated traits (e.g. Fortitude)
   public Morality?: MoralityTrait;
   public Soak: SoakSpec = MORTAL_SOAK;
+  // The character's say over incoming damage: reactions are folded over each
+  // packet (in order) before soak, letting it rewrite or ignore parts of the
+  // hit - a vampire turning bullets to bashing, a werewolf who cannot soak
+  // silver, a vest eating the first few levels of a gunshot.
+  public Reactions: DamageReaction[] = [];
 
   constructor(
     public readonly Name: string,
@@ -865,40 +1094,74 @@ export class LiveCharacter {
   // --- Health & soak -------------------------------------------------------
   get WoundPenalty(): number { return this.Health.Penalty; }
 
-  SoakPoolFor(type: DamageType | DamageKind): number {
-    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
-    const rule = this.Soak[dt.Name];
+  SoakPoolFor(severity: Severity | SeverityName): number {
+    const sev = Severity.coerce(severity);
+    const rule = this.Soak[sev.Name];
     if (!rule.soakable) return 0;
     return rule.pool.reduce((sum, t) => sum + this.TraitValue(t), 0);
   }
 
-  RollSoak(type: DamageType | DamageKind, rng?: Rng): SoakReport {
-    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
-    const rule = this.Soak[dt.Name];
+  RollSoak(severity: Severity | SeverityName, rng?: Rng): SoakReport {
+    const sev = Severity.coerce(severity);
+    const rule = this.Soak[sev.Name];
     if (!rule.soakable) return { soakable: false, pool: 0, soaked: 0, roll: null };
-    const pool = this.SoakPoolFor(dt);
+    const pool = this.SoakPoolFor(sev);
     if (pool <= 0) return { soakable: true, pool: 0, soaked: 0, roll: null };
-    const roll = Dice.roll(pool, { difficulty: this.Soak.difficulty, rng, label: `${dt.Name} soak` });
+    const roll = Dice.roll(pool, { difficulty: this.Soak.difficulty, rng, label: `${sev.Name} soak` });
     return { soakable: true, pool, soaked: Math.max(0, roll.net), roll };
   }
 
-  // Soak (when allowed) then apply the remaining damage to the health track.
-  TakeDamage(type: DamageType | DamageKind, amount: number, opts: { soak?: boolean; rng?: Rng } = {}): DamageReport {
-    const dt = typeof type === "string" ? DamageType.fromName(type) : type;
-    const doSoak = opts.soak ?? true;
+  // Fold this character's reactions over an incoming packet, recording each
+  // change. The returned packet is what actually gets soaked and applied.
+  ResolveIncoming(packet: DamagePacket): { final: DamagePacket; trace: ReactionTrace[] } {
+    let current = packet;
+    const trace: ReactionTrace[] = [];
+    for (const reaction of this.Reactions) {
+      const next = reaction.Apply(current, this);
+      if (next !== current) trace.push({ reaction: reaction.Label, from: current.describe(), to: next.describe() });
+      current = next;
+    }
+    return { final: current, trace };
+  }
+
+  // The full pipeline: let the character reshape the packet, then soak (if the
+  // resolved packet still permits it) and mark the remainder on the track.
+  TakePacket(packet: DamagePacket, opts: { soak?: boolean; rng?: Rng } = {}): DamageReport {
+    const { final, trace } = this.ResolveIncoming(packet);
+    const doSoak = (opts.soak ?? true) && final.Soakable;
     let soaked = 0;
     let soakRoll: RollResult | null = null;
     if (doSoak) {
-      const r = this.RollSoak(dt, opts.rng);
+      const r = this.RollSoak(final.Severity, opts.rng);
       soaked = r.soaked;
       soakRoll = r.roll;
     }
-    const applied = Math.max(0, amount - soaked);
-    this.Health.ApplyDamage(dt, applied);
-    return { type: dt.Name, incoming: amount, soaked, applied, soakRoll, health: this.Health.Summary() };
+    const applied = Math.max(0, final.Intensity - soaked);
+    this.Health.ApplyDamage(final.Severity, applied);
+    return {
+      severity: final.Severity.Name,
+      incoming: packet.Intensity,
+      intensity: final.Intensity,
+      soaked, applied, soakRoll,
+      original: packet.describe(),
+      resolved: final.describe(),
+      trace,
+      health: this.Health.Summary(),
+    };
   }
 
-  Heal(type: DamageType | DamageKind, amount: number): number { return this.Health.Heal(type, amount); }
+  // Convenience wrapper: build a bare packet (optionally tagged with kinds and a
+  // source) and run it through TakePacket.
+  TakeDamage(
+    severity: Severity | SeverityName,
+    intensity: number,
+    opts: { soak?: boolean; rng?: Rng; kinds?: DamageKind[]; source?: DamageSource } = {}
+  ): DamageReport {
+    const packet = new DamagePacket({ intensity, severity, kinds: opts.kinds, source: opts.source });
+    return this.TakePacket(packet, opts);
+  }
+
+  Heal(severity: Severity | SeverityName, amount: number): number { return this.Health.Heal(severity, amount); }
 
   // --- Resource pools ------------------------------------------------------
   private _tracker(name: string): Tracker {
@@ -956,6 +1219,7 @@ export interface CharacterCreationOptions {
   virtues?: Record<string, number>;       // Virtue dots (default 1 each)
   poolStarts?: Record<string, number>;    // chosen starting values for pools/trackers
   traits?: Record<string, number>;        // misc rated traits (e.g. fortitude)
+  reactions?: DamageReaction[];           // extra damage reactions (e.g. worn armour), appended after the template's
 }
 
 export class CharacterFactory {
@@ -1015,6 +1279,9 @@ export class CharacterFactory {
     character.Traits = traits;
     character.Soak = template.Soak;
     character.Health = new HealthTrack(template.HealthLevels);
+    // Template reactions first (innate physiology), then per-character extras
+    // like armour - so severity/kind rewrites happen before mitigation.
+    character.Reactions = [...template.Reactions, ...(opts.reactions ?? [])];
 
     // Morality (Road / Humanity) - derive starting rating from the two rating
     // Virtues when the player engaged with Virtues; otherwise a sane default.
@@ -1052,6 +1319,20 @@ export class CharacterFactory {
       throw new Error(`${def.name} must start between ${min} and ${max}, got ${chosen}.`);
     }
     return chosen;
+  }
+}
+
+// =============================================================================
+// COMMAND ROUTER - dispatch for inline [[...]] player commands
+// -----------------------------------------------------------------------------
+// Placeholder for the forthcoming command system: onTextAdventureInput below
+// pulls every [[bracketed]] command out of the player's input and hands the
+// inner text here. For now it just returns that text verbatim (a no-op parse);
+// verbs like `roll`, `spend` or `damage` will be dispatched from here later.
+// =============================================================================
+export class CommandRouter {
+  static route(command: string): string {
+    return command.trim();
   }
 }
 

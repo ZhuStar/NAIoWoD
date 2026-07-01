@@ -3,10 +3,13 @@ import {
   type Rng,
   StringUtil, Category, Stat, Tracker,
   Dice, Random,
-  DamageType, HealthTrack,
+  Severity, HealthTrack,
+  DamagePacket, Kind, Source,
+  UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON, TEMPLATES,
+  TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
+  TEMPLATE_WEREWOLF, TEMPLATES,
   CharacterFactory,
 } from "../src/wod";
 
@@ -110,10 +113,69 @@ describe("Dice", () => {
   });
 });
 
-describe("DamageType", () => {
-  test("resolves by name and orders by severity", () => {
-    expect(DamageType.fromName("lethal")).toBe(DamageType.LETHAL);
-    expect(DamageType.BASHING.Severity).toBeLessThan(DamageType.AGGRAVATED.Severity);
+describe("Severity", () => {
+  test("resolves by name and orders by rank", () => {
+    expect(Severity.fromName("lethal")).toBe(Severity.LETHAL);
+    expect(Severity.BASHING.Rank).toBeLessThan(Severity.AGGRAVATED.Rank);
+    expect(Severity.LETHAL.IsAtLeast(Severity.BASHING)).toBe(true);
+    expect(Severity.BASHING.Max(Severity.AGGRAVATED)).toBe(Severity.AGGRAVATED);
+    expect(Severity.coerce("bashing")).toBe(Severity.BASHING);
+  });
+});
+
+describe("DamagePacket", () => {
+  test("normalizes kinds/source and describes itself", () => {
+    const p = DamagePacket.of({ intensity: 3, severity: "lethal", kinds: ["Piercing"], source: "Gunshot" });
+    expect(p.Severity).toBe(Severity.LETHAL);
+    expect(p.HasKind("piercing")).toBe(true);
+    expect(p.Source).toBe("gunshot");
+    expect(p.describe()).toBe("3 lethal {piercing} from gunshot");
+  });
+
+  test("mutators return modified copies, leaving the original intact", () => {
+    const p = DamagePacket.of({ intensity: 3, severity: "lethal", kinds: ["piercing"] });
+    const bashing = p.WithSeverity(Severity.BASHING).AddKind("silver");
+    expect(bashing.Severity).toBe(Severity.BASHING);
+    expect(bashing.HasKind("silver")).toBe(true);
+    expect(bashing.Unsoakable().Soakable).toBe(false);
+    // original is frozen and unchanged
+    expect(p.Severity).toBe(Severity.LETHAL);
+    expect(p.HasKind("silver")).toBe(false);
+    expect(p.Soakable).toBe(true);
+  });
+});
+
+describe("Damage reactions (unit)", () => {
+  test("UndeadPhysiology turns piercing lethal to bashing but not fire", () => {
+    const undead = new UndeadPhysiology();
+    const bullet = DamagePacket.of({ intensity: 4, severity: "lethal", kinds: [Kind.PIERCING] });
+    expect(undead.Apply(bullet).Severity).toBe(Severity.BASHING);
+
+    const torch = DamagePacket.of({ intensity: 4, severity: "lethal", kinds: [Kind.FIRE] });
+    expect(undead.Apply(torch).Severity).toBe(Severity.AGGRAVATED);
+
+    const club = DamagePacket.of({ intensity: 4, severity: "bashing" });
+    expect(undead.Apply(club)).toBe(club); // untouched
+  });
+
+  test("SilverVulnerability makes silver aggravated and unsoakable", () => {
+    const silver = new SilverVulnerability();
+    const round = DamagePacket.of({ intensity: 4, severity: "lethal", kinds: [Kind.PIERCING, Kind.SILVER] });
+    const out = silver.Apply(round);
+    expect(out.Severity).toBe(Severity.AGGRAVATED);
+    expect(out.Soakable).toBe(false);
+
+    const plain = DamagePacket.of({ intensity: 4, severity: "lethal", kinds: [Kind.PIERCING] });
+    expect(silver.Apply(plain)).toBe(plain); // untouched
+  });
+
+  test("ArmorReaction reduces intensity only for covered kinds", () => {
+    const vest = new ArmorReaction("Kevlar", 3, [Kind.PIERCING]);
+    const shot = DamagePacket.of({ intensity: 5, severity: "lethal", kinds: [Kind.PIERCING] });
+    expect(vest.Apply(shot).Intensity).toBe(2);
+
+    const bite = DamagePacket.of({ intensity: 5, severity: "lethal", kinds: [Kind.SLASHING] });
+    expect(vest.Apply(bite)).toBe(bite); // vest doesn't cover slashing
   });
 });
 
@@ -257,7 +319,7 @@ describe("Templates: starting-value constraints", () => {
   });
 
   test("the TEMPLATES registry exposes all splats", () => {
-    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "mage", "mortal", "thrall", "vampire"]);
+    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "mage", "mortal", "thrall", "vampire", "werewolf"]);
   });
 });
 
@@ -338,6 +400,73 @@ describe("LiveCharacter: soak rules differ by template", () => {
     expect(r.soaked).toBe(0);
     expect(r.applied).toBe(3);
     expect(r.soakRoll).toBeNull();
+  });
+});
+
+describe("The gunshot, four ways (character-owned packet resolution)", () => {
+  // One and the same attack. Severity is decided by the target, not the weapon.
+  const gunshot = () => DamagePacket.of({
+    intensity: 4, severity: "lethal", kinds: [Kind.PIERCING], source: Source.GUNSHOT,
+  });
+
+  test("vampire: piercing lethal becomes bashing (no organs, no blood)", () => {
+    const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Cainite", {
+      generation: 13, attributes: { stamina: 3 }, traits: { fortitude: 2 },
+    });
+    const report = v.TakePacket(gunshot(), { soak: false });
+    expect(report.severity).toBe("bashing");
+    expect(report.applied).toBe(4);
+    expect(v.Health.Bashing).toBe(4);
+    expect(v.Health.Lethal).toBe(0);
+    expect(report.trace.map(t => t.reaction)).toContain("Undead physiology");
+    expect(report.original).toContain("lethal");
+    expect(report.resolved).toContain("bashing");
+  });
+
+  test("mortal: lethal stays lethal and cannot be soaked - all of it lands", () => {
+    const m = CharacterFactory.create(TEMPLATE_MORTAL, "Bystander", { attributes: { stamina: 3 } });
+    const report = m.TakePacket(gunshot());
+    expect(report.severity).toBe("lethal");
+    expect(report.soakRoll).toBeNull();   // mortals have no lethal soak
+    expect(report.applied).toBe(4);
+    expect(m.Health.Lethal).toBe(4);
+  });
+
+  test("mortal in a vest: armour eats intensity before the (still unsoakable) lethal lands", () => {
+    const cop = CharacterFactory.create(TEMPLATE_MORTAL, "Officer", {
+      attributes: { stamina: 3 },
+      reactions: [new ArmorReaction("Kevlar", 3, [Kind.PIERCING])],
+    });
+    const report = cop.TakePacket(gunshot());
+    expect(report.incoming).toBe(4);
+    expect(report.intensity).toBe(1);     // vest stopped 3 of the 4
+    expect(report.severity).toBe("lethal");
+    expect(report.soakRoll).toBeNull();
+    expect(report.applied).toBe(1);
+    expect(cop.Health.Lethal).toBe(1);
+  });
+
+  test("werewolf: plain lead is soaked away entirely", () => {
+    const w = CharacterFactory.create(TEMPLATE_WEREWOLF, "Garou", { attributes: { stamina: 5 } });
+    const report = w.TakePacket(gunshot(), { rng: seqRng([6, 7, 6, 7, 6]) }); // 5 soak successes
+    expect(report.severity).toBe("lethal");   // alive, so no undead downgrade
+    expect(report.soaked).toBeGreaterThanOrEqual(4);
+    expect(report.applied).toBe(0);
+    expect(w.Health.Filled).toBe(0);
+  });
+
+  test("werewolf + silver: aggravated, unsoakable - good luck", () => {
+    const w = CharacterFactory.create(TEMPLATE_WEREWOLF, "Garou", { attributes: { stamina: 5 } });
+    const silverShot = DamagePacket.of({
+      intensity: 4, severity: "lethal", kinds: [Kind.PIERCING, Kind.SILVER], source: Source.GUNSHOT,
+    });
+    const report = w.TakePacket(silverShot, { rng: allTens }); // huge soak pool is irrelevant
+    expect(report.severity).toBe("aggravated");
+    expect(report.soakRoll).toBeNull();   // silver arrives Unsoakable, so no roll happens
+    expect(report.soaked).toBe(0);
+    expect(report.applied).toBe(4);
+    expect(w.Health.Aggravated).toBe(4);
+    expect(report.trace.map(t => t.reaction)).toContain("Silver/fire vulnerability");
   });
 });
 

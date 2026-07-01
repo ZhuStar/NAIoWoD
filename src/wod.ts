@@ -383,12 +383,14 @@ export class Dice {
 // =============================================================================
 
 // --- SEVERITY (the bashing / lethal / aggravated axis) ---
-export type SeverityName = "bashing" | "lethal" | "aggravated";
+export type SeverityName = "harmless" | "bashing" | "lethal" | "aggravated" | "fatal";
 export class Severity {
-  static readonly BASHING = new Severity("bashing", 0);
-  static readonly LETHAL = new Severity("lethal", 1);
-  static readonly AGGRAVATED = new Severity("aggravated", 2);
-
+  static readonly HARMLESS = new Severity("harmless", 0)
+  static readonly BASHING = new Severity("bashing", 1);
+  static readonly LETHAL = new Severity("lethal", 2);
+  static readonly AGGRAVATED = new Severity("aggravated", 3);
+  static readonly FATAL = new Severity("fatal", 4);
+  
   // Rank orders the three so the health track's wrap-around upgrade rule works
   // and reactions can ask for "at least this bad".
   private constructor(public readonly Name: SeverityName, public readonly Rank: number) { Object.freeze(this); }
@@ -398,6 +400,8 @@ export class Severity {
       case "bashing": return Severity.BASHING;
       case "lethal": return Severity.LETHAL;
       case "aggravated": return Severity.AGGRAVATED;
+      case: "harmless": return Severity.HARMLESS;
+      case: "fatal": return Severity.FATAL;
       default: throw new Error(`Unknown severity: ${name}`);
     }
   }
@@ -785,7 +789,7 @@ const BLOOD_BY_GENERATION: Record<number, BloodStats> = {
   4: { max: 50, perTurn: 10 },
   5: { max: 40, perTurn: 8 },
   6: { max: 30, perTurn: 6 },
-  7: { max: 20, perTurn: 4 },
+  7: { max: 20, perTurn: 5 },
   8: { max: 15, perTurn: 3 },
   9: { max: 14, perTurn: 2 },
   10: { max: 13, perTurn: 1 },

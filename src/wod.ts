@@ -400,8 +400,8 @@ export class Severity {
       case "bashing": return Severity.BASHING;
       case "lethal": return Severity.LETHAL;
       case "aggravated": return Severity.AGGRAVATED;
-      case: "harmless": return Severity.HARMLESS;
-      case: "fatal": return Severity.FATAL;
+      case "harmless": return Severity.HARMLESS;
+      case "fatal": return Severity.FATAL;
       default: throw new Error(`Unknown severity: ${name}`);
     }
   }
@@ -618,7 +618,7 @@ export class HealthTrack {
   ApplyDamage(severity: Severity | SeverityName, intensity: number): void {
     const sev = Severity.coerce(severity);
     if (intensity < 0) throw new Error("Damage intensity cannot be negative.");
-    if (intensity === 0) return;
+    if (intensity === 0 || sev === Severity.HARMLESS) return; // harmless deals nothing
     this._log.push({ severity: sev.Name, intensity });
     for (let i = 0; i < intensity; i++) this._applyOne(sev);
   }
@@ -629,17 +629,18 @@ export class HealthTrack {
   private _applyOne(sev: Severity): void {
     if (this.Filled < this.Capacity) { this._add(sev, 1); return; }
 
-    let leastRank: number;
-    if (this._bashing > 0) leastRank = 0;
-    else if (this._lethal > 0) leastRank = 1;
-    else leastRank = 2;
+    // Least-severe wound currently present (bashing < lethal < aggravated).
+    let least: Severity;
+    if (this._bashing > 0) least = Severity.BASHING;
+    else if (this._lethal > 0) least = Severity.LETHAL;
+    else least = Severity.AGGRAVATED;
 
-    if (sev.Rank > leastRank) {
-      this._removeRank(leastRank, 1);
+    if (sev.Rank > least.Rank) {
+      this._remove(least, 1);
       this._add(sev, 1);
-    } else if (leastRank === 0) {
+    } else if (least === Severity.BASHING) {
       this._bashing--; this._lethal++;        // bashing wraps to lethal
-    } else if (leastRank === 1) {
+    } else if (least === Severity.LETHAL) {
       this._lethal--; this._aggravated++;     // lethal wraps to aggravated
     } else {
       this._overkill++;                       // aggravated track full -> overkill
@@ -649,12 +650,12 @@ export class HealthTrack {
   private _add(sev: Severity, n: number): void {
     if (sev === Severity.BASHING) this._bashing += n;
     else if (sev === Severity.LETHAL) this._lethal += n;
-    else this._aggravated += n;
+    else this._aggravated += n; // aggravated (and fatal) fill the worst boxes
   }
 
-  private _removeRank(rank: number, n: number): void {
-    if (rank === 0) this._bashing -= n;
-    else if (rank === 1) this._lethal -= n;
+  private _remove(sev: Severity, n: number): void {
+    if (sev === Severity.BASHING) this._bashing -= n;
+    else if (sev === Severity.LETHAL) this._lethal -= n;
     else this._aggravated -= n;
   }
 
@@ -664,7 +665,7 @@ export class HealthTrack {
     if (amount < 0) throw new Error("Heal amount cannot be negative.");
     const before = sev === Severity.BASHING ? this._bashing : sev === Severity.LETHAL ? this._lethal : this._aggravated;
     const healed = Math.min(before, amount);
-    this._removeRank(sev.Rank, healed);
+    this._remove(sev, healed);
     return healed;
   }
 
@@ -1098,16 +1099,24 @@ export class LiveCharacter {
   // --- Health & soak -------------------------------------------------------
   get WoundPenalty(): number { return this.Health.Penalty; }
 
+  // Soak rule for a severity; harmless/fatal are not in the SoakSpec and are
+  // treated as not soakable.
+  private _soakRule(sev: Severity): SoakTypeRule {
+    if (sev === Severity.BASHING) return this.Soak.bashing;
+    if (sev === Severity.LETHAL) return this.Soak.lethal;
+    if (sev === Severity.AGGRAVATED) return this.Soak.aggravated;
+    return { soakable: false, pool: [] };
+  }
+
   SoakPoolFor(severity: Severity | SeverityName): number {
-    const sev = Severity.coerce(severity);
-    const rule = this.Soak[sev.Name];
+    const rule = this._soakRule(Severity.coerce(severity));
     if (!rule.soakable) return 0;
     return rule.pool.reduce((sum, t) => sum + this.TraitValue(t), 0);
   }
 
   RollSoak(severity: Severity | SeverityName, rng?: Rng): SoakReport {
     const sev = Severity.coerce(severity);
-    const rule = this.Soak[sev.Name];
+    const rule = this._soakRule(sev);
     if (!rule.soakable) return { soakable: false, pool: 0, soaked: 0, roll: null };
     const pool = this.SoakPoolFor(sev);
     if (pool <= 0) return { soakable: true, pool: 0, soaked: 0, roll: null };

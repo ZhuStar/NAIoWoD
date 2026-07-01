@@ -48,7 +48,7 @@ runner is built in.
 - **`Pool`** — a free-floating counter with a max and an optional per-turn spend
   limit: Blood, Quintessence, Paradox.
 - **`Dice`** — auditable d10 roller (see below).
-- **`DamagePacket`** — an immutable hit: `Severity` (bashing/lethal/aggravated) ×
+- **`DamagePacket`** — an immutable hit: `Severity` (harmless…fatal) ×
   `Intensity` (the number) × `Kind`s (descriptors) × `Source`. Its mutators
   return copies (see below).
 - **`DamageReaction`** — a character's say over an incoming packet
@@ -82,8 +82,10 @@ Rules decisions worth knowing:
 A hit is a **`DamagePacket`** — four *independent* facts, deliberately kept
 apart (think D&D's damage typing):
 
-- **`Severity`** — `bashing` / `lethal` / `aggravated`: how hard it is to soak
-  and heal. (`Severity` also carries a numeric `Rank` for ordering.)
+- **`Severity`** — `harmless` / `bashing` / `lethal` / `aggravated` / `fatal`:
+  how hard it is to soak and heal. `harmless` deals nothing and `fatal` sits
+  above aggravated; the health track marks bashing/lethal/aggravated. (`Severity`
+  carries a numeric `Rank` for ordering, plus `IsAtLeast` / `Max` helpers.)
 - **`Intensity`** — the plain *number* of health levels the hit threatens.
 - **`Kind`(s)** — open-ended descriptors: `piercing`, `slashing`, `silver`,
   `fire`, `sunlight`, … A packet may carry several (a silver bullet is

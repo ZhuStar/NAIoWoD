@@ -9,7 +9,7 @@ import {
   Pool, bloodForGeneration,
   MoralityTrait,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
-  TEMPLATE_WEREWOLF, TEMPLATES,
+  TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
   CharacterFactory,
 } from "../src/wod";
 
@@ -319,17 +319,33 @@ describe("Templates: starting-value constraints", () => {
   });
 
   test("the TEMPLATES registry exposes all splats", () => {
-    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "mage", "mortal", "thrall", "vampire", "werewolf"]);
+    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "thrall", "vampire", "werewolf"]);
   });
 });
 
 describe("Templates: morality & virtues presence", () => {
-  test("mages have neither Road nor Virtues", () => {
+  test("mages have neither Road nor Virtues, Quintessence but no Paradox", () => {
     const mage = CharacterFactory.create(TEMPLATE_MAGE, "Hermetic");
     expect(mage.Morality).toBeUndefined();
     expect(mage.Virtues.size).toBe(0);
     expect(mage.Pools.has("quintessence")).toBe(true);
-    expect(mage.Pools.has("paradox")).toBe(true);
+    expect(mage.Pools.has("paradox")).toBe(false);
+  });
+
+  test("ghouls are mortal-like but carry a non-generation blood pool", () => {
+    const ghoul = CharacterFactory.create(TEMPLATE_GHOUL, "Renfield", {
+      attributes: { stamina: 2 },
+      traits: { potence: 1 }, // 🚧 Disciplines seeded as traits for now
+      virtues: { conscience: 2, "self-control": 2, courage: 3 },
+    });
+    const blood = ghoul.GetPool("blood");
+    expect(blood.Max).toBe(10);
+    expect(blood.Current).toBe(0);      // must be fed by a domitor
+    expect(blood.PerTurnLimit).toBe(1);
+    // still human: has a Road and Virtues (unlike a vampire's undead physiology)
+    expect(ghoul.Morality!.RoadName).toBe("Road of Humanity");
+    expect(ghoul.Virtues.get("courage")!.Value).toBe(3);
+    expect(ghoul.TraitValue("potence")).toBe(1);
   });
 
   test("vampires derive Road rating from Virtues and Willpower from Courage", () => {

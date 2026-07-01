@@ -933,13 +933,15 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
   [new UndeadPhysiology()]   // bullets & blades to bashing; fire/sunlight stay aggravated
 );
 
+// Dark Ages: Mage works magic through Foundation & Pillars (its answer to the
+// Spheres), which live with the not-yet-modelled powers, not as a pool. The
+// only pool is Quintessence; this line has no Paradox.
 export const TEMPLATE_MAGE = new TemplateConfig(
   "Mage (Dark Ages)",
   RulesetConfig.MAGE,
   [
     { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
     { name: "quintessence", kind: "pool", start: 0, max: 20 },
-    { name: "paradox", kind: "pool", start: 0, max: 20 },
   ],
   MAGE_SOAK,
   false, null, false   // Mages have no Road/Humanity and no Virtues
@@ -977,6 +979,26 @@ export const TEMPLATE_WEREWOLF = new TemplateConfig(
   [new SilverVulnerability()]
 );
 
+// A ghoul is a mortal sustained by vampire vitae. Mechanically they are a mortal
+// (still alive: Road/Humanity, Virtues, mortal soak) plus a Blood pool they do
+// NOT generate - it must be fed by their domitor, starting near-empty and
+// holding up to 10, spendable one point per turn.
+//
+// 🚧 At creation a ghoul also gets 2 dots of Disciplines, one of which must be
+// Potence. Disciplines (and Potence's automatic-success effect) aren't modelled
+// yet, so seed them for now via `traits: { potence: 1, ... }` - the template
+// can't enforce that rule until the powers system exists.
+export const TEMPLATE_GHOUL = new TemplateConfig(
+  "Ghoul",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [
+    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    { name: "blood", kind: "pool", start: 0, max: 10, perTurnLimit: 1 },
+  ],
+  MORTAL_SOAK,
+  true, ROAD_OF_HUMANITY, true   // still human: Road/Humanity + Virtues
+);
+
 export const TEMPLATES: Record<string, TemplateConfig> = {
   mortal: TEMPLATE_MORTAL,
   thrall: TEMPLATE_THRALL,
@@ -984,6 +1006,7 @@ export const TEMPLATES: Record<string, TemplateConfig> = {
   mage: TEMPLATE_MAGE,
   demon: TEMPLATE_DEMON,
   werewolf: TEMPLATE_WEREWOLF,
+  ghoul: TEMPLATE_GHOUL,
 };
 
 // --- LOREBOOK PARSER ---

@@ -46,7 +46,7 @@ runner is built in.
 - **`Tracker`** (extends `Stat`) — permanent rating + a spendable temporary
   value: Willpower, Resolve, Torment.
 - **`Pool`** — a free-floating counter with a max and an optional per-turn spend
-  limit: Blood, Quintessence, Paradox.
+  limit: Blood, Quintessence.
 - **`Dice`** — auditable d10 roller (see below).
 - **`DamagePacket`** — an immutable hit: `Severity` (harmless…fatal) ×
   `Intensity` (the number) × `Kind`s (descriptors) × `Source`. Its mutators
@@ -132,7 +132,7 @@ soakable and which traits form the dice pool. Out of the box:
 
 | Template | Bashing | Lethal | Aggravated |
 | --- | --- | --- | --- |
-| Mortal / Thrall / Mage | Stamina | — | — |
+| Mortal / Thrall / Mage / Ghoul | Stamina | — | — |
 | Vampire | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
 | Demon / Werewolf | Stamina | Stamina | Stamina |
 
@@ -149,7 +149,12 @@ per-template starting-value constraints. Examples baked in:
 - **Demon** — Resolve starts in the **3–5** band, plus a **Torment** tracker.
 - **Vampire** — Blood pool max/turn derived from **Generation**; Road rating
   derived from Virtues; Willpower derived from Courage.
-- **Mage** — **no** Road/Humanity and **no** Virtues; has Quintessence + Paradox.
+- **Mage** — **no** Road/Humanity and **no** Virtues; has Quintessence (no
+  Paradox in this line). Magic is **Foundation & Pillars** — traits, modelled
+  with the other powers later.
+- **Ghoul** — a mortal (Road/Humanity + Virtues, mortal soak) plus a **Blood**
+  pool it doesn't generate (fed by a domitor, starts empty). Also 2 Discipline
+  dots incl. Potence at creation — pending the powers system, seed via `traits`.
 
 ```ts
 import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src/wod";

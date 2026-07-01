@@ -48,13 +48,19 @@ runner is built in.
 - **`Pool`** — a free-floating counter with a max and an optional per-turn spend
   limit: Blood, Quintessence, Paradox.
 - **`Dice`** — auditable d10 roller (see below).
+- **`DamagePacket`** — an immutable hit: `Severity` (bashing/lethal/aggravated) ×
+  `Intensity` (the number) × `Kind`s (descriptors) × `Source`. Its mutators
+  return copies (see below).
+- **`DamageReaction`** — a character's say over an incoming packet
+  (`UndeadPhysiology`, `SilverVulnerability`, `ArmorReaction`).
 - **`HealthTrack`** — 7-level damage track with wound penalties.
 - **`MoralityTrait`** — a Road/Humanity rating (0–10) with degeneration/penance.
 - **`TemplateConfig`** + **`CharacterFactory`** — per-splat configuration
-  (starting values, soak rules, which sub-systems exist) and a builder that
-  enforces those rules.
-- **`LiveCharacter`** — the assembled sheet, with `TakeDamage`, `RollSoak`,
-  `SpendWillpower`, pool helpers, XP/downtime spending and `SaveToStory`.
+  (starting values, soak rules, innate reactions, which sub-systems exist) and a
+  builder that enforces those rules.
+- **`LiveCharacter`** — the assembled sheet, with `TakePacket`/`TakeDamage`,
+  `RollSoak`, `SpendWillpower`, pool helpers, XP/downtime spending and
+  `SaveToStory`.
 
 ### Dice (`Dice.roll`)
 
@@ -71,25 +77,66 @@ Rules decisions worth knowing:
 - Explosion chains are capped at 200 dice as a safety valve.
 - An injectable `rng` makes every roll deterministic for tests.
 
-### Health, damage & soak
+### Damage: packets, and who decides severity
 
-Bashing / lethal / aggravated, marked on a standard 7-level track
-(Bruised → Incapacitated). On a full track the **wrap-around upgrade** rule
-applies: a more-severe hit replaces the least-severe wound, otherwise the
-least-severe wound is upgraded a step (bashing → lethal → aggravated); damage
-past a full aggravated track is `Overkill`.
+A hit is a **`DamagePacket`** — four *independent* facts, deliberately kept
+apart (think D&D's damage typing):
 
-Soak rules are per-template data (`SoakSpec`): for each damage type, whether
-it's soakable and which traits form the dice pool. Out of the box:
+- **`Severity`** — `bashing` / `lethal` / `aggravated`: how hard it is to soak
+  and heal. (`Severity` also carries a numeric `Rank` for ordering.)
+- **`Intensity`** — the plain *number* of health levels the hit threatens.
+- **`Kind`(s)** — open-ended descriptors: `piercing`, `slashing`, `silver`,
+  `fire`, `sunlight`, … A packet may carry several (a silver bullet is
+  `piercing` + `silver`). Any normalized string works; `Kind`/`Source` export
+  the common ones as constants.
+- **`Source`** — where it came from (`gunshot`, `claw`, `fangs`, `fall`).
+
+The key idea: **severity is not intrinsic to the attack — the target decides.**
+Every character owns an ordered list of **`DamageReaction`s** that are folded
+over an incoming packet *before* soak, each free to rewrite or ignore parts of
+it. `character.TakePacket(packet)` runs that pipeline, then soaks (if the
+resolved packet still allows it), then marks the health track; the returned
+`DamageReport` includes a `trace` of every reaction that changed the packet.
+`character.TakeDamage(severity, intensity, { kinds, source })` is a convenience
+wrapper that builds a bare packet for you.
+
+Built-in reactions:
+
+- **`UndeadPhysiology`** (vampires) — piercing/ballistic **lethal → bashing**
+  (no organs to destroy, no blood to lose); `fire`/`sunlight` stay aggravated.
+- **`SilverVulnerability`** (werewolves) — `silver`/`fire` become **aggravated
+  and *unsoakable*** (regeneration can't touch them).
+- **`ArmorReaction`** — flat intensity reduction against the kinds it covers
+  (a vest eating the first few levels of a gunshot). Add per-character via
+  `CharacterFactory.create(…, { reactions: [new ArmorReaction("Vest", 3, ["piercing"]) ] })`.
+
+The same gunshot (`4 lethal {piercing} from gunshot`), four ways:
+
+| Target | Resolves to | Why |
+| --- | --- | --- |
+| Mortal | 4 **lethal**, unsoakable → 4 land | no downgrade; mortals can't soak lethal (armour is the only out) |
+| Vampire | 4 **bashing**, then soak | `UndeadPhysiology` talks the bullet down |
+| Werewolf | **soaked away** | alive, so still lethal — but Stamina soaks all of it |
+| Werewolf + silver | 4 **aggravated**, unsoakable → 4 land | `SilverVulnerability`: good luck |
+
+The health track itself is a standard 7-level track (Bruised → Incapacitated).
+On a full track the **wrap-around upgrade** rule applies: a more-severe hit
+replaces the least-severe wound, otherwise the least-severe wound is upgraded a
+step (bashing → lethal → aggravated); damage past a full aggravated track is
+`Overkill`.
+
+Soak rules are per-template data (`SoakSpec`): for each severity, whether it's
+soakable and which traits form the dice pool. Out of the box:
 
 | Template | Bashing | Lethal | Aggravated |
 | --- | --- | --- | --- |
 | Mortal / Thrall / Mage | Stamina | — | — |
 | Vampire | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
-| Demon | Stamina | Stamina | Stamina |
+| Demon / Werewolf | Stamina | Stamina | Stamina |
 
-`character.TakeDamage(type, amount)` rolls the soak (when allowed) and applies
-the remainder to the health track.
+> The **Werewolf** template is a modern-WoD illustration (not Dark Ages canon),
+> included so the kind/severity system has a regenerator — and a silver
+> weakness — to show off.
 
 ### Templates & starting values
 
@@ -103,7 +150,7 @@ per-template starting-value constraints. Examples baked in:
 - **Mage** — **no** Road/Humanity and **no** Virtues; has Quintessence + Paradox.
 
 ```ts
-import { CharacterFactory, TEMPLATE_VAMPIRE } from "./src/wod";
+import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src/wod";
 
 const dracula = CharacterFactory.create(TEMPLATE_VAMPIRE, "Dracula", {
   generation: 8,
@@ -112,7 +159,16 @@ const dracula = CharacterFactory.create(TEMPLATE_VAMPIRE, "Dracula", {
   virtues: { conscience: 2, "self-control": 3, courage: 4 },
 });
 
-dracula.TakeDamage("lethal", 5); // rolls Stamina + Fortitude to soak
+// A bullet: lethal + piercing. Dracula's UndeadPhysiology talks it down to
+// bashing, then he soaks it with Stamina + Fortitude.
+const bullet = DamagePacket.of({
+  intensity: 5, severity: "lethal", kinds: [Kind.PIERCING], source: Source.GUNSHOT,
+});
+const report = dracula.TakePacket(bullet);
+report.severity; // "bashing"
+report.trace;    // [{ reaction: "Undead physiology", from: "5 lethal …", to: "5 bashing …" }]
+
+dracula.TakeDamage("lethal", 5); // bare packet: rolls Stamina + Fortitude to soak
 dracula.SpendWillpower(1);
 dracula.SaveToStory();
 ```

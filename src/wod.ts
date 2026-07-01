@@ -85,7 +85,7 @@ export class StringUtil {
 export type CategoryType =
   | "physical" | "social" | "mental"
   | "talent" | "skill" | "knowledge"
-  | "background" | "tracker" | "virtue" | "morality" | "vital";
+  | "background" | "tracker" | "virtue" | "morality" | "vital" | "discipline";
 export class Category {
   static readonly PHYSICAL = new Category("physical");
   static readonly SOCIAL = new Category("social");
@@ -98,6 +98,7 @@ export class Category {
   static readonly VIRTUE = new Category("virtue");
   static readonly MORALITY = new Category("morality");
   static readonly VITAL = new Category("vital");
+  static readonly DISCIPLINE = new Category("discipline");
 
   public readonly Name: string;
   private constructor(name: CategoryType) {
@@ -264,10 +265,11 @@ export function Random(min: number, max: number, rng: Rng = __defaultRng): numbe
 
 export interface RollTrait { name: string; value: number; }
 export interface RollOptions {
-  difficulty?: number;   // default 6
-  nAgain?: number;       // default 10 (10-again). 11 disables, 9 explodes 9s & 10s.
+  difficulty?: number;        // default 6
+  nAgain?: number;            // default 10 (10-again). 11 disables, 9 explodes 9s & 10s.
+  automaticSuccesses?: number; // free successes (e.g. Potence, a spent Willpower)
   rng?: Rng;
-  label?: string;        // header label when rolling a raw pool
+  label?: string;             // header label when rolling a raw pool
 }
 export interface RollDie {
   face: number;
@@ -284,9 +286,10 @@ export interface RollResult {
   difficulty: number;
   nAgain: number;
   dice: RollDie[];
-  successes: number;     // dice meeting difficulty (incl. explosions)
-  ones: number;          // dice showing a 1 (incl. explosions)
-  net: number;           // successes - ones
+  successes: number;          // dice meeting difficulty (incl. explosions)
+  automaticSuccesses: number; // free successes added to the tally
+  ones: number;               // dice showing a 1 (incl. explosions)
+  net: number;                // successes + automaticSuccesses - ones
   isBotch: boolean;
   outcome: RollOutcome;
   message: string;
@@ -304,6 +307,7 @@ export class Dice {
   static roll(input: number | RollTrait[], options: RollOptions = {}): RollResult {
     const difficulty = options.difficulty ?? 6;
     const nAgain = Math.max(2, options.nAgain ?? 10); // never explode on faces < 2
+    const automaticSuccesses = Math.max(0, options.automaticSuccesses ?? 0);
     const rng = options.rng ?? __defaultRng;
 
     const traits: RollTrait[] = typeof input === "number"
@@ -337,18 +341,19 @@ export class Dice {
 
     const successes = dice.filter(d => d.isSuccess).length;
     const ones = dice.filter(d => d.isOne).length;
-    const net = successes - ones;
+    const net = successes + automaticSuccesses - ones;
 
     // A botch is judged on the INITIAL roll only: zero successes and >= 1 one.
-    // (If a success is present but cancelled by a 1, it is a failure, not a botch.)
+    // (A cancelled success is a failure, not a botch; a free success also averts it.)
     const initial = dice.filter(d => !d.fromExplosion);
     const initialSuccesses = initial.filter(d => d.isSuccess).length;
     const initialOnes = initial.filter(d => d.isOne).length;
-    const isBotch = initialSuccesses === 0 && initialOnes >= 1;
+    const isBotch = initialSuccesses === 0 && automaticSuccesses === 0 && initialOnes >= 1;
 
     const outcome: RollOutcome = isBotch ? "botch" : (net > 0 ? "success" : "failure");
 
-    const header = traits.map(t => `${StringUtil.toTitleCase(t.name)} (${t.value})`).join(" + ");
+    const autoText = automaticSuccesses > 0 ? ` +${automaticSuccesses} auto` : "";
+    const header = traits.map(t => `${StringUtil.toTitleCase(t.name)} (${t.value})`).join(" + ") + autoText;
     const faces = dice.map(d => `${d.symbol}${d.face}`).join(" ");
     let resultLine: string;
     if (isBotch) resultLine = `${DIE_BOMB} BOTCH!`;
@@ -356,7 +361,7 @@ export class Dice {
     else resultLine = `${DIE_MISS} Failure`;
     const message = `${header} vs diff ${difficulty} [${faces}] -> ${resultLine}`;
 
-    return { traits, pool, difficulty, nAgain, dice, successes, ones, net, isBotch, outcome, message };
+    return { traits, pool, difficulty, nAgain, dice, successes, automaticSuccesses, ones, net, isBotch, outcome, message };
   }
 }
 
@@ -984,10 +989,10 @@ export const TEMPLATE_WEREWOLF = new TemplateConfig(
 // NOT generate - it must be fed by their domitor, starting near-empty and
 // holding up to 10, spendable one point per turn.
 //
-// 🚧 At creation a ghoul also gets 2 dots of Disciplines, one of which must be
-// Potence. Disciplines (and Potence's automatic-success effect) aren't modelled
-// yet, so seed them for now via `traits: { potence: 1, ... }` - the template
-// can't enforce that rule until the powers system exists.
+// At creation a ghoul also gets 2 dots of Disciplines, one of which must be
+// Potence: seed them via `disciplines: { potence: 1, ... }`. Potence and
+// Fortitude have real mechanics now; 🚧 the template still can't *enforce* the
+// 2-dots-incl-Potence rule until character creation is modelled.
 export const TEMPLATE_GHOUL = new TemplateConfig(
   "Ghoul",
   new RulesetConfig(5, 2, 4, 2, false),
@@ -1008,6 +1013,46 @@ export const TEMPLATES: Record<string, TemplateConfig> = {
   werewolf: TEMPLATE_WEREWOLF,
   ghoul: TEMPLATE_GHOUL,
 };
+
+// =============================================================================
+// DISCIPLINES - vampiric (and ghoul/revenant) supernatural powers
+// -----------------------------------------------------------------------------
+// Rated traits (0-5). The registry is metadata: an "arena" and which Dark Ages
+// clans hold it in-clan (for the future advancement-cost engine). A couple have
+// wired mechanics today - Potence (automatic successes on Strength) and
+// Fortitude (soak) - while the rest are rated dots plus the generic bonus-dice
+// hook on `character.Roll`, until per-power effects and a turn system exist.
+// =============================================================================
+export type DisciplineArena = "physical" | "mental" | "social";
+export interface DisciplineDef {
+  name: string;
+  arena: DisciplineArena;
+  clans: string[];          // Dark Ages clans for whom it is in-clan
+  description?: string;
+}
+
+export const DISCIPLINES: Record<string, DisciplineDef> = {
+  potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength." },
+  fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't." },
+  celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
+  animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
+  auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
+  dominate:      { name: "Dominate",      arena: "mental",   clans: ["cappadocian", "lasombra", "tzimisce", "ventrue"] },
+  obfuscate:     { name: "Obfuscate",     arena: "mental",   clans: ["assamite", "cappadocian", "nosferatu", "ravnos"] },
+  presence:      { name: "Presence",      arena: "social",   clans: ["brujah", "followers-of-set", "toreador"] },
+  obtenebration: { name: "Obtenebration", arena: "mental",   clans: ["lasombra"] },
+  protean:       { name: "Protean",       arena: "physical", clans: ["gangrel"] },
+  quietus:       { name: "Quietus",       arena: "physical", clans: ["assamite"] },
+  serpentis:     { name: "Serpentis",     arena: "physical", clans: ["followers-of-set"] },
+  vicissitude:   { name: "Vicissitude",   arena: "physical", clans: ["tzimisce"] },
+  chimerstry:    { name: "Chimerstry",    arena: "mental",   clans: ["ravnos"] },
+  mortis:        { name: "Mortis",        arena: "mental",   clans: ["cappadocian"] },
+  thaumaturgy:   { name: "Thaumaturgy",   arena: "mental",   clans: ["tremere"] },
+};
+
+export function disciplineDef(name: string): DisciplineDef | undefined {
+  return DISCIPLINES[StringUtil.normalize(name)];
+}
 
 // --- LOREBOOK PARSER ---
 export class LorebookParser {
@@ -1068,7 +1113,8 @@ export class LiveCharacter {
   public Health: HealthTrack = new HealthTrack();
   public Pools: Map<string, Pool> = new Map();
   public Virtues: Map<string, Stat> = new Map();
-  public Traits: Map<string, Stat> = new Map(); // misc rated traits (e.g. Fortitude)
+  public Traits: Map<string, Stat> = new Map(); // misc rated traits
+  public Disciplines: Map<string, Stat> = new Map(); // rated supernatural powers (0-5)
   public Morality?: MoralityTrait;
   public Soak: SoakSpec = MORTAL_SOAK;
   // The character's say over incoming damage: reactions are folded over each
@@ -1115,20 +1161,53 @@ export class LiveCharacter {
   TraitValue(name: string): number {
     const n = StringUtil.normalize(name);
     const s = this.Attributes.get(n) ?? this.Abilities.get(n) ?? this.Backgrounds.get(n)
-      ?? this.Virtues.get(n) ?? this.Traits.get(n);
+      ?? this.Virtues.get(n) ?? this.Disciplines.get(n) ?? this.Traits.get(n);
     return s ? s.EffectiveValue : 0;
+  }
+
+  // --- Disciplines & rolls ------------------------------------------------
+  DisciplineRating(name: string): number {
+    const d = this.Disciplines.get(StringUtil.normalize(name));
+    return d ? d.EffectiveValue : 0;
+  }
+
+  // Roll a pool as this character, folding in Discipline effects: `potence` adds
+  // the character's Potence rating as automatic successes; `bonusDiceFrom` adds
+  // each named trait/Discipline's rating as bonus dice (e.g. Celerity, Auspex).
+  Roll(input: number | RollTrait[], opts: {
+    difficulty?: number; nAgain?: number; rng?: Rng; label?: string;
+    automaticSuccesses?: number; potence?: boolean; bonusDiceFrom?: string[];
+  } = {}): RollResult {
+    let automaticSuccesses = opts.automaticSuccesses ?? 0;
+    if (opts.potence) automaticSuccesses += this.DisciplineRating("potence");
+    let bonusDice = 0;
+    for (const name of opts.bonusDiceFrom ?? []) bonusDice += this.TraitValue(name);
+    let pool: number | RollTrait[];
+    if (typeof input === "number") pool = Math.max(0, input + bonusDice);
+    else pool = bonusDice > 0 ? [...input, { name: "bonus", value: bonusDice }] : input;
+    return Dice.roll(pool, {
+      difficulty: opts.difficulty, nAgain: opts.nAgain, rng: opts.rng,
+      label: opts.label, automaticSuccesses,
+    });
   }
 
   // --- Health & soak -------------------------------------------------------
   get WoundPenalty(): number { return this.Health.Penalty; }
 
   // Soak rule for a severity; harmless/fatal are not in the SoakSpec and are
-  // treated as not soakable.
+  // treated as not soakable. Fortitude (a Discipline) lets a character soak a
+  // severity their template normally can't - e.g. a ghoul soaking lethal - with
+  // Fortitude dice. (Templates that already soak it, like a vampire, are
+  // unaffected, so Fortitude is never double-counted.)
   private _soakRule(sev: Severity): SoakTypeRule {
-    if (sev === Severity.BASHING) return this.Soak.bashing;
-    if (sev === Severity.LETHAL) return this.Soak.lethal;
-    if (sev === Severity.AGGRAVATED) return this.Soak.aggravated;
-    return { soakable: false, pool: [] };
+    const base = sev === Severity.BASHING ? this.Soak.bashing
+      : sev === Severity.LETHAL ? this.Soak.lethal
+      : sev === Severity.AGGRAVATED ? this.Soak.aggravated
+      : { soakable: false, pool: [] };
+    if (!base.soakable && this.TraitValue("fortitude") > 0) {
+      return { soakable: true, pool: ["fortitude"] };
+    }
+    return base;
   }
 
   SoakPoolFor(severity: Severity | SeverityName): number {
@@ -1234,6 +1313,7 @@ export class LiveCharacter {
       pools: Array.from(this.Pools.entries()).map(([k, v]) => ({ name: k, current: v.Current, max: v.Max })),
       virtues: Array.from(this.Virtues.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
       traits: Array.from(this.Traits.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
+      disciplines: Array.from(this.Disciplines.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
       morality: this.Morality ? { road: this.Morality.RoadName, value: this.Morality.Value } : null,
       health: this.Health.Summary(),
     };
@@ -1254,7 +1334,8 @@ export interface CharacterCreationOptions {
   backgrounds?: Record<string, number>;
   virtues?: Record<string, number>;       // Virtue dots (default 1 each)
   poolStarts?: Record<string, number>;    // chosen starting values for pools/trackers
-  traits?: Record<string, number>;        // misc rated traits (e.g. fortitude)
+  traits?: Record<string, number>;        // misc rated traits
+  disciplines?: Record<string, number>;   // Discipline dots (e.g. { potence: 1, fortitude: 2 })
   reactions?: DamageReaction[];           // extra damage reactions (e.g. worn armour), appended after the template's
 }
 
@@ -1264,6 +1345,7 @@ export class CharacterFactory {
     const abilities = CharacterFactory._statMap(opts.abilities, Category.SKILL);
     const backgrounds = CharacterFactory._statMap(opts.backgrounds, Category.BACKGROUND);
     const traits = CharacterFactory._statMap(opts.traits, Category.VITAL);
+    const disciplines = CharacterFactory._statMap(opts.disciplines, Category.DISCIPLINE);
     const virtuesProvided = opts.virtues !== undefined;
     const road = opts.road ?? template.DefaultRoad ?? ROAD_OF_HUMANITY;
 
@@ -1313,6 +1395,7 @@ export class CharacterFactory {
     character.Pools = pools;
     character.Virtues = virtues;
     character.Traits = traits;
+    character.Disciplines = disciplines;
     character.Soak = template.Soak;
     character.Health = new HealthTrack(template.HealthLevels);
     // Template reactions first (innate physiology), then per-character extras

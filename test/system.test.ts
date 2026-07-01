@@ -8,6 +8,7 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
+  DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
   CharacterFactory,
@@ -524,5 +525,63 @@ describe("LiveCharacter: pools, willpower and persistence", () => {
     expect(data.morality).toEqual({ road: "Road of Humanity", value: 5 });
     expect(data.pools.find(p => p.name === "blood")!.max).toBe(13);
     expect(data.health.bashing).toBe(2);
+  });
+});
+
+describe("Automatic successes (Potence / Willpower)", () => {
+  test("Dice.roll adds free successes and averts a botch", () => {
+    const r = Dice.roll(3, { difficulty: 6, automaticSuccesses: 2, rng: seqRng([2, 2, 2]) });
+    expect(r.automaticSuccesses).toBe(2);
+    expect(r.successes).toBe(0); // dice only
+    expect(r.net).toBe(2);
+    const b = Dice.roll(2, { difficulty: 6, automaticSuccesses: 1, rng: seqRng([1, 2]) });
+    expect(b.isBotch).toBe(false);
+    expect(b.net).toBe(0);
+  });
+});
+
+describe("Disciplines", () => {
+  test("the registry records arenas and in-clan associations", () => {
+    expect(disciplineDef("Potence")!.arena).toBe("physical");
+    expect(DISCIPLINES.dominate.clans).toContain("ventrue");
+  });
+
+  test("the factory seeds Discipline dots; DisciplineRating and save read them", () => {
+    const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Boss", {
+      generation: 8, disciplines: { potence: 3, dominate: 2 },
+    });
+    expect(v.DisciplineRating("potence")).toBe(3);
+    expect(v.Disciplines.get("dominate")!.Category).toBe(Category.DISCIPLINE);
+    expect(v.SaveToStory().disciplines.find(d => d.name === "potence")!.value).toBe(3);
+  });
+
+  test("Potence adds its rating as automatic successes", () => {
+    const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Brute", { generation: 8, disciplines: { potence: 2 } });
+    const r = v.Roll(3, { potence: true, rng: seqRng([2, 2, 2]) }); // 3 misses + 2 auto
+    expect(r.automaticSuccesses).toBe(2);
+    expect(r.net).toBe(2);
+  });
+
+  test("Celerity (and any Discipline) can add bonus dice via bonusDiceFrom", () => {
+    const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Flash", { generation: 8, disciplines: { celerity: 2 } });
+    const r = v.Roll([{ name: "dexterity", value: 3 }], { bonusDiceFrom: ["celerity"], rng: seqRng([6, 6, 6, 6, 6]) });
+    expect(r.pool).toBe(5); // 3 + 2
+  });
+
+  test("Fortitude lets a ghoul soak lethal it otherwise couldn't", () => {
+    const ghoul = CharacterFactory.create(TEMPLATE_GHOUL, "Bruiser", { disciplines: { fortitude: 3 } });
+    const r = ghoul.RollSoak("lethal", seqRng([6, 6, 2]));
+    expect(r.soakable).toBe(true);
+    expect(r.pool).toBe(3);
+    expect(r.soaked).toBe(2);
+    // a plain mortal still can't soak lethal
+    expect(CharacterFactory.create(TEMPLATE_MORTAL, "Nobody", { attributes: { stamina: 4 } }).RollSoak("lethal").soakable).toBe(false);
+  });
+
+  test("Fortitude is not double-counted for a vampire that already soaks lethal", () => {
+    const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Elder", {
+      generation: 8, attributes: { stamina: 3 }, disciplines: { fortitude: 2 },
+    });
+    expect(v.SoakPoolFor("lethal")).toBe(5); // stamina 3 + fortitude 2, not 7
   });
 });

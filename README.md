@@ -55,12 +55,14 @@ runner is built in.
   (`UndeadPhysiology`, `SilverVulnerability`, `ArmorReaction`).
 - **`HealthTrack`** — 7-level damage track with wound penalties.
 - **`MoralityTrait`** — a Road/Humanity rating (0–10) with degeneration/penance.
+- **`DISCIPLINES`** — the registry of vampiric powers (Potence, Fortitude,
+  Celerity, Auspex …) as rated traits; Potence & Fortitude are wired (see below).
 - **`TemplateConfig`** + **`CharacterFactory`** — per-splat configuration
   (starting values, soak rules, innate reactions, which sub-systems exist) and a
   builder that enforces those rules.
 - **`LiveCharacter`** — the assembled sheet, with `TakePacket`/`TakeDamage`,
-  `RollSoak`, `SpendWillpower`, pool helpers, XP/downtime spending and
-  `SaveToStory`.
+  `Roll` (folds in Potence/bonus-dice), `RollSoak`, `SpendWillpower`, pool
+  helpers, XP/downtime spending and `SaveToStory`.
 
 ### Dice (`Dice.roll`)
 
@@ -180,10 +182,31 @@ dracula.SpendWillpower(1);
 dracula.SaveToStory();
 ```
 
+## Disciplines
+
+Disciplines are rated traits (0–5) on a character (`character.Disciplines`),
+seeded at creation via `disciplines: { potence: 1, fortitude: 2 }`. The
+`DISCIPLINES` registry is metadata — each entry's `arena` and the Dark Ages
+clans that hold it **in-clan** (for the future advancement-cost engine).
+
+Two have real mechanics today:
+
+- **Potence** → `character.Roll(pool, { potence: true })` adds its rating as
+  **automatic successes** (see `Dice.roll`'s `automaticSuccesses`, which also
+  averts botches — the same hook a spent Willpower would use).
+- **Fortitude** → lets a character **soak a severity their template can't**
+  (e.g. a ghoul soaking lethal), adding its rating in dice. It's never
+  double-counted for a vampire that already soaks lethal.
+
+Everything else (Celerity, Auspex, Dominate, …) is a rated dot plus the generic
+`character.Roll(pool, { bonusDiceFrom: ["celerity"] })` bonus-dice hook, until
+per-power effects and a turn system exist.
+
 ## Status / notes
 
 - Starting values, soak tables and the generation→blood table are **data** —
-  tweak the `TEMPLATE_*` / `*_SOAK` constants to match your table's house rules.
-- Disciplines/Spheres/Lores and the magic systems are not modelled yet; soak
-  reads "Fortitude" (and any trait) from a generic `Traits` map so they can be
-  layered in later.
+  tweak the `TEMPLATE_*` / `*_SOAK` / `DISCIPLINES` constants for house rules.
+- 🚧 Per-power Discipline effects, Mage's Foundation & Pillars, and Lores are
+  not modelled yet — only the rated traits and the two hooks above. Character
+  creation doesn't yet *enforce* Discipline-dot rules (e.g. a ghoul's free
+  Potence).

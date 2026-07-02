@@ -21,34 +21,52 @@
 // surface in memory so the engine behaves identically off-host and in tests.
 export type OnTextAdventureInput = (params: { rawInputText: string }) => { inputText: string };
 
+export interface LorebookCondition { [k: string]: unknown }
 export interface LorebookEntryData {
   id: string;
-  displayName: string;
-  text: string;
+  displayName?: string;
   category?: string;   // owning category id (undefined = uncategorized)
+  text?: string;
   keys?: string[];
+  hidden?: boolean;
+  enabled?: boolean;
+  advancedConditions?: LorebookCondition[];
+  forceActivation?: boolean;
 }
-export interface LorebookCategoryData { id: string; name: string; }
+export interface LorebookCategoryData {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  settings?: { entryHeader?: string };
+}
+
+// Persistent (storyStorage) and volatile (tempStorage) share this surface.
+interface StorageApi {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown) => Promise<void>;
+  setIfAbsent?: (key: string, value: unknown) => Promise<unknown>;
+  remove: (key: string) => Promise<void>;
+}
 
 interface WodApi {
   v1: {
     script: { id: string; name?: string; version?: string; author?: string };
     uuid: () => string;
     log: (...args: unknown[]) => void;
-    storyStorage: {
-      get: (key: string) => Promise<unknown>;
-      set: (key: string, value: unknown) => Promise<void>;
-      setIfAbsent?: (key: string, value: unknown) => Promise<unknown>;
-      remove: (key: string) => Promise<void>;
-    };
+    storyStorage: StorageApi;
+    // Volatile scratch storage: cleared whenever the script unloads (page
+    // refresh, session end, toggling the script off/on). For UI sync and any
+    // state we deliberately don't want kept between script loads.
+    tempStorage: StorageApi;
     lorebook: {
+      entry: (entryId: string) => Promise<LorebookEntryData | null>;
       entries: (categoryId?: string) => Promise<LorebookEntryData[]>;
       categories: () => Promise<LorebookCategoryData[]>;
-      // `id` is optional: the host generates a uuid when omitted (pass
-      // api.v1.uuid() only when you need to control it). Both return the created
-      // record, so callers read the assigned id off the result.
-      createCategory: (data: { id?: string; name: string }) => Promise<LorebookCategoryData>;
-      createEntry: (data: { id?: string; displayName: string; text: string; category?: string; keys?: string[] }) => Promise<LorebookEntryData>;
+      // `id` is optional: the host generates a uuid when omitted. Pass
+      // api.v1.uuid() when you want to keep the id (to fetch/recreate via
+      // entry(id) later). Both return the created record.
+      createCategory: (data: { id?: string; name?: string; enabled?: boolean; settings?: { entryHeader?: string } }) => Promise<LorebookCategoryData>;
+      createEntry: (data: { id?: string; displayName?: string; text?: string; category?: string; keys?: string[]; hidden?: boolean; enabled?: boolean }) => Promise<LorebookEntryData>;
     };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
   };
@@ -59,6 +77,7 @@ interface WodApi {
 // job to create its categories and seed them (see LorebookManager.bootstrap).
 const __host = globalThis as unknown as { api?: WodApi };
 const __mockStore = new Map<string, unknown>();
+const __mockTempStore = new Map<string, unknown>();
 let __mockCategories: LorebookCategoryData[] = [];
 let __mockEntries: LorebookEntryData[] = [];
 let __mockUuidCounter = 0;
@@ -66,6 +85,12 @@ const __mockUuid = (): string => {
   const g = globalThis as { crypto?: { randomUUID?: () => string } };
   return g.crypto?.randomUUID?.() ?? `mock-uuid-${++__mockUuidCounter}`;
 };
+const __makeMockStore = (m: Map<string, unknown>): StorageApi => ({
+  get: async (key) => m.get(key),
+  set: async (key, value) => { m.set(key, value); },
+  setIfAbsent: async (key, value) => { if (m.has(key)) return false; m.set(key, value); return true; },
+  remove: async (key) => { m.delete(key); },
+});
 
 // Test/off-host helper: wipe the mock lorebook back to a fresh (empty) story.
 // A no-op concern on-host, where the real `api` (not this mock) is used.
@@ -76,20 +101,10 @@ const api: WodApi = __host.api ?? {
     script: { id: "a1b2c3d4-script-uuid" },
     uuid: __mockUuid,
     log: (...args: unknown[]) => console.log(...args),
-    storyStorage: {
-      get: async (key: string) => __mockStore.get(key),
-      set: async (key: string, value: unknown) => {
-        __mockStore.set(key, value);
-        Log(`[STORAGE SAVE] Key: ${key}`);
-      },
-      setIfAbsent: async (key: string, value: unknown) => {
-        if (__mockStore.has(key)) return false;
-        __mockStore.set(key, value);
-        return true;
-      },
-      remove: async (key: string) => { __mockStore.delete(key); },
-    },
+    storyStorage: __makeMockStore(__mockStore),
+    tempStorage: __makeMockStore(__mockTempStore), // volatile; cleared on script unload
     lorebook: {
+      entry: async (entryId: string) => __mockEntries.find(e => e.id === entryId) ?? null,
       categories: async () => __mockCategories,
       entries: async (categoryId?: string) =>
         categoryId === undefined ? __mockEntries : __mockEntries.filter(e => e.category === categoryId),
@@ -137,16 +152,14 @@ export class StringUtil {
 // =============================================================================
 // STORAGE & LOREBOOK MANAGERS - the script's editable database layer
 // -----------------------------------------------------------------------------
-// StorageManager namespaces persistent story storage under a uuid prefix (the
-// script id by default) and pairs every method with a temp* variant backed by
-// an in-memory map - scratch state for this session only, never written into
-// the story. LorebookManager reads lorebook entries as data: rule lists live in
-// entries whose text is a newline list (or JSON), so the user can edit game
-// data like a database table right in the NovelAI lorebook UI.
+// StorageManager namespaces storage under a uuid prefix (the script id by
+// default) and pairs every persistent method with a temp* variant on
+// api.v1.tempStorage - volatile scratch state the host clears when the script
+// unloads. LorebookManager reads lorebook entries as data: rule lists live in
+// entries whose text is a newline list (or JSON) beneath a human-readable
+// header, so the user edits game data like a database table in the lorebook UI.
 // =============================================================================
 export class StorageManager {
-  private readonly _temp = new Map<string, unknown>();
-
   constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
 
   private _key(key: string): string { return `${this.StoragePrefix}_${key}`; }
@@ -177,26 +190,43 @@ export class StorageManager {
     return existed;
   }
 
-  // temp*: identical semantics, in-memory only (lost when the session ends).
-  tempGet(key: string): unknown { return this._temp.get(this._key(key)); }
-  tempGetOrDefault<T>(key: string, fallback: T): T {
-    const v = this._temp.get(this._key(key));
+  // temp*: same API against api.v1.tempStorage - scratch state the host clears
+  // whenever the script unloads (refresh, session end, toggling it off/on).
+  async tempGet(key: string): Promise<unknown> {
+    return api.v1.tempStorage.get(this._key(key));
+  }
+  async tempGetOrDefault<T>(key: string, fallback: T): Promise<T> {
+    const v = await this.tempGet(key);
     return v === undefined ? fallback : v as T;
   }
-  tempSet(key: string, value: unknown): void { this._temp.set(this._key(key), value); }
-  tempSetIfAbsent(key: string, value: unknown): boolean {
-    if (this._temp.has(this._key(key))) return false;
-    this._temp.set(this._key(key), value);
+  async tempSet(key: string, value: unknown): Promise<void> {
+    await api.v1.tempStorage.set(this._key(key), value);
+  }
+  async tempSetIfAbsent(key: string, value: unknown): Promise<boolean> {
+    if (await this.tempHas(key)) return false;
+    await this.tempSet(key, value);
     return true;
   }
-  tempHas(key: string): boolean { return this._temp.has(this._key(key)); }
-  tempDelete(key: string): boolean { return this._temp.delete(this._key(key)); }
+  async tempHas(key: string): Promise<boolean> {
+    return (await this.tempGet(key)) !== undefined;
+  }
+  async tempDelete(key: string): Promise<boolean> {
+    const existed = await this.tempHas(key);
+    await api.v1.tempStorage.remove(this._key(key));
+    return existed;
+  }
 }
 
-// The categories the game keeps in the lorebook, and the entries it seeds when
-// it has to create them. The seeded entries double as an in-lorebook tutorial:
-// the player edits them to shape their chronicle, and each "..._readme" entry
-// explains the format right where they are editing - friendlier than a README.
+// A lorebook data entry is a human-readable header, then a marker line of '='
+// (>= 3), then the data. On read, everything above the marker is ignored - so
+// the instructions live right in the entry card the player edits, no separate
+// readme needed. Below the marker, '#' or '//' start a note on list entries.
+export const SRD_HEADER_MARKER = "=====";
+function srdEntryText(header: string[], body: string[]): string {
+  return [...header, SRD_HEADER_MARKER, ...body].join("\n");
+}
+const __srdEditNote = "You may delete, rename or add lines below before you start playing.";
+
 export interface SrdSeedEntry { displayName: string; text: string; }
 export interface SrdCategorySpec { name: string; blurb: string; entries: SrdSeedEntry[]; }
 
@@ -205,37 +235,44 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
     name: "srd:abilities",
     blurb: "the Talents, Skills and Knowledges available at creation (one per line)",
     entries: [
-      { displayName: "srd:abilities:_readme", text: "This category defines the Abilities your chronicle uses. Edit the three lists below - talents, skills, knowledges - with ONE ability per line. Add, remove or rename freely; the game reads these lists, not a fixed table." },
-      { displayName: "srd:abilities:talents", text: "Alertness\nAthletics\nAwareness\nBrawl\nEmpathy\nExpression\nIntimidation\nLeadership\nLegerdemain\nSubterfuge" },
-      { displayName: "srd:abilities:skills", text: "Animal Ken\nArchery\nCommerce\nCrafts\nEtiquette\nMelee\nPerformance\nRide\nStealth\nSurvival" },
-      { displayName: "srd:abilities:knowledges", text: "Academics\nEnigmas\nHearth Wisdom\nInvestigation\nLaw\nMedicine\nOccult\nPolitics\nSeneschal\nTheology" },
+      { displayName: "srd:abilities:talents", text: srdEntryText(
+        [`Talents your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote, "Everything above the marker is ignored; '#' starts a note."],
+        ["Alertness", "Athletics", "Awareness", "Brawl", "Empathy", "Expression", "Intimidation", "Leadership", "Legerdemain", "Subterfuge"]) },
+      { displayName: "srd:abilities:skills", text: srdEntryText(
+        [`Skills your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
+        ["Animal Ken", "Archery", "Commerce", "Crafts", "Etiquette", "Melee", "Performance", "Ride", "Stealth", "Survival"]) },
+      { displayName: "srd:abilities:knowledges", text: srdEntryText(
+        [`Knowledges your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
+        ["Academics", "Enigmas", "Hearth Wisdom", "Investigation", "Law", "Medicine", "Occult", "Politics", "Seneschal", "Theology"]) },
     ],
   },
   {
     name: "srd:backgrounds",
     blurb: "the Backgrounds available at creation (one per line)",
     entries: [
-      { displayName: "srd:backgrounds:_readme", text: "One Background per line in the 'all' entry below - the Backgrounds characters may buy at creation." },
-      { displayName: "srd:backgrounds:all", text: "Allies\nContacts\nDomain\nGeneration\nHerd\nInfluence\nMentor\nResources\nRetainers\nStatus" },
+      { displayName: "srd:backgrounds:all", text: srdEntryText(
+        [`Backgrounds characters may buy at creation - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
+        ["Allies", "Contacts", "Domain", "Generation", "Herd", "Influence", "Mentor", "Resources", "Retainers", "Status"]) },
     ],
   },
   {
     name: "srd:merits-flaws",
     blurb: "custom Merits & Flaws (JSON), layered over the built-in list",
     entries: [
-      { displayName: "srd:merits-flaws:_readme", text: [
-        "Add custom Merits & Flaws here. Any entry in this category whose text is a JSON array is merged over the built-in list. Each definition:",
-        '  name        - display name',
-        '  kind        - "merit" or "flaw"',
-        '  points      - freebie cost (merit) / bonus (flaw); a number, or a list like [1,2,3] for variable ratings',
-        '  requires    - optional { "templates": [any-of], "tags": [all-of], "meritsFlaws": [all-of] }',
-        '  description - optional text',
-        'See the "srd:merits-flaws:example" entry for a copyable sample.',
-      ].join("\n") },
-      { displayName: "srd:merits-flaws:example", text: JSON.stringify([
-        { name: "Sturdy Stock", kind: "merit", points: 2, requires: { tags: ["revenant"] }, description: "Hardy revenant lineage." },
-        { name: "Illiterate", kind: "flaw", points: 1, description: "You cannot read or write." },
-      ], null, 2) },
+      { displayName: "srd:merits-flaws:custom", text: srdEntryText(
+        [
+          `Custom Merits & Flaws. Put a JSON array below the ${SRD_HEADER_MARKER} line; it is merged over the built-in list. Each definition:`,
+          '  name        - display name',
+          '  kind        - "merit" or "flaw"',
+          '  points      - freebie cost (merit) / bonus (flaw); a number, or [1,2,3] for variable ratings',
+          '  requires    - optional { "templates": [any-of], "tags": [all-of], "meritsFlaws": [all-of] }',
+          '  description - optional text',
+          "The two below are examples - edit or replace them.",
+        ],
+        [JSON.stringify([
+          { name: "Sturdy Stock", kind: "merit", points: 2, requires: { tags: ["revenant"] }, description: "Hardy revenant lineage." },
+          { name: "Illiterate", kind: "flaw", points: 1, description: "You cannot read or write." },
+        ], null, 2)]) },
     ],
   },
 ];
@@ -265,11 +302,26 @@ export class LorebookManager {
     return undefined;
   }
 
-  // An entry's text as a list: one item per non-empty line.
+  // Everything above a marker line (>= 3 '=') is a human-readable header and is
+  // ignored; the data is whatever follows. No marker -> the whole text is data.
+  static contentBelowHeader(text: string): string {
+    const m = text.match(/^[ \t]*={3,}[ \t]*$/m);
+    return m && m.index !== undefined ? text.slice(m.index + m[0].length) : text;
+  }
+
+  // An entry's data as a list: one item per non-empty line, with '#'/'//' line
+  // comments and /* */ block comments stripped.
+  static parseList(text: string): string[] {
+    return LorebookManager.contentBelowHeader(text)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .map(l => l.replace(/(^|\s)(#|\/\/).*$/, "$1").trim())
+      .filter(l => l.length > 0);
+  }
+
   static async listFrom(categoryName: string, displayName: string): Promise<string[]> {
     const text = await LorebookManager.entryText(categoryName, displayName);
-    if (text === undefined) return [];
-    return text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    return text === undefined ? [] : LorebookManager.parseList(text);
   }
 
   static async allTalents(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:talents"); }
@@ -282,7 +334,9 @@ export class LorebookManager {
   static async ensureCategory(name: string): Promise<{ id: string; created: boolean }> {
     const existing = await LorebookManager.categoryIdByName(name);
     if (existing !== undefined) return { id: existing, created: false };
-    const cat = await api.v1.lorebook.createCategory({ name }); // host assigns the id
+    // We keep the uuid (via api.v1.uuid()) so the category can be re-fetched or
+    // recreated with the same id later.
+    const cat = await api.v1.lorebook.createCategory({ id: api.v1.uuid(), name, enabled: true });
     return { id: cat.id, created: true };
   }
 
@@ -292,7 +346,7 @@ export class LorebookManager {
     const want = displayName.trim().toLowerCase();
     const entries = await api.v1.lorebook.entries(categoryId);
     if (entries.some(e => (e.displayName ?? "").trim().toLowerCase() === want)) return false;
-    await api.v1.lorebook.createEntry({ displayName, text, category: categoryId }); // host assigns the id
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName, text, category: categoryId });
     return true;
   }
 
@@ -318,9 +372,9 @@ export class LorebookManager {
     const lines = created.map(name => `• ${name} — ${specs.find(s => s.name === name)?.blurb ?? "game data"}`);
     return [
       "((OOC — Storyteller setup))",
-      "I've added the lorebook categories this game needs and filled them with starter data plus examples. Open your Lorebook and review / edit:",
+      "I've added the lorebook categories this game needs and filled them with starter data and examples. Open your Lorebook and review / edit:",
       ...lines,
-      'Each category has a "...:_readme" entry explaining its format. Tune these to your chronicle, then we’re ready to play.',
+      `Each entry starts with instructions; the data is below its "${SRD_HEADER_MARKER}" line. Tune these to your chronicle, then we’re ready to play.`,
     ].join("\n");
   }
 }
@@ -1358,10 +1412,11 @@ export class MeritFlawRegistry {
   static async loadFromLorebook(): Promise<number> {
     let count = 0;
     for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
-      // Only JSON-array entries are definitions; prose (e.g. the _readme) is skipped.
-      if (!entry.text.trim().startsWith("[")) continue;
+      // Data is the JSON array below the header marker; anything else is skipped.
+      const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
+      if (!body.startsWith("[")) continue;
       try {
-        const parsed = JSON.parse(entry.text);
+        const parsed = JSON.parse(body);
         if (!Array.isArray(parsed)) continue;
         for (const def of parsed) {
           if (def && typeof def.name === "string" && (def.kind === "merit" || def.kind === "flaw")) {

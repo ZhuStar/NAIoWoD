@@ -624,23 +624,23 @@ describe("StorageManager", () => {
     expect(await b.get("k")).toBe("B");
   });
 
-  test("temp variants mirror the API in memory only", async () => {
+  test("temp variants use api.v1.tempStorage, separate from story storage", async () => {
     const s = new StorageManager("test-temp");
-    expect(s.tempSetIfAbsent("k", 1)).toBe(true);
-    expect(s.tempSetIfAbsent("k", 2)).toBe(false);
-    expect(s.tempGet("k")).toBe(1);
-    expect(s.tempGetOrDefault("nope", "fallback")).toBe("fallback");
-    expect(s.tempHas("k")).toBe(true);
-    expect(s.tempDelete("k")).toBe(true);
-    expect(s.tempHas("k")).toBe(false);
-    expect(await s.has("k")).toBe(false); // persistent storage never touched
+    expect(await s.tempSetIfAbsent("k", 1)).toBe(true);
+    expect(await s.tempSetIfAbsent("k", 2)).toBe(false);
+    expect(await s.tempGet("k")).toBe(1);
+    expect(await s.tempGetOrDefault("nope", "fallback")).toBe("fallback");
+    expect(await s.tempHas("k")).toBe(true);
+    expect(await s.tempDelete("k")).toBe(true);
+    expect(await s.tempHas("k")).toBe(false);
+    expect(await s.has("k")).toBe(false); // persistent story storage never touched
   });
 });
 
 describe("LorebookManager", () => {
   test("resolves category names to ids and lists their entries", async () => {
     const entries = await LorebookManager.entriesInCategory("srd:abilities");
-    expect(entries).toHaveLength(4); // _readme + talents + skills + knowledges
+    expect(entries).toHaveLength(3); // talents + skills + knowledges
   });
 
   test("reads the ability lists from srd:abilities entries", async () => {
@@ -745,11 +745,14 @@ describe("LorebookManager.bootstrap (self-seeding tutorial)", () => {
     expect(r.createdCategories).toEqual(SRD_CATEGORIES.map(s => s.name));
     expect(r.seededEntries).toBeGreaterThan(0);
     expect(r.message).toContain("srd:abilities"); // player-facing setup note
-    expect(r.message).toContain("_readme");
+    expect(r.message).toContain("Storyteller setup");
 
-    // data is readable, and a tutorial entry sits alongside the lists
+    // parser strips the in-card instructions header; the marker + prose survive
+    // in the entry text for the player to read/edit
     expect(await LorebookManager.allTalents()).toContain("Brawl");
-    expect(await LorebookManager.entryText("srd:abilities", "srd:abilities:_readme")).toContain("ONE ability per line");
+    const talentsText = await LorebookManager.entryText("srd:abilities", "srd:abilities:talents");
+    expect(talentsText).toContain("one per line");
+    expect(talentsText).toContain("=====");
   });
 
   test("is idempotent: existing categories are left untouched", async () => {
@@ -759,5 +762,25 @@ describe("LorebookManager.bootstrap (self-seeding tutorial)", () => {
     expect(again.createdCategories).toEqual([]);
     expect(again.seededEntries).toBe(0);
     expect(again.message).toBeNull();
+  });
+});
+
+describe("LorebookManager.parseList (header marker + comments)", () => {
+  test("ignores the header above the marker, strips comments, keeps items", () => {
+    const text = [
+      "Instructions the player may keep — anything up here is ignored.",
+      "=====",
+      "Alertness",
+      "Brawl # the fisticuffs one",
+      "# a whole-line note",
+      "Melee // trailing note",
+      "",
+      "Occult /* inline */",
+    ].join("\n");
+    expect(LorebookManager.parseList(text)).toEqual(["Alertness", "Brawl", "Melee", "Occult"]);
+  });
+
+  test("with no marker, the whole text is data", () => {
+    expect(LorebookManager.parseList("Foo\nBar")).toEqual(["Foo", "Bar"]);
   });
 });

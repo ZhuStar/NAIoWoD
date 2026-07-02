@@ -208,12 +208,14 @@ The engine talks to NovelAI through two managers (both mirroring the real
 scripting API, which is async and — for lorebook entries — filtered by
 category *id*):
 
-- **`StorageManager`** — namespaced persistent storage. Every key is prefixed
-  with a uuid (the script id by default): `get`, `getOrDefault`, `set`,
-  `setIfAbsent`, `has`, `delete` — all async, written into the story — plus
-  `tempGet`/`tempSet`/`tempGetOrDefault`/`tempSetIfAbsent`/`tempHas`/
-  `tempDelete`, the same semantics backed by an in-memory map (this session
-  only, e.g. for extended-roll state). `SaveToStory()` now writes through it.
+- **`StorageManager`** — namespaced storage. Every key is prefixed with a uuid
+  (the script id by default): `get`, `getOrDefault`, `set`, `setIfAbsent`,
+  `has`, `delete` — all async, written into the story via `api.v1.storyStorage`
+  — plus `tempGet`/`tempSet`/`tempGetOrDefault`/`tempSetIfAbsent`/`tempHas`/
+  `tempDelete`, the same async API against **`api.v1.tempStorage`**: volatile
+  scratch the host clears whenever the script unloads (refresh, session end,
+  toggle) — for UI sync or state you don't want kept. `SaveToStory()` writes
+  through it.
 - **`LorebookManager`** — reads lorebook entries as *data*, so the user can
   edit game rules like database tables in the NovelAI lorebook UI. It resolves
   category **names** to ids via `categories()`, then filters entries.
@@ -222,22 +224,27 @@ category *id*):
 
 A fresh NovelAI story has none of these categories. On load the script calls
 **`LorebookManager.bootstrap()`**, which **creates any missing SRD category and
-seeds it** with starter data *and* a `…:_readme` entry that explains the format
-right where the player edits — so the game teaches itself in-app instead of
-sending you to this README. Categories that already exist are left untouched
-(your edits are safe), and `bootstrap()` is idempotent. When it creates
-anything it returns a player-facing `((OOC — Storyteller setup))` note listing
-what to review.
+seeds it** (`createCategory`/`createEntry`) with starter data. Each entry opens
+with **instructions written into the card itself**, then a marker line, then the
+data — so the game teaches itself in-app instead of sending you to this README.
+Categories that already exist are left untouched (your edits are safe), and
+`bootstrap()` is idempotent; when it creates anything it returns a player-facing
+`((OOC — Storyteller setup))` note.
+
+**Entry format.** On read, everything **above a `=====` marker line** (≥3 `=`)
+is a human header and is ignored; the data is what follows. In list entries,
+`#`/`//` start line comments and `/* */` are block comments — so players can
+annotate freely. `LorebookManager.parseList()` / `contentBelowHeader()` handle
+this; entries with no marker are read whole (backward compatible).
 
 Conventions (defined in `SRD_CATEGORIES`, installed by `bootstrap()`):
 
-| Category | Entry | Text format |
+| Category | Entry | Data below the marker |
 | --- | --- | --- |
 | `srd:abilities` | `srd:abilities:talents` / `:skills` / `:knowledges` | one ability per line |
 | `srd:backgrounds` | `srd:backgrounds:all` | one background per line |
-| `srd:merits-flaws` | `srd:merits-flaws:example` (+ any) | JSON array of merit/flaw definitions |
+| `srd:merits-flaws` | `srd:merits-flaws:custom` | JSON array of merit/flaw definitions |
 
-Every category also carries a `…:_readme` entry with format help.
 `LorebookManager.allTalents()` etc. return those lists;
 `LorebookParser.ParseFromApi()` (async) builds zero-dot `Stat` maps from them.
 

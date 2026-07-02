@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="permissions-api"><a href="#permissions-api" class="header">Permissions API</a></h1>
+<p>Certain methods in the scripting API require explicit permission from the user to use. This is to ensure that scripts cannot perform potentially sensitive actions without the user’s consent.</p>
+<h2 id="checking-permissions"><a href="#checking-permissions" class="header">Checking Permissions</a></h2>
+<p>To check if your script has a specific permission, use <code>api.v1.permissions.has</code>:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> canEditDocument </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.permissions.</span><span style="color:#B392F0">has</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'documentEdit'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">if</span><span style="color:#E1E4E8"> (canEditDocument) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Can edit document'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">} </span><span style="color:#F97583">else</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Cannot edit document'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h2 id="requesting-permissions"><a href="#requesting-permissions" class="header">Requesting Permissions</a></h2>
+<p>To request a permission from the user, use <code>api.v1.permissions.request</code>:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> granted </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.permissions.</span><span style="color:#B392F0">request</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'storyEdit'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">if</span><span style="color:#E1E4E8"> (granted) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Permission granted!'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#6A737D">  // Proceed with image generation</span></span>
+<span class="line"><span style="color:#E1E4E8">} </span><span style="color:#F97583">else</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Permission denied'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.ui.</span><span style="color:#B392F0">toast</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Story edit permission is required'</span><span style="color:#E1E4E8">, { type: </span><span style="color:#9ECBFF">'error'</span><span style="color:#E1E4E8"> });</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>The user will be shown a permission dialog explaining what the script is requesting with the option to allow or deny the request. The promise resolves to <code>true</code> if the user grants the permission, or <code>false</code> if they deny it. It will also resolve to <code>true</code> if the permission was already granted.</p>
+<h2 id="listing-all-permissions"><a href="#listing-all-permissions" class="header">Listing All Permissions</a></h2>
+<p>To get a list of all granted permissions for your script, use <code>api.v1.permissions.list</code>:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> grantedPermissions </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.permissions.</span><span style="color:#B392F0">list</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Granted permissions: ${</span><span style="color:#E1E4E8">grantedPermissions</span><span style="color:#9ECBFF">.</span><span style="color:#B392F0">join</span><span style="color:#9ECBFF">(</span><span style="color:#9ECBFF">', '</span><span style="color:#9ECBFF">)</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

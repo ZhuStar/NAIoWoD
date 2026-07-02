@@ -1,8 +1,11 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import {
   StringUtil, Category, PointSource, Stat, Tracker, RulesetConfig,
-  LedgerEntry, StatModifier, LorebookParser, LiveCharacter
+  LedgerEntry, StatModifier, LorebookParser, LorebookManager, LiveCharacter
 } from "../src/wod";
+
+// A fresh story has no SRD lorebook categories; the script seeds them on load.
+beforeAll(async () => { await LorebookManager.bootstrap(); });
 
 describe("StringUtil", () => {
   test("normalize lowercases, trims and hyphenates whitespace", () => {

@@ -218,17 +218,28 @@ category *id*):
   edit game rules like database tables in the NovelAI lorebook UI. It resolves
   category **names** to ids via `categories()`, then filters entries.
 
-Conventions (also seeded in the local mock):
+### Self-seeding: the lorebook *is* the tutorial
+
+A fresh NovelAI story has none of these categories. On load the script calls
+**`LorebookManager.bootstrap()`**, which **creates any missing SRD category and
+seeds it** with starter data *and* a `…:_readme` entry that explains the format
+right where the player edits — so the game teaches itself in-app instead of
+sending you to this README. Categories that already exist are left untouched
+(your edits are safe), and `bootstrap()` is idempotent. When it creates
+anything it returns a player-facing `((OOC — Storyteller setup))` note listing
+what to review.
+
+Conventions (defined in `SRD_CATEGORIES`, installed by `bootstrap()`):
 
 | Category | Entry | Text format |
 | --- | --- | --- |
 | `srd:abilities` | `srd:abilities:talents` / `:skills` / `:knowledges` | one ability per line |
 | `srd:backgrounds` | `srd:backgrounds:all` | one background per line |
-| `srd:merits-flaws` | any entry | JSON array of merit/flaw definitions |
+| `srd:merits-flaws` | `srd:merits-flaws:example` (+ any) | JSON array of merit/flaw definitions |
 
+Every category also carries a `…:_readme` entry with format help.
 `LorebookManager.allTalents()` etc. return those lists;
-`LorebookParser.ParseFromApi()` (now async) builds zero-dot `Stat` maps from
-them.
+`LorebookParser.ParseFromApi()` (async) builds zero-dot `Stat` maps from them.
 
 ## Merits & Flaws
 

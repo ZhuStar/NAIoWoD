@@ -44,46 +44,26 @@ interface WodApi {
     lorebook: {
       entries: (categoryId?: string) => Promise<LorebookEntryData[]>;
       categories: () => Promise<LorebookCategoryData[]>;
+      createCategory: (data: { id: string; name: string }) => Promise<LorebookCategoryData>;
+      createEntry: (data: { id: string; displayName: string; text: string; category?: string; keys?: string[] }) => Promise<LorebookEntryData>;
     };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
   };
 }
 
-// --- MOCK LOREBOOK DATA (the editable "database" a story would carry) ---
-// Ability lists live in the srd:abilities category, one entry per group, one
-// ability per line - exactly how a user edits them in the NovelAI lorebook.
-const MOCK_LOREBOOK_CATEGORIES: LorebookCategoryData[] = [
-  { id: "cat-srd-abilities", name: "srd:abilities" },
-  { id: "cat-srd-backgrounds", name: "srd:backgrounds" },
-  { id: "cat-srd-merits-flaws", name: "srd:merits-flaws" },
-];
-const MOCK_LOREBOOK_ENTRIES: LorebookEntryData[] = [
-  {
-    id: "lb-talents", category: "cat-srd-abilities", displayName: "srd:abilities:talents",
-    text: "Alertness\nAthletics\nAwareness\nBrawl\nEmpathy\nExpression\nIntimidation\nLeadership\nLegerdemain\nSubterfuge",
-  },
-  {
-    id: "lb-skills", category: "cat-srd-abilities", displayName: "srd:abilities:skills",
-    text: "Animal Ken\nArchery\nCommerce\nCrafts\nEtiquette\nMelee\nPerformance\nRide\nStealth\nSurvival",
-  },
-  {
-    id: "lb-knowledges", category: "cat-srd-abilities", displayName: "srd:abilities:knowledges",
-    text: "Academics\nEnigmas\nHearth Wisdom\nInvestigation\nLaw\nMedicine\nOccult\nPolitics\nSeneschal\nTheology",
-  },
-  {
-    id: "lb-backgrounds", category: "cat-srd-backgrounds", displayName: "srd:backgrounds:all",
-    text: "Allies\nContacts\nDomain\nGeneration\nHerd\nInfluence\nMentor\nResources\nRetainers\nStatus",
-  },
-  {
-    id: "lb-mf-custom", category: "cat-srd-merits-flaws", displayName: "srd:merits-flaws:custom",
-    text: '[{"name": "Sturdy Stock", "kind": "merit", "points": 2, "requires": {"tags": ["revenant"]}, "description": "Hardy revenant lineage."}]',
-  },
-];
-
 // --- API MOCK (yields to a real host-provided `api` when one exists) ---
+// The mock lorebook starts EMPTY, like a fresh NovelAI story: it is the script's
+// job to create its categories and seed them (see LorebookManager.bootstrap).
 const __host = globalThis as unknown as { api?: WodApi };
 const __mockStore = new Map<string, unknown>();
+let __mockCategories: LorebookCategoryData[] = [];
+let __mockEntries: LorebookEntryData[] = [];
 let __mockUuidCounter = 0;
+
+// Test/off-host helper: wipe the mock lorebook back to a fresh (empty) story.
+// A no-op concern on-host, where the real `api` (not this mock) is used.
+export function __resetLorebookMock(): void { __mockCategories = []; __mockEntries = []; }
+
 const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },
@@ -106,11 +86,11 @@ const api: WodApi = __host.api ?? {
       remove: async (key: string) => { __mockStore.delete(key); },
     },
     lorebook: {
-      categories: async () => MOCK_LOREBOOK_CATEGORIES,
+      categories: async () => __mockCategories,
       entries: async (categoryId?: string) =>
-        categoryId === undefined
-          ? MOCK_LOREBOOK_ENTRIES
-          : MOCK_LOREBOOK_ENTRIES.filter(e => e.category === categoryId),
+        categoryId === undefined ? __mockEntries : __mockEntries.filter(e => e.category === categoryId),
+      createCategory: async (data) => { const c = { ...data }; __mockCategories.push(c); return c; },
+      createEntry: async (data) => { const e = { ...data }; __mockEntries.push(e); return e; },
     },
     // Off-host there is no engine to fire hooks; registering just records that a
     // handler exists (and keeps import-time `hooks.register(...)` from throwing).
@@ -208,6 +188,53 @@ export class StorageManager {
   tempDelete(key: string): boolean { return this._temp.delete(this._key(key)); }
 }
 
+// The categories the game keeps in the lorebook, and the entries it seeds when
+// it has to create them. The seeded entries double as an in-lorebook tutorial:
+// the player edits them to shape their chronicle, and each "..._readme" entry
+// explains the format right where they are editing - friendlier than a README.
+export interface SrdSeedEntry { displayName: string; text: string; }
+export interface SrdCategorySpec { name: string; blurb: string; entries: SrdSeedEntry[]; }
+
+export const SRD_CATEGORIES: SrdCategorySpec[] = [
+  {
+    name: "srd:abilities",
+    blurb: "the Talents, Skills and Knowledges available at creation (one per line)",
+    entries: [
+      { displayName: "srd:abilities:_readme", text: "This category defines the Abilities your chronicle uses. Edit the three lists below - talents, skills, knowledges - with ONE ability per line. Add, remove or rename freely; the game reads these lists, not a fixed table." },
+      { displayName: "srd:abilities:talents", text: "Alertness\nAthletics\nAwareness\nBrawl\nEmpathy\nExpression\nIntimidation\nLeadership\nLegerdemain\nSubterfuge" },
+      { displayName: "srd:abilities:skills", text: "Animal Ken\nArchery\nCommerce\nCrafts\nEtiquette\nMelee\nPerformance\nRide\nStealth\nSurvival" },
+      { displayName: "srd:abilities:knowledges", text: "Academics\nEnigmas\nHearth Wisdom\nInvestigation\nLaw\nMedicine\nOccult\nPolitics\nSeneschal\nTheology" },
+    ],
+  },
+  {
+    name: "srd:backgrounds",
+    blurb: "the Backgrounds available at creation (one per line)",
+    entries: [
+      { displayName: "srd:backgrounds:_readme", text: "One Background per line in the 'all' entry below - the Backgrounds characters may buy at creation." },
+      { displayName: "srd:backgrounds:all", text: "Allies\nContacts\nDomain\nGeneration\nHerd\nInfluence\nMentor\nResources\nRetainers\nStatus" },
+    ],
+  },
+  {
+    name: "srd:merits-flaws",
+    blurb: "custom Merits & Flaws (JSON), layered over the built-in list",
+    entries: [
+      { displayName: "srd:merits-flaws:_readme", text: [
+        "Add custom Merits & Flaws here. Any entry in this category whose text is a JSON array is merged over the built-in list. Each definition:",
+        '  name        - display name',
+        '  kind        - "merit" or "flaw"',
+        '  points      - freebie cost (merit) / bonus (flaw); a number, or a list like [1,2,3] for variable ratings',
+        '  requires    - optional { "templates": [any-of], "tags": [all-of], "meritsFlaws": [all-of] }',
+        '  description - optional text',
+        'See the "srd:merits-flaws:example" entry for a copyable sample.',
+      ].join("\n") },
+      { displayName: "srd:merits-flaws:example", text: JSON.stringify([
+        { name: "Sturdy Stock", kind: "merit", points: 2, requires: { tags: ["revenant"] }, description: "Hardy revenant lineage." },
+        { name: "Illiterate", kind: "flaw", points: 1, description: "You cannot read or write." },
+      ], null, 2) },
+    ],
+  },
+];
+
 export class LorebookManager {
   // The host API filters entries by category *id*; users think in category
   // *names* ("srd:abilities"), so resolve the name first.
@@ -244,6 +271,53 @@ export class LorebookManager {
   static async allSkills(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:skills"); }
   static async allKnowledges(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:knowledges"); }
   static async allBackgrounds(): Promise<string[]> { return LorebookManager.listFrom("srd:backgrounds", "srd:backgrounds:all"); }
+
+  // --- Bootstrap: create-if-missing + seed a tutorial -----------------------
+  // Create a category if it doesn't exist; report whether we made it.
+  static async ensureCategory(name: string): Promise<{ id: string; created: boolean }> {
+    const existing = await LorebookManager.categoryIdByName(name);
+    if (existing !== undefined) return { id: existing, created: false };
+    const cat = await api.v1.lorebook.createCategory({ id: api.v1.uuid(), name });
+    return { id: cat.id, created: true };
+  }
+
+  // Create an entry unless one with that displayName already exists in the
+  // category; returns whether it created it.
+  static async ensureEntry(categoryId: string, displayName: string, text: string): Promise<boolean> {
+    const want = displayName.trim().toLowerCase();
+    const entries = await api.v1.lorebook.entries(categoryId);
+    if (entries.some(e => (e.displayName ?? "").trim().toLowerCase() === want)) return false;
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName, text, category: categoryId });
+    return true;
+  }
+
+  // Ensure every SRD category exists, seeding tutorial/starter entries into any
+  // we had to create. Categories the player already has are left untouched.
+  // Returns what was created and a player-facing note asking them to review it
+  // (null when nothing was created).
+  static async bootstrap(specs: SrdCategorySpec[] = SRD_CATEGORIES): Promise<{ createdCategories: string[]; seededEntries: number; message: string | null }> {
+    const created: string[] = [];
+    let seeded = 0;
+    for (const spec of specs) {
+      const { id, created: madeCategory } = await LorebookManager.ensureCategory(spec.name);
+      if (!madeCategory) continue; // respect existing player data
+      created.push(spec.name);
+      for (const entry of spec.entries) {
+        if (await LorebookManager.ensureEntry(id, entry.displayName, entry.text)) seeded++;
+      }
+    }
+    return { createdCategories: created, seededEntries: seeded, message: created.length ? LorebookManager._setupMessage(specs, created) : null };
+  }
+
+  private static _setupMessage(specs: SrdCategorySpec[], created: string[]): string {
+    const lines = created.map(name => `• ${name} — ${specs.find(s => s.name === name)?.blurb ?? "game data"}`);
+    return [
+      "((OOC — Storyteller setup))",
+      "I've added the lorebook categories this game needs and filled them with starter data plus examples. Open your Lorebook and review / edit:",
+      ...lines,
+      'Each category has a "...:_readme" entry explaining its format. Tune these to your chronicle, then we’re ready to play.',
+    ].join("\n");
+  }
 }
 
 export type CategoryType =
@@ -1279,6 +1353,8 @@ export class MeritFlawRegistry {
   static async loadFromLorebook(): Promise<number> {
     let count = 0;
     for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
+      // Only JSON-array entries are definitions; prose (e.g. the _readme) is skipped.
+      if (!entry.text.trim().startsWith("[")) continue;
       try {
         const parsed = JSON.parse(entry.text);
         if (!Array.isArray(parsed)) continue;

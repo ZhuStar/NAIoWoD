@@ -8,5 +8,7 @@ declare module "bun:test" {
   export const describe: (name: string, fn: () => void) => void;
   export const beforeEach: (fn: TestFn) => void;
   export const afterEach: (fn: TestFn) => void;
+  export const beforeAll: (fn: TestFn) => void;
+  export const afterAll: (fn: TestFn) => void;
   export function expect(value: unknown): any;
 }

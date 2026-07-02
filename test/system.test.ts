@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import {
   type Rng,
   StringUtil, Category, Stat, Tracker,
@@ -8,13 +8,16 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  StorageManager, LorebookManager,
-  MeritFlawRegistry,
+  StorageManager, LorebookManager, __resetLorebookMock,
+  MeritFlawRegistry, SRD_CATEGORIES,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
   CharacterFactory,
 } from "../src/wod";
+
+// A fresh story has no SRD lorebook categories; the script seeds them on load.
+beforeAll(async () => { await LorebookManager.bootstrap(); });
 
 // Deterministic d10s: maps each desired face (1-10) to the rng value that
 // Random(1,10,rng) will turn back into that face. Throws if under-provisioned.
@@ -637,7 +640,7 @@ describe("StorageManager", () => {
 describe("LorebookManager", () => {
   test("resolves category names to ids and lists their entries", async () => {
     const entries = await LorebookManager.entriesInCategory("srd:abilities");
-    expect(entries).toHaveLength(3);
+    expect(entries).toHaveLength(4); // _readme + talents + skills + knowledges
   });
 
   test("reads the ability lists from srd:abilities entries", async () => {
@@ -730,5 +733,31 @@ describe("Merits & Flaws", () => {
     expect(data.tags).toContain("tzimisce");
     expect(data.meritsFlaws).toContainEqual({ name: "eat-food", kind: "merit", points: 1 });
     expect(data.meritsFlaws).toContainEqual({ name: "hunted", kind: "flaw", points: 4 });
+  });
+});
+
+describe("LorebookManager.bootstrap (self-seeding tutorial)", () => {
+  test("creates missing categories, seeds tutorial entries, and asks the player", async () => {
+    __resetLorebookMock();
+    expect(await LorebookManager.entriesInCategory("srd:abilities")).toEqual([]);
+
+    const r = await LorebookManager.bootstrap();
+    expect(r.createdCategories).toEqual(SRD_CATEGORIES.map(s => s.name));
+    expect(r.seededEntries).toBeGreaterThan(0);
+    expect(r.message).toContain("srd:abilities"); // player-facing setup note
+    expect(r.message).toContain("_readme");
+
+    // data is readable, and a tutorial entry sits alongside the lists
+    expect(await LorebookManager.allTalents()).toContain("Brawl");
+    expect(await LorebookManager.entryText("srd:abilities", "srd:abilities:_readme")).toContain("ONE ability per line");
+  });
+
+  test("is idempotent: existing categories are left untouched", async () => {
+    __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    const again = await LorebookManager.bootstrap();
+    expect(again.createdCategories).toEqual([]);
+    expect(again.seededEntries).toBe(0);
+    expect(again.message).toBeNull();
   });
 });

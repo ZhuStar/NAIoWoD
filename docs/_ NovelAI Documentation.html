@@ -1,0 +1,138 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="ui-extensions"><a href="#ui-extensions" class="header">UI Extensions</a></h1>
+<p>UI Extensions allow you to add custom interface elements to NovelAI. These extensions can appear in various locations and provide interactive controls for your scripts. They are set through the function <code>api.v1.ui.register</code> and if given IDs can be updated through <code>api.v1.ui.update</code>. You can also use <code>api.v1.ui.update</code> to add new extensions as long as an ID is provided.</p>
+<p>All extensions are defined as objects with a <code>type</code> property that specifies the kind of extension it is. Each type has its own set of properties that define its behavior and appearance. Many extensions can contain UI Parts to define their content. For more information on UI Parts please see the <a href="./ui-parts">UI Parts documentation</a>.</p>
+<h2 id="extension-types"><a href="#extension-types" class="header">Extension Types</a></h2>
+<h3 id="context-menu-buttons"><a href="#context-menu-buttons" class="header">Context Menu Buttons</a></h3>
+<p>These appear in the context menu that appears when right clicking in the editor. Its callback is provided the current selection in the document.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.ui.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">'contextMenuButton'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    text: </span><span style="color:#9ECBFF">'Example Button'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    callback</span><span style="color:#E1E4E8">: () </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">      api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Example context menu button clicked.'</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">])</span></span></code></pre>
+<p><img src="/assets/en/scripting/contextMenuButton-example.webp" alt="Context Menu Button Example" loading="lazy" decoding="async"></p>
+<h3 id="toolbar-buttons"><a href="#toolbar-buttons" class="header">Toolbar Buttons</a></h3>
+<p>Toolbar Buttons appear in a new toolbar above the normal editor toolbar. This bar is reserved for scripts to place these buttons.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.ui.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">'toolbarButton'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    text: </span><span style="color:#9ECBFF">'Example Button'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    callback</span><span style="color:#E1E4E8">: () </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">      api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Example toolbar button clicked.'</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">])</span></span></code></pre>
+<p><img src="/assets/en/scripting/toolbarButton-example.webp" alt="Toolbar Button Example" loading="lazy" decoding="async"></p>
+<h3 id="toolbox-options"><a href="#toolbox-options" class="header">Toolbox Options</a></h3>
+<p>This extension type adds an option to the Writer’s Toolbox. Script-added options appear below the normal selection. It’s callback is called when the user clicks the “Adjust” button when the tool is selected. The toolbox option’s callback is provided the text selected for the tool and the selection in the document and string returned by the callback will be treated as the modified text. It has a <code>content</code> field that can be used to provide custom UI Parts to be displayed in the toolbox when the tool is selected.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.ui.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">'toolboxOption'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    name: </span><span style="color:#9ECBFF">'Custom Tool'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'textInput'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        storageKey: </span><span style="color:#9ECBFF">'tool-input'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      }</span></span>
+<span class="line"><span style="color:#E1E4E8">    ],</span></span>
+<span class="line"><span style="color:#B392F0">    callback</span><span style="color:#E1E4E8">: ({ </span><span style="color:#FFAB70">text</span><span style="color:#E1E4E8"> }) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">      api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Custom tool executed.'</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">      return</span><span style="color:#E1E4E8"> { text: text </span><span style="color:#F97583">+</span><span style="color:#9ECBFF"> ' New text.'</span><span style="color:#E1E4E8"> }</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">])</span></span></code></pre>
+<p><img src="/assets/en/scripting/toolboxOption-example1.webp" alt="Toolbox Option Example 1" loading="lazy" decoding="async">
+<img src="/assets/en/scripting/toolboxOption-example2.webp" alt="Toolbox Option Example 2" loading="lazy" decoding="async"></p>
+<h3 id="script-panels"><a href="#script-panels" class="header">Script Panels</a></h3>
+<p>Script Panels are added between the document the the controls. They are collapsible panels that can contain arbitrary UI content defined using UI Parts. Only one panel can be open at a time.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.ui.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">'scriptPanel'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    name: </span><span style="color:#9ECBFF">'Example Panel'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        text: </span><span style="color:#9ECBFF">'This is an example script panel.'</span></span>
+<span class="line"><span style="color:#E1E4E8">      },</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'button'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        text: </span><span style="color:#9ECBFF">'Click Me'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">        callback</span><span style="color:#E1E4E8">: () </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">          api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Button in script panel clicked.'</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">        }</span></span>
+<span class="line"><span style="color:#E1E4E8">      }</span></span>
+<span class="line"><span style="color:#E1E4E8">    ]</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">])</span></span></code></pre>
+<p><img src="/assets/en/scripting/scriptPanel-example.webp" alt="Script Panel Example" loading="lazy" decoding="async"></p>
+<h3 id="sidebar-panels"><a href="#sidebar-panels" class="header">Sidebar Panels</a></h3>
+<p>Sidebar Panels are added to the right sidebar when a story is open to a new ”…” tab. Like Script Panels they can contain arbitrary UI content defined using UI Parts. If multiple Sidebar Panels are registered they will appear as tabs in the sidebar.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.ui.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">'sidebarPanel'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    name: </span><span style="color:#9ECBFF">'Example Sidebar'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        text: </span><span style="color:#9ECBFF">'This is an example sidebar panel.'</span></span>
+<span class="line"><span style="color:#E1E4E8">      },</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'button'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        text: </span><span style="color:#9ECBFF">'Click Me'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">        callback</span><span style="color:#E1E4E8">: () </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">          api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Button in sidebar panel clicked.'</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">        }</span></span>
+<span class="line"><span style="color:#E1E4E8">      }</span></span>
+<span class="line"><span style="color:#E1E4E8">    ]</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">])</span></span></code></pre>
+<p><img src="/assets/en/scripting/sidebarPanel-example.webp" alt="Sidebar Panel Example" loading="lazy" decoding="async"></p>
+<h3 id="lorebook-panels"><a href="#lorebook-panels" class="header">Lorebook Panels</a></h3>
+<p>Lorebook Panels appear in the “Script” tab of Lorebook entries and categories. If multiple Lorebook Panels are registered they will appear as tabs within the “Script” tab. They can contain arbitrary UI content defined using UI Parts. If you want them to have content specific to the selected entry or category, you can render it inside of the <code>onLorebookEntrySelected</code> hook.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.hooks.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'onLorebookEntrySelected'</span><span style="color:#E1E4E8">, </span><span style="color:#F97583">async</span><span style="color:#E1E4E8"> ({ </span><span style="color:#FFAB70">entryId</span><span style="color:#E1E4E8">, </span><span style="color:#FFAB70">categoryId</span><span style="color:#E1E4E8"> }) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.ui.</span><span style="color:#B392F0">update</span><span style="color:#E1E4E8">([{</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">"lorebookPanel"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    id: </span><span style="color:#9ECBFF">'lore-info-panel'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        text: </span><span style="color:#9ECBFF">`ID: ${</span><span style="color:#E1E4E8">entryId</span><span style="color:#F97583"> ??</span><span style="color:#E1E4E8"> categoryId</span><span style="color:#9ECBFF">}`</span></span>
+<span class="line"><span style="color:#E1E4E8">      }</span></span>
+<span class="line"><span style="color:#E1E4E8">    ]</span></span>
+<span class="line"><span style="color:#E1E4E8">  }])</span></span>
+<span class="line"><span style="color:#E1E4E8">})</span></span></code></pre>
+<p><img src="/assets/en/scripting/lorebookPanel-example.webp" alt="Lorebook Panel Example" loading="lazy" decoding="async"></p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./ui-parts">UI Parts Reference</a> - Building blocks for UI content</li>
+<li><a href="./hooks">Hooks</a> - Responding to lorebook selection events</li>
+<li><a href="./lorebook-api">Lorebook API</a> - Working with lorebook entries</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

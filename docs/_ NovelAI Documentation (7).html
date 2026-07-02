@@ -1,0 +1,173 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="generation-api"><a href="#generation-api" class="header">Generation API</a></h1>
+<p>Scripts can generate text to use for whatever purpose they need. This is done through the <code>api.v1.generate</code> function. Currently generation is only supported with models that use the OpenAI-like completions endpoint.</p>
+<h2 id="text-generation"><a href="#text-generation" class="header">Text Generation</a></h2>
+<h3 id="basic-generation"><a href="#basic-generation" class="header">Basic Generation</a></h3>
+<p>To generate text, you can call the <code>api.v1.generate</code> function with an array of messages that form the prompt for the generation. Each message should be an object with a <code>role</code> property (either “user”, “assistant”, or “system”) and a <code>content</code> property containing the text of the message.</p>
+<p>The parameters object can also include generation settings such as <code>model</code>, <code>temperature</code>, <code>max_tokens</code>, and others to control the behavior of the generation. <code>model</code> is required and must be set to a valid model ID.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> response </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.</span><span style="color:#B392F0">generate</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#E1E4E8">  [</span></span>
+<span class="line"><span style="color:#E1E4E8">    { role: </span><span style="color:#9ECBFF">'system'</span><span style="color:#E1E4E8">, content: </span><span style="color:#9ECBFF">'You are a not-very-helpful assistant.'</span><span style="color:#E1E4E8"> },</span></span>
+<span class="line"><span style="color:#E1E4E8">    { role: </span><span style="color:#9ECBFF">'user'</span><span style="color:#E1E4E8">, content: </span><span style="color:#9ECBFF">'Where am I?'</span><span style="color:#E1E4E8"> }</span></span>
+<span class="line"><span style="color:#E1E4E8">  ],</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    model: </span><span style="color:#9ECBFF">'glm-4-6'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Generated text: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> response.choices[</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">].text);</span></span></code></pre>
+<h3 id="generation-parameters"><a href="#generation-parameters" class="header">Generation Parameters</a></h3>
+<p>The list of available generation parameters includes:</p>
+<ul>
+<li><code>model</code> (string, required)</li>
+<li><code>temperature</code> (number)</li>
+<li><code>max_tokens</code> (number)</li>
+<li><code>top_p</code> (number)</li>
+<li><code>top_k</code> (number)</li>
+<li><code>frequency_penalty</code> (number)</li>
+<li><code>presence_penalty</code> (number)</li>
+<li><code>stop</code> (array of strings)</li>
+</ul>
+<h3 id="streaming-generation"><a href="#streaming-generation" class="header">Streaming Generation</a></h3>
+<p>All requests to <code>api.v1.generate</code> will stream the response by default. These streamed values can be accessed by providing a callback function as the third parameter to <code>api.v1.generate</code>. This callback will be called multiple times as new data is received from the generation endpoint.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.</span><span style="color:#B392F0">generate</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#E1E4E8">  [</span></span>
+<span class="line"><span style="color:#E1E4E8">    { role: </span><span style="color:#9ECBFF">'user'</span><span style="color:#E1E4E8">, content: </span><span style="color:#9ECBFF">'aaaa, nslx, bjal, abcd, or izti?'</span><span style="color:#E1E4E8"> }</span></span>
+<span class="line"><span style="color:#E1E4E8">  ],</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    model: </span><span style="color:#9ECBFF">'glm-4-6'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  },</span></span>
+<span class="line"><span style="color:#E1E4E8">  (</span><span style="color:#FFAB70">choices</span><span style="color:#E1E4E8">, </span><span style="color:#FFAB70">final</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">    for</span><span style="color:#E1E4E8"> (</span><span style="color:#F97583">let</span><span style="color:#E1E4E8"> choice </span><span style="color:#F97583">of</span><span style="color:#E1E4E8"> choices) {</span></span>
+<span class="line"><span style="color:#E1E4E8">      api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Received text chunk: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> choice.text);</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#F97583">    if</span><span style="color:#E1E4E8"> (final) {</span></span>
+<span class="line"><span style="color:#E1E4E8">      api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Generation complete.'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="blocking-and-background-generation"><a href="#blocking-and-background-generation" class="header">Blocking and Background Generation</a></h3>
+<p>By default, calls to <code>api.v1.generate</code> are considered ‘blocking’ and will prevent interaction with the editor and user-initiated generation until the generation is complete. To allow user interaction during generation, you can set the fourth parameter, <code>behaviour</code>, to <code>'background'</code>.</p>
+<h3 id="generation-limits"><a href="#generation-limits" class="header">Generation Limits</a></h3>
+<p>Scripts have several limits on how frequently and how much that can generate. These limits are shown in the script diagnostics tab in the UI for debugging purposes.</p>
+<h4 id="output-token-limits"><a href="#output-token-limits" class="header">Output Token Limits</a></h4>
+<p>Scripts are only about to generate a certain number of output tokens over a period of time. The current limit is 2048 output tokens every 4 minutes. This limit is per script. When you generate text, the number of output tokens generated is deducted from your available tokens and placed in a “bucket”. The tokens in that bucket will be added back to your available tokens once two conditions are met:</p>
+<ol>
+<li>4 minutes have passed since the generation that used those tokens.</li>
+<li>The user has interacted with UI created by the script or generated in the editor manually.</li>
+</ol>
+<h4 id="input-token-limits"><a href="#input-token-limits" class="header">Input Token Limits</a></h4>
+<p>Scripts also have a limit on input tokens. The current limit is double the maximum allowed context size for the model and current subscription tier every 6 minutes. Input tokens are counted from the prompt messages you provide to <code>api.v1.generate</code>. Only new input tokens that haven’t been used in previous generations are counted against your limit. Building your context in a way that’s likely to reuse previous input tokens will help you stay within your limits.</p>
+<p>Like output tokens, input tokens are placed in a bucket when used and are returned to your available tokens after 6 minutes and user interaction.</p>
+<p>Tokens are counted as cached when they match the start of the prompt for a previous generation. If you provide a prompt that starts with the same tokens as a previous generation, those tokens will not count against your input token limit. Tokens are only measured against the cache to a resolution of 64 tokens. A very common way to ensure caching is to implement “rollover” logic. This means keeping the context deliberately below the upper limit and only adding new messages until you reach the limit, at which point you remove the oldest messages to make room for new ones. This way the start of your prompt will match previous generations as much as possible. A helper object for implementing rollover logic can be created using <code>api.v1.createRolloverHelper</code>. An example of its usage can be found below though its specific use will depend heavily on your use case.</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#6A737D">/**</span></span>
+<span class="line"><span style="color:#6A737D"> * Simple Chat Window - Rollover Helper Example</span></span>
+<span class="line"><span style="color:#6A737D"> * This script creates a simple chat window that uses a rollover helper to manage context size.</span></span>
+<span class="line"><span style="color:#6A737D"> */</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> MODEL</span><span style="color:#F97583"> =</span><span style="color:#9ECBFF"> "glm-4-6"</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> MAX_TOKENS</span><span style="color:#F97583"> =</span><span style="color:#79B8FF"> 2000</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> ROLLOVER_TOKENS</span><span style="color:#F97583"> =</span><span style="color:#79B8FF"> 500</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> SYSTEM_MESSAGE</span><span style="color:#F97583">:</span><span style="color:#B392F0"> Message</span><span style="color:#F97583"> =</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    role: </span><span style="color:#9ECBFF">"system"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: </span><span style="color:#9ECBFF">"You are a helpful assistant. Keep responses brief."</span></span>
+<span class="line"><span style="color:#E1E4E8">};</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">type</span><span style="color:#B392F0"> ChatMessage</span><span style="color:#F97583"> =</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#FFAB70">    role</span><span style="color:#F97583">:</span><span style="color:#9ECBFF"> "user"</span><span style="color:#F97583"> |</span><span style="color:#9ECBFF"> "assistant"</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#FFAB70">    content</span><span style="color:#F97583">:</span><span style="color:#79B8FF"> string</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">};</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> rollover</span><span style="color:#F97583"> =</span><span style="color:#E1E4E8"> api.v1.</span><span style="color:#B392F0">createRolloverHelper</span><span style="color:#E1E4E8">&lt;</span><span style="color:#B392F0">ChatMessage</span><span style="color:#E1E4E8">&gt;({</span></span>
+<span class="line"><span style="color:#E1E4E8">    maxTokens: </span><span style="color:#79B8FF">MAX_TOKENS</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    rolloverTokens: </span><span style="color:#79B8FF">ROLLOVER_TOKENS</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    model: </span><span style="color:#79B8FF">MODEL</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">async</span><span style="color:#F97583"> function</span><span style="color:#B392F0"> sendMessage</span><span style="color:#E1E4E8">(</span><span style="color:#FFAB70">userInput</span><span style="color:#F97583">:</span><span style="color:#79B8FF"> string</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#F97583">    if</span><span style="color:#E1E4E8"> (</span><span style="color:#F97583">!</span><span style="color:#E1E4E8">userInput.</span><span style="color:#B392F0">trim</span><span style="color:#E1E4E8">()) </span><span style="color:#F97583">return</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#F97583">    await</span><span style="color:#E1E4E8"> rollover.</span><span style="color:#B392F0">add</span><span style="color:#E1E4E8">({ role: </span><span style="color:#9ECBFF">"user"</span><span style="color:#E1E4E8">, content: userInput });</span></span>
+<span class="line"><span style="color:#B392F0">    updateDisplay</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#F97583">    const</span><span style="color:#79B8FF"> messages</span><span style="color:#F97583">:</span><span style="color:#B392F0"> Message</span><span style="color:#E1E4E8">[] </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> [</span><span style="color:#79B8FF">SYSTEM_MESSAGE</span><span style="color:#E1E4E8">, </span><span style="color:#F97583">...</span><span style="color:#E1E4E8">rollover.</span><span style="color:#B392F0">read</span><span style="color:#E1E4E8">()];</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#F97583">    const</span><span style="color:#79B8FF"> response</span><span style="color:#F97583"> =</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.</span><span style="color:#B392F0">generate</span><span style="color:#E1E4E8">(messages, {</span></span>
+<span class="line"><span style="color:#E1E4E8">        model: </span><span style="color:#79B8FF">MODEL</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        max_tokens: </span><span style="color:#79B8FF">200</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        temperature: </span><span style="color:#79B8FF">0.7</span></span>
+<span class="line"><span style="color:#E1E4E8">    });</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#F97583">    const</span><span style="color:#79B8FF"> assistantContent</span><span style="color:#F97583"> =</span><span style="color:#E1E4E8"> response.choices[</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">]?.text </span><span style="color:#F97583">??</span><span style="color:#9ECBFF"> "(no response)"</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#F97583">    await</span><span style="color:#E1E4E8"> rollover.</span><span style="color:#B392F0">add</span><span style="color:#E1E4E8">({ role: </span><span style="color:#9ECBFF">"assistant"</span><span style="color:#E1E4E8">, content: assistantContent });</span></span>
+<span class="line"><span style="color:#B392F0">    updateDisplay</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">function</span><span style="color:#B392F0"> updateDisplay</span><span style="color:#E1E4E8">() {</span></span>
+<span class="line"><span style="color:#F97583">    const</span><span style="color:#79B8FF"> history</span><span style="color:#F97583"> =</span><span style="color:#E1E4E8"> rollover.</span><span style="color:#B392F0">read</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#F97583">    const</span><span style="color:#79B8FF"> chatText</span><span style="color:#F97583"> =</span><span style="color:#E1E4E8"> history</span></span>
+<span class="line"><span style="color:#E1E4E8">        .</span><span style="color:#B392F0">map</span><span style="color:#E1E4E8">(</span><span style="color:#FFAB70">m</span><span style="color:#F97583"> =&gt;</span><span style="color:#9ECBFF"> `**${</span><span style="color:#E1E4E8">m</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">role</span><span style="color:#9ECBFF">}:** ${</span><span style="color:#E1E4E8">m</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">content</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">        .</span><span style="color:#B392F0">join</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">"</span><span style="color:#79B8FF">\n\n</span><span style="color:#9ECBFF">"</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#E1E4E8">    win.</span><span style="color:#B392F0">update</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">        content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">            { type: </span><span style="color:#9ECBFF">"text"</span><span style="color:#E1E4E8">, id: </span><span style="color:#9ECBFF">"chat"</span><span style="color:#E1E4E8">, markdown: </span><span style="color:#79B8FF">true</span><span style="color:#E1E4E8">, text: chatText </span><span style="color:#F97583">||</span><span style="color:#9ECBFF"> "*No messages yet*"</span><span style="color:#E1E4E8"> },</span></span>
+<span class="line"><span style="color:#E1E4E8">            {</span></span>
+<span class="line"><span style="color:#E1E4E8">                type: </span><span style="color:#9ECBFF">"textInput"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                id: </span><span style="color:#9ECBFF">"input"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                placeholder: </span><span style="color:#9ECBFF">"Type a message..."</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                onSubmit: sendMessage</span></span>
+<span class="line"><span style="color:#E1E4E8">            },</span></span>
+<span class="line"><span style="color:#E1E4E8">            {</span></span>
+<span class="line"><span style="color:#E1E4E8">                type: </span><span style="color:#9ECBFF">"text"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                id: </span><span style="color:#9ECBFF">"status"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                text: </span><span style="color:#9ECBFF">`${</span><span style="color:#E1E4E8">rollover</span><span style="color:#9ECBFF">.</span><span style="color:#B392F0">count</span><span style="color:#9ECBFF">()</span><span style="color:#9ECBFF">} messages, ~${</span><span style="color:#E1E4E8">rollover</span><span style="color:#9ECBFF">.</span><span style="color:#B392F0">totalTokens</span><span style="color:#9ECBFF">()</span><span style="color:#9ECBFF">} tokens`</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                style: { opacity: </span><span style="color:#79B8FF">0.6</span><span style="color:#E1E4E8">, fontSize: </span><span style="color:#9ECBFF">"0.85em"</span><span style="color:#E1E4E8"> }</span></span>
+<span class="line"><span style="color:#E1E4E8">            }</span></span>
+<span class="line"><span style="color:#E1E4E8">        ]</span></span>
+<span class="line"><span style="color:#E1E4E8">    });</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> win</span><span style="color:#F97583"> =</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.ui.window.</span><span style="color:#B392F0">open</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">    title: </span><span style="color:#9ECBFF">"Chat (Rollover Demo)"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    defaultWidth: </span><span style="color:#79B8FF">400</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    defaultHeight: </span><span style="color:#79B8FF">300</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    resizable: </span><span style="color:#79B8FF">true</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: []</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">updateDisplay</span><span style="color:#E1E4E8">();</span></span></code></pre>
+<h4 id="utility-functions"><a href="#utility-functions" class="header">Utility Functions</a></h4>
+<p><code>api.v1.script.getAllowedOutput</code> and <code>api.v1.script.getAllowedInput</code> can be used to determine how many tokens are currently available for generation.</p>
+<p>The <code>api.v1.script.getTimeUntilAllowedOutput</code> and <code>api.v1.script.getTimeUntilAllowedInput</code> functions can be used to determine how long until the script will have available tokens again.</p>
+<p><code>api.v1.script.waitForAllowedOutput</code> and <code>api.v1.script.waitForAllowedInput</code> can be used to get a promise that resolves when tokens are available again.</p>
+<p><code>countUncachedInputTokens</code> can be used to determine how many input tokens in a given prompt would count against your input token limit, taking caching into account.</p>
+<h2 id="editor-generate"><a href="#editor-generate" class="header">Editor Generate</a></h2>
+<p>Scripts can also trigger text generation directly into the editor using the <code>api.v1.editor.generate</code> function. This functions as if the user had clicked the “Send” button in the editor, generating text based on the current document content and appending the result to the document.</p>
+<p>Only three editior generation calls are allowed without user interaction in between. After three generations, further calls to <code>api.v1.editor.generate</code> will be rejected until the user interacts generates manually or interacts with UI created by the script.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./hooks">Hooks</a> - Responding to user generation events</li>
+<li><a href="./context-building-api">Context Building API</a> - Getting a built context of the document</li>
+<li><a href="./story-settings-api">Story Settings API</a> - Configuring generation parameters</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

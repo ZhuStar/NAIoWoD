@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="lorebook-api"><a href="#lorebook-api" class="header">Lorebook API</a></h1>
+<p>The Lorebook API provides methods for programmatically managing Lorebook entries and categories. Scripts can create, read, update, and delete Lorebook content. Methods that create, modify, or delete Lorebook entries and categories require the script to have the <code>lorebookEdit</code> permission.</p>
+<h2 id="lorebook-structure"><a href="#lorebook-structure" class="header">Lorebook Structure</a></h2>
+<h3 id="entries"><a href="#entries" class="header">Entries</a></h3>
+<p>Lorebook entries contain information that can be inserted into generation context when their activation keys are matched. Each entry has various settings that control when and how it activates.
+Lorebook entries are indentified by a unique ID. This ID can be set freely by scripts, but it’s recommended to use api.v1.uuid() to generate unique IDs. If you attempt to create two entries with the same ID an error will be thrown.</p>
+<h3 id="categories"><a href="#categories" class="header">Categories</a></h3>
+<p>Categories are organizational containers for entries. They’re used to group related entries together for easier browsing in the Lorebook UI.
+Categories are also identified by unique IDs, which can be set freely by scripts. As with entries, it’s recommended to use api.v1.uuid() to generate unique IDs. If you attempt to create two categories with the same ID an error will be thrown.</p>
+<h2 id="reading-lorebook-content"><a href="#reading-lorebook-content" class="header">Reading Lorebook Content</a></h2>
+<h3 id="getting-all-entries"><a href="#getting-all-entries" class="header">Getting All Entries</a></h3>
+<p>To retrieve all Lorebook entries, use the <code>api.v1.lorebook.entries</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> allEntries </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">entries</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#F97583">for</span><span style="color:#E1E4E8"> (</span><span style="color:#F97583">let</span><span style="color:#E1E4E8"> entry </span><span style="color:#F97583">of</span><span style="color:#E1E4E8"> allEntries) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Entry: ${</span><span style="color:#E1E4E8">entry</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">displayName</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="getting-a-specific-entry"><a href="#getting-a-specific-entry" class="header">Getting a Specific Entry</a></h3>
+<p>To retrieve a single entry by its ID, use the <code>api.v1.lorebook.entry</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> entry </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">entry</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'entry-id-here'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#F97583">if</span><span style="color:#E1E4E8"> (entry) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Found entry: ${</span><span style="color:#E1E4E8">entry</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">displayName</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="getting-all-categories"><a href="#getting-all-categories" class="header">Getting All Categories</a></h3>
+<p>To retrieve all Lorebook categories, use the <code>api.v1.lorebook.categories</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> allCategories </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">categories</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#F97583">for</span><span style="color:#E1E4E8"> (</span><span style="color:#F97583">let</span><span style="color:#E1E4E8"> category </span><span style="color:#F97583">of</span><span style="color:#E1E4E8"> allCategories) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Category: ${</span><span style="color:#E1E4E8">category</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">name</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="getting-a-specific-category"><a href="#getting-a-specific-category" class="header">Getting a Specific Category</a></h3>
+<p>To retrieve a single category by its ID, use the <code>api.v1.lorebook.category</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> category </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">category</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'category-id-here'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#F97583">if</span><span style="color:#E1E4E8"> (category) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Found category: ${</span><span style="color:#E1E4E8">category</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">name</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h2 id="creating-lorebook-content"><a href="#creating-lorebook-content" class="header">Creating Lorebook Content</a></h2>
+<h3 id="creating-an-entry"><a href="#creating-an-entry" class="header">Creating an Entry</a></h3>
+<p>To create a new Lorebook entry, use the <code>api.v1.lorebook.createEntry</code> function. If no ID is provided, one will be generated automatically:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> entryId </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">createEntry</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  text: </span><span style="color:#9ECBFF">'Galena, the Witch of the Tower. Galena</span><span style="color:#79B8FF">\'</span><span style="color:#9ECBFF">s eyes are obscured by a translucent ribbon...'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  displayName: </span><span style="color:#9ECBFF">'Galena, the Witch of the Tower'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  keys: [</span><span style="color:#9ECBFF">'Galena'</span><span style="color:#E1E4E8">, </span><span style="color:#9ECBFF">'witch'</span><span style="color:#E1E4E8">, </span><span style="color:#9ECBFF">'ribbon'</span><span style="color:#E1E4E8">, </span><span style="color:#9ECBFF">'tower'</span><span style="color:#E1E4E8">],</span></span>
+<span class="line"><span style="color:#E1E4E8">  enabled: </span><span style="color:#79B8FF">true</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Created entry with ID: ${</span><span style="color:#E1E4E8">entryId</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="creating-a-category"><a href="#creating-a-category" class="header">Creating a Category</a></h3>
+<p>To create a new Lorebook category, use the <code>api.v1.lorebook.createCategory</code> function. If no ID is provided, one will be generated automatically:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> newCategory </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">createCategory</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  name: </span><span style="color:#9ECBFF">'Locations'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  enabled: </span><span style="color:#79B8FF">true</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Created category with ID: ${</span><span style="color:#E1E4E8">newCategory</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">id</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="updating-lorebook-content"><a href="#updating-lorebook-content" class="header">Updating Lorebook Content</a></h2>
+<h3 id="updating-an-entry"><a href="#updating-an-entry" class="header">Updating an Entry</a></h3>
+<p>To update an existing Lorebook entry, use the <code>api.v1.lorebook.updateEntry</code> function with the entry ID and the fields to update:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">updateEntry</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'entry-id-here'</span><span style="color:#E1E4E8">, {</span></span>
+<span class="line"><span style="color:#E1E4E8">  text: </span><span style="color:#9ECBFF">'Galena, the Retired Witch of the Tower. Galena now...'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  enabled: </span><span style="color:#79B8FF">false</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<p>Only the fields you provide will be updated; other fields remain unchanged.</p>
+<h3 id="updating-a-category"><a href="#updating-a-category" class="header">Updating a Category</a></h3>
+<p>To update an existing Lorebook category, use the <code>api.v1.lorebook.updateCategory</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">updateCategory</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'category-id-here'</span><span style="color:#E1E4E8">, {</span></span>
+<span class="line"><span style="color:#E1E4E8">  name: </span><span style="color:#9ECBFF">'World Locations'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  enabled: </span><span style="color:#79B8FF">false</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<h2 id="deleting-lorebook-content"><a href="#deleting-lorebook-content" class="header">Deleting Lorebook Content</a></h2>
+<h3 id="deleting-an-entry"><a href="#deleting-an-entry" class="header">Deleting an Entry</a></h3>
+<p>To delete a Lorebook entry, use the <code>api.v1.lorebook.removeEntry</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">removeEntry</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'entry-id-here'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="deleting-a-category"><a href="#deleting-a-category" class="header">Deleting a Category</a></h3>
+<p>To delete a Lorebook category, use the <code>api.v1.lorebook.removeCategory</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">removeCategory</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'category-id-here'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<p>Note that deleting a category does not delete its entries; they become uncategorized.</p>
+<h2 id="working-with-entry-selection"><a href="#working-with-entry-selection" class="header">Working with Entry Selection</a></h2>
+<p>Scripts can respond to Lorebook entry selection through the <code>onLorebookEntrySelected</code> hook. This is useful for displaying entry-specific UI or performing actions when users navigate the Lorebook:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.hooks.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'onLorebookEntrySelected'</span><span style="color:#E1E4E8">, </span><span style="color:#F97583">async</span><span style="color:#E1E4E8"> ({ </span><span style="color:#FFAB70">entryId</span><span style="color:#E1E4E8">, </span><span style="color:#FFAB70">categoryId</span><span style="color:#E1E4E8"> }) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">  if</span><span style="color:#E1E4E8"> (entryId) {</span></span>
+<span class="line"><span style="color:#F97583">    let</span><span style="color:#E1E4E8"> entry </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">entry</span><span style="color:#E1E4E8">(entryId);</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Selected entry: ${</span><span style="color:#E1E4E8">entry</span><span style="color:#9ECBFF">?.</span><span style="color:#E1E4E8">displayName</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">  } </span><span style="color:#F97583">else</span><span style="color:#F97583"> if</span><span style="color:#E1E4E8"> (categoryId) {</span></span>
+<span class="line"><span style="color:#F97583">    let</span><span style="color:#E1E4E8"> category </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.lorebook.</span><span style="color:#B392F0">category</span><span style="color:#E1E4E8">(categoryId);</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Selected category: ${</span><span style="color:#E1E4E8">category</span><span style="color:#9ECBFF">?.</span><span style="color:#E1E4E8">name</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./hooks">Hooks</a> - Responding to Lorebook selection events</li>
+<li><a href="./ui-extensions">UI Extensions</a> - Creating Lorebook panel UI</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

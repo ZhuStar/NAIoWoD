@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="storage-api"><a href="#storage-api" class="header">Storage API</a></h1>
+<p>The Storage API provides persistent data storage for scripts at both the story and account level. Each script gets its own storage separate from other scripts. Data is stored as key-value pairs.</p>
+<h2 id="overview"><a href="#overview" class="header">Overview</a></h2>
+<p>There are four different storage APIs for scripts: <code>api.v1.storage</code>, <code>api.v1.storyStorage</code>, <code>api.v1.historyStorage</code>, and <code>api.v1.tempStorage</code>.</p>
+<p><code>api.v1.storage</code> is the standard storage for scripts. It stores data with the script. This means that where data is stored depends on whether the script is an account or story script. Account scripts are only allowed to store a limited amount of data (currently 4 MB) per script in regular storage. This is due to account scripts needing to be loaded on login.</p>
+<p><code>api.v1.storyStorage</code> will always store data in the current story regardless of what kind of script it is. Note that for story scripts this is separate from its <code>api.v1.storage</code>.</p>
+<p><code>api.v1.historyStorage</code> functions like storyStorage in that it’s always stored in the current story, but it’s also aware of the document history. When a value is set it’s set at a specific point in the document history. If the document is undone to before that history node where the value was set, it will revert to its previous value.</p>
+<p><code>api.v1.tempStorage</code> is temporary storage that persists only for the current session and is cleared when the story is closed. Use this for displaying temporary UI state using storage keys in UI Parts.</p>
+<h2 id="basic-operations"><a href="#basic-operations" class="header">Basic Operations</a></h2>
+<p>All the storage APIs share the same basic structure. They have <code>set</code>, <code>get</code>, <code>remove</code>, and <code>list</code> functions. <code>set</code> is used to write values to storage, <code>get</code> retrieves them, and <code>remove</code> deletes them. <code>list</code> will return an array of all currently set keys.</p>
+<h2 id="history-aware-storage"><a href="#history-aware-storage" class="header">History-Aware Storage</a></h2>
+<p>History storage is unique because it’s tied to specific points in the document history tree. When you undo or redo, values revert to their state at that point in history.</p>
+<h3 id="basic-usage"><a href="#basic-usage" class="header">Basic Usage</a></h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#6A737D">// Set a value at the current history point</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'character-state'</span><span style="color:#E1E4E8">, {</span></span>
+<span class="line"><span style="color:#E1E4E8">  health: </span><span style="color:#79B8FF">100</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  location: </span><span style="color:#9ECBFF">'town'</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">// Get the value</span></span>
+<span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> state </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'character-state'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="history-aware-behavior"><a href="#history-aware-behavior" class="header">History-Aware Behavior</a></h3>
+<p>When the document history changes, history storage values automatically update:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#6A737D">// At history point A</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'turn-count'</span><span style="color:#E1E4E8">, </span><span style="color:#79B8FF">1</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">// User generates some text, moving to point B</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'turn-count'</span><span style="color:#E1E4E8">, </span><span style="color:#79B8FF">2</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">// User generates more text, moving to point C</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'turn-count'</span><span style="color:#E1E4E8">, </span><span style="color:#79B8FF">3</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> count </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'turn-count'</span><span style="color:#E1E4E8">); </span><span style="color:#6A737D">// Returns 3</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">// User undoes back to point B</span></span>
+<span class="line"><span style="color:#6A737D">// Now get returns 2 automatically!</span></span>
+<span class="line"><span style="color:#E1E4E8">count </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'turn-count'</span><span style="color:#E1E4E8">); </span><span style="color:#6A737D">// Returns 2</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">// User undoes back to point A</span></span>
+<span class="line"><span style="color:#E1E4E8">count </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.historyStorage.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'turn-count'</span><span style="color:#E1E4E8">); </span><span style="color:#6A737D">// Returns 1</span></span></code></pre>
+<h3 id="limitations"><a href="#limitations" class="header">Limitations</a></h3>
+<p>History aware storage has some limitations. Notably, it can only handle cases where undo/redo are used. If the user manually edits the document to delete content, history storage will not automatically revert values. Additionally, history storage only marks history points when a generation occurs. Edits to the document without generation will not create new history points for storage.</p>
+<h2 id="temporary-storage"><a href="#temporary-storage" class="header">Temporary Storage</a></h2>
+<p>Temporary storage is useful for displaying data in the UI using storageKeys in UI Parts. Unlike other storage types, temporary storage does not cause anything to be saved to disk or remotely.</p>
+<h3 id="using-temporary-storage-together-with-ui-parts"><a href="#using-temporary-storage-together-with-ui-parts" class="header">Using Temporary Storage Together With UI Parts</a></h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#6A737D">// Set a temporary value</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.tempStorage.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'example-string'</span><span style="color:#E1E4E8">, </span><span style="color:#9ECBFF">'Alice gives meaning to character strings that are devoid of meaning.'</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#6A737D">// Register a UI Part that displays the temporary value</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.ui.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    type: </span><span style="color:#9ECBFF">'scriptPanel'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    name: </span><span style="color:#9ECBFF">'Temporary Storage Example'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">      {</span></span>
+<span class="line"><span style="color:#E1E4E8">        type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">        text: </span><span style="color:#9ECBFF">'{{temp:example-string}}'</span></span>
+<span class="line"><span style="color:#E1E4E8">      }</span></span>
+<span class="line"><span style="color:#E1E4E8">    ]</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">]);</span></span>
+<span class="line"><span style="color:#6A737D">// We can update the temporary storage value later and the UI will reflect the change. This will cause no data to be saved permanently and the minimum amount of the UI will be re-rendered.</span></span>
+<span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.tempStorage.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'example-string'</span><span style="color:#E1E4E8">, </span><span style="color:#9ECBFF">'Bob considers character strings to be meaningless without context.'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="data-types"><a href="#data-types" class="header">Data Types</a></h2>
+<p>Stored data is immediately serialized as JSON, so anything not serializable will be lost or altered. For more information please see <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify#description">this section</a> from the MDN Web Docs.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./ui-parts">UI Parts</a> - Using storageKey in UI components</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

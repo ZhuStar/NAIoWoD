@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="hooks"><a href="#hooks" class="header">Hooks</a></h1>
+<p>Hooks allow your scripts to respond to events in the generation pipeline, enabling you to modify context, alter responses, and control generation behavior. All the hooks recieve their parameters as a single object.</p>
+<p>Hooks are registered by calling <code>api.v1.hooks.register</code> with the name of the hook and a callback function. The callback function will be called whenever the corresponding event occurs. You can only have a single callback per hook per script. If you register a hook that already exists for the script, it will replace the existing one.</p>
+<h2 id="available-hooks"><a href="#available-hooks" class="header">Available Hooks</a></h2>
+<h3 id="ongenerationrequested"><a href="#ongenerationrequested" class="header">onGenerationRequested</a></h3>
+<p>The onGenerationRequested hook is the first hook that will trigger when a user generates text. The generation has not yet happened and context has not yet been built. This hook could be used to prevent generation and take full control over the generation flow or to prepare things for later hooks. Changes to generation settings at this time will affect the generation that’s about to happen.</p>
+<h3 id="onbeforecontextbuild"><a href="#onbeforecontextbuild" class="header">onBeforeContextBuild</a></h3>
+<p>The onBeforeContextBuild hook will happen just before context is built. This may be as part of a generation but doesn’t have to be. Context will also be built under other circumstances, such as the context viewer being opened. You can look at the <code>dryRun</code> parameter to determine if this is a context that will be used for generation or not. It provides an opportunity to temporarily modify or disable context objects like Lorebook entries, Memory, etc. to be used for the context build.</p>
+<h3 id="oncontextbuilt"><a href="#oncontextbuilt" class="header">onContextBuilt</a></h3>
+<p>The onContextBuilt hook will happen whenever context is built. This may be as part of a generation but doesn’t have to be. Context will also be built under other circumstances, such as the context viewer being opened. You can look at the <code>dryRun</code> parameter to determine if this is a context that will be used for generation or not. You can return a modified array of messages to alter the context that will be used for the generation.</p>
+<p>Note: This hook will only happen when generating with models that use the OpenAI-like completions endpoint.</p>
+<h3 id="onresponse"><a href="#onresponse" class="header">onResponse</a></h3>
+<p>The onResponse hook will happen when response data is received for a generation request. You can return modified text to alter what will be placed in the editor. You can also provide altered token ids and logprobs if you want to maintain the functionality of editor logprobs.</p>
+<p>The text, logprobs, and tokenIds are provided as arrays. The index of an item in the text array will correspond to the items with the same index in the other arrays.</p>
+<p>If streaming is enabled there will be multiple onResponse calls for each generation. When writing scripts it’s recommended that you always treat it as if streaming is enabled. The final onResponse will have the <code>final</code> param set to true. It is possible that no <code>final</code> response will ever be sent, such as if the generation errors.</p>
+<p>If you want to hold part or all of a response from been sent up the chain and placed into the editor you can set <code>seenData</code> on the return object. If set to a number, only that number of text/logprobs/tokenIds will be considered “seen” and others will be resent on the next onResponse call. If <code>final</code> is true the response will be sent up the chain regardless of the value of <code>seenData</code>.</p>
+<p>Note: This hook will only happen when generating with models that use the OpenAI-like completions endpoint.</p>
+<h3 id="ongenerationend"><a href="#ongenerationend" class="header">onGenerationEnd</a></h3>
+<p>The onGenerationEnd hook will trigger after a generation has sucessfully completed or been cancelled. When this hook is called, the generation is fully finished, the editor is unlocked, and generation is no longer blocked.</p>
+<h3 id="onscriptsloaded"><a href="#onscriptsloaded" class="header">onScriptsLoaded</a></h3>
+<p>The onScriptsLoaded hook will trigger once after all scripts have been loaded and initialized. This is a good place to perform any setup that would fail if done at the top level of the script, such as calling buildContext.</p>
+<h3 id="onlorebookentryselected"><a href="#onlorebookentryselected" class="header">onLorebookEntrySelected</a></h3>
+<p>The onLorebookEntrySelected hook will trigger whenever a Lorebook entry or category is selected in the Lorebook. The hook is provided the id of the selected entry or category. The primary use of this hook is to allow scripts to modify lorebookPanel UIExtensions based on the selected entry or category.</p>
+<h2 id="ontextadventureinput"><a href="#ontextadventureinput" class="header">onTextAdventureInput</a></h2>
+<p>The onTextAdventureInput hook will trigger whenever input is submitted via the Text Adventure input box. You can return modified text to alter what will be placed in the editor (including an empty string to prevent any text from being added) and prevent generation by setting <code>stopGeneration</code> to true.</p>
+<h2 id="onhistorynavigated"><a href="#onhistorynavigated" class="header">onHistoryNavigated</a></h2>
+<p>The onHistoryNavigated hook will trigger whenever the user or a script navigates the document history through undo/redo/retry/jump to history node. This hook can be used to keep track of when state should be reverted or updated based on history changes.</p>
+<h2 id="ondocumentconvertedtotext"><a href="#ondocumentconvertedtotext" class="header">onDocumentConvertedToText</a></h2>
+<p>The onDocumentConvertedToText hook will trigger whenever a document is converted to text format. This is generally for the purposes of generation context building. You can return modified sections to alter the text that will be used for context. The <code>reason</code> parameter indicates why the document is being converted, such as for ‘context’ building</p>
+<h2 id="hook-execution-order"><a href="#hook-execution-order" class="header">Hook Execution Order</a></h2>
+<p>Scripts execute their hooks in the same order as they are listed in the User Scripts modal. All account scripts are executed in order, then all story scripts.</p>
+<h2 id="controlling-hook-propagation"><a href="#controlling-hook-propagation" class="header">Controlling Hook Propagation</a></h2>
+<h3 id="stopfurtherscripts"><a href="#stopfurtherscripts" class="header">stopFurtherScripts</a></h3>
+<p>You can set <code>stopFurtherScripts</code> to true to prevent a hook from being called for any scripts after this one.</p>
+<h3 id="stopgeneration"><a href="#stopgeneration" class="header">stopGeneration</a></h3>
+<p>For onGenerationRequested, onContextBuilt, and onResponse you can set <code>stopGeneration</code> to true to immediately prevent or cancel a generation. It will be immediately halted and no further hooks will trigger for any script.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./generation-api">Generation API</a> - Triggering generation programmatically</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

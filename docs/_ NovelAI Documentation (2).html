@@ -1,0 +1,179 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="ui-parts"><a href="#ui-parts" class="header">UI Parts</a></h1>
+<p>UI Parts are the building blocks for creating user interfaces in your scripts. The provide a way to display information and get user input. UI Parts can be used in various UI Extensions such as Sidebar Panels, Script Panels, and Toolbox Options as well as in Modals and Windows.</p>
+<p>All UI Parts are defined as objects with a <code>type</code> property that specifies the kind of UI Part it is. Each type has its own set of properties that define its behavior and appearance.</p>
+<h2 id="layout-components"><a href="#layout-components" class="header">Layout Components</a></h2>
+<h3 id="row"><a href="#row" class="header">Row</a></h3>
+<p>A row layout arranges its child components horizontally in a single line. It accepts a <code>content</code> property which is an array of UI Parts to be displayed in the row. It functions as a flex container with row direction and has <code>spacing</code> and <code>alignment</code> properties to control the spacing between items and their vertical alignment.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'row'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  content</span><span style="color:#E1E4E8">: [</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'First Item'</span></span>
+<span class="line"><span style="color:#E1E4E8">    },</span></span>
+<span class="line"><span style="color:#E1E4E8">    {      </span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'Second Item'</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  ]</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="column"><a href="#column" class="header">Column</a></h3>
+<p>A column layout arranges its child components vertically in a single column. It accepts a <code>content</code> property which is an array of UI Parts to be displayed in the column. It functions as a flex container with column direction and has <code>spacing</code> and <code>alignment</code> properties to control the spacing between items and their horizontal alignment.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'column'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  content</span><span style="color:#E1E4E8">: [</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'First Item'</span></span>
+<span class="line"><span style="color:#E1E4E8">    },</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'Second Item'</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  ]</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="box"><a href="#box" class="header">Box</a></h3>
+<p>A box layout places its child components in a bordered box with a background color. It accepts a <code>content</code> property which is an array of UI Parts to be displayed inside the box. If you want a custom-styled box, use a Container with the <code>style</code> property instead.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'box'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  content</span><span style="color:#E1E4E8">: [</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'This is inside a box.'</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  ]</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="container"><a href="#container" class="header">Container</a></h3>
+<p>A container is a simple wrapper that wraps its child components in a plain div. It accepts a <code>content</code> property which is an array of UI Parts to be displayed inside the container. Containers are useful for applying custom styles to a group of UI Parts using the <code>style</code> property.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'container'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  style</span><span style="color:#E1E4E8">: {</span></span>
+<span class="line"><span style="color:#B392F0">    border</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'1px solid #ff0000'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    padding</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'10px'</span></span>
+<span class="line"><span style="color:#E1E4E8">  },</span></span>
+<span class="line"><span style="color:#B392F0">  content</span><span style="color:#E1E4E8">: [</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'This is inside a custom-styled container.'</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  ]</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h2 id="input-components"><a href="#input-components" class="header">Input Components</a></h2>
+<h3 id="text-input"><a href="#text-input" class="header">Text Input</a></h3>
+<p>A single-line text input allows users to enter and edit text. It has a <code>storageKey</code> property that can be used to bind the input value to persistent storage, enabling the value to be saved and retrieved across sessions. onChange and onSubmit callbacks can also be provided to respond to user input in real-time or when the user submits the input (e.g., by pressing Enter).</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'textInput'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  storageKey</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'user-value'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  onChange</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User changed input to: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  },</span></span>
+<span class="line"><span style="color:#B392F0">  onSubmit</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User submitted input: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="multiline-text-input"><a href="#multiline-text-input" class="header">Multiline Text Input</a></h3>
+<p>A multiline text input allows users to enter and edit larger blocks of text. It has a <code>storageKey</code> property that can be used to bind the input value to persistent storage, enabling the value to be saved and retrieved across sessions. onChange and onSubmit callbacks can also be provided to respond to user input in real-time or when the user submits the input (e.g., by pressing Ctrl+Enter).</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'multilineTextInput'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  storageKey</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'user-multiline-value'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  onChange</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User changed multiline input to: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  },</span></span>
+<span class="line"><span style="color:#B392F0">  onSubmit</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User submitted multiline input: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="number-input"><a href="#number-input" class="header">Number Input</a></h3>
+<p>A number input allows users to enter and edit numeric values. It has a <code>storageKey</code> property that can be used to bind the input value to persistent storage, enabling the value to be saved and retrieved across sessions. onChange and onSubmit callbacks can also be provided to respond to user input in real-time or when the user submits the input (e.g., by pressing Enter).</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'numberInput'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  storageKey</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'user-number-value'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  onChange</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User changed number input to: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  },</span></span>
+<span class="line"><span style="color:#B392F0">  onSubmit</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User submitted number input: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="checkbox-input"><a href="#checkbox-input" class="header">Checkbox Input</a></h3>
+<p>A checkbox input allows users to toggle a boolean value. It has a <code>storageKey</code> property that can be used to bind the input value to persistent storage, enabling the value to be saved and retrieved across sessions. An onChange callback can also be provided to respond to user input in real-time.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'checkboxInput'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  storageKey</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'user-checkbox-value'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  onChange</span><span style="color:#E1E4E8">: (</span><span style="color:#FFAB70">value</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'User changed checkbox to: '</span><span style="color:#F97583"> +</span><span style="color:#E1E4E8"> value)</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h2 id="display-components"><a href="#display-components" class="header">Display Components</a></h2>
+<h3 id="text"><a href="#text" class="header">Text</a></h3>
+<p>A text display component shows a piece of text. It has a <code>text</code> property for the content to display. The <code>markdown</code> property can be set to true to enable markdown formatting in the text. URLs do not become clickable links for security and privacy reasons.</p>
+<p>Text contained within <code>{{curly braces}}</code> will be treated as a storage key and replaced with the corresponding stored value. If you want to disable this behaviour, you can set <code>noTemplate</code> to true. To use this with historyStorage, storyStorage, or tempStorage, use the syntax <code>{{history:key}}</code>, <code>{{story:key}}</code>, or <code>{{temp:key}}</code>.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  text</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">`# Heading</span></span>
+<span class="line"><span style="color:#9ECBFF">This is **bold** text and this is *italic* text.`</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  markdown</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">true</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="image"><a href="#image" class="header">Image</a></h3>
+<p>An image display component shows an image. It has a <code>src</code> property for the image URL. The <code>alt</code> property can be used to provide alternative text for the image.</p>
+<p>The <code>src</code> property only supports Data URLs (e.g., “data:image/png;base64,…”) and you cannot load images from external URLs for security and privacy reasons.</p>
+<p>For various reasons, it’s recommended to also set explicit <code>height</code> and <code>width</code> properties to control the size of the image.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'image'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  src</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  alt</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'Example Image'</span></span>
+<span class="line"><span style="color:#B392F0">  height</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">200</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  width</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">200</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h3 id="button"><a href="#button" class="header">Button</a></h3>
+<p>A button component displays a clickable button. It has a <code>text</code> property for the button label and a <code>callback</code> property which is a function that will be called when the button is clicked. The button can be disabled by setting the <code>disabled</code> property to true or can be disabled while its callback is running by setting <code>disableWhileCallbackRunning</code> to true.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'button'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  text</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">'Click Me'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">  callback</span><span style="color:#E1E4E8">: () </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">    api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Button was clicked!'</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<h2 id="styling"><a href="#styling" class="header">Styling</a></h2>
+<p>Most UI Parts can use the <code>style</code> property to customize their appearance. This property accepts an object with CSS properties and values. Properties should be written in camelCase format (e.g., <code>backgroundColor</code> instead of <code>background-color</code>).</p>
+<p>This sets inline styles, so you cannot use pseudo-classes or media queries. URLs are stripped from style properties for security and privacy reasons.</p>
+<p>If you use the key of a theme color (e.g., <code>bg0</code>, <code>textHeadings</code>, <code>warning</code>) or font family (e.g., <code>default</code>, <code>headings</code>) as a value it will be replaced with the actual value from the current theme.</p>
+<h2 id="state-management"><a href="#state-management" class="header">State Management</a></h2>
+<h3 id="storage-keys"><a href="#storage-keys" class="header">Storage Keys</a></h3>
+<p>Many input UI Parts support a <code>storageKey</code> property which can be used to bind the input value to persistent storage. When a user changes the value of the input, it will automatically be saved to storage under the specified key. If the value in storage changes (e.g., from another UI Part or script), the input will automatically update to reflect the new value.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./ui-extensions">UI Extensions</a> - Where to use UI parts</li>
+<li><a href="./modals-and-windows">Modals and Windows</a> - Using UI parts in modals and windows</li>
+<li><a href="./storage-api">Storage API</a> - Understanding storage keys</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="document-api"><a href="#document-api" class="header">Document API</a></h1>
+<p>The Document API provides methods for reading and manipulating the story document. Any methods that modify the document require the script to have the <code>documentEdit</code> permission.</p>
+<h2 id="understanding-document-structure"><a href="#understanding-document-structure" class="header">Understanding Document Structure</a></h2>
+<h3 id="sections"><a href="#sections" class="header">Sections</a></h3>
+<p>The document is divided into sections, which represent paragraphs. The only current section type is “text”, but future updates may add more types. The terms “section” and “paragraph” are used interchangeably.</p>
+<p>Sections have the following structure:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  text</span><span style="color:#E1E4E8">: string</span></span>
+<span class="line"><span style="color:#B392F0">  origin</span><span style="color:#E1E4E8">: { </span><span style="color:#B392F0">position</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">length</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">data</span><span style="color:#E1E4E8">: string }[]</span></span>
+<span class="line"><span style="color:#B392F0">  formatting</span><span style="color:#E1E4E8">: { </span><span style="color:#B392F0">position</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">length</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">data</span><span style="color:#E1E4E8">: string }[]</span></span>
+<span class="line"><span style="color:#B392F0">  source</span><span style="color:#E1E4E8">: string </span><span style="color:#F97583">|</span><span style="color:#79B8FF"> undefined</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>The <code>text</code> property contains the raw text of the section. The <code>origin</code> and <code>formatting</code> properties contain arrays of objects that describe the origin and formatting of different parts of the section’s text. The <code>source</code> property defines the type of paragraph it is. This is used for special sections like text adventure inputs and instructions.</p>
+<h3 id="selections"><a href="#selections" class="header">Selections</a></h3>
+<p>Document selections represent a range of text within the document. They are an object that looks like this:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#B392F0">  from</span><span style="color:#E1E4E8">: { </span><span style="color:#B392F0">sectionId</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">offset</span><span style="color:#E1E4E8">: number }</span></span>
+<span class="line"><span style="color:#B392F0">  to</span><span style="color:#E1E4E8">: { </span><span style="color:#B392F0">sectionId</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">offset</span><span style="color:#E1E4E8">: number }</span></span>
+<span class="line"><span style="color:#B392F0">  anchor</span><span style="color:#E1E4E8">: { </span><span style="color:#B392F0">sectionId</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">offset</span><span style="color:#E1E4E8">: number }</span></span>
+<span class="line"><span style="color:#B392F0">  head</span><span style="color:#E1E4E8">: { </span><span style="color:#B392F0">sectionId</span><span style="color:#E1E4E8">: number; </span><span style="color:#B392F0">offset</span><span style="color:#E1E4E8">: number }</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>The <code>from</code> and <code>to</code> properties represent the start and end of the selection, while <code>anchor</code> and <code>head</code> represent the fixed and moving ends of the selection respectively. For most purposes you’ll only need to use <code>from</code> and <code>to</code>.</p>
+<p>The <code>sectionId</code> represents the numeric ID of the section in the document, and <code>offset</code> represents the character offset within that section.</p>
+<h2 id="reading-document-content"><a href="#reading-document-content" class="header">Reading Document Content</a></h2>
+<h3 id="getting-text"><a href="#getting-text" class="header">Getting Text</a></h3>
+<p>To read the text content of the document, you can use the <code>api.v1.document.scan</code> function. This function accepts a callback that will be called for each section in the document. The callback is provided the section object, its ID, and the index of the section in the document. The function also returns a promise that resolves to an array of all sections in the document.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> allSections </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.document.</span><span style="color:#B392F0">scan</span><span style="color:#E1E4E8">((</span><span style="color:#FFAB70">sectionId</span><span style="color:#E1E4E8">, </span><span style="color:#FFAB70">section</span><span style="color:#E1E4E8">, </span><span style="color:#FFAB70">index</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Section ${</span><span style="color:#E1E4E8">index</span><span style="color:#9ECBFF">} (ID: ${</span><span style="color:#E1E4E8">sectionId</span><span style="color:#9ECBFF">}): ${</span><span style="color:#E1E4E8">section</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">text</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<h3 id="working-with-selections"><a href="#working-with-selections" class="header">Working with Selections</a></h3>
+<p>You can get text from a selection object using the <code>textFromSelection</code> method. This method accepts an object with a <code>from</code> and <code>to</code> position and returns the text within that range.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> selectionText </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.document.</span><span style="color:#B392F0">textFromSelection</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  from: selection.from,</span></span>
+<span class="line"><span style="color:#E1E4E8">  to: selection.to</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Selected text: ${</span><span style="color:#E1E4E8">selectionText</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="modifying-document-content"><a href="#modifying-document-content" class="header">Modifying Document Content</a></h2>
+<h3 id="appending-text"><a href="#appending-text" class="header">Appending Text</a></h3>
+<p>To append text to the end of the document, you can use <code>append</code>, <code>appendParagraph</code>, or <code>appendParagraphs</code> methods.</p>
+<p><code>append</code> is simplest and takes a string of text to add:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.document.</span><span style="color:#B392F0">append</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'This text will be added to the end of the document.'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<p>It will automatically create a new paragraph if needed. You cannot specify formatting or origin with this method.</p>
+<p><code>appendParagraph</code> and appendParagraphs` allow you to add one or more complete section objects, giving you full control over the text, formatting, origin, and source.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.document.</span><span style="color:#B392F0">appendParagraph</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  text: </span><span style="color:#9ECBFF">'This is a new paragraph with custom formatting.'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  origin: [{ position: </span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">, length: </span><span style="color:#79B8FF">4</span><span style="color:#E1E4E8">, data: </span><span style="color:#9ECBFF">'user'</span><span style="color:#E1E4E8"> }],</span></span>
+<span class="line"><span style="color:#E1E4E8">  formatting: [{ position: </span><span style="color:#79B8FF">10</span><span style="color:#E1E4E8">, length: </span><span style="color:#79B8FF">4</span><span style="color:#E1E4E8">, data: </span><span style="color:#9ECBFF">'bold'</span><span style="color:#E1E4E8"> }],</span></span>
+<span class="line"><span style="color:#E1E4E8">  source: </span><span style="color:#79B8FF">undefined</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<h3 id="inserting-text"><a href="#inserting-text" class="header">Inserting Text</a></h3>
+<p>To insert text at a specific position in the document, you can use the <code>insertParagraphAfter</code> or <code>insertParagraphsAfter</code> methods. These methods take a section ID to insert after and one or more section objects to insert.</p>
+<p><code>0</code> is a special case that represents inserting at the start of the document.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.document.</span><span style="color:#B392F0">insertParagraphAfter</span><span style="color:#E1E4E8">(</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">, {</span></span>
+<span class="line"><span style="color:#E1E4E8">  text: </span><span style="color:#9ECBFF">'This paragraph was inserted at the start of the document.'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<h3 id="deleting-paragraphs"><a href="#deleting-paragraphs" class="header">Deleting Paragraphs</a></h3>
+<p>To delete sections from the document, you can use the <code>removeParagraph</code> or <code>removeParagraphs</code> methods. These methods take one or more section IDs to remove.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.document.</span><span style="color:#B392F0">removeParagraph</span><span style="color:#E1E4E8">(</span><span style="color:#79B8FF">2115805536300901</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="updating-paragraphs"><a href="#updating-paragraphs" class="header">Updating Paragraphs</a></h3>
+<p>To update an existing section in the document, you can use the <code>updateParagraph</code> or <code>updateParagraphs</code> methods. These methods take one or more partial section objects and ids to update. Only the provided fields will be updated; other fields will remain unchanged.
+Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.document.</span><span style="color:#B392F0">updateParagraphs</span><span style="color:#E1E4E8">([</span></span>
+<span class="line"><span style="color:#E1E4E8">  {</span></span>
+<span class="line"><span style="color:#E1E4E8">    sectionId: </span><span style="color:#79B8FF">2115805536300901</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    section: {</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'This paragraph has been updated with new text.'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#E1E4E8">  }</span></span>
+<span class="line"><span style="color:#E1E4E8">])</span></span></code></pre>
+<h2 id="history"><a href="#history" class="header">History</a></h2>
+<p>The Document API also provides access to the document history through the <code>api.v1.document.history</code> object. This object has methods for undoing and redoing changes, as well as querying the history state.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+<li><a href="./permissions">Permissions</a> - Explaining script permissions</li>
+</ul> </article>  
+</body>
+</html>

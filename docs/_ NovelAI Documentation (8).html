@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="context-building"><a href="#context-building" class="header">Context Building</a></h1>
+<p>The <code>buildContext</code> method allows scripts to generate the same kind of context that would be used for a standard editor generation. If you just want a quick and easy way to mimic the normal generation logic, this is the API to use.</p>
+<h2 id="what-does-context-mean"><a href="#what-does-context-mean" class="header">What Does “Context” Mean?</a></h2>
+<p>Context is the string of text that gets sent to the language model during generation. It’s built based on the current document content, story settings, and lorebook entries.</p>
+<h2 id="basic-usage"><a href="#basic-usage" class="header">Basic Usage</a></h2>
+<p>To build context for the current document state, use the <code>api.v1.buildContext</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> context </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.</span><span style="color:#B392F0">buildContext</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">for</span><span style="color:#E1E4E8"> (</span><span style="color:#F97583">let</span><span style="color:#E1E4E8"> message </span><span style="color:#F97583">of</span><span style="color:#E1E4E8"> context) {</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Role: ${</span><span style="color:#E1E4E8">message</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">role</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Content: ${</span><span style="color:#E1E4E8">message</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">content</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>The context is returned as an array of message objects, where each message has a <code>role</code> (such as “user”, “assistant”, or “system”) and <code>content</code> (the text of the message). The same format is used for generating with <code>api.v1.generate</code>.</p>
+<h2 id="unsafe-usage"><a href="#unsafe-usage" class="header">Unsafe Usage</a></h2>
+<p>The <code>buildContext</code> function should not be called during the initialization of scripts, as it triggers the <code>onContextBuilt</code> hook which other scripts will not yet be able to respond to. Instead, use the <code>onScriptsLoaded</code> hook to ensure all scripts are initialized before building context.</p>
+<p>Example:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#E1E4E8">api.v1.hooks.</span><span style="color:#B392F0">register</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'onScriptsLoaded'</span><span style="color:#E1E4E8">, </span><span style="color:#F97583">async</span><span style="color:#E1E4E8"> () </span><span style="color:#F97583">=&gt;</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">  let</span><span style="color:#E1E4E8"> context </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.</span><span style="color:#B392F0">buildContext</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">  api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Context has ${</span><span style="color:#E1E4E8">context</span><span style="color:#9ECBFF">.</span><span style="color:#79B8FF">length</span><span style="color:#9ECBFF">} messages`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./hooks">Hooks</a> - Modifying context during generation</li>
+<li><a href="./generation-api">Generation API</a> - Triggering text generation</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

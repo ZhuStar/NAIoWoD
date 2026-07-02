@@ -44,8 +44,11 @@ interface WodApi {
     lorebook: {
       entries: (categoryId?: string) => Promise<LorebookEntryData[]>;
       categories: () => Promise<LorebookCategoryData[]>;
-      createCategory: (data: { id: string; name: string }) => Promise<LorebookCategoryData>;
-      createEntry: (data: { id: string; displayName: string; text: string; category?: string; keys?: string[] }) => Promise<LorebookEntryData>;
+      // `id` is optional: the host generates a uuid when omitted (pass
+      // api.v1.uuid() only when you need to control it). Both return the created
+      // record, so callers read the assigned id off the result.
+      createCategory: (data: { id?: string; name: string }) => Promise<LorebookCategoryData>;
+      createEntry: (data: { id?: string; displayName: string; text: string; category?: string; keys?: string[] }) => Promise<LorebookEntryData>;
     };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
   };
@@ -59,6 +62,10 @@ const __mockStore = new Map<string, unknown>();
 let __mockCategories: LorebookCategoryData[] = [];
 let __mockEntries: LorebookEntryData[] = [];
 let __mockUuidCounter = 0;
+const __mockUuid = (): string => {
+  const g = globalThis as { crypto?: { randomUUID?: () => string } };
+  return g.crypto?.randomUUID?.() ?? `mock-uuid-${++__mockUuidCounter}`;
+};
 
 // Test/off-host helper: wipe the mock lorebook back to a fresh (empty) story.
 // A no-op concern on-host, where the real `api` (not this mock) is used.
@@ -67,10 +74,7 @@ export function __resetLorebookMock(): void { __mockCategories = []; __mockEntri
 const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },
-    uuid: () => {
-      const g = globalThis as { crypto?: { randomUUID?: () => string } };
-      return g.crypto?.randomUUID?.() ?? `mock-uuid-${++__mockUuidCounter}`;
-    },
+    uuid: __mockUuid,
     log: (...args: unknown[]) => console.log(...args),
     storyStorage: {
       get: async (key: string) => __mockStore.get(key),
@@ -89,8 +93,9 @@ const api: WodApi = __host.api ?? {
       categories: async () => __mockCategories,
       entries: async (categoryId?: string) =>
         categoryId === undefined ? __mockEntries : __mockEntries.filter(e => e.category === categoryId),
-      createCategory: async (data) => { const c = { ...data }; __mockCategories.push(c); return c; },
-      createEntry: async (data) => { const e = { ...data }; __mockEntries.push(e); return e; },
+      // Mirror the host: generate a uuid when the caller doesn't supply one.
+      createCategory: async (data) => { const c = { id: data.id ?? __mockUuid(), name: data.name }; __mockCategories.push(c); return c; },
+      createEntry: async (data) => { const e = { id: data.id ?? __mockUuid(), displayName: data.displayName, text: data.text, category: data.category, keys: data.keys }; __mockEntries.push(e); return e; },
     },
     // Off-host there is no engine to fire hooks; registering just records that a
     // handler exists (and keeps import-time `hooks.register(...)` from throwing).
@@ -277,7 +282,7 @@ export class LorebookManager {
   static async ensureCategory(name: string): Promise<{ id: string; created: boolean }> {
     const existing = await LorebookManager.categoryIdByName(name);
     if (existing !== undefined) return { id: existing, created: false };
-    const cat = await api.v1.lorebook.createCategory({ id: api.v1.uuid(), name });
+    const cat = await api.v1.lorebook.createCategory({ name }); // host assigns the id
     return { id: cat.id, created: true };
   }
 
@@ -287,7 +292,7 @@ export class LorebookManager {
     const want = displayName.trim().toLowerCase();
     const entries = await api.v1.lorebook.entries(categoryId);
     if (entries.some(e => (e.displayName ?? "").trim().toLowerCase() === want)) return false;
-    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName, text, category: categoryId });
+    await api.v1.lorebook.createEntry({ displayName, text, category: categoryId }); // host assigns the id
     return true;
   }
 

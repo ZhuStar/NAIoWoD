@@ -19,7 +19,21 @@
 // *id* (categories() resolves names to ids); storyStorage offers setIfAbsent;
 // the host also provides uuid() and log(). The mock below implements the same
 // surface in memory so the engine behaves identically off-host and in tests.
-export type OnTextAdventureInput = (params: { rawInputText: string }) => { inputText: string };
+// Exact host shape (docs/api-reference.html): the handler may be async, may
+// rewrite the input and mode, and may stop generation. Newlines in the
+// returned inputText are NOT allowed (the host replaces them with spaces).
+export interface OnTextAdventureInputReturnValue {
+  stopFurtherScripts?: boolean;
+  inputText?: string;
+  mode?: "action" | "dialogue" | "story";
+  stopGeneration?: boolean;
+}
+export type OnTextAdventureInput = (params: {
+  continuityId?: string;
+  inputText?: string;
+  rawInputText: string;
+  mode?: "action" | "dialogue" | "story";
+}) => OnTextAdventureInputReturnValue | void | Promise<OnTextAdventureInputReturnValue | void>;
 
 export interface LorebookCondition { [k: string]: unknown }
 export interface LorebookEntryData {
@@ -62,11 +76,12 @@ interface WodApi {
       entry: (entryId: string) => Promise<LorebookEntryData | null>;
       entries: (categoryId?: string) => Promise<LorebookEntryData[]>;
       categories: () => Promise<LorebookCategoryData[]>;
-      // `id` is optional: the host generates a uuid when omitted. Pass
-      // api.v1.uuid() when you want to keep the id (to fetch/recreate via
-      // entry(id) later). Both return the created record.
-      createCategory: (data: { id?: string; name?: string; enabled?: boolean; settings?: { entryHeader?: string } }) => Promise<LorebookCategoryData>;
-      createEntry: (data: { id?: string; displayName?: string; text?: string; category?: string; keys?: string[]; hidden?: boolean; enabled?: boolean }) => Promise<LorebookEntryData>;
+      // Per the API reference: create* take Partial objects and resolve to the
+      // NEW ID (a string). Pass id: api.v1.uuid() to control/reuse the id.
+      createCategory: (data: Partial<LorebookCategoryData>) => Promise<string>;
+      createEntry: (data: Partial<LorebookEntryData>) => Promise<string>;
+      updateEntry: (id: string, entry: Partial<LorebookEntryData>) => Promise<void>;
+      removeEntry: (id: string) => Promise<void>;
     };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
   };
@@ -108,9 +123,15 @@ const api: WodApi = __host.api ?? {
       categories: async () => __mockCategories,
       entries: async (categoryId?: string) =>
         categoryId === undefined ? __mockEntries : __mockEntries.filter(e => e.category === categoryId),
-      // Mirror the host: generate a uuid when the caller doesn't supply one.
-      createCategory: async (data) => { const c = { id: data.id ?? __mockUuid(), name: data.name }; __mockCategories.push(c); return c; },
-      createEntry: async (data) => { const e = { id: data.id ?? __mockUuid(), displayName: data.displayName, text: data.text, category: data.category, keys: data.keys }; __mockEntries.push(e); return e; },
+      // Mirror the host: generate a uuid when the caller doesn't supply one,
+      // and resolve to the new ID (a string), per the API reference.
+      createCategory: async (data) => { const c = { ...data, id: data.id ?? __mockUuid() }; __mockCategories.push(c); return c.id; },
+      createEntry: async (data) => { const e = { ...data, id: data.id ?? __mockUuid() }; __mockEntries.push(e); return e.id; },
+      updateEntry: async (id, entry) => {
+        const i = __mockEntries.findIndex(e => e.id === id);
+        if (i !== -1) __mockEntries[i] = { ...__mockEntries[i], ...entry, id };
+      },
+      removeEntry: async (id) => { __mockEntries = __mockEntries.filter(e => e.id !== id); },
     },
     // Off-host there is no engine to fire hooks; registering just records that a
     // handler exists (and keeps import-time `hooks.register(...)` from throwing).
@@ -324,6 +345,20 @@ export class LorebookManager {
     return text === undefined ? [] : LorebookManager.parseList(text);
   }
 
+  // Overwrite an entry's text (found by category + displayName). Returns
+  // whether the entry existed. This is also what a player's manual lorebook
+  // edit amounts to, so tests use it to simulate one.
+  static async updateEntryText(categoryName: string, displayName: string, text: string): Promise<boolean> {
+    const want = displayName.trim().toLowerCase();
+    for (const entry of await LorebookManager.entriesInCategory(categoryName)) {
+      if ((entry.displayName ?? "").trim().toLowerCase() === want) {
+        await api.v1.lorebook.updateEntry(entry.id, { text });
+        return true;
+      }
+    }
+    return false;
+  }
+
   static async allTalents(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:talents"); }
   static async allSkills(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:skills"); }
   static async allKnowledges(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:knowledges"); }
@@ -335,9 +370,9 @@ export class LorebookManager {
     const existing = await LorebookManager.categoryIdByName(name);
     if (existing !== undefined) return { id: existing, created: false };
     // We keep the uuid (via api.v1.uuid()) so the category can be re-fetched or
-    // recreated with the same id later.
-    const cat = await api.v1.lorebook.createCategory({ id: api.v1.uuid(), name, enabled: true });
-    return { id: cat.id, created: true };
+    // recreated with the same id later. createCategory resolves to the new id.
+    const id = await api.v1.lorebook.createCategory({ id: api.v1.uuid(), name, enabled: true });
+    return { id, created: true };
   }
 
   // Create an entry unless one with that displayName already exists in the
@@ -1894,16 +1929,213 @@ export class CharacterFactory {
 // inner text here. For now it just returns that text verbatim (a no-op parse);
 // verbs like `roll`, `spend` or `damage` will be dispatched from here later.
 // =============================================================================
-export class CommandRouter {
-  static route(command: string): string {
-    return command.trim();
+// =============================================================================
+// PLAYABLE CHARACTERS - potential characters created via [[create-playable]]
+// -----------------------------------------------------------------------------
+// A PlayableCharacter is the persisted record of a (possibly in-progress)
+// player character: a name, one or MORE templates (hybrids are legal; how
+// multiple templates merge is resolved later, at build time), and allocation
+// buckets that start empty ("everything unassigned").
+//
+// Source of truth is the LOREBOOK entry (category wod:player-characters), which
+// the player may edit directly while creator mode is on; storyStorage carries a
+// synced copy for fast access. Sync always flows lorebook -> storage, never the
+// other way, except when the script itself changes a character (save() writes
+// both, lorebook first).
+// =============================================================================
+export const PLAYER_CHARACTERS_CATEGORY = "wod:player-characters";
+
+export interface PlayableCharacter {
+  id: string;
+  name: string;
+  templates: string[];                    // normalized TEMPLATES keys, 1+
+  stage: "potential" | "ready";           // potential = not yet buildable
+  attributes: Record<string, number>;     // all buckets start empty
+  abilities: Record<string, number>;
+  backgrounds: Record<string, number>;
+  virtues: Record<string, number>;
+  disciplines: Record<string, number>;
+  traits: Record<string, number>;
+  poolStarts: Record<string, number>;
+  tags: string[];                         // free-form (clan, ghoul, ...)
+}
+
+export class CharacterStore {
+  private static _storage = new StorageManager();
+  private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
+  private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
+
+  static newPotential(name: string, templates: string[]): PlayableCharacter {
+    return {
+      id: api.v1.uuid(),
+      name,
+      templates: templates.map(t => StringUtil.normalize(t)),
+      stage: "potential",
+      attributes: {}, abilities: {}, backgrounds: {}, virtues: {},
+      disciplines: {}, traits: {}, poolStarts: {},
+      tags: [],
+    };
+  }
+
+  private static _entryText(char: PlayableCharacter): string {
+    return [
+      `Player character sheet for ${char.name}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
+      "character's data. Edit it only while creator mode is on ([[creator-mode set=true]]);",
+      "your edits are synced into the game when you issue any command or turn creator mode off.",
+      SRD_HEADER_MARKER,
+      JSON.stringify(char, null, 2),
+    ].join("\n");
+  }
+
+  // Write-through save: lorebook entry (create or update) first, then storage.
+  static async save(char: PlayableCharacter): Promise<void> {
+    const { id: categoryId } = await LorebookManager.ensureCategory(PLAYER_CHARACTERS_CATEGORY);
+    const want = CharacterStore._entryName(char.name);
+    const entries = await api.v1.lorebook.entries(categoryId);
+    const existing = entries.find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+    if (existing) {
+      await api.v1.lorebook.updateEntry(existing.id, { text: CharacterStore._entryText(char) });
+    } else {
+      await api.v1.lorebook.createEntry({
+        id: api.v1.uuid(), displayName: want, category: categoryId,
+        text: CharacterStore._entryText(char),
+      });
+    }
+    await CharacterStore._storage.set(CharacterStore._key(char.name), char);
+  }
+
+  static async load(name: string): Promise<PlayableCharacter | undefined> {
+    return await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
+  }
+
+  // Lorebook -> storage. The player's lorebook edits win; unparseable entries
+  // are reported, not synced. Returns what happened for the OOC reply.
+  static async syncFromLorebook(): Promise<{ synced: string[]; failed: string[] }> {
+    const synced: string[] = [];
+    const failed: string[] = [];
+    for (const entry of await LorebookManager.entriesInCategory(PLAYER_CHARACTERS_CATEGORY)) {
+      const label = (entry.displayName ?? "").trim();
+      const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
+      if (!body.startsWith("{")) { if (label) failed.push(label); continue; }
+      try {
+        const char = JSON.parse(body) as PlayableCharacter;
+        if (!char || typeof char.name !== "string" || !Array.isArray(char.templates)) { failed.push(label); continue; }
+        await CharacterStore._storage.set(CharacterStore._key(char.name), char);
+        synced.push(char.name);
+      } catch {
+        failed.push(label);
+      }
+    }
+    return { synced, failed };
   }
 }
 
-api.v1.hooks.register("onTextAdventureInput", (params: Parameters<OnTextAdventureInput>[0]) => {
-    let parsedText = params.rawInputText.replace(/\[\[(.*?)\]\]/g, (match, commandBody) => {
-        return CommandRouter.route(commandBody);
-    });
+// =============================================================================
+// COMMAND ROUTER - dispatch for inline [[...]] player commands
+// -----------------------------------------------------------------------------
+// onTextAdventureInput pulls every [[bracketed]] command out of the player's
+// input, dispatches it here, and replaces it with a single-line
+// ((OOC-Storyteller: ...)) note (the host forbids newlines in inputText).
+// Implemented verbs: creator-mode, create-playable. More (roll, damage,
+// spend, extended-roll) plug into the same table.
+// =============================================================================
+export interface ParsedCommand { name: string; args: Record<string, string>; }
 
-    return { inputText: parsedText };
+export class CommandRouter {
+  private static _storage = new StorageManager();
+
+  // `verb key=value key="quoted value"` -> { name: verb, args: {...} }
+  static parse(body: string): ParsedCommand {
+    const trimmed = body.trim();
+    const nameMatch = trimmed.match(/^[A-Za-z][\w-]*/);
+    const name = (nameMatch?.[0] ?? "").toLowerCase();
+    const args: Record<string, string> = {};
+    const argRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|[^\s]+)/g;
+    for (const m of trimmed.slice(name.length).matchAll(argRe)) {
+      args[m[1].toLowerCase()] = m[3] ?? m[4] ?? m[2];
+    }
+    return { name, args };
+  }
+
+  static async creatorModeEnabled(): Promise<boolean> {
+    return (await CommandRouter._storage.getOrDefault("creator-mode", false)) as boolean;
+  }
+
+  // Routes one command body to its handler; returns the OOC replacement text
+  // (always a single line - the host strips newlines from inputText).
+  static async route(body: string): Promise<string> {
+    const cmd = CommandRouter.parse(body);
+    // While creator mode is on, the player may have edited character entries:
+    // pick those edits up before any command runs.
+    if (await CommandRouter.creatorModeEnabled()) await CharacterStore.syncFromLorebook();
+
+    switch (cmd.name) {
+      case "creator-mode": return CommandRouter._creatorMode(cmd);
+      case "create-playable": return CommandRouter._createPlayable(cmd);
+      default:
+        return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: creator-mode, create-playable.))`;
+    }
+  }
+
+  private static async _creatorMode(cmd: ParsedCommand): Promise<string> {
+    const set = (cmd.args["set"] ?? "").toLowerCase();
+    if (set !== "true" && set !== "false") {
+      return `((OOC-Storyteller: creator-mode needs set=true or set=false.))`;
+    }
+    if (set === "true") {
+      await CommandRouter._storage.set("creator-mode", true);
+      return `((OOC-Storyteller: Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.))`;
+    }
+    // Leaving creator mode: capture any final lorebook edits, then switch off.
+    const { synced, failed } = await CharacterStore.syncFromLorebook();
+    await CommandRouter._storage.set("creator-mode", false);
+    const parts = [`Creator mode OFF.`];
+    if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
+    if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
+    return `((OOC-Storyteller: ${parts.join(" ")}))`;
+  }
+
+  private static async _createPlayable(cmd: ParsedCommand): Promise<string> {
+    const name = cmd.args["name"]?.trim();
+    if (!name) return `((OOC-Storyteller: create-playable needs name="...".))`;
+    const rawTemplates = (cmd.args["templates"] ?? cmd.args["template"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+    if (rawTemplates.length === 0) return `((OOC-Storyteller: create-playable needs templates="a,b,..." (at least one).))`;
+    const unknown = rawTemplates.filter(t => !(t in TEMPLATES));
+    if (unknown.length) {
+      return `((OOC-Storyteller: Unknown template(s): ${unknown.join(", ")}. Valid: ${Object.keys(TEMPLATES).join(", ")}.))`;
+    }
+    if (await CharacterStore.load(name)) {
+      return `((OOC-Storyteller: A character named "${name}" already exists. Edit it in creator mode, or pick another name.))`;
+    }
+    const char = CharacterStore.newPotential(name, rawTemplates);
+    await CharacterStore.save(char);
+    return `((OOC-Storyteller: Created playable character "${name}" [${rawTemplates.join("+")}] - all traits unassigned. Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it.))`;
+  }
+}
+
+const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
+
+// Replace every [[command]] in the player's adventure-mode input with its OOC
+// note, running commands in order. If the input was ONLY commands (no prose),
+// generation is suppressed - the player is operating the system, not the story.
+export async function processAdventureInput(rawInputText: string): Promise<OnTextAdventureInputReturnValue | undefined> {
+  const matches = [...rawInputText.matchAll(COMMAND_PATTERN)];
+  if (matches.length === 0) return undefined; // not ours; leave input untouched
+
+  let out = "";
+  let cursor = 0;
+  for (const m of matches) {
+    out += rawInputText.slice(cursor, m.index);
+    out += await CommandRouter.route(m[1]);
+    cursor = (m.index ?? 0) + m[0].length;
+  }
+  out += rawInputText.slice(cursor);
+
+  const prose = rawInputText.replace(COMMAND_PATTERN, "").trim();
+  // The host forbids newlines in inputText (it would replace them with spaces).
+  return { inputText: out.replace(/\n/g, " "), stopGeneration: prose.length === 0 };
+}
+
+api.v1.hooks.register("onTextAdventureInput", async (params: Parameters<OnTextAdventureInput>[0]) => {
+  return processAdventureInput(params.rawInputText);
 });

@@ -48,8 +48,10 @@ instead of account storage. Read the current value back with
 ## 2. Lorebook (already wrapped in `src/wod.ts`)
 
 `api.v1.lorebook`: `entries(categoryId?)`, `categories()`, `entry(entryId)`,
-`createCategory({ id?, name, enabled?, settings? })`,
-`createEntry({ id?, displayName, text, category?, keys?, hidden?, enabled? })`.
+`category(categoryId)`, `createCategory(Partial<LorebookCategory>)` →
+**`Promise<string>` (the new id)**, `createEntry(Partial<LorebookEntry>)` →
+**`Promise<string>`**, `updateEntry(id, Partial<LorebookEntry>)`,
+`updateCategory(id, …)`, `removeEntry(id)`, `removeCategory(id)`.
 Entries are filtered by category **id**, not name — resolve names via
 `categories()` first. The host generates a uuid when `id` is omitted; pass
 `api.v1.uuid()` when you want to keep/reuse it. Our `LorebookManager` handles
@@ -125,9 +127,14 @@ there is no `prompt()`/`confirm()`.
 
 | Hook | Handler shape (verbatim) |
 | --- | --- |
-| `onTextAdventureInput` | `({ rawInputText }) => ({ inputText })` — rewrite the player's adventure-mode input (our `[[…]]` command entry point) |
-| `onContextBuilt` | `(params: { messages: {role, content}[] }) => { messages } \| void` — mutate/extend the prompt right before generation |
+| `onTextAdventureInput` | `({ continuityId, inputText, rawInputText, mode }) => { inputText?, mode?, stopGeneration?, stopFurtherScripts? } \| void \| Promise<…>` — rewrite adventure-mode input (our `[[…]]` entry point). **Newlines in the returned `inputText` are replaced with spaces** by the host; return `inputText: ""` and write the document yourself if you need them. `stopGeneration: true` suppresses the AI turn. |
+| `onContextBuilt` | `(params: { messages: {role, content}[] }) => { messages, stopGeneration?, stopFurtherScripts? } \| void` — mutate/extend the prompt right before generation |
 | `onResponse` | `(params: { text: string[] }) => { text } \| void` — transform streamed output batches (called incrementally, not just at the end) |
+
+Handlers may be async. Other hooks exist (`onBeforeContextBuild`,
+`onGenerationRequested`/`onGenerationEnd`, `onHistoryNavigated`,
+`onDocumentConvertedToText`, `onLorebookEntrySelected`, `onScriptsLoaded`);
+see `docs/hooks.html`.
 
 ## 7. Generation, document & editor (for the Storyteller loop later)
 
@@ -177,6 +184,11 @@ there is no `prompt()`/`confirm()`.
 7. `memoryLimit` in the frontmatter is real (examples use 8 MB) — keep big data
    in storage/lorebook, not module globals.
 
-*Unverified areas (docs unreachable from this environment, not exercised by any
-example): exact `LorebookCondition` shape, full `WindowOptions`/part-type list,
-and any parts beyond §4. When touching those, fetch `script-types.d.ts` first.*
+**Full local mirror:** the complete official documentation now lives in this
+repo as `docs/*.html` (`api-reference.html` is the whole API index with exact
+signatures; plus per-topic pages: hooks, lorebook, storage, story-settings,
+generation, context-building, document, permissions, ui-extensions, ui-parts,
+modals-and-windows). When anything here is in doubt, grep those. Also in the
+reference but not summarized above: `api.v1.memory`, `api.v1.messaging`
+(cross-script), `api.v1.prefill`, `api.v1.random.roll()`, `api.v1.maxTokens()`,
+`rolloverTokens`/`RolloverHelper`.

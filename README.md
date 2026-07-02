@@ -249,6 +249,36 @@ Conventions (defined in `SRD_CATEGORIES`, installed by `bootstrap()`):
 `LorebookManager.allTalents()` etc. return those lists;
 `LorebookParser.ParseFromApi()` (async) builds zero-dot `Stat` maps from them.
 
+## Player commands & character creation
+
+In adventure mode, `[[…]]` blocks in the input box are commands. The
+`onTextAdventureInput` hook extracts each one, dispatches it through
+`CommandRouter`, and replaces it with a single-line `((OOC-Storyteller: …))`
+note; if the input contained *only* commands, generation is suppressed (you're
+operating the system, not the story).
+
+```
+[[creator-mode set=true]]
+[[create-playable name="Erik the Red" templates="vampire,werewolf,mage"]]
+[[creator-mode set=false]]
+```
+
+- **`create-playable`** makes a *potential* character: a name, one or **more**
+  templates (hybrids are stored as-is; how they merge is resolved later at
+  build time), and every allocation bucket empty. Unknown templates are
+  rejected with the valid list; duplicate names are refused.
+- The character is written to **both** a lorebook entry
+  (`pc:<name>` in the `wod:player-characters` category — instructions above a
+  `=====` marker, the sheet as JSON below it) and `storyStorage`. **The
+  lorebook entry is the source of truth.**
+- **`creator-mode set=true`** lets the player edit those entries directly;
+  edits are synced **lorebook → storage** whenever a command runs and when
+  creator mode is turned off. Unparseable edits are reported and skipped, never
+  synced. The script's own writes (`CharacterStore.save`) go lorebook-first.
+
+🚧 Next for creation: allocation commands (attributes/abilities/etc.),
+multi-template resolution, and turning a finished sheet into a `LiveCharacter`.
+
 ## Merits & Flaws
 
 Defaults live in `DEFAULT_MERITS_FLAWS` (an in-code list served by

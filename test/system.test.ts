@@ -9,6 +9,7 @@ import {
   Pool, bloodForGeneration,
   MoralityTrait,
   StorageManager, LorebookManager, __resetLorebookMock,
+  CommandRouter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
@@ -782,5 +783,110 @@ describe("LorebookManager.parseList (header marker + comments)", () => {
 
   test("with no marker, the whole text is data", () => {
     expect(LorebookManager.parseList("Foo\nBar")).toEqual(["Foo", "Bar"]);
+  });
+});
+
+describe("CommandRouter.parse", () => {
+  test("parses verb, quoted and bare args", () => {
+    const c = CommandRouter.parse('create-playable name="Erik the Red" templates=vampire,werewolf');
+    expect(c.name).toBe("create-playable");
+    expect(c.args.name).toBe("Erik the Red");
+    expect(c.args.templates).toBe("vampire,werewolf");
+  });
+
+  test("single-quoted values and case-insensitive keys", () => {
+    const c = CommandRouter.parse("creator-mode SET='true'");
+    expect(c.name).toBe("creator-mode");
+    expect(c.args.set).toBe("true");
+  });
+});
+
+describe("[[create-playable]] and creator mode", () => {
+  test("creates a potential multi-template character in lorebook + storage", async () => {
+    const reply = await CommandRouter.route('create-playable name="Absurd Al" templates="vampire, werewolf, mage"');
+    expect(reply).toContain("Created playable character");
+    expect(reply).toContain("vampire+werewolf+mage");
+
+    // storage copy
+    const stored = await CharacterStore.load("Absurd Al");
+    expect(stored!.templates).toEqual(["vampire", "werewolf", "mage"]);
+    expect(stored!.stage).toBe("potential");
+    expect(stored!.attributes).toEqual({}); // everything unassigned
+
+    // lorebook entry is the source of truth
+    const text = await LorebookManager.entryText(PLAYER_CHARACTERS_CATEGORY, "pc:absurd-al");
+    expect(text).toContain("=====");
+    const parsed = JSON.parse(LorebookManager.contentBelowHeader(text!));
+    expect(parsed.name).toBe("Absurd Al");
+    expect(parsed.templates).toEqual(["vampire", "werewolf", "mage"]);
+  });
+
+  test("rejects unknown templates, naming the valid ones", async () => {
+    const reply = await CommandRouter.route('create-playable name="Bad" templates="vampire,unicorn"');
+    expect(reply).toContain("Unknown template(s): unicorn");
+    expect(reply).toContain("vampire");
+    expect(await CharacterStore.load("Bad")).toBeUndefined();
+  });
+
+  test("refuses duplicate names", async () => {
+    await CommandRouter.route('create-playable name="Twin" templates=mortal');
+    const reply = await CommandRouter.route('create-playable name="Twin" templates=demon');
+    expect(reply).toContain("already exists");
+    expect((await CharacterStore.load("Twin"))!.templates).toEqual(["mortal"]);
+  });
+
+  test("creator mode syncs player lorebook edits into storage (lorebook wins)", async () => {
+    await CommandRouter.route('create-playable name="Editable" templates=mortal');
+    await CommandRouter.route("creator-mode set=true");
+
+    // The player edits the sheet directly in the lorebook: becomes a ghoul.
+    const char = (await CharacterStore.load("Editable"))!;
+    const edited = { ...char, templates: ["ghoul"], tags: ["tzimisce-thrall"] };
+    const newText = `edited by hand\n=====\n${JSON.stringify(edited, null, 2)}`;
+    expect(await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:editable", newText)).toBe(true);
+
+    // Turning creator mode off picks the edit up (sync is lorebook -> storage).
+    const reply = await CommandRouter.route("creator-mode set=false");
+    expect(reply).toContain("Synced from lorebook");
+    const synced = (await CharacterStore.load("Editable"))!;
+    expect(synced.templates).toEqual(["ghoul"]);
+    expect(synced.tags).toEqual(["tzimisce-thrall"]);
+  });
+
+  test("unparseable player edits are reported, not synced", async () => {
+    await CommandRouter.route('create-playable name="Broken" templates=mortal');
+    await CommandRouter.route("creator-mode set=true");
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:broken", "junk\n=====\n{not json");
+    const reply = await CommandRouter.route("creator-mode set=false");
+    expect(reply).toContain("Could not parse");
+    expect(reply).toContain("pc:broken");
+    expect((await CharacterStore.load("Broken"))!.templates).toEqual(["mortal"]); // old copy intact
+  });
+});
+
+describe("processAdventureInput (the [[...]] hook)", () => {
+  test("replaces commands with OOC notes and suppresses generation for command-only input", async () => {
+    const r = await processAdventureInput('[[creator-mode set=true]] [[creator-mode set=false]]');
+    expect(r!.stopGeneration).toBe(true);
+    expect(r!.inputText).toContain("Creator mode ON");
+    expect(r!.inputText).toContain("Creator mode OFF");
+    expect(r!.inputText).not.toContain("[[");
+    expect(r!.inputText).not.toContain("\n"); // host forbids newlines
+  });
+
+  test("keeps surrounding prose and lets generation proceed", async () => {
+    const r = await processAdventureInput('I sit down to plan. [[creator-mode set=false]] Then I sleep.');
+    expect(r!.stopGeneration).toBe(false);
+    expect(r!.inputText!.startsWith("I sit down to plan. ((OOC-Storyteller:")).toBe(true);
+    expect(r!.inputText!.endsWith("Then I sleep.")).toBe(true);
+  });
+
+  test("returns undefined for plain input (leaves it untouched)", async () => {
+    expect(await processAdventureInput("Just walking along.")).toBeUndefined();
+  });
+
+  test("unknown commands answer with the available list", async () => {
+    const r = await processAdventureInput("[[frobnicate now=please]]");
+    expect(r!.inputText).toContain('Unknown command "frobnicate"');
   });
 });

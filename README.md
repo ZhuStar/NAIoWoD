@@ -202,6 +202,61 @@ Everything else (Celerity, Auspex, Dominate, …) is a rated dot plus the generi
 `character.Roll(pool, { bonusDiceFrom: ["celerity"] })` bonus-dice hook, until
 per-power effects and a turn system exist.
 
+## Storage & Lorebook — the editable database
+
+The engine talks to NovelAI through two managers (both mirroring the real
+scripting API, which is async and — for lorebook entries — filtered by
+category *id*):
+
+- **`StorageManager`** — namespaced persistent storage. Every key is prefixed
+  with a uuid (the script id by default): `get`, `getOrDefault`, `set`,
+  `setIfAbsent`, `has`, `delete` — all async, written into the story — plus
+  `tempGet`/`tempSet`/`tempGetOrDefault`/`tempSetIfAbsent`/`tempHas`/
+  `tempDelete`, the same semantics backed by an in-memory map (this session
+  only, e.g. for extended-roll state). `SaveToStory()` now writes through it.
+- **`LorebookManager`** — reads lorebook entries as *data*, so the user can
+  edit game rules like database tables in the NovelAI lorebook UI. It resolves
+  category **names** to ids via `categories()`, then filters entries.
+
+Conventions (also seeded in the local mock):
+
+| Category | Entry | Text format |
+| --- | --- | --- |
+| `srd:abilities` | `srd:abilities:talents` / `:skills` / `:knowledges` | one ability per line |
+| `srd:backgrounds` | `srd:backgrounds:all` | one background per line |
+| `srd:merits-flaws` | any entry | JSON array of merit/flaw definitions |
+
+`LorebookManager.allTalents()` etc. return those lists;
+`LorebookParser.ParseFromApi()` (now async) builds zero-dot `Stat` maps from
+them.
+
+## Merits & Flaws
+
+Defaults live in `DEFAULT_MERITS_FLAWS` (an in-code list served by
+`MeritFlawRegistry`); the lorebook overlays it —
+`MeritFlawRegistry.loadFromLorebook()` merges any JSON definitions found in
+`srd:merits-flaws`, so custom content needs no code change.
+
+```ts
+const sasha = CharacterFactory.create(TEMPLATE_GHOUL, "Sasha", {
+  tags: ["revenant", "zantosa"],          // free-form prerequisite tags
+  meritsFlaws: ["Acute Senses", { name: "Hunted" }],
+});
+sasha.AddMeritFlaw("Sturdy Stock");        // ok: requires the "revenant" tag
+sasha.AddMeritFlaw("Eat Food", { waivePrerequisites: true }); // ST override
+sasha.MeritPointsSpent; sasha.FlawPointsGained; // for the future freebie engine
+```
+
+- **Prerequisites** (`requires`) may name `templates` (any-of, matched against
+  the template name or a tag), `tags` (all-of — `toreador`, `revenant`,
+  `inconnu`, …) and other `meritsFlaws` (all-of). `MeetsRequirements` reports
+  every unmet item; `waivePrerequisites: true` skips the check case-by-case.
+- **Points** are a number or an array of allowed ratings (variable-cost
+  merits/flaws validate the chosen value). Merits total into
+  `MeritPointsSpent`, flaws into `FlawPointsGained`.
+- 🚧 Mechanical *effects* of merits/flaws (dice/difficulty tweaks) aren't wired
+  yet — that's the effects layer, coming with the cost engine.
+
 ## Status / notes
 
 - Starting values, soak tables and the generation→blood table are **data** —

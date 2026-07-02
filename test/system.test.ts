@@ -8,6 +8,8 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
+  StorageManager, LorebookManager,
+  MeritFlawRegistry,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -512,14 +514,14 @@ describe("LiveCharacter: pools, willpower and persistence", () => {
     expect(m.Health.Level).toBe("Mauled");
   });
 
-  test("SaveToStory serializes the full sheet", () => {
+  test("SaveToStory serializes the full sheet", async () => {
     const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Archive", {
       generation: 10,
       virtues: { conscience: 2, "self-control": 3, courage: 3 },
       attributes: { stamina: 2 },
     });
     v.TakeDamage("bashing", 2, { soak: false });
-    const data = v.SaveToStory();
+    const data = await v.SaveToStory();
     expect(data.name).toBe("Archive");
     expect(data.template).toBe("Vampire (Dark Ages)");
     expect(data.morality).toEqual({ road: "Road of Humanity", value: 5 });
@@ -546,13 +548,13 @@ describe("Disciplines", () => {
     expect(DISCIPLINES.dominate.clans).toContain("ventrue");
   });
 
-  test("the factory seeds Discipline dots; DisciplineRating and save read them", () => {
+  test("the factory seeds Discipline dots; DisciplineRating and save read them", async () => {
     const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Boss", {
       generation: 8, disciplines: { potence: 3, dominate: 2 },
     });
     expect(v.DisciplineRating("potence")).toBe(3);
     expect(v.Disciplines.get("dominate")!.Category).toBe(Category.DISCIPLINE);
-    expect(v.SaveToStory().disciplines.find(d => d.name === "potence")!.value).toBe(3);
+    expect((await v.SaveToStory()).disciplines.find(d => d.name === "potence")!.value).toBe(3);
   });
 
   test("Potence adds its rating as automatic successes", () => {
@@ -583,5 +585,150 @@ describe("Disciplines", () => {
       generation: 8, attributes: { stamina: 3 }, disciplines: { fortitude: 2 },
     });
     expect(v.SoakPoolFor("lethal")).toBe(5); // stamina 3 + fortitude 2, not 7
+  });
+});
+
+describe("StorageManager", () => {
+  test("persists under the prefixed key and reads back", async () => {
+    const s = new StorageManager("test-prefix");
+    await s.set("alpha", { v: 1 });
+    expect(await s.get("alpha")).toEqual({ v: 1 });
+    expect(await s.has("alpha")).toBe(true);
+    expect(await s.getOrDefault("missing", 42)).toBe(42);
+  });
+
+  test("setIfAbsent only writes once", async () => {
+    const s = new StorageManager("test-sia");
+    expect(await s.setIfAbsent("k", 1)).toBe(true);
+    expect(await s.setIfAbsent("k", 2)).toBe(false);
+    expect(await s.get("k")).toBe(1);
+  });
+
+  test("delete reports whether the key existed", async () => {
+    const s = new StorageManager("test-del");
+    await s.set("k", "x");
+    expect(await s.delete("k")).toBe(true);
+    expect(await s.delete("k")).toBe(false);
+    expect(await s.has("k")).toBe(false);
+  });
+
+  test("prefixes isolate managers from each other", async () => {
+    const a = new StorageManager("pref-a");
+    const b = new StorageManager("pref-b");
+    await a.set("k", "A");
+    await b.set("k", "B");
+    expect(await a.get("k")).toBe("A");
+    expect(await b.get("k")).toBe("B");
+  });
+
+  test("temp variants mirror the API in memory only", async () => {
+    const s = new StorageManager("test-temp");
+    expect(s.tempSetIfAbsent("k", 1)).toBe(true);
+    expect(s.tempSetIfAbsent("k", 2)).toBe(false);
+    expect(s.tempGet("k")).toBe(1);
+    expect(s.tempGetOrDefault("nope", "fallback")).toBe("fallback");
+    expect(s.tempHas("k")).toBe(true);
+    expect(s.tempDelete("k")).toBe(true);
+    expect(s.tempHas("k")).toBe(false);
+    expect(await s.has("k")).toBe(false); // persistent storage never touched
+  });
+});
+
+describe("LorebookManager", () => {
+  test("resolves category names to ids and lists their entries", async () => {
+    const entries = await LorebookManager.entriesInCategory("srd:abilities");
+    expect(entries).toHaveLength(3);
+  });
+
+  test("reads the ability lists from srd:abilities entries", async () => {
+    expect(await LorebookManager.allTalents()).toContain("Brawl");
+    expect(await LorebookManager.allSkills()).toContain("Ride");
+    expect(await LorebookManager.allKnowledges()).toContain("Occult");
+    expect(await LorebookManager.allBackgrounds()).toContain("Generation");
+  });
+
+  test("unknown categories and entries come back empty", async () => {
+    expect(await LorebookManager.entriesInCategory("srd:nope")).toEqual([]);
+    expect(await LorebookManager.listFrom("srd:abilities", "srd:abilities:nope")).toEqual([]);
+    expect(await LorebookManager.entryText("srd:abilities", "srd:abilities:nope")).toBeUndefined();
+  });
+});
+
+describe("Merits & Flaws", () => {
+  test("the registry serves defaults case-insensitively", () => {
+    expect(MeritFlawRegistry.get("Iron Will")!.points).toBe(3);
+    expect(MeritFlawRegistry.get("iron-will")!.kind).toBe("merit");
+  });
+
+  test("plain merits and flaws attach and total their points", () => {
+    const m = CharacterFactory.create(TEMPLATE_MORTAL, "Quirky");
+    m.AddMeritFlaw("Acute Senses");
+    m.AddMeritFlaw("Hunted");
+    expect(m.HasMeritFlaw("acute-senses")).toBe(true);
+    expect(m.MeritPointsSpent).toBe(1);
+    expect(m.FlawPointsGained).toBe(4);
+  });
+
+  test("template prerequisites gate, match templates, and can be waived", () => {
+    const mortal = CharacterFactory.create(TEMPLATE_MORTAL, "Warm");
+    expect(() => mortal.AddMeritFlaw("Eat Food")).toThrow(/prerequisites not met/);
+    mortal.AddMeritFlaw("Eat Food", { waivePrerequisites: true });
+    expect(mortal.HasMeritFlaw("eat-food")).toBe(true);
+
+    const vampire = CharacterFactory.create(TEMPLATE_VAMPIRE, "Cold", { generation: 12 });
+    vampire.AddMeritFlaw("Eat Food"); // "vampire" matches "Vampire (Dark Ages)"
+    expect(vampire.HasMeritFlaw("eat-food")).toBe(true);
+  });
+
+  test("tag prerequisites work against character tags (lorebook-defined merit)", async () => {
+    MeritFlawRegistry.reset();
+    const loaded = await MeritFlawRegistry.loadFromLorebook();
+    expect(loaded).toBeGreaterThan(0); // the mock lorebook defines "Sturdy Stock"
+
+    const revenant = CharacterFactory.create(TEMPLATE_GHOUL, "Sasha", { tags: ["revenant", "zantosa"] });
+    revenant.AddMeritFlaw("Sturdy Stock");
+    expect(revenant.HasMeritFlaw("sturdy-stock")).toBe(true);
+
+    const plain = CharacterFactory.create(TEMPLATE_GHOUL, "Igor");
+    expect(() => plain.AddMeritFlaw("Sturdy Stock")).toThrow(/tag:revenant/);
+  });
+
+  test("merit-on-merit prerequisites chain", () => {
+    MeritFlawRegistry.register({ name: "Old Blood", kind: "merit", points: 2, requires: { meritsFlaws: ["iron-will"] } });
+    const m = CharacterFactory.create(TEMPLATE_MORTAL, "Stubborn");
+    expect(() => m.AddMeritFlaw("Old Blood")).toThrow(/merit-flaw:iron-will/);
+    m.AddMeritFlaw("Iron Will");
+    m.AddMeritFlaw("Old Blood");
+    expect(m.MeritPointsSpent).toBe(5);
+    MeritFlawRegistry.reset();
+  });
+
+  test("variable point costs validate the chosen rating", () => {
+    MeritFlawRegistry.register({ name: "Contested Domain", kind: "flaw", points: [1, 2, 3] });
+    const m = CharacterFactory.create(TEMPLATE_MORTAL, "Landed");
+    expect(() => m.AddMeritFlaw("Contested Domain", { points: 5 })).toThrow(/one of \[1, 2, 3\]/);
+    m.AddMeritFlaw("Contested Domain", { points: 2 });
+    expect(m.FlawPointsGained).toBe(2);
+    MeritFlawRegistry.reset();
+  });
+
+  test("duplicates and unknown names are rejected", () => {
+    const m = CharacterFactory.create(TEMPLATE_MORTAL, "Once");
+    m.AddMeritFlaw("Dark Secret");
+    expect(() => m.AddMeritFlaw("Dark Secret")).toThrow(/already taken/);
+    expect(() => m.AddMeritFlaw("Totally Made Up")).toThrow(/Unknown merit\/flaw/);
+  });
+
+  test("the factory seeds tags and merits/flaws; SaveToStory includes them", async () => {
+    const v = CharacterFactory.create(TEMPLATE_VAMPIRE, "Milov", {
+      generation: 10,
+      tags: ["tzimisce"],
+      meritsFlaws: ["Eat Food", { name: "Hunted" }],
+    });
+    expect(v.HasTag("tzimisce")).toBe(true);
+    const data = await v.SaveToStory();
+    expect(data.tags).toContain("tzimisce");
+    expect(data.meritsFlaws).toContainEqual({ name: "eat-food", kind: "merit", points: 1 });
+    expect(data.meritsFlaws).toContainEqual({ name: "hunted", kind: "flaw", points: 4 });
   });
 });

@@ -113,11 +113,11 @@ describe("Tracker", () => {
 });
 
 describe("LorebookParser", () => {
-  test("splits abilities and backgrounds from the mock api", () => {
-    const { abilities, backgrounds } = LorebookParser.ParseFromApi();
+  test("builds abilities and backgrounds from the lorebook lists", async () => {
+    const { abilities, backgrounds } = await LorebookParser.ParseFromApi();
     expect(abilities.has("brawl")).toBe(true);
     expect(abilities.get("brawl")!.Category).toBe(Category.TALENT);
-    expect(abilities.get("drive")!.Category).toBe(Category.SKILL);
+    expect(abilities.get("ride")!.Category).toBe(Category.SKILL);
     expect(abilities.get("occult")!.Category).toBe(Category.KNOWLEDGE);
     expect(backgrounds.has("generation")).toBe(true);
   });

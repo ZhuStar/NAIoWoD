@@ -14,36 +14,103 @@
 // =============================================================================
 
 // --- API CONTRACT ---
-// NovelAI's text-adventure input hook: the host hands the player's raw input to
-// the registered handler each turn and uses the returned `inputText`.
+// Mirrors the real NovelAI scripting API (docs.novelai.net/en/scripting):
+// storage & lorebook calls are async; lorebook entries are filtered by category
+// *id* (categories() resolves names to ids); storyStorage offers setIfAbsent;
+// the host also provides uuid() and log(). The mock below implements the same
+// surface in memory so the engine behaves identically off-host and in tests.
 export type OnTextAdventureInput = (params: { rawInputText: string }) => { inputText: string };
+
+export interface LorebookEntryData {
+  id: string;
+  displayName: string;
+  text: string;
+  category?: string;   // owning category id (undefined = uncategorized)
+  keys?: string[];
+}
+export interface LorebookCategoryData { id: string; name: string; }
 
 interface WodApi {
   v1: {
-    script: { id: string };
-    storyStorage: { set: (key: string, value: unknown) => void };
-    lorebook: { entries: () => Array<{ displayName: string; category: string }> };
+    script: { id: string; name?: string; version?: string; author?: string };
+    uuid: () => string;
+    log: (...args: unknown[]) => void;
+    storyStorage: {
+      get: (key: string) => Promise<unknown>;
+      set: (key: string, value: unknown) => Promise<void>;
+      setIfAbsent?: (key: string, value: unknown) => Promise<unknown>;
+      remove: (key: string) => Promise<void>;
+    };
+    lorebook: {
+      entries: (categoryId?: string) => Promise<LorebookEntryData[]>;
+      categories: () => Promise<LorebookCategoryData[]>;
+    };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
   };
 }
 
+// --- MOCK LOREBOOK DATA (the editable "database" a story would carry) ---
+// Ability lists live in the srd:abilities category, one entry per group, one
+// ability per line - exactly how a user edits them in the NovelAI lorebook.
+const MOCK_LOREBOOK_CATEGORIES: LorebookCategoryData[] = [
+  { id: "cat-srd-abilities", name: "srd:abilities" },
+  { id: "cat-srd-backgrounds", name: "srd:backgrounds" },
+  { id: "cat-srd-merits-flaws", name: "srd:merits-flaws" },
+];
+const MOCK_LOREBOOK_ENTRIES: LorebookEntryData[] = [
+  {
+    id: "lb-talents", category: "cat-srd-abilities", displayName: "srd:abilities:talents",
+    text: "Alertness\nAthletics\nAwareness\nBrawl\nEmpathy\nExpression\nIntimidation\nLeadership\nLegerdemain\nSubterfuge",
+  },
+  {
+    id: "lb-skills", category: "cat-srd-abilities", displayName: "srd:abilities:skills",
+    text: "Animal Ken\nArchery\nCommerce\nCrafts\nEtiquette\nMelee\nPerformance\nRide\nStealth\nSurvival",
+  },
+  {
+    id: "lb-knowledges", category: "cat-srd-abilities", displayName: "srd:abilities:knowledges",
+    text: "Academics\nEnigmas\nHearth Wisdom\nInvestigation\nLaw\nMedicine\nOccult\nPolitics\nSeneschal\nTheology",
+  },
+  {
+    id: "lb-backgrounds", category: "cat-srd-backgrounds", displayName: "srd:backgrounds:all",
+    text: "Allies\nContacts\nDomain\nGeneration\nHerd\nInfluence\nMentor\nResources\nRetainers\nStatus",
+  },
+  {
+    id: "lb-mf-custom", category: "cat-srd-merits-flaws", displayName: "srd:merits-flaws:custom",
+    text: '[{"name": "Sturdy Stock", "kind": "merit", "points": 2, "requires": {"tags": ["revenant"]}, "description": "Hardy revenant lineage."}]',
+  },
+];
+
 // --- API MOCK (yields to a real host-provided `api` when one exists) ---
 const __host = globalThis as unknown as { api?: WodApi };
+const __mockStore = new Map<string, unknown>();
+let __mockUuidCounter = 0;
 const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },
+    uuid: () => {
+      const g = globalThis as { crypto?: { randomUUID?: () => string } };
+      return g.crypto?.randomUUID?.() ?? `mock-uuid-${++__mockUuidCounter}`;
+    },
+    log: (...args: unknown[]) => console.log(...args),
     storyStorage: {
-      set: (key: string, value: unknown) => {
-        Log(`[STORAGE SAVE] Key: ${key} | Data:`, value);
-      }
+      get: async (key: string) => __mockStore.get(key),
+      set: async (key: string, value: unknown) => {
+        __mockStore.set(key, value);
+        Log(`[STORAGE SAVE] Key: ${key}`);
+      },
+      setIfAbsent: async (key: string, value: unknown) => {
+        if (__mockStore.has(key)) return false;
+        __mockStore.set(key, value);
+        return true;
+      },
+      remove: async (key: string) => { __mockStore.delete(key); },
     },
     lorebook: {
-      entries: () => [
-        { displayName: "srd:ability:talent:brawl", category: "srd:ability" },
-        { displayName: "srd:ability:skill:drive", category: "srd:ability" },
-        { displayName: "srd:ability:knowledge:occult", category: "srd:ability" },
-        { displayName: "srd:background:none:generation", category: "srd:background" }
-      ]
+      categories: async () => MOCK_LOREBOOK_CATEGORIES,
+      entries: async (categoryId?: string) =>
+        categoryId === undefined
+          ? MOCK_LOREBOOK_ENTRIES
+          : MOCK_LOREBOOK_ENTRIES.filter(e => e.category === categoryId),
     },
     // Off-host there is no engine to fire hooks; registering just records that a
     // handler exists (and keeps import-time `hooks.register(...)` from throwing).
@@ -80,6 +147,103 @@ export class StringUtil {
       .map(w => w[0].toUpperCase() + w.slice(1).toLowerCase())
       .join(' ');
   }
+}
+
+// =============================================================================
+// STORAGE & LOREBOOK MANAGERS - the script's editable database layer
+// -----------------------------------------------------------------------------
+// StorageManager namespaces persistent story storage under a uuid prefix (the
+// script id by default) and pairs every method with a temp* variant backed by
+// an in-memory map - scratch state for this session only, never written into
+// the story. LorebookManager reads lorebook entries as data: rule lists live in
+// entries whose text is a newline list (or JSON), so the user can edit game
+// data like a database table right in the NovelAI lorebook UI.
+// =============================================================================
+export class StorageManager {
+  private readonly _temp = new Map<string, unknown>();
+
+  constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
+
+  private _key(key: string): string { return `${this.StoragePrefix}_${key}`; }
+
+  async get(key: string): Promise<unknown> {
+    return api.v1.storyStorage.get(this._key(key));
+  }
+  async getOrDefault<T>(key: string, fallback: T): Promise<T> {
+    const v = await this.get(key);
+    return v === undefined ? fallback : v as T;
+  }
+  async set(key: string, value: unknown): Promise<void> {
+    await api.v1.storyStorage.set(this._key(key), value);
+  }
+  // Writes only when the key is missing; returns whether it wrote.
+  async setIfAbsent(key: string, value: unknown): Promise<boolean> {
+    if (await this.has(key)) return false;
+    await this.set(key, value);
+    return true;
+  }
+  async has(key: string): Promise<boolean> {
+    return (await this.get(key)) !== undefined;
+  }
+  // Returns whether the key existed before removal.
+  async delete(key: string): Promise<boolean> {
+    const existed = await this.has(key);
+    await api.v1.storyStorage.remove(this._key(key));
+    return existed;
+  }
+
+  // temp*: identical semantics, in-memory only (lost when the session ends).
+  tempGet(key: string): unknown { return this._temp.get(this._key(key)); }
+  tempGetOrDefault<T>(key: string, fallback: T): T {
+    const v = this._temp.get(this._key(key));
+    return v === undefined ? fallback : v as T;
+  }
+  tempSet(key: string, value: unknown): void { this._temp.set(this._key(key), value); }
+  tempSetIfAbsent(key: string, value: unknown): boolean {
+    if (this._temp.has(this._key(key))) return false;
+    this._temp.set(this._key(key), value);
+    return true;
+  }
+  tempHas(key: string): boolean { return this._temp.has(this._key(key)); }
+  tempDelete(key: string): boolean { return this._temp.delete(this._key(key)); }
+}
+
+export class LorebookManager {
+  // The host API filters entries by category *id*; users think in category
+  // *names* ("srd:abilities"), so resolve the name first.
+  static async categoryIdByName(name: string): Promise<string | undefined> {
+    const want = name.trim().toLowerCase();
+    const categories = await api.v1.lorebook.categories();
+    return categories.find(c => (c.name ?? "").trim().toLowerCase() === want)?.id;
+  }
+
+  static async entriesInCategory(categoryName: string): Promise<LorebookEntryData[]> {
+    const id = await LorebookManager.categoryIdByName(categoryName);
+    if (id === undefined) return [];
+    return api.v1.lorebook.entries(id);
+  }
+
+  // Text of the entry with the given displayName inside a category, or undefined.
+  static async entryText(categoryName: string, displayName: string): Promise<string | undefined> {
+    const want = displayName.trim().toLowerCase();
+    for (const entry of await LorebookManager.entriesInCategory(categoryName)) {
+      const label = (entry.displayName ?? (entry as { displayText?: string }).displayText ?? "").trim().toLowerCase();
+      if (label === want) return entry.text;
+    }
+    return undefined;
+  }
+
+  // An entry's text as a list: one item per non-empty line.
+  static async listFrom(categoryName: string, displayName: string): Promise<string[]> {
+    const text = await LorebookManager.entryText(categoryName, displayName);
+    if (text === undefined) return [];
+    return text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  }
+
+  static async allTalents(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:talents"); }
+  static async allSkills(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:skills"); }
+  static async allKnowledges(): Promise<string[]> { return LorebookManager.listFrom("srd:abilities", "srd:abilities:knowledges"); }
+  static async allBackgrounds(): Promise<string[]> { return LorebookManager.listFrom("srd:backgrounds", "srd:backgrounds:all"); }
 }
 
 export type CategoryType =
@@ -1054,30 +1218,104 @@ export function disciplineDef(name: string): DisciplineDef | undefined {
   return DISCIPLINES[StringUtil.normalize(name)];
 }
 
+// =============================================================================
+// MERITS & FLAWS - optional quirks with (waivable) prerequisites
+// -----------------------------------------------------------------------------
+// Defaults live in an in-code list; the lorebook is the editable database on
+// top: any entry in the "srd:merits-flaws" category whose text is a JSON array
+// of definitions is merged over the defaults by MeritFlawRegistry
+// .loadFromLorebook(). Prerequisites may name templates, free-form character
+// tags ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every
+// check can be waived case-by-case.
+// =============================================================================
+export type MeritFlawKind = "merit" | "flaw";
+export interface MeritFlawRequirements {
+  templates?: string[];   // met if the character's template matches ANY listed
+  tags?: string[];        // ALL listed tags must be present on the character
+  meritsFlaws?: string[]; // ALL listed merits/flaws must already be taken
+}
+export interface MeritFlawDef {
+  name: string;
+  kind: MeritFlawKind;
+  points: number | number[]; // freebie cost (merit) / bonus granted (flaw); array = variable rating
+  requires?: MeritFlawRequirements;
+  description?: string;
+}
+
+export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
+  { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
+  { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },
+  { name: "Iron Will", kind: "merit", points: 3, description: "Resistant to Dominate and mental control." },
+  { name: "Eat Food", kind: "merit", points: 1, requires: { templates: ["vampire"] }, description: "Can consume (and later expel) mortal food." },
+  { name: "Efficient Digestion", kind: "merit", points: 3, requires: { templates: ["vampire"] }, description: "Gain an extra blood point for every two drawn." },
+  { name: "Unbondable", kind: "merit", points: 4, requires: { templates: ["mortal", "thrall", "ghoul"] }, description: "Immune to the blood bond." },
+  { name: "True Faith", kind: "merit", points: 7, requires: { templates: ["mortal"] }, description: "A wellspring of genuine faith (rating 1)." },
+  { name: "Dark Secret", kind: "flaw", points: 1, description: "Exposure would be disastrous." },
+  { name: "Nightmares", kind: "flaw", points: 1, description: "Nightly horrors that bleed into the day." },
+  { name: "Prey Exclusion", kind: "flaw", points: 1, requires: { templates: ["vampire"] }, description: "You refuse to feed from a certain class of prey." },
+  { name: "Vengeful", kind: "flaw", points: 2, description: "An old score you cannot let rest." },
+  { name: "Haunted", kind: "flaw", points: 3, description: "A spiteful ghost follows you." },
+  { name: "Hunted", kind: "flaw", points: 4, description: "Someone dangerous wants you destroyed." },
+];
+
+export class MeritFlawRegistry {
+  private static _defs: Map<string, MeritFlawDef> =
+    new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
+
+  static get(name: string): MeritFlawDef | undefined {
+    return MeritFlawRegistry._defs.get(StringUtil.normalize(name));
+  }
+  static all(): MeritFlawDef[] { return [...MeritFlawRegistry._defs.values()]; }
+  static register(def: MeritFlawDef): void {
+    MeritFlawRegistry._defs.set(StringUtil.normalize(def.name), def);
+  }
+  static reset(): void {
+    MeritFlawRegistry._defs = new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
+  }
+
+  // Merge lorebook definitions over the defaults: every entry in the
+  // srd:merits-flaws category whose text parses as a JSON array of defs.
+  // Returns how many definitions were registered.
+  static async loadFromLorebook(): Promise<number> {
+    let count = 0;
+    for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
+      try {
+        const parsed = JSON.parse(entry.text);
+        if (!Array.isArray(parsed)) continue;
+        for (const def of parsed) {
+          if (def && typeof def.name === "string" && (def.kind === "merit" || def.kind === "flaw")) {
+            MeritFlawRegistry.register(def as MeritFlawDef);
+            count++;
+          }
+        }
+      } catch {
+        Log(`[MERITS] Skipping unparseable lorebook entry: ${entry.displayName}`);
+      }
+    }
+    return count;
+  }
+}
+
 // --- LOREBOOK PARSER ---
+// Builds zero-dot Stat maps from the lorebook ability/background lists (see
+// LorebookManager): talents/skills/knowledges from srd:abilities, backgrounds
+// from srd:backgrounds.
 export class LorebookParser {
-  static ParseFromApi(): { abilities: Map<string, Stat>, backgrounds: Map<string, Stat> } {
+  static async ParseFromApi(): Promise<{ abilities: Map<string, Stat>, backgrounds: Map<string, Stat> }> {
     const abilities = new Map<string, Stat>();
     const backgrounds = new Map<string, Stat>();
 
-    const rawEntries = api.v1.lorebook.entries();
-
-    rawEntries.forEach(entry => {
-      const parsed = StringUtil.parseSrdName(entry.displayName);
-
-      // Map the parsed subCategory string back to our strict Category constants
-      let catObj: Category = Category.KNOWLEDGE; // fallback
-      if (parsed.subCategory === 'talent') catObj = Category.TALENT;
-      if (parsed.subCategory === 'skill') catObj = Category.SKILL;
-      if (parsed.kind === 'background') catObj = Category.BACKGROUND;
-
-      if (catObj === Category.BACKGROUND) {
-        backgrounds.set(parsed.name, new Stat(parsed.name, catObj, 0));
-      } else {
-        abilities.set(parsed.name, new Stat(parsed.name, catObj, 0));
-      }
-    });
-
+    const groups: Array<[string[], Category]> = [
+      [await LorebookManager.allTalents(), Category.TALENT],
+      [await LorebookManager.allSkills(), Category.SKILL],
+      [await LorebookManager.allKnowledges(), Category.KNOWLEDGE],
+    ];
+    for (const [names, cat] of groups) {
+      for (const name of names) abilities.set(StringUtil.normalize(name), new Stat(name, cat, 0));
+    }
+    for (const name of await LorebookManager.allBackgrounds()) {
+      backgrounds.set(StringUtil.normalize(name), new Stat(name, Category.BACKGROUND, 0));
+    }
     return { abilities, backgrounds };
   }
 }
@@ -1115,6 +1353,10 @@ export class LiveCharacter {
   public Virtues: Map<string, Stat> = new Map();
   public Traits: Map<string, Stat> = new Map(); // misc rated traits
   public Disciplines: Map<string, Stat> = new Map(); // rated supernatural powers (0-5)
+  // Free-form prerequisite tags ("toreador", "revenant", "inconnu", ...) and
+  // the Merits/Flaws taken against them.
+  public Tags: Set<string> = new Set();
+  public MeritsFlaws: Map<string, { def: MeritFlawDef; points: number }> = new Map();
   public Morality?: MoralityTrait;
   public Soak: SoakSpec = MORTAL_SOAK;
   // The character's say over incoming damage: reactions are folded over each
@@ -1163,6 +1405,60 @@ export class LiveCharacter {
     const s = this.Attributes.get(n) ?? this.Abilities.get(n) ?? this.Backgrounds.get(n)
       ?? this.Virtues.get(n) ?? this.Disciplines.get(n) ?? this.Traits.get(n);
     return s ? s.EffectiveValue : 0;
+  }
+
+  // --- Tags & Merits/Flaws --------------------------------------------------
+  AddTag(tag: string): void { this.Tags.add(StringUtil.normalize(tag)); }
+  RemoveTag(tag: string): void { this.Tags.delete(StringUtil.normalize(tag)); }
+  HasTag(tag: string): boolean { return this.Tags.has(StringUtil.normalize(tag)); }
+  HasMeritFlaw(name: string): boolean { return this.MeritsFlaws.has(StringUtil.normalize(name)); }
+
+  // Prerequisite check: a template requirement is met if the character's
+  // template name contains it (or it is present as a tag); listed tags and
+  // merits/flaws must ALL be present. Returns every unmet requirement so the
+  // Storyteller can decide whether to waive.
+  MeetsRequirements(req: MeritFlawRequirements | undefined): { ok: boolean; missing: string[] } {
+    if (!req) return { ok: true, missing: [] };
+    const missing: string[] = [];
+    if (req.templates && req.templates.length > 0) {
+      const template = StringUtil.normalize(this.Template);
+      const hit = req.templates.some(t => template.includes(StringUtil.normalize(t)) || this.HasTag(t));
+      if (!hit) missing.push(`template:${req.templates.join("|")}`);
+    }
+    for (const t of req.tags ?? []) if (!this.HasTag(t)) missing.push(`tag:${StringUtil.normalize(t)}`);
+    for (const m of req.meritsFlaws ?? []) if (!this.HasMeritFlaw(m)) missing.push(`merit-flaw:${StringUtil.normalize(m)}`);
+    return { ok: missing.length === 0, missing };
+  }
+
+  // Take a merit/flaw by registry name or inline definition. The chosen point
+  // value must be one the definition allows; prerequisites throw unless waived.
+  AddMeritFlaw(nameOrDef: string | MeritFlawDef, opts: { points?: number; waivePrerequisites?: boolean } = {}): void {
+    const def = typeof nameOrDef === "string" ? MeritFlawRegistry.get(nameOrDef) : nameOrDef;
+    if (!def) throw new Error(`Unknown merit/flaw: ${nameOrDef}`);
+    const key = StringUtil.normalize(def.name);
+    if (this.MeritsFlaws.has(key)) throw new Error(`${def.name} is already taken.`);
+    if (!opts.waivePrerequisites) {
+      const check = this.MeetsRequirements(def.requires);
+      if (!check.ok) throw new Error(`${def.name} prerequisites not met: ${check.missing.join(", ")}`);
+    }
+    const allowed = Array.isArray(def.points) ? def.points : [def.points];
+    const points = opts.points ?? allowed[0];
+    if (!allowed.includes(points)) {
+      throw new Error(`${def.name} must be taken at one of [${allowed.join(", ")}] points, got ${points}.`);
+    }
+    this.MeritsFlaws.set(key, { def, points });
+  }
+
+  // Bookkeeping for the future freebie engine (merits cost, flaws grant).
+  get MeritPointsSpent(): number {
+    let n = 0;
+    for (const { def, points } of this.MeritsFlaws.values()) if (def.kind === "merit") n += points;
+    return n;
+  }
+  get FlawPointsGained(): number {
+    let n = 0;
+    for (const { def, points } of this.MeritsFlaws.values()) if (def.kind === "flaw") n += points;
+    return n;
   }
 
   // --- Disciplines & rolls ------------------------------------------------
@@ -1297,8 +1593,10 @@ export class LiveCharacter {
   GainPool(name: string, amount: number, reason: string = ""): number { return this.GetPool(name).Gain(amount, reason); }
 
   // --- Storage serialization ----------------------------------------------
-  SaveToStory() {
-    const storageKey = `${api.v1.script.id}_char_${StringUtil.normalize(this.Name)}`;
+  // Writes the sheet under `char_<name>` via a StorageManager (prefixed with
+  // the script id, preserving the historical `<scriptId>_char_<name>` key).
+  async SaveToStory() {
+    const storage = new StorageManager();
 
     // Extracting just the data needed for persistence to avoid circular JSON issues
     const serializedData = {
@@ -1314,11 +1612,13 @@ export class LiveCharacter {
       virtues: Array.from(this.Virtues.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
       traits: Array.from(this.Traits.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
       disciplines: Array.from(this.Disciplines.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
+      tags: [...this.Tags],
+      meritsFlaws: Array.from(this.MeritsFlaws.values()).map(({ def, points }) => ({ name: StringUtil.normalize(def.name), kind: def.kind, points })),
       morality: this.Morality ? { road: this.Morality.RoadName, value: this.Morality.Value } : null,
       health: this.Health.Summary(),
     };
 
-    api.v1.storyStorage.set(storageKey, serializedData);
+    await storage.set(`char_${StringUtil.normalize(this.Name)}`, serializedData);
     return serializedData;
   }
 }
@@ -1336,6 +1636,8 @@ export interface CharacterCreationOptions {
   poolStarts?: Record<string, number>;    // chosen starting values for pools/trackers
   traits?: Record<string, number>;        // misc rated traits
   disciplines?: Record<string, number>;   // Discipline dots (e.g. { potence: 1, fortitude: 2 })
+  tags?: string[];                        // prerequisite tags ("toreador", "revenant", ...)
+  meritsFlaws?: Array<string | { name: string; points?: number; waive?: boolean }>;
   reactions?: DamageReaction[];           // extra damage reactions (e.g. worn armour), appended after the template's
 }
 
@@ -1411,6 +1713,13 @@ export class CharacterFactory {
         rating = (virtues.get(StringUtil.normalize(a))?.Value ?? 0) + (virtues.get(StringUtil.normalize(b))?.Value ?? 0);
       }
       character.Morality = new MoralityTrait(road.name, rating);
+    }
+
+    // Tags before merits/flaws, so tag-based prerequisites can be satisfied.
+    for (const tag of opts.tags ?? []) character.AddTag(tag);
+    for (const mf of opts.meritsFlaws ?? []) {
+      if (typeof mf === "string") character.AddMeritFlaw(mf);
+      else character.AddMeritFlaw(mf.name, { points: mf.points, waivePrerequisites: mf.waive });
     }
 
     return character;

@@ -16,7 +16,7 @@
 <body>
   <article> <h1 id="modals-and-windows"><a href="#modals-and-windows" class="header">Modals and Windows</a></h1>
 <p>Modals and Windows provide a way to create custom dialog boxes and floating windows in NovelAI. They can be used to display information, gather user input, or provide additional functionality for your scripts. Modals are centered dialog boxes that block interaction with the rest of the UI until closed, while Windows are floating panels that can be moved around and allow interaction with other parts of the UI. They are created using the <code>api.v1.ui.modal.open</code> and <code>api.v1.ui.window.open</code> functions respectively.</p>
-<p>Other than their positioning and interaction model, Modals and Windows share similar structure and capabilities. Both can contain arbitrary UI content defined using UI Parts. For more information on UI Parts please see the <a href="./ui-parts">UI Parts documentation</a>.</p>
+<p>Other than their positioning and interaction model, Modals and Windows share similar structure and capabilities. Both can contain arbitrary UI content defined using UI Parts. For more information on UI Parts please see the <a href="./ui-parts.html">UI Parts documentation</a>.</p>
 <h2 id="creating-a-modal"><a href="#creating-a-modal" class="header">Creating a Modal</a></h2>
 <p>To create a modal, use the <code>api.v1.ui.modal.open</code> function. This function takes an object defining the modal’s properties, including its title, content, and size. Here is an example of creating a simple modal:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> modal </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> api.v1.ui.modal.</span><span style="color:#B392F0">open</span><span style="color:#E1E4E8">({</span></span>
@@ -50,9 +50,9 @@
 <p>All modals and windows created by scripts will have a “Disable This Script?” button. It appears in the bottom right of modals and in the title bar of windows. Clicking this button will immediately disable the script that created the modal or window and close it and any other modals or windows created by that script.</p>
 <h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
 <ul>
-<li><a href="./ui-parts">UI Parts</a> - Building content for modals and windows</li>
-<li><a href="./ui-extensions">UI Extensions</a> - Other ways to create UI</li>
-<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+<li><a href="./ui-parts.html">UI Parts</a> - Building content for modals and windows</li>
+<li><a href="./ui-extensions.html">UI Extensions</a> - Other ways to create UI</li>
+<li><a href="./api-reference.html">API Reference</a> - Complete API documentation</li>
 </ul> </article>  
 </body>
 </html>

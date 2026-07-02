@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="story-settings-api"><a href="#story-settings-api" class="header">Story Settings API</a></h1>
+<p>Most story settings related to text generation can be accessed and modified through the API. This includes memory, system prompt, author’s note, prefill, and generation parameters. Scripts can both read the current settings and update them as needed. Updating these settings requires the script to have the <code>storyEdit</code> permission.</p>
+<h2 id="memory"><a href="#memory" class="header">Memory</a></h2>
+<p>Memory is a persistent text field that is always included in the generation context. It typically contains important information about characters, plot points, and world details that should always be available to the model.</p>
+<h3 id="getting-memory"><a href="#getting-memory" class="header">Getting Memory</a></h3>
+<p>To retrieve the current memory text, use the <code>api.v1.memory.get</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> memory </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.memory.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Current memory: ${</span><span style="color:#E1E4E8">memory</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="setting-memory"><a href="#setting-memory" class="header">Setting Memory</a></h3>
+<p>To update the memory text, use the <code>api.v1.memory.set</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.memory.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Character: Maria - A brave knight seeking redemption.'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="authors-note"><a href="#authors-note" class="header">Author’s Note</a></h2>
+<p>The author’s note (A/N) is inserted near the end of the context, just before the most recent story content, as a system message.</p>
+<h3 id="getting-authors-note"><a href="#getting-authors-note" class="header">Getting Author’s Note</a></h3>
+<p>To retrieve the current author’s note and its settings, use the <code>api.v1.an.get</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> an </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.an.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Author's Note: ${</span><span style="color:#E1E4E8">an</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="setting-authors-note"><a href="#setting-authors-note" class="header">Setting Author’s Note</a></h3>
+<p>To update the author’s note, use the <code>api.v1.an.set</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.an.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Please please please write good.'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="system-prompt"><a href="#system-prompt" class="header">System Prompt</a></h2>
+<p>The system prompt provides instructions to the model about how to generate text. It’s placed in a system message at the start of the generation context.</p>
+<h3 id="getting-system-prompt"><a href="#getting-system-prompt" class="header">Getting System Prompt</a></h3>
+<p>To retrieve the current system prompt, use the <code>api.v1.systemPrompt.get</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> prompt </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.systemPrompt.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Current system prompt: ${</span><span style="color:#E1E4E8">prompt</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="setting-system-prompt"><a href="#setting-system-prompt" class="header">Setting System Prompt</a></h3>
+<p>To update the system prompt, use the <code>api.v1.systemPrompt.set</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.systemPrompt.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Write good please.'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<p>If the system prompt is set to an empty string the default system prompt will be used.</p>
+<h2 id="prefill"><a href="#prefill" class="header">Prefill</a></h2>
+<p>Prefill is added to the start of the most recent “assistant” message in context. It can be used to strongly influence model responses.</p>
+<h3 id="getting-prefill"><a href="#getting-prefill" class="header">Getting Prefill</a></h3>
+<p>To retrieve the current prefill text, use the <code>api.v1.prefill.get</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> prefill </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.prefill.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Current prefill: ${</span><span style="color:#E1E4E8">prefill</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="setting-prefill"><a href="#setting-prefill" class="header">Setting Prefill</a></h3>
+<p>To update the prefill text, use the <code>api.v1.prefill.set</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.prefill.</span><span style="color:#B392F0">set</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">'Here</span><span style="color:#79B8FF">\'</span><span style="color:#9ECBFF">s a list of delicious baked goods:'</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h2 id="generation-parameters"><a href="#generation-parameters" class="header">Generation Parameters</a></h2>
+<p>Generation parameters control the behavior of the text generation model, including temperature, token limits, and other sampling settings.</p>
+<h3 id="getting-generation-parameters"><a href="#getting-generation-parameters" class="header">Getting Generation Parameters</a></h3>
+<p>To retrieve the current generation parameters, use the <code>api.v1.generationParameters.get</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> params </span><span style="color:#F97583">=</span><span style="color:#F97583"> await</span><span style="color:#E1E4E8"> api.v1.generationParameters.</span><span style="color:#B392F0">get</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Temperature: ${</span><span style="color:#E1E4E8">params</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">temperature</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#E1E4E8">api.v1.</span><span style="color:#B392F0">log</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">`Max tokens: ${</span><span style="color:#E1E4E8">params</span><span style="color:#9ECBFF">.</span><span style="color:#E1E4E8">max_tokens</span><span style="color:#9ECBFF">}`</span><span style="color:#E1E4E8">);</span></span></code></pre>
+<h3 id="updating-generation-parameters"><a href="#updating-generation-parameters" class="header">Updating Generation Parameters</a></h3>
+<p>To update generation parameters, use the <code>api.v1.generationParameters.update</code> function:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">await</span><span style="color:#E1E4E8"> api.v1.generationParameters.</span><span style="color:#B392F0">update</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  temperature: </span><span style="color:#79B8FF">0.7</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  max_tokens: </span><span style="color:#79B8FF">150</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  top_p: </span><span style="color:#79B8FF">0.9</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  top_k: </span><span style="color:#79B8FF">50</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<p>You only need to provide the parameters you want to change; other parameters remain unchanged. See the <a href="./api-reference">API Reference</a> for a complete list of generation parameters.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./generation-api">Generation API</a> - Triggering text generation</li>
+<li><a href="./hooks">Hooks</a> - Modifying context during generation</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

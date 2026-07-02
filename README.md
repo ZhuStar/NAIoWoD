@@ -10,6 +10,7 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | Path | What |
 | --- | --- |
 | `src/wod.ts` | The whole engine in one file (so it can be pasted into NovelAI). |
+| `docs/novelai-api.md` | **Working reference for the NovelAI scripting API** (UI, storage, hooks, generation) — read this before touching the `api` surface. |
 | `test/*.test.ts` | Bun test suites (`baseline` = original code, `system` = new mechanics). |
 | `types/bun-test.d.ts` | Ambient shim so `tsc` can check tests without installing `bun-types`. |
 

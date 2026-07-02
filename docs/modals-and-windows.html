@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>| NovelAI Documentation</title>
+<style>
+      body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.45;color:#111}
+      pre, code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f6f8fa;padding:8px;border-radius:6px;overflow:auto}
+      pre{padding:12px}
+      img{max-width:100%;height:auto}
+      a{color:#0366d6}
+      .export-nav{position:fixed;left:8px;top:8px;background:#fff;border:1px solid #ddd;padding:8px;border-radius:6px;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+    </style>
+</head>
+<body>
+  <article> <h1 id="modals-and-windows"><a href="#modals-and-windows" class="header">Modals and Windows</a></h1>
+<p>Modals and Windows provide a way to create custom dialog boxes and floating windows in NovelAI. They can be used to display information, gather user input, or provide additional functionality for your scripts. Modals are centered dialog boxes that block interaction with the rest of the UI until closed, while Windows are floating panels that can be moved around and allow interaction with other parts of the UI. They are created using the <code>api.v1.ui.modal.open</code> and <code>api.v1.ui.window.open</code> functions respectively.</p>
+<p>Other than their positioning and interaction model, Modals and Windows share similar structure and capabilities. Both can contain arbitrary UI content defined using UI Parts. For more information on UI Parts please see the <a href="./ui-parts">UI Parts documentation</a>.</p>
+<h2 id="creating-a-modal"><a href="#creating-a-modal" class="header">Creating a Modal</a></h2>
+<p>To create a modal, use the <code>api.v1.ui.modal.open</code> function. This function takes an object defining the modal’s properties, including its title, content, and size. Here is an example of creating a simple modal:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> modal </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> api.v1.ui.modal.</span><span style="color:#B392F0">open</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  title: </span><span style="color:#9ECBFF">'Example Modal'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'This is an example modal created by a script.'</span></span>
+<span class="line"><span style="color:#E1E4E8">    },</span></span>
+<span class="line"><span style="color:#E1E4E8">  ],</span></span>
+<span class="line"><span style="color:#E1E4E8">  size: </span><span style="color:#9ECBFF">'small'</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<p><img src="/assets/en/scripting/modal-example.webp" alt="Modal Example" loading="lazy" decoding="async"></p>
+<p>A modal returns an object that can be used to interact with the modal after it’s been created. You can close the modal programmatically using the <code>close</code> method, update the modal with the <code>update</code> method, or await the <code>closed</code> promise to perform actions after the modal is closed.</p>
+<h2 id="creating-a-window"><a href="#creating-a-window" class="header">Creating a Window</a></h2>
+<p>To create a window, use the <code>api.v1.ui.window.open</code> function. This function takes an object defining the window’s properties, including its title, content, and size. Here is an example of creating a simple window:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="typescript"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> wndw </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> api.v1.ui.window.</span><span style="color:#B392F0">open</span><span style="color:#E1E4E8">({</span></span>
+<span class="line"><span style="color:#E1E4E8">  title: </span><span style="color:#9ECBFF">'Example Window'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  content: [</span></span>
+<span class="line"><span style="color:#E1E4E8">    {</span></span>
+<span class="line"><span style="color:#E1E4E8">      type: </span><span style="color:#9ECBFF">'text'</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">      text: </span><span style="color:#9ECBFF">'This is an example window created by a script.'</span></span>
+<span class="line"><span style="color:#E1E4E8">    },</span></span>
+<span class="line"><span style="color:#E1E4E8">  ],</span></span>
+<span class="line"><span style="color:#E1E4E8">  defaultHeight: </span><span style="color:#79B8FF">300</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">  defaultWidth: </span><span style="color:#79B8FF">400</span></span>
+<span class="line"><span style="color:#E1E4E8">});</span></span></code></pre>
+<p><img src="/assets/en/scripting/window-example.webp" alt="Window Example" loading="lazy" decoding="async"></p>
+<p>A window returns an object that can be used to interact with the window after it’s been created. You can close the window programmatically using the <code>close</code> method, update the window with the <code>update</code> method, or await the <code>closed</code> promise to perform actions after the window is closed.</p>
+<h1 id="disable-this-script"><a href="#disable-this-script" class="header">Disable This Script?</a></h1>
+<p>All modals and windows created by scripts will have a “Disable This Script?” button. It appears in the bottom right of modals and in the title bar of windows. Clicking this button will immediately disable the script that created the modal or window and close it and any other modals or windows created by that script.</p>
+<h2 id="see-also"><a href="#see-also" class="header">See Also</a></h2>
+<ul>
+<li><a href="./ui-parts">UI Parts</a> - Building content for modals and windows</li>
+<li><a href="./ui-extensions">UI Extensions</a> - Other ways to create UI</li>
+<li><a href="./api-reference">API Reference</a> - Complete API documentation</li>
+</ul> </article>  
+</body>
+</html>

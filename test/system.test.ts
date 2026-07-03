@@ -9,7 +9,7 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  StorageManager, LorebookManager, __resetLorebookMock,
+  ScopedStorage, LorebookManager, __resetLorebookMock,
   CommandRouter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES,
   DISCIPLINES, disciplineDef,
@@ -596,9 +596,9 @@ describe("Disciplines", () => {
   });
 });
 
-describe("StorageManager", () => {
+describe("ScopedStorage", () => {
   test("persists under the prefixed key and reads back", async () => {
-    const s = new StorageManager("test-prefix");
+    const s = new ScopedStorage("test-prefix");
     await s.set("alpha", { v: 1 });
     expect(await s.get("alpha")).toEqual({ v: 1 });
     expect(await s.has("alpha")).toBe(true);
@@ -606,14 +606,14 @@ describe("StorageManager", () => {
   });
 
   test("setIfAbsent only writes once", async () => {
-    const s = new StorageManager("test-sia");
+    const s = new ScopedStorage("test-sia");
     expect(await s.setIfAbsent("k", 1)).toBe(true);
     expect(await s.setIfAbsent("k", 2)).toBe(false);
     expect(await s.get("k")).toBe(1);
   });
 
   test("delete reports whether the key existed", async () => {
-    const s = new StorageManager("test-del");
+    const s = new ScopedStorage("test-del");
     await s.set("k", "x");
     expect(await s.delete("k")).toBe(true);
     expect(await s.delete("k")).toBe(false);
@@ -621,8 +621,8 @@ describe("StorageManager", () => {
   });
 
   test("prefixes isolate managers from each other", async () => {
-    const a = new StorageManager("pref-a");
-    const b = new StorageManager("pref-b");
+    const a = new ScopedStorage("pref-a");
+    const b = new ScopedStorage("pref-b");
     await a.set("k", "A");
     await b.set("k", "B");
     expect(await a.get("k")).toBe("A");
@@ -630,7 +630,7 @@ describe("StorageManager", () => {
   });
 
   test("temp variants use api.v1.tempStorage, separate from story storage", async () => {
-    const s = new StorageManager("test-temp");
+    const s = new ScopedStorage("test-temp");
     expect(await s.tempSetIfAbsent("k", 1)).toBe(true);
     expect(await s.tempSetIfAbsent("k", 2)).toBe(false);
     expect(await s.tempGet("k")).toBe(1);

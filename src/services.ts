@@ -5,14 +5,14 @@ import { SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER, DEFAULT_MERITS_FLAW
 // =============================================================================
 // STORAGE & LOREBOOK MANAGERS - the script's editable database layer
 // -----------------------------------------------------------------------------
-// StorageManager namespaces storage under a uuid prefix (the script id by
+// ScopedStorage namespaces storage under a uuid prefix (the script id by
 // default) and pairs every persistent method with a temp* variant on
 // api.v1.tempStorage - volatile scratch state the host clears when the script
 // unloads. LorebookManager reads lorebook entries as data: rule lists live in
 // entries whose text is a newline list (or JSON) beneath a human-readable
 // header, so the user edits game data like a database table in the lorebook UI.
 // =============================================================================
-export class StorageManager {
+export class ScopedStorage {
   constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
 
   private _key(key: string): string { return `${this.StoragePrefix}_${key}`; }

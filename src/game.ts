@@ -11,7 +11,7 @@ import {
   RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, PoolDef,
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER,
 } from "./rules";
-import { StorageManager, LorebookManager, MeritFlawRegistry } from "./services";
+import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
 
 // --- LIVE CHARACTER SHEET ---
 // One line of "what a reaction did to the packet", for auditability.
@@ -286,10 +286,10 @@ export class LiveCharacter {
   GainPool(name: string, amount: number, reason: string = ""): number { return this.GetPool(name).Gain(amount, reason); }
 
   // --- Storage serialization ----------------------------------------------
-  // Writes the sheet under `char_<name>` via a StorageManager (prefixed with
+  // Writes the sheet under `char_<name>` via a ScopedStorage (prefixed with
   // the script id, preserving the historical `<scriptId>_char_<name>` key).
   async SaveToStory() {
-    const storage = new StorageManager();
+    const storage = new ScopedStorage();
 
     // Extracting just the data needed for persistence to avoid circular JSON issues
     const serializedData = {
@@ -485,7 +485,7 @@ export interface PlayableCharacter {
 }
 
 export class CharacterStore {
-  private static _storage = new StorageManager();
+  private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
   private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
 
@@ -566,7 +566,7 @@ export class CharacterStore {
 export interface ParsedCommand { name: string; args: Record<string, string>; }
 
 export class CommandRouter {
-  private static _storage = new StorageManager();
+  private static _storage = new ScopedStorage();
 
   // `verb key=value key="quoted value"` -> { name: verb, args: {...} }
   static parse(body: string): ParsedCommand {

@@ -15,29 +15,36 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser. |
 | `src/game.ts` | `LiveCharacter`, factory, character store, `[[…]]` command router. |
 | `src/index.ts` | Re-exports everything + `init()` — the one entry point with side effects. |
-| `src/main.ts` → `dist/wod.naiscript` | Bundle entry → **the deployment artifact** (see below). |
+| `src/main.ts` | Runtime entry — boots the engine by calling `init()` (runs last in the built artifact). |
+| `scripts/build-single.ts` → `dist/naiowod.ts` | Concatenates `src/*` into one readable, editable TS file — **the deployment artifact** (see below). |
 | `docs/novelai-api.md` | **Working reference for the NovelAI scripting API** (plus the full official docs mirrored as `docs/*.html`). |
-| `test/system.test.ts` | The Bun test suite. |
-| `types/bun-test.d.ts` | Ambient shim so `tsc` can check tests without installing `bun-types`. |
+| `test/` | The Bun test suite (`system.test.ts`; `build.test.ts` keeps `dist/naiowod.ts` in sync with `src/`). |
+| `types/` | Ambient shims so `tsc` can check tests and scripts without installing `bun-types`. |
 
 ### One artifact, many modules
 
 NovelAI's runtime is a single, import-free context that injects a global
 `api`. That's a **deployment** constraint, not a source one: the code is
 ordinary ES modules with a strict layering (`core` → `rules` → `services` →
-`game`), and `bun run build` bundles them into one IIFE with the `.naiscript`
-frontmatter prepended. **To deploy, paste the contents of
-`dist/wod.naiscript` into NovelAI.** Off-host (tests, local runs) the mock in
-`src/host.ts` yields to a real host-provided `api` when one exists, and
-importing the engine has **no side effects** — everything host-facing happens
-in `init()`, which the built artifact calls.
+`game`), and `bun run build` concatenates them **in dependency order** into one
+readable, editable TypeScript file — `dist/naiowod.ts` — stripping the
+inter-module `import`/`export` wiring and prepending the `.naiscript` metadata
+header. It is **not** minified or bundled: every declaration keeps its original
+source, so the single file reads like the modules laid end to end (with
+`//#region` markers per module). The file is committed and kept honest by
+`test/build.test.ts`, which fails the suite if it ever drifts from `src/`. **To
+deploy, rename `dist/naiowod.ts` to `.naiscript` and paste it into NovelAI.**
+Off-host (tests, local runs) the mock in `src/host.ts` yields to a real
+host-provided `api` when one exists, and importing the engine has **no side
+effects** — everything host-facing happens in `init()`, which the built
+artifact calls last.
 
 ## Commands
 
 ```bash
 bun test          # run all tests
 bun run typecheck # tsc --noEmit
-bun run build     # build dist/wod.naiscript (the paste-into-NovelAI artifact)
+bun run build     # regenerate dist/naiowod.ts (the paste-into-NovelAI artifact)
 ```
 
 No `npm install` is required — Bun runs the TypeScript directly and its test
@@ -218,7 +225,7 @@ The engine talks to NovelAI through two managers (both mirroring the real
 scripting API, which is async and — for lorebook entries — filtered by
 category *id*):
 
-- **`StorageManager`** — namespaced storage. Every key is prefixed with a uuid
+- **`ScopedStorage`** — namespaced storage. Every key is prefixed with a uuid
   (the script id by default): `get`, `getOrDefault`, `set`, `setIfAbsent`,
   `has`, `delete` — all async, written into the story via `api.v1.storyStorage`
   — plus `tempGet`/`tempSet`/`tempGetOrDefault`/`tempSetIfAbsent`/`tempHas`/

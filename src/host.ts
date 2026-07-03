@@ -9,8 +9,9 @@
 // --- API CONTRACT ---
 // Mirrors the real NovelAI scripting API (docs.novelai.net/en/scripting):
 // storage & lorebook calls are async; lorebook entries are filtered by category
-// *id* (categories() resolves names to ids); storyStorage offers setIfAbsent;
-// the host also provides uuid() and log(). The mock below implements the same
+// *id* (categories() resolves names to ids); all four stores share only
+// get/set/remove/list - no setIfAbsent (ScopedStorage emulates it). The host
+// also provides uuid() and log(). The mock below implements the same
 // surface in memory so the engine behaves identically off-host and in tests.
 // Exact host shape (docs/api-reference.html): the handler may be async, may
 // rewrite the input and mode, and may stop generation. Newlines in the

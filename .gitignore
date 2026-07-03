@@ -1,5 +1,8 @@
 node_modules/
-dist/
+# dist/ holds generated build artifacts; the one committed deliverable is the
+# readable single-file build, kept in sync by test/build.test.ts.
+dist/*
+!dist/naiowod.ts
 *.log
 .DS_Store
 bun.lockb

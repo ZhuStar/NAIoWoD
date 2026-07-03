@@ -30,7 +30,7 @@ Ground rules:
 There are **four** stores (docs/storage-api.html), all sharing one surface:
 `get(key)`, `set(key, value)`, `remove(key)`, `list()` (array of set keys).
 There is **no** `setIfAbsent` on the host — emulate with get+set (our
-`StorageManager.setIfAbsent` does). Values are JSON-serializable.
+`ScopedStorage.setIfAbsent` does). Values are JSON-serializable.
 
 | Store | Scope / lifetime |
 | --- | --- |

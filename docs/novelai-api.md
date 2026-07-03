@@ -1,6 +1,7 @@
 # NovelAI Scripting API — working reference for this project
 
-Audience: Claude (or any model/dev) working on `src/wod.ts`. This is the API
+Audience: Claude (or any model/dev) working on this engine (the API contract
+and mock live in `src/host.ts`). This is the API
 surface we need, distilled from NovelAI's **official example scripts**
 ([NovelAI/novelai-script-examples](https://github.com/NovelAI/novelai-script-examples))
 — every signature below appears verbatim in a shipped example unless marked
@@ -47,7 +48,7 @@ instead of account storage. Read the current value back with
 
 `api.v1.story.id()` → current story's id (useful to detect story switches).
 
-## 2. Lorebook (already wrapped in `src/wod.ts`)
+## 2. Lorebook (already wrapped by `LorebookManager` in `src/services.ts`)
 
 `api.v1.lorebook`: `entries(categoryId?)`, `categories()`, `entry(entryId)`,
 `category(categoryId)`, `createCategory(Partial<LorebookCategory>)` →

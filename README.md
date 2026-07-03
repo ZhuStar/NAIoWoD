@@ -9,31 +9,35 @@ damage, soak, resource pools and morality. UI and game loop come later.
 
 | Path | What |
 | --- | --- |
-| `src/wod.ts` | The whole engine in one file (so it can be pasted into NovelAI). |
-| `docs/novelai-api.md` | **Working reference for the NovelAI scripting API** (UI, storage, hooks, generation) — read this before touching the `api` surface. |
-| `test/*.test.ts` | Bun test suites (`baseline` = original code, `system` = new mechanics). |
+| `src/host.ts` | NovelAI API contract + the off-host mock — the only module that touches `globalThis`. |
+| `src/core/` | Pure mechanics (`traits`, `dice`, `damage`) — no host imports. |
+| `src/rules.ts` | The Dark Ages **data**: templates, soak tables, disciplines, merits, the SRD lorebook seed. |
+| `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser. |
+| `src/game.ts` | `LiveCharacter`, factory, character store, `[[…]]` command router. |
+| `src/index.ts` | Re-exports everything + `init()` — the one entry point with side effects. |
+| `src/main.ts` → `dist/wod.naiscript` | Bundle entry → **the deployment artifact** (see below). |
+| `docs/novelai-api.md` | **Working reference for the NovelAI scripting API** (plus the full official docs mirrored as `docs/*.html`). |
+| `test/system.test.ts` | The Bun test suite. |
 | `types/bun-test.d.ts` | Ambient shim so `tsc` can check tests without installing `bun-types`. |
 
-### Why one file
+### One artifact, many modules
 
-NovelAI's scripting runtime is a single, import-free context that injects a
-global `api` object. `src/wod.ts` keeps everything in one module and the `api`
-mock at the top **yields to a host-provided `api`** when one exists:
-
-```ts
-const api = __host.api ?? { /* local/test mock */ };
-```
-
-So the same file runs locally, under test, and in NovelAI. When you want to
-split it into modules for the eventual UI work, the test suite makes that
-refactor safe.
+NovelAI's runtime is a single, import-free context that injects a global
+`api`. That's a **deployment** constraint, not a source one: the code is
+ordinary ES modules with a strict layering (`core` → `rules` → `services` →
+`game`), and `bun run build` bundles them into one IIFE with the `.naiscript`
+frontmatter prepended. **To deploy, paste the contents of
+`dist/wod.naiscript` into NovelAI.** Off-host (tests, local runs) the mock in
+`src/host.ts` yields to a real host-provided `api` when one exists, and
+importing the engine has **no side effects** — everything host-facing happens
+in `init()`, which the built artifact calls.
 
 ## Commands
 
 ```bash
 bun test          # run all tests
 bun run typecheck # tsc --noEmit
-bun run build     # bundle to dist/wod.novelai.js (one file, for NovelAI)
+bun run build     # build dist/wod.naiscript (the paste-into-NovelAI artifact)
 ```
 
 No `npm install` is required — Bun runs the TypeScript directly and its test
@@ -45,7 +49,7 @@ runner is built in.
   creation-phase vs. absolute caps and `StatModifier`s (buffs/debuffs that can
   optionally bypass the cap). `EffectiveValue` is the pool you roll.
 - **`Tracker`** (extends `Stat`) — permanent rating + a spendable temporary
-  value: Willpower, Resolve, Torment.
+  value: Willpower, Resolve.
 - **`Pool`** — a free-floating counter with a max and an optional per-turn spend
   limit: Blood, Quintessence.
 - **`Dice`** — auditable d10 roller (see below).
@@ -54,8 +58,12 @@ runner is built in.
   return copies (see below).
 - **`DamageReaction`** — a character's say over an incoming packet
   (`UndeadPhysiology`, `SilverVulnerability`, `ArmorReaction`).
-- **`HealthTrack`** — 7-level damage track with wound penalties.
-- **`MoralityTrait`** — a Road/Humanity rating (0–10) with degeneration/penance.
+- **`HealthTrack`** — square-based damage track: per-square wound penalties,
+  condition-linked boxes (poisoned…), heal policies (`never`/`special`) and
+  per-box heal costs (`HealWithPoints`). Simple use is unchanged.
+- **`MoralityTrait`** — a 0–10 rating with a **polarity**: *descending*
+  (Humanity, lost at 0) or *ascending* (Torment, unplayable at 10);
+  `Degenerate()` always moves toward the bad extreme.
 - **`DISCIPLINES`** — the registry of vampiric powers (Potence, Fortitude,
   Celerity, Auspex …) as rated traits; Potence & Fortitude are wired (see below).
 - **`TemplateConfig`** + **`CharacterFactory`** — per-splat configuration
@@ -149,7 +157,8 @@ soakable and which traits form the dice pool. Out of the box:
 per-template starting-value constraints. Examples baked in:
 
 - **Thrall** — Resolve is locked to **1** (`startMin == startMax == 1`).
-- **Demon** — Resolve starts in the **3–5** band, plus a **Torment** tracker.
+- **Demon** (_Dark Ages: Devil's Due_) — Resolve starts in the **3–5** band,
+  plus an **ascending Torment morality** (climbs toward an unplayable 10).
 - **Vampire** — Blood pool max/turn derived from **Generation**; Road rating
   derived from Virtues; Willpower derived from Courage.
 - **Mage** — **no** Road/Humanity and **no** Virtues; has Quintessence (no
@@ -160,7 +169,7 @@ per-template starting-value constraints. Examples baked in:
   dots incl. Potence at creation — pending the powers system, seed via `traits`.
 
 ```ts
-import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src/wod";
+import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src";
 
 const dracula = CharacterFactory.create(TEMPLATE_VAMPIRE, "Dracula", {
   generation: 8,
@@ -213,9 +222,11 @@ category *id*):
   (the script id by default): `get`, `getOrDefault`, `set`, `setIfAbsent`,
   `has`, `delete` — all async, written into the story via `api.v1.storyStorage`
   — plus `tempGet`/`tempSet`/`tempGetOrDefault`/`tempSetIfAbsent`/`tempHas`/
-  `tempDelete`, the same async API against **`api.v1.tempStorage`**: volatile
-  scratch the host clears whenever the script unloads (refresh, session end,
-  toggle) — for UI sync or state you don't want kept. `SaveToStory()` writes
+  `tempDelete`, the same async API against **`api.v1.tempStorage`**:
+  session-scoped scratch, cleared when the story closes — for UI sync or state
+  you don't want kept. (`api.v1.historyStorage` — story-scoped **and**
+  history-aware, reverting on undo — is in the contract and earmarked for
+  mechanical state like damage and pool spends.) `SaveToStory()` writes
   through it.
 - **`LorebookManager`** — reads lorebook entries as *data*, so the user can
   edit game rules like database tables in the NovelAI lorebook UI. It resolves

@@ -26,15 +26,17 @@ Ground rules:
 
 ## 1. Storage (three stores + a UI binding)
 
-All three stores share one surface: `get(key)`, `set(key, value)`,
-`remove(key)` (and `setIfAbsent` per the storage docs). Values are
-JSON-serializable.
+There are **four** stores (docs/storage-api.html), all sharing one surface:
+`get(key)`, `set(key, value)`, `remove(key)`, `list()` (array of set keys).
+There is **no** `setIfAbsent` on the host — emulate with get+set (our
+`StorageManager.setIfAbsent` does). Values are JSON-serializable.
 
 | Store | Scope / lifetime |
 | --- | --- |
-| `api.v1.storage` | per **account/script** — survives across stories |
+| `api.v1.storage` | per **script** — account scripts get ~4 MB (loaded on login); story scripts store it with the story |
 | `api.v1.storyStorage` | per **story** — travels with the story file |
-| `api.v1.tempStorage` | volatile — cleared whenever the script unloads (refresh, toggle, session end); for UI sync & deliberately-unsaved state |
+| `api.v1.historyStorage` | per **story**, **history-aware** — a value is set at a document-history node; undoing past that node reverts it. Ideal for mechanical state that should rewind with the story. |
+| `api.v1.tempStorage` | session-scoped — persists for the current session, cleared when the story is closed; for UI sync & deliberately-unsaved state |
 
 **`storageKey` binding:** input parts (`textInput`, `multilineTextInput`,
 `checkboxInput`) accept `storageKey: "someKey"` — the host then persists the

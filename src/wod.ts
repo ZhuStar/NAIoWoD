@@ -54,12 +54,13 @@ export interface LorebookCategoryData {
   settings?: { entryHeader?: string };
 }
 
-// Persistent (storyStorage) and volatile (tempStorage) share this surface.
+// All four stores share this surface (docs/storage-api.html): set, get,
+// remove, and list (all currently-set keys).
 interface StorageApi {
   get: (key: string) => Promise<unknown>;
   set: (key: string, value: unknown) => Promise<void>;
-  setIfAbsent?: (key: string, value: unknown) => Promise<unknown>;
   remove: (key: string) => Promise<void>;
+  list: () => Promise<string[]>;
 }
 
 interface WodApi {
@@ -67,10 +68,15 @@ interface WodApi {
     script: { id: string; name?: string; version?: string; author?: string };
     uuid: () => string;
     log: (...args: unknown[]) => void;
+    // Story-scoped storage: travels with the story file.
     storyStorage: StorageApi;
-    // Volatile scratch storage: cleared whenever the script unloads (page
-    // refresh, session end, toggling the script off/on). For UI sync and any
-    // state we deliberately don't want kept between script loads.
+    // Story-scoped AND history-aware: a value is set at a point in the document
+    // history, and undoing past that node reverts it. The natural home for
+    // mechanical state (damage, pool spends) - adoption is a planned follow-up.
+    historyStorage: StorageApi;
+    // Session-scoped scratch: persists for the current session and is cleared
+    // when the story is closed. For UI sync via storage keys and any state we
+    // deliberately don't want to keep.
     tempStorage: StorageApi;
     lorebook: {
       entry: (entryId: string) => Promise<LorebookEntryData | null>;
@@ -92,6 +98,7 @@ interface WodApi {
 // job to create its categories and seed them (see LorebookManager.bootstrap).
 const __host = globalThis as unknown as { api?: WodApi };
 const __mockStore = new Map<string, unknown>();
+const __mockHistoryStore = new Map<string, unknown>();
 const __mockTempStore = new Map<string, unknown>();
 let __mockCategories: LorebookCategoryData[] = [];
 let __mockEntries: LorebookEntryData[] = [];
@@ -103,8 +110,8 @@ const __mockUuid = (): string => {
 const __makeMockStore = (m: Map<string, unknown>): StorageApi => ({
   get: async (key) => m.get(key),
   set: async (key, value) => { m.set(key, value); },
-  setIfAbsent: async (key, value) => { if (m.has(key)) return false; m.set(key, value); return true; },
   remove: async (key) => { m.delete(key); },
+  list: async () => [...m.keys()],
 });
 
 // Test/off-host helper: wipe the mock lorebook back to a fresh (empty) story.
@@ -117,7 +124,10 @@ const api: WodApi = __host.api ?? {
     uuid: __mockUuid,
     log: (...args: unknown[]) => console.log(...args),
     storyStorage: __makeMockStore(__mockStore),
-    tempStorage: __makeMockStore(__mockTempStore), // volatile; cleared on script unload
+    // The mock is not history-aware (no document history off-host); it just
+    // gives historyStorage its own bucket with the same surface.
+    historyStorage: __makeMockStore(__mockHistoryStore),
+    tempStorage: __makeMockStore(__mockTempStore), // session-scoped; cleared when the story closes
     lorebook: {
       entry: async (entryId: string) => __mockEntries.find(e => e.id === entryId) ?? null,
       categories: async () => __mockCategories,
@@ -134,17 +144,18 @@ const api: WodApi = __host.api ?? {
       removeEntry: async (id) => { __mockEntries = __mockEntries.filter(e => e.id !== id); },
     },
     // Off-host there is no engine to fire hooks; registering just records that a
-    // handler exists (and keeps import-time `hooks.register(...)` from throwing).
+    // handler exists (and keeps `hooks.register(...)` from throwing).
     hooks: {
       register: (event: "onTextAdventureInput", _handler: OnTextAdventureInput) => {
-        Log(`[HOOK REGISTER] ${event}`);
+        log(`[HOOK REGISTER] ${event}`);
       }
     }
   }
 };
 
 // --- UTILITIES & CONSTANTS ---
-export function Log(...args: unknown[]): void { console.log(...args); }
+// Project-wide logger: routes through the host's logger (console.log off-host).
+export function log(...args: unknown[]): void { api.v1.log(...args); }
 
 export class StringUtil {
   static normalize(str: string): string {
@@ -1460,7 +1471,7 @@ export class MeritFlawRegistry {
           }
         }
       } catch {
-        Log(`[MERITS] Skipping unparseable lorebook entry: ${entry.displayName}`);
+        log(`[MERITS] Skipping unparseable lorebook entry: ${entry.displayName}`);
       }
     }
     return count;

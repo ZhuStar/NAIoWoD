@@ -162,13 +162,6 @@ export class StringUtil {
     return str.toLowerCase().trim().replace(/\s+/g, '-');
   }
 
-  // Parses srd:ability:talent:brawl -> { kind: "ability", sub: "talent", name: "brawl" }
-  static parseSrdName(srdString: string): { kind: string, subCategory: string, name: string } {
-    const parts = srdString.toLowerCase().split(':');
-    if (parts[0] !== 'srd' || parts.length < 4) return { kind: "unknown", subCategory: "none", name: srdString };
-    return { kind: parts[1], subCategory: parts[2], name: parts.slice(3).join('-') };
-  }
-
   // "blood-potency" / "self_control" -> "Blood Potency" / "Self Control"
   static toTitleCase(str: string): string {
     return str

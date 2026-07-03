@@ -1,16 +1,10 @@
-/*---
-compatibilityVersion: naiscript-1.0
-id: 50033a8a-0b47-4113-ab20-401559296ba5
-name: NAIoWoD
-version: 0.1.0
-author: ZhuStar
-description: World of Darkness (Dark Ages) Storyteller engine - characters, dice, damage, lorebook-driven rules.
-memoryLimit: 8
----*/
+// NAIoWoD - World of Darkness (Dark Ages) engine for NovelAI scripting.
 // GENERATED - do not edit by hand. This is src/* concatenated in dependency
 // order with inter-module import/export wiring removed; every declaration
 // keeps its original source. Edit the modules under src/, then `bun run build`.
 // test/build.test.ts fails if this file drifts from src/.
+//
+// Paste this TypeScript into NovelAI's script editor as-is - no header needed.
 //
 // Order: host -> core/traits -> core/dice -> core/damage -> rules ->
 //        services -> game -> init (index.ts) -> bootstrap (main.ts)

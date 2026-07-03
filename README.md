@@ -28,16 +28,17 @@ NovelAI's runtime is a single, import-free context that injects a global
 ordinary ES modules with a strict layering (`core` → `rules` → `services` →
 `game`), and `bun run build` concatenates them **in dependency order** into one
 readable, editable TypeScript file — `dist/naiowod.ts` — stripping the
-inter-module `import`/`export` wiring and prepending the `.naiscript` metadata
-header. It is **not** minified or bundled: every declaration keeps its original
-source, so the single file reads like the modules laid end to end (with
-`//#region` markers per module). The file is committed and kept honest by
-`test/build.test.ts`, which fails the suite if it ever drifts from `src/`. **To
-deploy, rename `dist/naiowod.ts` to `.naiscript` and paste it into NovelAI.**
-Off-host (tests, local runs) the mock in `src/host.ts` yields to a real
-host-provided `api` when one exists, and importing the engine has **no side
-effects** — everything host-facing happens in `init()`, which the built
-artifact calls last.
+inter-module `import`/`export` wiring. It is **not** minified or bundled: every
+declaration keeps its original source, so the single file reads like the modules
+laid end to end (with `//#region` markers per module). The file is committed and
+kept honest by `test/build.test.ts`, which fails the suite if it ever drifts
+from `src/`. **To deploy, paste the contents of `dist/naiowod.ts` into NovelAI's
+script editor — it's plain TypeScript, nothing else needed.** (A `.naiscript`
+YAML frontmatter header, with an embedded script id, is only for
+exporting/importing scripts; pasting doesn't use it.) Off-host (tests, local
+runs) the mock in `src/host.ts` yields to a real host-provided `api` when one
+exists, and importing the engine has **no side effects** — everything
+host-facing happens in `init()`, which the built artifact calls last.
 
 ## Commands
 

@@ -3,17 +3,14 @@
 // or transpiled. Inter-module import/export *wiring* is stripped (a NovelAI
 // script runs in one global scope, so cross-file imports are neither needed nor
 // allowed), but every declaration keeps its original source text. The result
-// reads like the modules laid end to end, under a NovelAI script metadata
-// header.
+// reads like the modules laid end to end.
 //
 // `bun run build` regenerates it; test/build.test.ts fails the suite if the
 // committed dist/naiowod.ts ever drifts from src/, so the single file stays in
-// sync with the modules on every change. To deploy, rename the file to
-// `.naiscript` and paste it into NovelAI (or point the importer at it).
-//
-// The script id is FIXED so re-imports update the same NovelAI script instead
-// of creating a new one; bump `version` in package.json per release.
-const SCRIPT_ID = "50033a8a-0b47-4113-ab20-401559296ba5";
+// sync with the modules on every change. To use it, paste the TypeScript below
+// into NovelAI's script editor - no metadata header needed. (The `.naiscript`
+// YAML frontmatter is only for exporting/importing scripts, which embeds a
+// script id; pasting plain TypeScript does not need it.)
 
 // Modules in dependency order: each references only names declared above it.
 // (host -> core -> rules -> services -> game -> index/init -> main/bootstrap.)
@@ -49,21 +46,14 @@ export function stripModule(src: string): string {
 }
 
 export async function buildSingleFile(): Promise<string> {
-  const pkg = await Bun.file(new URL("package.json", ROOT)).json();
   const header = [
-    "/*---",
-    "compatibilityVersion: naiscript-1.0",
-    `id: ${SCRIPT_ID}`,
-    "name: NAIoWoD",
-    `version: ${pkg.version}`,
-    "author: ZhuStar",
-    "description: World of Darkness (Dark Ages) Storyteller engine - characters, dice, damage, lorebook-driven rules.",
-    "memoryLimit: 8",
-    "---*/",
+    "// NAIoWoD - World of Darkness (Dark Ages) engine for NovelAI scripting.",
     "// GENERATED - do not edit by hand. This is src/* concatenated in dependency",
     "// order with inter-module import/export wiring removed; every declaration",
     "// keeps its original source. Edit the modules under src/, then `bun run build`.",
     "// test/build.test.ts fails if this file drifts from src/.",
+    "//",
+    "// Paste this TypeScript into NovelAI's script editor as-is - no header needed.",
     "//",
     "// Order: host -> core/traits -> core/dice -> core/damage -> rules ->",
     "//        services -> game -> init (index.ts) -> bootstrap (main.ts)",
@@ -80,9 +70,10 @@ export async function buildSingleFile(): Promise<string> {
 if (import.meta.main) {
   const out = await buildSingleFile();
 
-  // Guardrails: metadata header first, and no inter-module wiring survived
-  // (in a global-scope script no line may start with `import` or `export`).
-  if (!out.startsWith("/*---")) throw new Error("metadata header missing");
+  // Guardrails: starts with the generated comment (NOT naiscript frontmatter),
+  // and no inter-module wiring survived (no line may start with import/export).
+  if (!out.startsWith("//")) throw new Error("generated header comment missing");
+  if (out.startsWith("/*---")) throw new Error("naiscript frontmatter should not be emitted");
   const leaked = out.split("\n").filter((l) => /^(import|export)\b/.test(l));
   if (leaked.length) {
     throw new Error(`inter-module wiring leaked:\n  ${leaked.slice(0, 5).join("\n  ")}`);

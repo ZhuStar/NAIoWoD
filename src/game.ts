@@ -13,7 +13,7 @@ import {
 } from "./rules";
 import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
 import {
-  RollSpec, makeRollSpec, executeRoll, formatExecution, DEFAULT_DIFFICULTY,
+  RollSpec, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
 } from "./rolls";
 
 // --- LIVE CHARACTER SHEET ---
@@ -591,6 +591,68 @@ export class CharacterStore {
 }
 
 // =============================================================================
+// NAMED ROLLS - a global, player-editable library of saved RollSpecs
+// -----------------------------------------------------------------------------
+// One lorebook entry IS the library: a JSON map { name: RollSpec } below the
+// header marker in wod:named-rolls. Read fresh on every call (no storage mirror)
+// so a player's hand edits are always live. Names normalize to single tokens.
+// =============================================================================
+export const NAMED_ROLLS_CATEGORY = "wod:named-rolls";
+const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
+
+export class NamedRollStore {
+  private static _text(map: Record<string, RollSpec>): string {
+    return [
+      "Saved rolls for this chronicle: a JSON object { name: rollspec } below the",
+      "marker. Invoke one with [[roll @name]]; edit this map freely by hand.",
+      "Each spec: pool, difficulty, difficultyMod, requires, diceMod, tags[].",
+      SRD_HEADER_MARKER,
+      JSON.stringify(map, null, 2),
+    ].join("\n");
+  }
+
+  // The whole library ({} when the entry is missing or unparseable).
+  static async all(): Promise<Record<string, RollSpec>> {
+    const text = await LorebookManager.entryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY);
+    if (!text) return {};
+    const body = LorebookManager.contentBelowHeader(text).trim();
+    if (!body.startsWith("{")) return {};
+    try {
+      const o = JSON.parse(body);
+      return (o && typeof o === "object" && !Array.isArray(o)) ? o as Record<string, RollSpec> : {};
+    } catch { return {}; }
+  }
+
+  static async get(name: string): Promise<RollSpec | undefined> {
+    return (await NamedRollStore.all())[StringUtil.normalize(name)];
+  }
+  static async names(): Promise<string[]> { return Object.keys(await NamedRollStore.all()); }
+
+  // Write the library back (create the category/entry on first use).
+  private static async _write(map: Record<string, RollSpec>): Promise<void> {
+    const { id } = await LorebookManager.ensureCategory(NAMED_ROLLS_CATEGORY);
+    const text = NamedRollStore._text(map);
+    const created = await LorebookManager.ensureEntry(id, NAMED_ROLLS_ENTRY, text);
+    if (!created) await LorebookManager.updateEntryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY, text);
+  }
+
+  static async save(name: string, spec: RollSpec): Promise<void> {
+    const map = await NamedRollStore.all();
+    map[StringUtil.normalize(name)] = spec;
+    await NamedRollStore._write(map);
+  }
+
+  static async remove(name: string): Promise<boolean> {
+    const map = await NamedRollStore.all();
+    const key = StringUtil.normalize(name);
+    if (!(key in map)) return false;
+    delete map[key];
+    await NamedRollStore._write(map);
+    return true;
+  }
+}
+
+// =============================================================================
 // COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
 // Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -737,28 +799,48 @@ function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
   return 0;
 }
 
-// Build a RollSpec from a parsed command. `offset` is where the pool sits among
-// the positionals (0 for [[roll]], 1 for [[roll-for "Name" ...]]). Difficulty
-// and its modifier may be positional OR named (named wins); requires,
-// dice-modifier and tags are named-only.
-function rollSpecFromCommand(cmd: ParsedCommand, offset: number): RollSpec {
-  const num = (s: string | undefined, fallback: number): number => {
-    if (s === undefined) return fallback;
+// Extract only the roll fields the player actually supplied (no defaults filled
+// in), so callers can tell "keep the saved value" from "reset to default".
+// `offset` is where the pool sits among the positionals (0 for [[roll]], 1 for
+// [[roll-for "Name" ...]]). Difficulty and its modifier may be positional OR
+// named (named wins); requires, dice-modifier and tags are named-only.
+function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> {
+  const intOf = (s: string | undefined): number | undefined => {
+    if (s === undefined) return undefined;
     const v = parseInt(s, 10);
-    return Number.isNaN(v) ? fallback : v;
+    return Number.isNaN(v) ? undefined : v;
   };
-  const pool = cmd.positional[offset] ?? "";
-  const difficulty = num(cmd.named["difficulty"] ?? cmd.positional[offset + 1], DEFAULT_DIFFICULTY);
-  const difficultyMod = num(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2], 0);
-  const requires = num(cmd.named["requires"], 1);
-  const diceMod = num(cmd.named["dice-modifier"], 0);
-  const tags = (cmd.named["tags"] ?? "").split(",").map(t => t.trim()).filter(t => t.length > 0);
-  return makeRollSpec({ pool, difficulty, difficultyMod, requires, diceMod, tags });
+  const args: Partial<RollSpec> = {};
+  const pool = cmd.positional[offset];
+  if (pool !== undefined) args.pool = pool;
+  const difficulty = intOf(cmd.named["difficulty"] ?? cmd.positional[offset + 1]);
+  if (difficulty !== undefined) args.difficulty = difficulty;
+  const difficultyMod = intOf(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2]);
+  if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
+  const requires = intOf(cmd.named["requires"]);
+  if (requires !== undefined) args.requires = requires;
+  const diceMod = intOf(cmd.named["dice-modifier"]);
+  if (diceMod !== undefined) args.diceMod = diceMod;
+  if (cmd.named["tags"] !== undefined) {
+    args.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
+  }
+  return args;
 }
 
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
-  const spec = rollSpecFromCommand(cmd, offset);
-  if (!spec.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]].))`;
+  const args = extractRollArgs(cmd, offset);
+  if (!args.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].))`;
+  let spec: RollSpec;
+  if (args.pool.startsWith("@")) {
+    // Saved roll: load the base spec, then apply the supplied overrides (pool is
+    // never overridden, so passing `args` straight through to overrideSpec is safe).
+    const name = StringUtil.normalize(args.pool.slice(1));
+    const base = await NamedRollStore.get(name);
+    if (!base) return `((OOC-Storyteller: No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].))`;
+    spec = overrideSpec(base, args);
+  } else {
+    spec = makeRollSpec({ ...args, pool: args.pool });
+  }
   const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
   return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}))`;
 }
@@ -777,11 +859,43 @@ async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
   return rollAndReport(char, cmd, ctx, 1);
 }
 
+// Save a reusable roll: name is positional[0], then the roll grammar at offset 1.
+async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: name-roll needs a name, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
+  const args = extractRollArgs(cmd, 1);
+  if (!args.pool) return `((OOC-Storyteller: name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
+  const spec = makeRollSpec({ ...args, pool: args.pool });
+  await NamedRollStore.save(name, spec);
+  const key = StringUtil.normalize(name);
+  return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}. Use it with [[roll @${key}]].))`;
+}
+
+async function cmdListRolls(): Promise<string> {
+  const map = await NamedRollStore.all();
+  const names = Object.keys(map);
+  if (!names.length) return `((OOC-Storyteller: No saved rolls yet. Save one with [[name-roll <name> <pool> ...]].))`;
+  const items = names.map(n => `${n} (${describeSpec(map[n])})`).join("; ");
+  return `((OOC-Storyteller: Saved rolls: ${items}.))`;
+}
+
+async function cmdForgetRoll(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: forget-roll needs a name, e.g. [[forget-roll dodge]].))`;
+  const key = StringUtil.normalize(name);
+  return (await NamedRollStore.remove(key))
+    ? `((OOC-Storyteller: Forgot saved roll "${key}".))`
+    : `((OOC-Storyteller: No saved roll named "${key}".))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
+CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags=");
+CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags=');
+CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
+CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
+CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

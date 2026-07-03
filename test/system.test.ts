@@ -13,6 +13,7 @@ import {
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
+  overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -1254,5 +1255,73 @@ describe("[[play]], [[roll]] and [[roll-for]]", () => {
     expect(r).toContain("Sela");
     expect(r).toContain("1 success");
     expect((await CharacterStore.getCurrent())!.name).toBe("Rok"); // unchanged
+  });
+});
+
+describe("named rolls (@name library)", () => {
+  beforeEach(async () => {
+    __resetStorageMock();
+    __resetLorebookMock();
+    await LorebookManager.bootstrap();   // re-seed SRD abilities for create-playable
+  });
+
+  test("overrideSpec applies only supplied fields and never the pool", () => {
+    const base = makeRollSpec({ pool: "dexterity+dodge", difficulty: 6, requires: 1, tags: ["specialty"] });
+    const merged = overrideSpec(base, { difficulty: 8, diceMod: 2 });
+    expect(merged.pool).toBe("dexterity+dodge");   // pool never overridden
+    expect(merged.difficulty).toBe(8);
+    expect(merged.diceMod).toBe(2);
+    expect(merged.requires).toBe(1);                // untouched
+    expect(merged.tags).toEqual(["specialty"]);     // untouched
+  });
+
+  test("NamedRollStore round-trips through the lorebook entry", async () => {
+    expect(await NamedRollStore.get("dodge")).toBeUndefined();
+    await NamedRollStore.save("Dodge", makeRollSpec({ pool: "dexterity+dodge", difficulty: 6 }));
+    expect((await NamedRollStore.get("dodge"))!.pool).toBe("dexterity+dodge"); // normalized key
+    expect(await NamedRollStore.names()).toContain("dodge");
+    expect(await NamedRollStore.remove("dodge")).toBe(true);
+    expect(await NamedRollStore.get("dodge")).toBeUndefined();
+  });
+
+  test("a hand-edited library entry is read live", async () => {
+    await NamedRollStore.save("dodge", makeRollSpec({ pool: "dexterity+dodge" }));
+    const map = { "power-attack": makeRollSpec({ pool: "strength+brawl", difficulty: 7 }) };
+    const text = `edited by hand\n=====\n${JSON.stringify(map, null, 2)}`;
+    await LorebookManager.updateEntryText(NAMED_ROLLS_CATEGORY, "wod:named-rolls:library", text);
+    expect((await NamedRollStore.get("power-attack"))!.difficulty).toBe(7);
+    expect(await NamedRollStore.get("dodge")).toBeUndefined(); // replaced by the edit
+  });
+
+  test("[[name-roll]] then [[roll @name]] with a per-use override", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    expect(await CommandRouter.route("name-roll punch strength+brawl 6")).toContain('Saved roll "punch"');
+    // Rok: Strength 1 + Brawl 0 = a one-die pool.
+    const base = await CommandRouter.route("roll @punch", { rng: seqRng([6]) });
+    expect(base).toContain("Rok");
+    expect(base).toContain("1 success");
+    // Override difficulty up to 9: the single die (face 6) now misses.
+    const hard = await CommandRouter.route("roll @punch difficulty=9", { rng: seqRng([6]) });
+    expect(hard).toContain("vs diff 9");
+    expect(hard).toContain("Failure");
+  });
+
+  test('[[roll-for "X" @name]] uses the saved roll without changing selection', async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    await CommandRouter.route("name-roll dodge dexterity+dodge 6");
+    const r = await CommandRouter.route('roll-for "Sela" @dodge', { rng: seqRng([6]) });
+    expect(r).toContain("Sela");
+    expect((await CharacterStore.getCurrent())!.name).toBe("Rok"); // unchanged
+  });
+
+  test("list-rolls, forget-roll, and an unknown @name are reported", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    expect(await CommandRouter.route("list-rolls")).toContain("No saved rolls");
+    await CommandRouter.route("name-roll dodge dexterity+dodge");
+    expect(await CommandRouter.route("list-rolls")).toContain("dodge");
+    expect(await CommandRouter.route("roll @ghost", { rng: seqRng([]) })).toContain('No saved roll named "ghost"');
+    expect(await CommandRouter.route("forget-roll dodge")).toContain("Forgot");
+    expect(await CommandRouter.route("list-rolls")).toContain("No saved rolls");
   });
 });

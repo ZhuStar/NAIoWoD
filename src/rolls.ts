@@ -201,3 +201,29 @@ export function formatExecution(exec: RollExecution): string {
   const extra = exec.resolved.notes.length ? ` [${exec.resolved.notes.join("; ")}]` : "";
   return `${r.message} - ${verdict}${extra}`;
 }
+
+// --- PARTIAL OVERRIDE (named rolls, and later extended-roll continuations) ---
+// Return a copy of `base` with only the DEFINED fields of `overrides` applied.
+// `pool` is intentionally never overridden - a saved roll keeps its own pool;
+// callers tweak the knobs (difficulty, dice, requirement, tags). This is the
+// shared primitive behind named rolls and the future extended-roll continuations
+// (helpers changing the dice modifier, etc.).
+export function overrideSpec(base: RollSpec, overrides: Partial<RollSpec>): RollSpec {
+  const merged: RollSpec = { ...base, tags: [...base.tags] };
+  if (overrides.difficulty !== undefined) merged.difficulty = overrides.difficulty;
+  if (overrides.difficultyMod !== undefined) merged.difficultyMod = overrides.difficultyMod;
+  if (overrides.requires !== undefined) merged.requires = Math.max(1, overrides.requires);
+  if (overrides.diceMod !== undefined) merged.diceMod = overrides.diceMod;
+  if (overrides.tags !== undefined) merged.tags = overrides.tags.map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  return merged;
+}
+
+// A short one-line summary of a spec, for save/list confirmations.
+export function describeSpec(spec: RollSpec): string {
+  const mod = spec.difficultyMod ? (spec.difficultyMod > 0 ? `+${spec.difficultyMod}` : `${spec.difficultyMod}`) : "";
+  const parts = [spec.pool, `diff ${spec.difficulty}${mod}`];
+  if (spec.requires !== 1) parts.push(`requires ${spec.requires}`);
+  if (spec.diceMod) parts.push(`dice ${spec.diceMod > 0 ? "+" : ""}${spec.diceMod}`);
+  if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);
+  return parts.join(", ");
+}

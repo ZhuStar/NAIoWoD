@@ -321,9 +321,30 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
   `RollModifierRegistry` (e.g. `acute-senses` → −2 difficulty, `willpower` → +1
   automatic success) — the hook for rules-driven modifiers like Merits & Flaws.
 
+### Named rolls
+
+Save a roll once, then fire it by name — tweaking pieces on the spot. Saved
+rolls are a single **chronicle-wide library**, stored as an editable JSON map in
+the `wod:named-rolls` lorebook entry.
+
+```
+[[name-roll dodge dexterity+dodge 6]]
+[[roll @dodge]]
+[[roll @dodge difficulty=8 dice-modifier=+1]]
+[[roll-for "Sela" @dodge]]
+```
+
+- **`name-roll <name> <pool> …`** saves a roll (same grammar as `roll`).
+- **`@name`** in any `roll` / `roll-for` loads that saved spec; supplied args
+  **override** its difficulty, modifier, `requires`, `dice-modifier` or `tags`
+  for that one use (the pool itself is fixed). This override-merge is the same
+  primitive extended rolls will reuse for helpers and continuations.
+- **`list-rolls`** shows the library; **`forget-roll <name>`** removes one (or
+  just edit the JSON map in the lorebook directly).
+
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
 resolution, turning a finished sheet into a `LiveCharacter`, and **extended
-rolls** (persistent, interval-aware) plus saved **named rolls**.
+rolls** (persistent, interval-aware).
 
 ## Merits & Flaws
 

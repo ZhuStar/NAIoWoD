@@ -16,7 +16,7 @@ import {
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
   CharacterFactory,
-} from "../src/wod";
+} from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
 beforeAll(async () => { await LorebookManager.bootstrap(); });

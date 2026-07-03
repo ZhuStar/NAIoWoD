@@ -7,6 +7,6 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "bun build ./src/wod.ts --outfile ./dist/wod.novelai.js --target browser"
+    "build": "bun scripts/build-naiscript.ts"
   }
 }

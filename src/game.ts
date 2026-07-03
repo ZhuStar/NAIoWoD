@@ -8,12 +8,13 @@ import {
   HealthTrack, HealthSummary, SoakSpec, SoakTypeRule,
 } from "./core/damage";
 import {
-  RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, PoolDef,
+  RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, ResourceDef,
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
+  resourcesForTemplates,
 } from "./rules";
 import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
 import {
-  RollSpec, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
+  RollSpec, RollModifier, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
   ExtendedRoll, applyInterval, describeExtended, parseBotchPolicy,
 } from "./rolls";
 
@@ -435,7 +436,7 @@ export class CharacterFactory {
   }
 
   // Validates a chosen starting value against the PoolDef constraints.
-  private static _resolveStart(def: PoolDef, chosen: number | undefined): number {
+  private static _resolveStart(def: ResourceDef, chosen: number | undefined): number {
     if (chosen === undefined) return def.start;
     if (def.startOptions && !def.startOptions.includes(chosen)) {
       throw new Error(`${def.name} must start at one of [${def.startOptions.join(", ")}], got ${chosen}.`);
@@ -694,6 +695,81 @@ export class ExtendedRollStore {
 }
 
 // =============================================================================
+// CHARACTER RESOURCES - live current values for a character's resources
+// -----------------------------------------------------------------------------
+// A character's resources are the union of its templates' ResourceDefs; current
+// values live in story storage (res:<char>), defaulting to the record's chosen
+// start (poolStarts), else the template default. Resolving by name OR role is how
+// one resource fills another's job (Quintessence carrying role "resolve").
+// history-aware historyStorage is the eventual home.
+// =============================================================================
+export interface ResourceView { def: ResourceDef; current: number; max: number; }
+
+export class CharacterResources {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
+
+  static defsFor(char: PlayableCharacter): ResourceDef[] { return resourcesForTemplates(char.templates); }
+
+  // A resource by exact name, else by a role it fills (the "use X as Y" hook).
+  static resolveDef(char: PlayableCharacter, nameOrRole: string): ResourceDef | undefined {
+    const key = StringUtil.normalize(nameOrRole);
+    const defs = CharacterResources.defsFor(char);
+    return defs.find(d => StringUtil.normalize(d.name) === key)
+      ?? defs.find(d => (d.roles ?? []).some(r => StringUtil.normalize(r) === key));
+  }
+
+  private static _startOf(char: PlayableCharacter, def: ResourceDef): number {
+    const chosen = char.poolStarts?.[StringUtil.normalize(def.name)];
+    return Math.max(0, Math.min(chosen ?? def.start, def.max));
+  }
+
+  private static async _values(char: PlayableCharacter): Promise<Record<string, number>> {
+    return ((await CharacterResources._storage.get(CharacterResources._key(char.name))) as Record<string, number> | undefined) ?? {};
+  }
+
+  static async current(char: PlayableCharacter, def: ResourceDef): Promise<number> {
+    const values = await CharacterResources._values(char);
+    const k = StringUtil.normalize(def.name);
+    return k in values ? values[k] : CharacterResources._startOf(char, def);
+  }
+
+  static async all(char: PlayableCharacter): Promise<ResourceView[]> {
+    const values = await CharacterResources._values(char);
+    return CharacterResources.defsFor(char).map(def => {
+      const k = StringUtil.normalize(def.name);
+      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: def.max };
+    });
+  }
+
+  // Spend up to `amount` (never below 0); returns how much actually left the pool.
+  static async spend(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ spent: number; def?: ResourceDef }> {
+    const def = CharacterResources.resolveDef(char, nameOrRole);
+    if (!def) return { spent: 0 };
+    const values = await CharacterResources._values(char);
+    const k = StringUtil.normalize(def.name);
+    const have = k in values ? values[k] : CharacterResources._startOf(char, def);
+    const spent = Math.max(0, Math.min(amount, have));
+    values[k] = have - spent;
+    await CharacterResources._storage.set(CharacterResources._key(char.name), values);
+    return { spent, def };
+  }
+
+  // Restore up to max; returns the new value.
+  static async gain(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ value: number; def?: ResourceDef }> {
+    const def = CharacterResources.resolveDef(char, nameOrRole);
+    if (!def) return { value: 0 };
+    const values = await CharacterResources._values(char);
+    const k = StringUtil.normalize(def.name);
+    const have = k in values ? values[k] : CharacterResources._startOf(char, def);
+    const value = Math.max(0, Math.min(have + amount, def.max));
+    values[k] = value;
+    await CharacterResources._storage.set(CharacterResources._key(char.name), values);
+    return { value, def };
+  }
+}
+
+// =============================================================================
 // COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
 // Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -868,6 +944,29 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   return args;
 }
 
+// Read a spend=<resource|role> [spend-amount=N] request off a command, deduct it
+// from the character, and return the effect to fold into the roll (plus a note).
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<{ extra?: Partial<RollModifier>; note: string }> {
+  const which = cmd.named["spend"];
+  if (!which) return { note: "" };
+  const def = CharacterResources.resolveDef(char, which);
+  if (!def) return { note: `no resource "${which}" to spend` };
+  const e = def.effect;
+  const cost = Math.max(1, e?.cost ?? 1);
+  const want = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
+  const have = await CharacterResources.current(char, def);
+  const applications = Math.min(e?.maxPerRoll ?? want, want, Math.floor(have / cost));
+  if (applications < 1) return { note: `not enough ${def.name} to spend` };
+  const { spent } = await CharacterResources.spend(char, which, applications * cost);
+  if (!e) return { note: `spent ${spent} ${def.name}` };
+  const extra: Partial<RollModifier> = {
+    difficultyMod: (e.difficultyMod ?? 0) * applications,
+    diceMod: (e.diceMod ?? 0) * applications,
+    autoSuccesses: (e.autoSuccesses ?? 0) * applications,
+  };
+  return { extra, note: `spent ${spent} ${def.name}: ${e.label}` };
+}
+
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
   const args = extractRollArgs(cmd, offset);
   if (!args.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].))`;
@@ -882,8 +981,9 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
-  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
-  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}))`;
+  const { extra, note } = await applySpend(char, cmd);
+  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng, extra });
+  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${note ? ` - ${note}` : ""}))`;
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -1006,11 +1106,51 @@ async function cmdCancelRoll(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Cancelled extended action${action.label ? ` "${action.label}"` : ""} (was ${action.accumulated}/${action.target}).))`;
 }
 
+async function cmdResources(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const views = await CharacterResources.all(char);
+  if (!views.length) return `((OOC-Storyteller: ${char.name} has no resources.))`;
+  const items = views.map(v => {
+    const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
+    const meta = [roles.length ? `roles: ${roles.join("/")}` : "", v.def.effect?.label ?? ""].filter(Boolean).join("; ");
+    return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
+  }).join("; ");
+  return `((OOC-Storyteller: ${char.name} resources - ${items}.))`;
+}
+
+async function cmdSpend(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const which = cmd.positional[0]?.trim();
+  if (!which) return `((OOC-Storyteller: spend needs a resource, e.g. [[spend willpower]] or [[spend blood 2]].))`;
+  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+  const def = CharacterResources.resolveDef(char, which);
+  if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  const { spent } = await CharacterResources.spend(char, which, amount);
+  if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
+  const now = await CharacterResources.current(char, def);
+  const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
+  return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
+}
+
+async function cmdGain(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const which = cmd.positional[0]?.trim();
+  if (!which) return `((OOC-Storyteller: gain needs a resource, e.g. [[gain willpower]].))`;
+  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+  const def = CharacterResources.resolveDef(char, which);
+  if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  const { value } = await CharacterResources.gain(char, which, amount);
+  return `((OOC-Storyteller: ${char.name} regains ${def.name}. Now ${value}/${def.max}.))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags=");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags=');
+CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=");
+CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=');
 CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
 CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
 CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
@@ -1018,6 +1158,9 @@ CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> r
 CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
 CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
 CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
+CommandRouter.register("resources", cmdResources, "resources");
+CommandRouter.register("spend", cmdSpend, 'spend <resource> [amount] [reason="..."]');
+CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

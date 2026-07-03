@@ -126,7 +126,7 @@ export interface ResolvedRoll {
   notes: string[];
 }
 
-export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy } = {}): ResolvedRoll {
+export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}): ResolvedRoll {
   const breakdown = parsePoolExpression(spec.pool, resolve);
   let difficulty = spec.difficulty + spec.difficultyMod;
   let dice = breakdown.total + spec.diceMod;
@@ -142,6 +142,14 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
     dice += mod.diceMod ?? 0;
     automaticSuccesses += mod.autoSuccesses ?? 0;
     if (mod.nAgain !== undefined) nAgain = Math.min(nAgain, mod.nAgain);
+  }
+
+  // An ad-hoc modifier (e.g. a spent resource's effect) applied like a matched tag.
+  if (opts.extra) {
+    difficulty += opts.extra.difficultyMod ?? 0;
+    dice += opts.extra.diceMod ?? 0;
+    automaticSuccesses += opts.extra.autoSuccesses ?? 0;
+    if (opts.extra.nAgain !== undefined) nAgain = Math.min(nAgain, opts.extra.nAgain);
   }
 
   const rawDifficulty = difficulty;
@@ -174,7 +182,7 @@ export interface RollExecution {
 
 export function executeRoll(
   spec: RollSpec, resolve: TraitResolver,
-  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy } = {}
+  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}
 ): RollExecution {
   const resolved = resolveSpec(spec, resolve, opts);
   if (resolved.impossible) return { resolved, result: null, met: false, outcome: "impossible" };

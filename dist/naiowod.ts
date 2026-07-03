@@ -1093,7 +1093,7 @@ interface ResolvedRoll {
   notes: string[];
 }
 
-function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy } = {}): ResolvedRoll {
+function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}): ResolvedRoll {
   const breakdown = parsePoolExpression(spec.pool, resolve);
   let difficulty = spec.difficulty + spec.difficultyMod;
   let dice = breakdown.total + spec.diceMod;
@@ -1109,6 +1109,14 @@ function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficu
     dice += mod.diceMod ?? 0;
     automaticSuccesses += mod.autoSuccesses ?? 0;
     if (mod.nAgain !== undefined) nAgain = Math.min(nAgain, mod.nAgain);
+  }
+
+  // An ad-hoc modifier (e.g. a spent resource's effect) applied like a matched tag.
+  if (opts.extra) {
+    difficulty += opts.extra.difficultyMod ?? 0;
+    dice += opts.extra.diceMod ?? 0;
+    automaticSuccesses += opts.extra.autoSuccesses ?? 0;
+    if (opts.extra.nAgain !== undefined) nAgain = Math.min(nAgain, opts.extra.nAgain);
   }
 
   const rawDifficulty = difficulty;
@@ -1141,7 +1149,7 @@ interface RollExecution {
 
 function executeRoll(
   spec: RollSpec, resolve: TraitResolver,
-  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy } = {}
+  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}
 ): RollExecution {
   const resolved = resolveSpec(spec, resolve, opts);
   if (resolved.impossible) return { resolved, result: null, met: false, outcome: "impossible" };
@@ -1413,7 +1421,22 @@ const HUMANITY_MORALITY: MoralityConfig = {
 // TEMPLATES - per-splat configuration including starting values
 // =============================================================================
 type PoolKind = "tracker" | "pool";
-interface PoolDef {
+// What spending `cost` points of a resource grants to a roll. Maps onto the
+// RollModifier fields in rolls.ts (difficulty/dice/auto-successes), so a resource
+// effect and a tag modifier flow through the same pipeline.
+interface ResourceEffect {
+  label: string;
+  cost?: number;            // points spent per application (default 1)
+  difficultyMod?: number;   // e.g. Resolve -2 (magnitude is configurable data)
+  diceMod?: number;
+  autoSuccesses?: number;   // e.g. Willpower +1
+  maxPerRoll?: number;      // stacking cap per roll (default 1)
+}
+
+// A resource is a tracker/pool PLUS abstract `roles` it can fill and an optional
+// spend `effect`. Roles are how templates compose/share resources: Quintessence
+// carrying the "resolve" role IS "use Quintessence as Resolve" - pure data.
+interface ResourceDef {
   name: string;
   kind: PoolKind;
   start: number;            // default starting value
@@ -1423,13 +1446,32 @@ interface PoolDef {
   max: number;              // permanent cap (tracker) / capacity (pool)
   perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
+  roles?: string[];         // abstract capabilities this resource fills
+  effect?: ResourceEffect;  // what spending it does to a roll
+}
+/** @deprecated Renamed to ResourceDef. */
+type PoolDef = ResourceDef;
+
+// Reusable builders so shared roles/effects are configured once.
+function willpowerResource(start: number): ResourceDef {
+  return {
+    name: "willpower", kind: "tracker", start, startMin: 1, startMax: 10, max: 10,
+    roles: ["willpower"], effect: { label: "Willpower: +1 automatic success", autoSuccesses: 1 },
+  };
+}
+function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
+  return {
+    name: "resolve", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10,
+    roles: ["resolve", "magic-fuel"], effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
+    ...over,
+  };
 }
 
 class TemplateConfig {
   constructor(
     public readonly Name: string,
     public readonly Rules: RulesetConfig,
-    public readonly Pools: PoolDef[],
+    public readonly Pools: ResourceDef[],
     public readonly Soak: SoakSpec,
     // The template's morality (a Road/Humanity, or an ascending Torment), or
     // null for splats without one (Mage, Werewolf).
@@ -1442,7 +1484,10 @@ class TemplateConfig {
     public readonly Reactions: DamageReaction[] = []
   ) {}
 
-  GetPool(name: string): PoolDef | undefined {
+  // Resources is the modern name for Pools (trackers + pools with roles/effects).
+  get Resources(): ResourceDef[] { return this.Pools; }
+
+  GetPool(name: string): ResourceDef | undefined {
     const n = StringUtil.normalize(name);
     return this.Pools.find(p => StringUtil.normalize(p.name) === n);
   }
@@ -1451,7 +1496,7 @@ class TemplateConfig {
 const TEMPLATE_MORTAL = new TemplateConfig(
   "Mortal",
   new RulesetConfig(5, 2, 4, 2, false),
-  [{ name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 }],
+  [willpowerResource(3)],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true
 );
@@ -1460,9 +1505,9 @@ const TEMPLATE_THRALL = new TemplateConfig(
   "Thrall",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(3),
     // A thrall's bond grants only a flicker of Resolve: it must start at 1.
-    { name: "resolve", kind: "tracker", start: 1, startMin: 1, startMax: 1, max: 10 },
+    resolveResource({ start: 1, startMin: 1, startMax: 1 }),
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true
@@ -1472,7 +1517,7 @@ const TEMPLATE_VAMPIRE = new TemplateConfig(
   "Vampire (Dark Ages)",
   RulesetConfig.VAMPIRE,
   [
-    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(5),
     { name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1, fromGeneration: true },
   ],
   VAMPIRE_SOAK,
@@ -1488,8 +1533,8 @@ const TEMPLATE_MAGE = new TemplateConfig(
   "Mage (Dark Ages)",
   RulesetConfig.MAGE,
   [
-    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
-    { name: "quintessence", kind: "pool", start: 0, max: 20 },
+    willpowerResource(5),
+    { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"] },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues
@@ -1500,9 +1545,9 @@ const TEMPLATE_DEMON = new TemplateConfig(
   "Demon (Dark Ages: Devil's Due)",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(5),
     // Resolve (the demon's spiritual power, 1-10): a fledgling starts in the 3-5 band.
-    { name: "resolve", kind: "tracker", start: 3, startMin: 3, startMax: 5, max: 10 },
+    resolveResource({ start: 3, startMin: 3, startMax: 5 }),
   ],
   DEMON_SOAK,
   // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
@@ -1517,7 +1562,7 @@ const TEMPLATE_WEREWOLF = new TemplateConfig(
   "Werewolf",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(3),
     { name: "rage", kind: "pool", start: 1, max: 10 },
     { name: "gnosis", kind: "pool", start: 1, max: 10 },
   ],
@@ -1540,11 +1585,23 @@ const TEMPLATE_GHOUL = new TemplateConfig(
   "Ghoul",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(3),
     { name: "blood", kind: "pool", start: 0, max: 10, perTurnLimit: 1 },
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true   // still human: Road/Humanity + Virtues
+);
+
+// Sorcerers work static / linear (hedge) magic through Paths - rated traits that
+// arrive with a later slice. Mechanically a mortal for now (mortal soak, Road/
+// Humanity + Virtues, Willpower); kept here so [[create-playable templates=sorcerer]]
+// works today.
+const TEMPLATE_SORCERER = new TemplateConfig(
+  "Sorcerer",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [willpowerResource(3)],
+  MORTAL_SOAK,
+  HUMANITY_MORALITY, true
 );
 
 const TEMPLATES: Record<string, TemplateConfig> = {
@@ -1555,7 +1612,31 @@ const TEMPLATES: Record<string, TemplateConfig> = {
   demon: TEMPLATE_DEMON,
   werewolf: TEMPLATE_WEREWOLF,
   ghoul: TEMPLATE_GHOUL,
+  sorcerer: TEMPLATE_SORCERER,
 };
+
+// The resources a character has = the union of its templates' resources, deduped
+// by name (first template wins for numbers; roles are merged). Unknown or zero
+// templates yield the mortal baseline (just Willpower).
+function resourcesForTemplates(keys: string[]): ResourceDef[] {
+  const byName = new Map<string, ResourceDef>();
+  const out: ResourceDef[] = [];
+  const add = (def: ResourceDef): void => {
+    const key = StringUtil.normalize(def.name);
+    const existing = byName.get(key);
+    if (existing) {
+      const roles = [...new Set([...(existing.roles ?? []), ...(def.roles ?? [])])];
+      if (roles.length) existing.roles = roles;
+      return;
+    }
+    const copy: ResourceDef = { ...def, roles: def.roles ? [...def.roles] : undefined };
+    byName.set(key, copy);
+    out.push(copy);
+  };
+  const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
+  for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
+  return out;
+}
 
 // =============================================================================
 // DISCIPLINES - vampiric (and ghoul/revenant) supernatural powers
@@ -2375,7 +2456,7 @@ class CharacterFactory {
   }
 
   // Validates a chosen starting value against the PoolDef constraints.
-  private static _resolveStart(def: PoolDef, chosen: number | undefined): number {
+  private static _resolveStart(def: ResourceDef, chosen: number | undefined): number {
     if (chosen === undefined) return def.start;
     if (def.startOptions && !def.startOptions.includes(chosen)) {
       throw new Error(`${def.name} must start at one of [${def.startOptions.join(", ")}], got ${chosen}.`);
@@ -2634,6 +2715,81 @@ class ExtendedRollStore {
 }
 
 // =============================================================================
+// CHARACTER RESOURCES - live current values for a character's resources
+// -----------------------------------------------------------------------------
+// A character's resources are the union of its templates' ResourceDefs; current
+// values live in story storage (res:<char>), defaulting to the record's chosen
+// start (poolStarts), else the template default. Resolving by name OR role is how
+// one resource fills another's job (Quintessence carrying role "resolve").
+// history-aware historyStorage is the eventual home.
+// =============================================================================
+interface ResourceView { def: ResourceDef; current: number; max: number; }
+
+class CharacterResources {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
+
+  static defsFor(char: PlayableCharacter): ResourceDef[] { return resourcesForTemplates(char.templates); }
+
+  // A resource by exact name, else by a role it fills (the "use X as Y" hook).
+  static resolveDef(char: PlayableCharacter, nameOrRole: string): ResourceDef | undefined {
+    const key = StringUtil.normalize(nameOrRole);
+    const defs = CharacterResources.defsFor(char);
+    return defs.find(d => StringUtil.normalize(d.name) === key)
+      ?? defs.find(d => (d.roles ?? []).some(r => StringUtil.normalize(r) === key));
+  }
+
+  private static _startOf(char: PlayableCharacter, def: ResourceDef): number {
+    const chosen = char.poolStarts?.[StringUtil.normalize(def.name)];
+    return Math.max(0, Math.min(chosen ?? def.start, def.max));
+  }
+
+  private static async _values(char: PlayableCharacter): Promise<Record<string, number>> {
+    return ((await CharacterResources._storage.get(CharacterResources._key(char.name))) as Record<string, number> | undefined) ?? {};
+  }
+
+  static async current(char: PlayableCharacter, def: ResourceDef): Promise<number> {
+    const values = await CharacterResources._values(char);
+    const k = StringUtil.normalize(def.name);
+    return k in values ? values[k] : CharacterResources._startOf(char, def);
+  }
+
+  static async all(char: PlayableCharacter): Promise<ResourceView[]> {
+    const values = await CharacterResources._values(char);
+    return CharacterResources.defsFor(char).map(def => {
+      const k = StringUtil.normalize(def.name);
+      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: def.max };
+    });
+  }
+
+  // Spend up to `amount` (never below 0); returns how much actually left the pool.
+  static async spend(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ spent: number; def?: ResourceDef }> {
+    const def = CharacterResources.resolveDef(char, nameOrRole);
+    if (!def) return { spent: 0 };
+    const values = await CharacterResources._values(char);
+    const k = StringUtil.normalize(def.name);
+    const have = k in values ? values[k] : CharacterResources._startOf(char, def);
+    const spent = Math.max(0, Math.min(amount, have));
+    values[k] = have - spent;
+    await CharacterResources._storage.set(CharacterResources._key(char.name), values);
+    return { spent, def };
+  }
+
+  // Restore up to max; returns the new value.
+  static async gain(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ value: number; def?: ResourceDef }> {
+    const def = CharacterResources.resolveDef(char, nameOrRole);
+    if (!def) return { value: 0 };
+    const values = await CharacterResources._values(char);
+    const k = StringUtil.normalize(def.name);
+    const have = k in values ? values[k] : CharacterResources._startOf(char, def);
+    const value = Math.max(0, Math.min(have + amount, def.max));
+    values[k] = value;
+    await CharacterResources._storage.set(CharacterResources._key(char.name), values);
+    return { value, def };
+  }
+}
+
+// =============================================================================
 // COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
 // Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -2808,6 +2964,29 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   return args;
 }
 
+// Read a spend=<resource|role> [spend-amount=N] request off a command, deduct it
+// from the character, and return the effect to fold into the roll (plus a note).
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<{ extra?: Partial<RollModifier>; note: string }> {
+  const which = cmd.named["spend"];
+  if (!which) return { note: "" };
+  const def = CharacterResources.resolveDef(char, which);
+  if (!def) return { note: `no resource "${which}" to spend` };
+  const e = def.effect;
+  const cost = Math.max(1, e?.cost ?? 1);
+  const want = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
+  const have = await CharacterResources.current(char, def);
+  const applications = Math.min(e?.maxPerRoll ?? want, want, Math.floor(have / cost));
+  if (applications < 1) return { note: `not enough ${def.name} to spend` };
+  const { spent } = await CharacterResources.spend(char, which, applications * cost);
+  if (!e) return { note: `spent ${spent} ${def.name}` };
+  const extra: Partial<RollModifier> = {
+    difficultyMod: (e.difficultyMod ?? 0) * applications,
+    diceMod: (e.diceMod ?? 0) * applications,
+    autoSuccesses: (e.autoSuccesses ?? 0) * applications,
+  };
+  return { extra, note: `spent ${spent} ${def.name}: ${e.label}` };
+}
+
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
   const args = extractRollArgs(cmd, offset);
   if (!args.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].))`;
@@ -2822,8 +3001,9 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
-  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
-  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}))`;
+  const { extra, note } = await applySpend(char, cmd);
+  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng, extra });
+  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${note ? ` - ${note}` : ""}))`;
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -2946,11 +3126,51 @@ async function cmdCancelRoll(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Cancelled extended action${action.label ? ` "${action.label}"` : ""} (was ${action.accumulated}/${action.target}).))`;
 }
 
+async function cmdResources(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const views = await CharacterResources.all(char);
+  if (!views.length) return `((OOC-Storyteller: ${char.name} has no resources.))`;
+  const items = views.map(v => {
+    const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
+    const meta = [roles.length ? `roles: ${roles.join("/")}` : "", v.def.effect?.label ?? ""].filter(Boolean).join("; ");
+    return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
+  }).join("; ");
+  return `((OOC-Storyteller: ${char.name} resources - ${items}.))`;
+}
+
+async function cmdSpend(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const which = cmd.positional[0]?.trim();
+  if (!which) return `((OOC-Storyteller: spend needs a resource, e.g. [[spend willpower]] or [[spend blood 2]].))`;
+  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+  const def = CharacterResources.resolveDef(char, which);
+  if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  const { spent } = await CharacterResources.spend(char, which, amount);
+  if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
+  const now = await CharacterResources.current(char, def);
+  const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
+  return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
+}
+
+async function cmdGain(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const which = cmd.positional[0]?.trim();
+  if (!which) return `((OOC-Storyteller: gain needs a resource, e.g. [[gain willpower]].))`;
+  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+  const def = CharacterResources.resolveDef(char, which);
+  if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  const { value } = await CharacterResources.gain(char, which, amount);
+  return `((OOC-Storyteller: ${char.name} regains ${def.name}. Now ${value}/${def.max}.))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags=");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags=');
+CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=");
+CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=');
 CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
 CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
 CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
@@ -2958,6 +3178,9 @@ CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> r
 CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
 CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
 CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
+CommandRouter.register("resources", cmdResources, "resources");
+CommandRouter.register("spend", cmdSpend, 'spend <resource> [amount] [reason="..."]');
+CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

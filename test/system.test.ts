@@ -15,6 +15,7 @@ import {
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
+  resourcesForTemplates, CharacterResources,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -333,7 +334,7 @@ describe("Templates: starting-value constraints", () => {
   });
 
   test("the TEMPLATES registry exposes all splats", () => {
-    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "thrall", "vampire", "werewolf"]);
+    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "sorcerer", "thrall", "vampire", "werewolf"]);
   });
 });
 
@@ -1441,5 +1442,87 @@ describe("extended-roll commands", () => {
 
     expect(await CommandRouter.route("cancel-roll")).toContain("Cancelled");
     expect(await CommandRouter.route("roll-status")).toContain("No extended action");
+  });
+});
+
+describe("resources: model", () => {
+  test("resourcesForTemplates unions and dedupes, merging roles", () => {
+    expect(resourcesForTemplates(["mortal"]).map(r => r.name)).toEqual(["willpower"]);
+    const mage = resourcesForTemplates(["mage"]).map(r => r.name);
+    expect(mage).toEqual(["willpower", "quintessence"]);
+    // hybrid: mage + thrall -> willpower once, then quintessence + resolve
+    expect(resourcesForTemplates(["mage", "thrall"]).map(r => r.name)).toEqual(["willpower", "quintessence", "resolve"]);
+    expect(resourcesForTemplates([]).map(r => r.name)).toEqual(["willpower"]); // baseline
+  });
+
+  test("Willpower and Resolve carry their configured effects/roles", () => {
+    expect(resourcesForTemplates(["mortal"])[0].effect?.autoSuccesses).toBe(1);
+    const resolve = resourcesForTemplates(["demon"]).find(r => r.name === "resolve")!;
+    expect(resolve.effect?.difficultyMod).toBe(-2);
+    expect(resolve.roles).toContain("resolve");
+  });
+});
+
+describe("CharacterResources", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("resolves by name and by role, spends/gains with clamping, and persists", async () => {
+    const zul = await CharacterStore.newPotential("Zul", ["demon"]);
+    expect(CharacterResources.resolveDef(zul, "resolve")!.name).toBe("resolve");
+    expect(CharacterResources.resolveDef(zul, "magic-fuel")!.name).toBe("resolve"); // by role
+    const def = CharacterResources.resolveDef(zul, "resolve")!;
+    expect(await CharacterResources.current(zul, def)).toBe(3);           // template default
+    expect((await CharacterResources.spend(zul, "resolve", 2)).spent).toBe(2);
+    expect(await CharacterResources.current(zul, def)).toBe(1);
+    expect((await CharacterResources.spend(zul, "resolve", 5)).spent).toBe(1); // only 1 left
+    expect(await CharacterResources.current(zul, def)).toBe(0);
+    await CharacterResources.gain(zul, "resolve", 100);
+    expect(await CharacterResources.current(zul, def)).toBe(10);          // clamped at max
+  });
+});
+
+describe("executeRoll extra modifier", () => {
+  test("folds an ad-hoc modifier in like a matched tag", () => {
+    const r0 = () => 0;
+    const auto = executeRoll(makeRollSpec({ pool: "1", requires: 1 }), r0, { rng: seqRng([2]), extra: { autoSuccesses: 1 } });
+    expect(auto.result!.automaticSuccesses).toBe(1);
+    expect(auto.met).toBe(true); // 0 dice successes + 1 auto
+    expect(resolveSpec(makeRollSpec({ pool: "1", difficulty: 8 }), r0, { extra: { difficultyMod: -2 } }).dieDifficulty).toBe(6);
+  });
+});
+
+describe("resource commands", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("[[resources]] lists the current character's resources", async () => {
+    await CommandRouter.route('create-playable name="Merlin" templates=mage');
+    const r = await CommandRouter.route("resources");
+    expect(r).toContain("willpower");
+    expect(r).toContain("quintessence");
+  });
+
+  test("[[roll ... spend=willpower]] deducts Willpower and adds an automatic success", async () => {
+    await CommandRouter.route('create-playable name="Merlin" templates=mage');
+    await CommandRouter.route("gain willpower 3");   // seeded at 0; give some to spend
+    const r = await CommandRouter.route("roll strength spend=willpower", { rng: seqRng([2]) });
+    expect(r).toContain("spent 1 willpower");
+    expect(r).toContain("1 success");               // 0 dice + 1 automatic
+    expect(await CommandRouter.route("resources")).toContain("willpower 2/10");
+  });
+
+  test("spending Resolve lowers difficulty by its configured amount", async () => {
+    await CommandRouter.route('create-playable name="Zul" templates=demon');
+    // Resolve starts at 3; difficulty 8 - 2 = 6, so the single die (face 6) now hits.
+    const r = await CommandRouter.route("roll strength difficulty=8 spend=resolve", { rng: seqRng([6]) });
+    expect(r).toContain("vs diff 6");
+    expect(r).toContain("spent 1 resolve");
+    expect(r).toContain("1 success");
+  });
+
+  test("standalone spend/gain adjust and clamp; spending with none is reported", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire'); // Blood starts full (10)
+    expect(await CommandRouter.route("spend blood 3")).toContain("Now 7/10");
+    expect(await CommandRouter.route("gain blood 100")).toContain("Now 10/10");
+    expect(await CommandRouter.route("spend willpower")).toContain("no willpower to spend"); // seeded at 0
   });
 });

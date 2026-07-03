@@ -371,6 +371,33 @@ Some actions take several rolls to finish — you accumulate successes toward a
   persists across turns (story storage) and defaults to the action in progress,
   so you rarely need the id.
 
+### Resources
+
+Resources (Willpower, Blood, Resolve, Quintessence, …) are **abstract and
+configurable** (`ResourceDef` in `src/rules.ts`): each carries optional **roles**
+(abstract capabilities like `resolve` or `magic-fuel`) and a **spend effect** (a
+configurable `−difficulty` / `+dice` / `+auto-success`). A character's resources
+are the **union of its templates'**, so hybrids compose them — and because a
+resource can be resolved *by role*, one resource can do another's job (give
+Quintessence the `resolve` role and `spend=resolve` draws from Quintessence).
+
+```
+[[resources]]
+[[roll strength+brawl spend=willpower]]   # -1 Willpower, +1 automatic success
+[[roll stealth difficulty=8 spend=resolve]]  # Resolve: -2 difficulty
+[[spend blood 2 reason="heal"]]
+[[gain willpower]]
+```
+
+- **`spend=<resource|role>`** on any `roll` / `roll-for` deducts the resource and
+  folds its effect into that roll (magnitudes are data — Resolve reducing
+  difficulty "much more" is one number). Add `spend-amount=N` to apply it N times
+  (capped by the effect's `maxPerRoll`).
+- **`spend <resource> [amount]`** / **`gain <resource> [amount]`** adjust a
+  resource outside a roll (clamped to 0…max); **`resources`** shows the sheet.
+- Current values persist per character (story storage) and default to the
+  template start until changed — nothing needs allocating to start playing.
+
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
 resolution, and turning a finished sheet into a `LiveCharacter`.
 

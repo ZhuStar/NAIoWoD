@@ -147,7 +147,22 @@ export const HUMANITY_MORALITY: MoralityConfig = {
 // TEMPLATES - per-splat configuration including starting values
 // =============================================================================
 export type PoolKind = "tracker" | "pool";
-export interface PoolDef {
+// What spending `cost` points of a resource grants to a roll. Maps onto the
+// RollModifier fields in rolls.ts (difficulty/dice/auto-successes), so a resource
+// effect and a tag modifier flow through the same pipeline.
+export interface ResourceEffect {
+  label: string;
+  cost?: number;            // points spent per application (default 1)
+  difficultyMod?: number;   // e.g. Resolve -2 (magnitude is configurable data)
+  diceMod?: number;
+  autoSuccesses?: number;   // e.g. Willpower +1
+  maxPerRoll?: number;      // stacking cap per roll (default 1)
+}
+
+// A resource is a tracker/pool PLUS abstract `roles` it can fill and an optional
+// spend `effect`. Roles are how templates compose/share resources: Quintessence
+// carrying the "resolve" role IS "use Quintessence as Resolve" - pure data.
+export interface ResourceDef {
   name: string;
   kind: PoolKind;
   start: number;            // default starting value
@@ -157,13 +172,32 @@ export interface PoolDef {
   max: number;              // permanent cap (tracker) / capacity (pool)
   perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
+  roles?: string[];         // abstract capabilities this resource fills
+  effect?: ResourceEffect;  // what spending it does to a roll
+}
+/** @deprecated Renamed to ResourceDef. */
+export type PoolDef = ResourceDef;
+
+// Reusable builders so shared roles/effects are configured once.
+export function willpowerResource(start: number): ResourceDef {
+  return {
+    name: "willpower", kind: "tracker", start, startMin: 1, startMax: 10, max: 10,
+    roles: ["willpower"], effect: { label: "Willpower: +1 automatic success", autoSuccesses: 1 },
+  };
+}
+export function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
+  return {
+    name: "resolve", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10,
+    roles: ["resolve", "magic-fuel"], effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
+    ...over,
+  };
 }
 
 export class TemplateConfig {
   constructor(
     public readonly Name: string,
     public readonly Rules: RulesetConfig,
-    public readonly Pools: PoolDef[],
+    public readonly Pools: ResourceDef[],
     public readonly Soak: SoakSpec,
     // The template's morality (a Road/Humanity, or an ascending Torment), or
     // null for splats without one (Mage, Werewolf).
@@ -176,7 +210,10 @@ export class TemplateConfig {
     public readonly Reactions: DamageReaction[] = []
   ) {}
 
-  GetPool(name: string): PoolDef | undefined {
+  // Resources is the modern name for Pools (trackers + pools with roles/effects).
+  get Resources(): ResourceDef[] { return this.Pools; }
+
+  GetPool(name: string): ResourceDef | undefined {
     const n = StringUtil.normalize(name);
     return this.Pools.find(p => StringUtil.normalize(p.name) === n);
   }
@@ -185,7 +222,7 @@ export class TemplateConfig {
 export const TEMPLATE_MORTAL = new TemplateConfig(
   "Mortal",
   new RulesetConfig(5, 2, 4, 2, false),
-  [{ name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 }],
+  [willpowerResource(3)],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true
 );
@@ -194,9 +231,9 @@ export const TEMPLATE_THRALL = new TemplateConfig(
   "Thrall",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(3),
     // A thrall's bond grants only a flicker of Resolve: it must start at 1.
-    { name: "resolve", kind: "tracker", start: 1, startMin: 1, startMax: 1, max: 10 },
+    resolveResource({ start: 1, startMin: 1, startMax: 1 }),
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true
@@ -206,7 +243,7 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
   "Vampire (Dark Ages)",
   RulesetConfig.VAMPIRE,
   [
-    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(5),
     { name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1, fromGeneration: true },
   ],
   VAMPIRE_SOAK,
@@ -222,8 +259,8 @@ export const TEMPLATE_MAGE = new TemplateConfig(
   "Mage (Dark Ages)",
   RulesetConfig.MAGE,
   [
-    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
-    { name: "quintessence", kind: "pool", start: 0, max: 20 },
+    willpowerResource(5),
+    { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"] },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues
@@ -234,9 +271,9 @@ export const TEMPLATE_DEMON = new TemplateConfig(
   "Demon (Dark Ages: Devil's Due)",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(5),
     // Resolve (the demon's spiritual power, 1-10): a fledgling starts in the 3-5 band.
-    { name: "resolve", kind: "tracker", start: 3, startMin: 3, startMax: 5, max: 10 },
+    resolveResource({ start: 3, startMin: 3, startMax: 5 }),
   ],
   DEMON_SOAK,
   // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
@@ -251,7 +288,7 @@ export const TEMPLATE_WEREWOLF = new TemplateConfig(
   "Werewolf",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(3),
     { name: "rage", kind: "pool", start: 1, max: 10 },
     { name: "gnosis", kind: "pool", start: 1, max: 10 },
   ],
@@ -274,11 +311,23 @@ export const TEMPLATE_GHOUL = new TemplateConfig(
   "Ghoul",
   new RulesetConfig(5, 2, 4, 2, false),
   [
-    { name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 },
+    willpowerResource(3),
     { name: "blood", kind: "pool", start: 0, max: 10, perTurnLimit: 1 },
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true   // still human: Road/Humanity + Virtues
+);
+
+// Sorcerers work static / linear (hedge) magic through Paths - rated traits that
+// arrive with a later slice. Mechanically a mortal for now (mortal soak, Road/
+// Humanity + Virtues, Willpower); kept here so [[create-playable templates=sorcerer]]
+// works today.
+export const TEMPLATE_SORCERER = new TemplateConfig(
+  "Sorcerer",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [willpowerResource(3)],
+  MORTAL_SOAK,
+  HUMANITY_MORALITY, true
 );
 
 export const TEMPLATES: Record<string, TemplateConfig> = {
@@ -289,7 +338,31 @@ export const TEMPLATES: Record<string, TemplateConfig> = {
   demon: TEMPLATE_DEMON,
   werewolf: TEMPLATE_WEREWOLF,
   ghoul: TEMPLATE_GHOUL,
+  sorcerer: TEMPLATE_SORCERER,
 };
+
+// The resources a character has = the union of its templates' resources, deduped
+// by name (first template wins for numbers; roles are merged). Unknown or zero
+// templates yield the mortal baseline (just Willpower).
+export function resourcesForTemplates(keys: string[]): ResourceDef[] {
+  const byName = new Map<string, ResourceDef>();
+  const out: ResourceDef[] = [];
+  const add = (def: ResourceDef): void => {
+    const key = StringUtil.normalize(def.name);
+    const existing = byName.get(key);
+    if (existing) {
+      const roles = [...new Set([...(existing.roles ?? []), ...(def.roles ?? [])])];
+      if (roles.length) existing.roles = roles;
+      return;
+    }
+    const copy: ResourceDef = { ...def, roles: def.roles ? [...def.roles] : undefined };
+    byName.set(key, copy);
+    out.push(copy);
+  };
+  const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
+  for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
+  return out;
+}
 
 // =============================================================================
 // DISCIPLINES - vampiric (and ghoul/revenant) supernatural powers

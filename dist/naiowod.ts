@@ -1194,6 +1194,78 @@ function describeSpec(spec: RollSpec): string {
   if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);
   return parts.join(", ");
 }
+
+// --- EXTENDED ROLLS (persistent, interval-aware accumulating actions) --------
+// An extended action accumulates net successes toward `target` across up to
+// `maxRolls` intervals (which may be far apart in time). A botch triggers the
+// configurable `onBotch` policy. This state machine is pure; persistence and the
+// commands live in game.ts.
+type BotchPolicy = "fail" | "lose-successes" | "ignore";
+type ExtendedStatus = "open" | "succeeded" | "failed";
+
+interface ExtendedInterval {
+  by: string;              // character who rolled this interval
+  net: number;             // successes credited (0 on a botch)
+  outcome: RollOutcomeKind;
+  total: number;           // accumulated successes after this interval
+}
+
+interface ExtendedRoll {
+  id: string;
+  label: string;           // description ("" if none)
+  base: RollSpec;          // the roll each interval makes
+  target: number;          // successes needed to succeed
+  maxRolls: number;        // intervals allowed
+  interval: string;        // advisory spacing label ("" if none)
+  onBotch: BotchPolicy;
+  accumulated: number;
+  rollsUsed: number;
+  status: ExtendedStatus;
+  log: ExtendedInterval[];
+}
+
+function parseBotchPolicy(s: string | undefined): BotchPolicy {
+  const n = (s ?? "").trim().toLowerCase();
+  if (n === "lose-successes" || n === "lose" || n === "reset") return "lose-successes";
+  if (n === "ignore" || n === "continue") return "ignore";
+  return "fail";
+}
+
+// Apply one interval's result to an OPEN action. Pure: returns a NEW action plus
+// a short human note. Caller must ensure `action.status === "open"`.
+function applyInterval(action: ExtendedRoll, exec: RollExecution, by: string): { action: ExtendedRoll; note: string } {
+  const next: ExtendedRoll = { ...action, log: [...action.log] };
+  const net = exec.result ? exec.result.net : 0;
+  let credited = 0;
+  let note: string;
+
+  next.rollsUsed += 1;
+  if (exec.outcome === "botch") {
+    if (action.onBotch === "fail") { next.status = "failed"; note = "botch - the action fails"; }
+    else if (action.onBotch === "lose-successes") { next.accumulated = 0; note = "botch - accumulated successes lost"; }
+    else { note = "botch - counted as no progress"; }
+  } else {
+    credited = Math.max(0, net);
+    next.accumulated += credited;
+    note = `+${credited} (total ${next.accumulated}/${action.target})`;
+  }
+
+  if (next.status === "open") {
+    if (next.accumulated >= action.target) next.status = "succeeded";
+    else if (next.rollsUsed >= action.maxRolls) next.status = "failed";
+  }
+  next.log.push({ by, net: credited, outcome: exec.outcome, total: next.accumulated });
+  return { action: next, note };
+}
+
+// One-line status summary.
+function describeExtended(a: ExtendedRoll): string {
+  const head = a.label ? `"${a.label}" ` : "";
+  const bits = [`${a.accumulated}/${a.target} successes`, `roll ${a.rollsUsed}/${a.maxRolls}`];
+  if (a.interval) bits.push(`interval ${a.interval}`);
+  bits.push(a.status);
+  return `${head}[${describeSpec(a.base)}] - ${bits.join(", ")}`;
+}
 //#endregion src/rolls.ts
 
 //#region src/rules.ts
@@ -2522,6 +2594,46 @@ class NamedRollStore {
 }
 
 // =============================================================================
+// EXTENDED ROLLS - persistence for accumulating, interval-aware actions
+// -----------------------------------------------------------------------------
+// Story-scoped state (survives across turns and characters), keyed xroll:<id>,
+// with a current-extended pointer so continue/status/cancel default to the
+// action in progress. history-aware historyStorage is the eventual home.
+// =============================================================================
+class ExtendedRollStore {
+  private static _storage = new ScopedStorage();
+  private static readonly CURRENT_KEY = "current-extended";
+  private static _key(id: string): string { return `xroll:${id}`; }
+
+  static async save(a: ExtendedRoll): Promise<void> { await ExtendedRollStore._storage.set(ExtendedRollStore._key(a.id), a); }
+  static async load(id: string): Promise<ExtendedRoll | undefined> {
+    return (await ExtendedRollStore._storage.get(ExtendedRollStore._key(id))) as ExtendedRoll | undefined;
+  }
+  static async remove(id: string): Promise<void> { await ExtendedRollStore._storage.delete(ExtendedRollStore._key(id)); }
+  static async setCurrent(id: string): Promise<void> { await ExtendedRollStore._storage.set(ExtendedRollStore.CURRENT_KEY, id); }
+  static async currentId(): Promise<string | undefined> { return (await ExtendedRollStore._storage.get(ExtendedRollStore.CURRENT_KEY)) as string | undefined; }
+  static async clearCurrent(): Promise<void> { await ExtendedRollStore._storage.delete(ExtendedRollStore.CURRENT_KEY); }
+
+  static async ids(): Promise<string[]> {
+    return (await ExtendedRollStore._storage.list()).filter(k => k.startsWith("xroll:")).map(k => k.slice(6));
+  }
+
+  // The action to act on: explicit id, else the current pointer (if still open),
+  // else the single open action. Undefined if nothing resolves.
+  static async resolve(id?: string): Promise<ExtendedRoll | undefined> {
+    if (id) return ExtendedRollStore.load(id);
+    const cur = await ExtendedRollStore.currentId();
+    if (cur) { const a = await ExtendedRollStore.load(cur); if (a && a.status === "open") return a; }
+    const open: ExtendedRoll[] = [];
+    for (const xid of await ExtendedRollStore.ids()) {
+      const a = await ExtendedRollStore.load(xid);
+      if (a && a.status === "open") open.push(a);
+    }
+    return open.length === 1 ? open[0] : undefined;
+  }
+}
+
+// =============================================================================
 // COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
 // Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -2757,6 +2869,83 @@ async function cmdForgetRoll(cmd: ParsedCommand): Promise<string> {
     : `((OOC-Storyteller: No saved roll named "${key}".))`;
 }
 
+// Named-only roll overrides for a continuation (no positional pool/difficulty, so
+// the optional id positional is never mistaken for a pool). `requires` is not
+// per-interval overridable - the target is fixed on the action.
+function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
+  const intOf = (s: string | undefined): number | undefined => {
+    if (s === undefined) return undefined;
+    const v = parseInt(s, 10);
+    return Number.isNaN(v) ? undefined : v;
+  };
+  const o: Partial<RollSpec> = {};
+  const difficulty = intOf(cmd.named["difficulty"]);
+  if (difficulty !== undefined) o.difficulty = difficulty;
+  const difficultyMod = intOf(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"]);
+  if (difficultyMod !== undefined) o.difficultyMod = difficultyMod;
+  const diceMod = intOf(cmd.named["dice-modifier"]);
+  if (diceMod !== undefined) o.diceMod = diceMod;
+  if (cmd.named["tags"] !== undefined) o.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
+  return o;
+}
+
+// Start an extended action and roll its first interval as the current character.
+async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const args = extractRollArgs(cmd, 0);
+  if (!args.pool) return `((OOC-Storyteller: extended-roll needs a pool, e.g. [[extended-roll strength+stamina requires=8 intervals=4]].))`;
+  if (args.pool.startsWith("@")) return `((OOC-Storyteller: extended-roll takes a pool expression (e.g. strength+stamina), not a saved @name.))`;
+  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
+  const maxRolls = intOf(cmd.named["intervals"]) ?? 0;
+  if (maxRolls < 1) return `((OOC-Storyteller: extended-roll needs intervals=<max rolls> (at least 1).))`;
+  const target = args.requires ?? 1;   // `requires=` is the accumulated target
+  const base = makeRollSpec({ ...args, pool: args.pool, requires: 1 });
+  const action: ExtendedRoll = {
+    id: api.v1.uuid(),
+    label: cmd.named["label"] ?? "",
+    base, target, maxRolls,
+    interval: cmd.named["interval"] ?? "",
+    onBotch: parseBotchPolicy(cmd.named["on-botch"]),
+    accumulated: 0, rollsUsed: 0, status: "open", log: [],
+  };
+  const exec = executeRoll(base, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
+  const { action: after, note } = applyInterval(action, exec, char.name);
+  await ExtendedRollStore.save(after);
+  if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
+  const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
+  return `((OOC-Storyteller: ${char.name} starts extended ${describeExtended(after)}. Interval 1: ${note}.${tail}))`;
+}
+
+async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const action = await ExtendedRollStore.resolve(cmd.positional[0]);
+  if (!action) return `((OOC-Storyteller: No open extended action. Start one with [[extended-roll ...]] or name its id.))`;
+  if (action.status !== "open") return `((OOC-Storyteller: That extended action is already ${action.status}.))`;
+  const spec = overrideSpec(action.base, rollOverridesFromNamed(cmd));
+  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
+  const { action: after, note } = applyInterval(action, exec, char.name);
+  await ExtendedRollStore.save(after);
+  if (after.status !== "open" && (await ExtendedRollStore.currentId()) === after.id) await ExtendedRollStore.clearCurrent();
+  return `((OOC-Storyteller: ${char.name} continues ${describeExtended(after)}. This interval: ${note}.))`;
+}
+
+async function cmdRollStatus(cmd: ParsedCommand): Promise<string> {
+  const action = await ExtendedRollStore.resolve(cmd.positional[0]);
+  if (!action) return `((OOC-Storyteller: No extended action found. Start one with [[extended-roll ...]].))`;
+  const recent = action.log.slice(-3).map(l => `${l.by}: ${l.outcome === "botch" ? "botch" : `+${l.net}`}`).join(", ");
+  return `((OOC-Storyteller: ${describeExtended(action)}${recent ? ` | recent: ${recent}` : ""}.))`;
+}
+
+async function cmdCancelRoll(cmd: ParsedCommand): Promise<string> {
+  const action = await ExtendedRollStore.resolve(cmd.positional[0]);
+  if (!action) return `((OOC-Storyteller: No extended action to cancel.))`;
+  await ExtendedRollStore.remove(action.id);
+  if ((await ExtendedRollStore.currentId()) === action.id) await ExtendedRollStore.clearCurrent();
+  return `((OOC-Storyteller: Cancelled extended action${action.label ? ` "${action.label}"` : ""} (was ${action.accumulated}/${action.target}).))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
@@ -2765,6 +2954,10 @@ CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [di
 CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
 CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
 CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
+CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=] [on-botch=fail|lose-successes|ignore] + roll knobs");
+CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
+CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
+CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

@@ -14,6 +14,7 @@ import {
   MeritFlawRegistry, SRD_CATEGORIES,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
+  ExtendedRoll, applyInterval, ExtendedRollStore,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -1323,5 +1324,122 @@ describe("named rolls (@name library)", () => {
     expect(await CommandRouter.route("roll @ghost", { rng: seqRng([]) })).toContain('No saved roll named "ghost"');
     expect(await CommandRouter.route("forget-roll dodge")).toContain("Forgot");
     expect(await CommandRouter.route("list-rolls")).toContain("No saved rolls");
+  });
+});
+
+describe("extended rolls: applyInterval state machine", () => {
+  const base: ExtendedRoll = {
+    id: "x", label: "", base: makeRollSpec({ pool: "3" }), target: 5, maxRolls: 3,
+    interval: "", onBotch: "fail", accumulated: 0, rollsUsed: 0, status: "open", log: [],
+  };
+  const twoHits = executeRoll(makeRollSpec({ pool: "3" }), () => 0, { rng: seqRng([6, 6, 2]) }); // net 2
+  const botch = executeRoll(makeRollSpec({ pool: "2" }), () => 0, { rng: seqRng([1, 2]) });        // botch
+
+  test("accumulates net successes toward the target, then succeeds", () => {
+    let a = base;
+    a = applyInterval(a, twoHits, "A").action;   // 2/5
+    expect(a.accumulated).toBe(2);
+    expect(a.status).toBe("open");
+    a = applyInterval(a, twoHits, "A").action;   // 4/5
+    expect(a.status).toBe("open");
+    a = applyInterval(a, twoHits, "B").action;   // 6/5 -> succeeded
+    expect(a.status).toBe("succeeded");
+    expect(a.log.map(l => l.by)).toEqual(["A", "A", "B"]);
+  });
+
+  test("runs out of intervals and fails", () => {
+    let a: ExtendedRoll = { ...base, target: 100, maxRolls: 2 };
+    a = applyInterval(a, twoHits, "A").action;
+    a = applyInterval(a, twoHits, "A").action;
+    expect(a.rollsUsed).toBe(2);
+    expect(a.status).toBe("failed");
+  });
+
+  test("a botch fails the action under the default policy", () => {
+    const r = applyInterval(base, botch, "A");
+    expect(r.action.status).toBe("failed");
+    expect(r.note).toContain("botch");
+  });
+
+  test('the "lose-successes" policy zeroes progress but keeps going', () => {
+    const a0: ExtendedRoll = { ...base, accumulated: 3, rollsUsed: 1, onBotch: "lose-successes" };
+    const r = applyInterval(a0, botch, "A");
+    expect(r.action.accumulated).toBe(0);
+    expect(r.action.status).toBe("open");
+  });
+
+  test('the "ignore" policy treats a botch as a wasted interval', () => {
+    const a0: ExtendedRoll = { ...base, accumulated: 3, rollsUsed: 1, onBotch: "ignore" };
+    const r = applyInterval(a0, botch, "A");
+    expect(r.action.accumulated).toBe(3);   // unchanged
+    expect(r.action.rollsUsed).toBe(2);      // interval still consumed
+    expect(r.action.status).toBe("open");
+  });
+});
+
+describe("ExtendedRollStore.resolve", () => {
+  beforeEach(() => { __resetStorageMock(); });
+  const mk = (id: string, status: ExtendedRoll["status"] = "open"): ExtendedRoll => ({
+    id, label: "", base: makeRollSpec({ pool: "3" }), target: 5, maxRolls: 3,
+    interval: "", onBotch: "fail", accumulated: 0, rollsUsed: 0, status, log: [],
+  });
+
+  test("resolves the single open action, the current pointer, and an explicit id", async () => {
+    await ExtendedRollStore.save(mk("a"));
+    expect((await ExtendedRollStore.resolve())!.id).toBe("a");    // single open
+    await ExtendedRollStore.save(mk("b"));
+    expect(await ExtendedRollStore.resolve()).toBeUndefined();    // two open -> ambiguous
+    await ExtendedRollStore.setCurrent("b");
+    expect((await ExtendedRollStore.resolve())!.id).toBe("b");    // current pointer
+    expect((await ExtendedRollStore.resolve("a"))!.id).toBe("a"); // explicit id
+  });
+
+  test("a closed current pointer falls back to the single open action", async () => {
+    await ExtendedRollStore.save(mk("done", "succeeded"));
+    await ExtendedRollStore.setCurrent("done");
+    await ExtendedRollStore.save(mk("live"));
+    expect((await ExtendedRollStore.resolve())!.id).toBe("live");
+  });
+});
+
+describe("extended-roll commands", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("start then continue to success (accumulating across intervals)", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal'); // Strength 1 + Stamina 1 = 2 dice
+    const start = await CommandRouter.route("extended-roll strength+stamina requires=3 intervals=4", { rng: seqRng([6, 6]) });
+    expect(start).toContain("Rok starts extended");
+    expect(start).toContain("2/3 successes");
+    const cont = await CommandRouter.route("continue-roll", { rng: seqRng([6, 6]) });
+    expect(cont).toContain("succeeded");   // 2 + 2 >= 3
+  });
+
+  test("a botch fails the whole action by default", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const start = await CommandRouter.route("extended-roll strength+stamina requires=9 intervals=3", { rng: seqRng([1, 2]) });
+    expect(start).toContain("botch");
+    expect(start).toContain("failed");
+  });
+
+  test("a continuation's dice-modifier brings in helpers", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("extended-roll strength+stamina requires=20 intervals=5", { rng: seqRng([2, 2]) }); // i1: 0
+    const cont = await CommandRouter.route("continue-roll dice-modifier=+3", { rng: seqRng([6, 6, 6, 6, 6]) });    // 2+3 dice
+    expect(cont).toContain("5/20 successes");
+  });
+
+  test("roll-status, cancel-roll, and a second character continuing", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    await CommandRouter.route('extended-roll strength+stamina requires=20 intervals=5 label="Dig out"', { rng: seqRng([6, 6]) });
+    expect(await CommandRouter.route("roll-status")).toContain("Dig out");
+
+    await CommandRouter.route('play name="Sela"');
+    const cont = await CommandRouter.route("continue-roll", { rng: seqRng([6, 6]) });
+    expect(cont).toContain("Sela continues");
+    expect(cont).toContain("4/20 successes"); // 2 (Rok) + 2 (Sela)
+
+    expect(await CommandRouter.route("cancel-roll")).toContain("Cancelled");
+    expect(await CommandRouter.route("roll-status")).toContain("No extended action");
   });
 });

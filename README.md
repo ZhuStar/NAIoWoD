@@ -342,9 +342,37 @@ the `wod:named-rolls` lorebook entry.
 - **`list-rolls`** shows the library; **`forget-roll <name>`** removes one (or
   just edit the JSON map in the lorebook directly).
 
+### Extended rolls
+
+Some actions take several rolls to finish — you accumulate successes toward a
+**target** across up to **N** rolls (intervals), which may be far apart in time.
+
+```
+[[extended-roll strength+stamina requires=8 intervals=4 interval="per scene" label="Force the door"]]
+[[continue-roll]]
+[[continue-roll dice-modifier=+2]]   # helpers arrive
+[[roll-status]]
+```
+
+- **`extended-roll <pool> requires=<target> intervals=<max> …`** starts the
+  action and rolls the first interval as the current character. `requires` is the
+  **total** target; `intervals` is the max number of rolls; `interval="…"` is an
+  advisory spacing label (shown in status — the Storyteller decides when the next
+  roll is allowed); `label`, `on-botch` and the usual roll knobs are optional.
+- **`continue-roll [id] …`** rolls the next interval as whoever is current — so
+  one character can start and **others continue**. Named overrides
+  (`dice-modifier=+2`, `difficulty=`, `tags=`) apply to that one interval, e.g. to
+  reflect helpers joining or leaving.
+- Each interval adds its net successes; reaching the target **succeeds**, running
+  out of intervals **fails**. A **botch** normally fails the whole action —
+  `on-botch=lose-successes` (reset progress, keep going) or `on-botch=ignore`
+  (waste the interval) change that.
+- **`roll-status [id]`** shows progress; **`cancel-roll [id]`** abandons it. State
+  persists across turns (story storage) and defaults to the action in progress,
+  so you rarely need the id.
+
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
-resolution, turning a finished sheet into a `LiveCharacter`, and **extended
-rolls** (persistent, interval-aware).
+resolution, and turning a finished sheet into a `LiveCharacter`.
 
 ## Merits & Flaws
 

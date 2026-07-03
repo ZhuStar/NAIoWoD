@@ -227,3 +227,75 @@ export function describeSpec(spec: RollSpec): string {
   if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);
   return parts.join(", ");
 }
+
+// --- EXTENDED ROLLS (persistent, interval-aware accumulating actions) --------
+// An extended action accumulates net successes toward `target` across up to
+// `maxRolls` intervals (which may be far apart in time). A botch triggers the
+// configurable `onBotch` policy. This state machine is pure; persistence and the
+// commands live in game.ts.
+export type BotchPolicy = "fail" | "lose-successes" | "ignore";
+export type ExtendedStatus = "open" | "succeeded" | "failed";
+
+export interface ExtendedInterval {
+  by: string;              // character who rolled this interval
+  net: number;             // successes credited (0 on a botch)
+  outcome: RollOutcomeKind;
+  total: number;           // accumulated successes after this interval
+}
+
+export interface ExtendedRoll {
+  id: string;
+  label: string;           // description ("" if none)
+  base: RollSpec;          // the roll each interval makes
+  target: number;          // successes needed to succeed
+  maxRolls: number;        // intervals allowed
+  interval: string;        // advisory spacing label ("" if none)
+  onBotch: BotchPolicy;
+  accumulated: number;
+  rollsUsed: number;
+  status: ExtendedStatus;
+  log: ExtendedInterval[];
+}
+
+export function parseBotchPolicy(s: string | undefined): BotchPolicy {
+  const n = (s ?? "").trim().toLowerCase();
+  if (n === "lose-successes" || n === "lose" || n === "reset") return "lose-successes";
+  if (n === "ignore" || n === "continue") return "ignore";
+  return "fail";
+}
+
+// Apply one interval's result to an OPEN action. Pure: returns a NEW action plus
+// a short human note. Caller must ensure `action.status === "open"`.
+export function applyInterval(action: ExtendedRoll, exec: RollExecution, by: string): { action: ExtendedRoll; note: string } {
+  const next: ExtendedRoll = { ...action, log: [...action.log] };
+  const net = exec.result ? exec.result.net : 0;
+  let credited = 0;
+  let note: string;
+
+  next.rollsUsed += 1;
+  if (exec.outcome === "botch") {
+    if (action.onBotch === "fail") { next.status = "failed"; note = "botch - the action fails"; }
+    else if (action.onBotch === "lose-successes") { next.accumulated = 0; note = "botch - accumulated successes lost"; }
+    else { note = "botch - counted as no progress"; }
+  } else {
+    credited = Math.max(0, net);
+    next.accumulated += credited;
+    note = `+${credited} (total ${next.accumulated}/${action.target})`;
+  }
+
+  if (next.status === "open") {
+    if (next.accumulated >= action.target) next.status = "succeeded";
+    else if (next.rollsUsed >= action.maxRolls) next.status = "failed";
+  }
+  next.log.push({ by, net: credited, outcome: exec.outcome, total: next.accumulated });
+  return { action: next, note };
+}
+
+// One-line status summary.
+export function describeExtended(a: ExtendedRoll): string {
+  const head = a.label ? `"${a.label}" ` : "";
+  const bits = [`${a.accumulated}/${a.target} successes`, `roll ${a.rollsUsed}/${a.maxRolls}`];
+  if (a.interval) bits.push(`interval ${a.interval}`);
+  bits.push(a.status);
+  return `${head}[${describeSpec(a.base)}] - ${bits.join(", ")}`;
+}

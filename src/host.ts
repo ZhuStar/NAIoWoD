@@ -112,6 +112,10 @@ const __makeMockStore = (m: Map<string, unknown>): StorageApi => ({
 // A no-op concern on-host, where the real `api` (not this mock) is used.
 export function __resetLorebookMock(): void { __mockCategories = []; __mockEntries = []; }
 
+// Test/off-host helper: wipe the mock storage stores (story, history, temp).
+// A no-op concern on-host, where the real `api` is used instead of this mock.
+export function __resetStorageMock(): void { __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); }
+
 export const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },

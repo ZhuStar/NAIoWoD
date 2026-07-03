@@ -124,6 +124,10 @@ const __makeMockStore = (m: Map<string, unknown>): StorageApi => ({
 // A no-op concern on-host, where the real `api` (not this mock) is used.
 function __resetLorebookMock(): void { __mockCategories = []; __mockEntries = []; }
 
+// Test/off-host helper: wipe the mock storage stores (story, history, temp).
+// A no-op concern on-host, where the real `api` is used instead of this mock.
+function __resetStorageMock(): void { __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); }
+
 const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },
@@ -962,11 +966,227 @@ interface SoakSpec {
 }
 //#endregion src/core/damage.ts
 
+//#region src/rolls.ts
+// =============================================================================
+// ROLLS - turn a player's roll request into dice, with contextual modifiers
+// -----------------------------------------------------------------------------
+// Pure: depends only on core (Dice + StringUtil). A RollSpec is the declarative,
+// serializable description of a roll (pool expression, difficulty, requirement,
+// dice/difficulty modifiers, tags). resolveSpec turns it into concrete numbers
+// against a TraitResolver, folding in any tag-driven RollModifiers; executeRoll
+// then rolls it via core Dice. Keeping the spec separate and serializable is
+// what will let players save and re-run "named rolls" later.
+// =============================================================================
+
+// Resolves a trait name to its dice value (0 when the character lacks it).
+type TraitResolver = (name: string) => number;
+
+const DEFAULT_DIFFICULTY = 6;
+
+// A declarative, serializable roll. `pool` is an expression ("strength+brawl",
+// "7", "3+2", "willpower"); the rest are the Storyteller's knobs.
+interface RollSpec {
+  pool: string;
+  difficulty: number;     // base target number (default 6)
+  difficultyMod: number;  // +/- applied to difficulty (default 0)
+  requires: number;       // successes needed to count as a success (default 1)
+  diceMod: number;        // +/- dice added to the resolved pool (default 0)
+  tags: string[];         // contextual mechanic keys (normalized)
+}
+
+// Fill defaults and normalize tags. `requires` is at least 1.
+function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollSpec {
+  return {
+    pool: parts.pool,
+    difficulty: parts.difficulty ?? DEFAULT_DIFFICULTY,
+    difficultyMod: parts.difficultyMod ?? 0,
+    requires: Math.max(1, parts.requires ?? 1),
+    diceMod: parts.diceMod ?? 0,
+    tags: (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0),
+  };
+}
+
+// --- POOL EXPRESSION ---
+interface PoolPart { token: string; value: number; isLiteral: boolean; }
+interface PoolBreakdown { parts: PoolPart[]; total: number; }
+
+// "strength+brawl" / "3+2" / "7" / "willpower" -> summed dice (>= 0). Each
+// '+'-separated part is an integer literal or a trait name resolved via
+// `resolve`. The pool source is a single token (no spaces) so it never collides
+// with the positional difficulty / difficulty-modifier that follow it.
+function parsePoolExpression(expr: string, resolve: TraitResolver): PoolBreakdown {
+  const parts: PoolPart[] = [];
+  for (const raw of expr.split("+")) {
+    const token = raw.trim();
+    if (token.length === 0) continue;
+    if (/^-?\d+$/.test(token)) parts.push({ token, value: parseInt(token, 10), isLiteral: true });
+    else parts.push({ token, value: resolve(token), isLiteral: false });
+  }
+  return { parts, total: Math.max(0, parts.reduce((s, p) => s + p.value, 0)) };
+}
+
+function prettyPool(expr: string): string {
+  return expr.split("+").map(t => t.trim()).filter(t => t.length > 0)
+    .map(t => /^-?\d+$/.test(t) ? t : StringUtil.toTitleCase(t)).join(" + ");
+}
+
+// --- CONTEXTUAL MODIFIERS (tags) ---
+// A modifier keyed by a roll tag: matching tags adjust the difficulty, the dice
+// pool, free successes, or the n-again threshold before the roll. This is how
+// "rules for things" (merits/flaws, situational modifiers) attach to a roll -
+// the roll carries tags, each matching modifier fires. Tags are strings, so
+// they ride along in a saved (named) roll unchanged.
+interface RollModifier {
+  tag: string;             // normalized on registration
+  describe: string;
+  difficultyMod?: number;
+  diceMod?: number;
+  autoSuccesses?: number;
+  nAgain?: number;         // tighten n-again (e.g. 9 for 9-again); never loosens
+}
+
+// Starter set; a chronicle can register more. These name the *situation* (the
+// ST tags the roll), not the character's owned merits - auto-deriving modifiers
+// from a character's Merits/Flaws is a planned follow-up.
+const DEFAULT_ROLL_MODIFIERS: RollModifier[] = [
+  { tag: "Acute Senses", describe: "Acute Senses: -2 difficulty on the sharpened sense.", difficultyMod: -2 },
+  { tag: "off-hand", describe: "Off-hand action: +1 difficulty (cancelled by Ambidextrous).", difficultyMod: 1 },
+  { tag: "Ambidextrous", describe: "Ambidextrous: cancels the off-hand penalty.", difficultyMod: -1 },
+  { tag: "Willpower", describe: "Spent Willpower: +1 automatic success.", autoSuccesses: 1 },
+  { tag: "specialty", describe: "Relevant specialty: 9s count again (9-again).", nAgain: 9 },
+];
+
+class RollModifierRegistry {
+  private static _mods: Map<string, RollModifier> =
+    new Map(DEFAULT_ROLL_MODIFIERS.map(m => [StringUtil.normalize(m.tag), { ...m, tag: StringUtil.normalize(m.tag) }]));
+
+  static register(mod: RollModifier): void {
+    const tag = StringUtil.normalize(mod.tag);
+    RollModifierRegistry._mods.set(tag, { ...mod, tag });
+  }
+  static get(tag: string): RollModifier | undefined { return RollModifierRegistry._mods.get(StringUtil.normalize(tag)); }
+  static all(): RollModifier[] { return [...RollModifierRegistry._mods.values()]; }
+  static reset(): void {
+    RollModifierRegistry._mods = new Map(DEFAULT_ROLL_MODIFIERS.map(m => [StringUtil.normalize(m.tag), { ...m, tag: StringUtil.normalize(m.tag) }]));
+  }
+}
+
+// --- RESOLUTION & EXECUTION ---
+// How to treat a final difficulty above 10. Default charges an extra required
+// success per point over 10 (the die target caps at 10); "impossible" fails the
+// action outright. Both are Storyteller-authentic; extra-success is the default.
+type OverDifficultyPolicy = "extra-success" | "impossible";
+
+interface ResolvedRoll {
+  spec: RollSpec;
+  breakdown: PoolBreakdown;
+  dice: number;               // pool after diceMod (>= 0)
+  dieDifficulty: number;      // clamped to [2, 10] - what the dice actually use
+  requires: number;           // successes needed (incl. any over-10 surcharge)
+  automaticSuccesses: number;
+  nAgain: number;
+  rawDifficulty: number;      // pre-clamp difficulty (may exceed 10 or dip below 2)
+  overflow: number;           // max(0, rawDifficulty - 10)
+  impossible: boolean;        // over-10 under the "impossible" policy
+  appliedTags: string[];
+  unknownTags: string[];
+  notes: string[];
+}
+
+function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy } = {}): ResolvedRoll {
+  const breakdown = parsePoolExpression(spec.pool, resolve);
+  let difficulty = spec.difficulty + spec.difficultyMod;
+  let dice = breakdown.total + spec.diceMod;
+  let automaticSuccesses = 0;
+  let nAgain = 10;
+  const appliedTags: string[] = [];
+  const unknownTags: string[] = [];
+  for (const tag of spec.tags) {
+    const mod = RollModifierRegistry.get(tag);
+    if (!mod) { unknownTags.push(tag); continue; }
+    appliedTags.push(tag);
+    difficulty += mod.difficultyMod ?? 0;
+    dice += mod.diceMod ?? 0;
+    automaticSuccesses += mod.autoSuccesses ?? 0;
+    if (mod.nAgain !== undefined) nAgain = Math.min(nAgain, mod.nAgain);
+  }
+
+  const rawDifficulty = difficulty;
+  const dieDifficulty = Math.max(2, Math.min(10, rawDifficulty));
+  const overflow = Math.max(0, rawDifficulty - 10);
+  const policy = opts.overDifficulty ?? "extra-success";
+  const impossible = overflow > 0 && policy === "impossible";
+
+  let requires = Math.max(1, spec.requires);
+  const notes: string[] = [];
+  if (overflow > 0) {
+    if (impossible) notes.push(`difficulty ${rawDifficulty} exceeds 10 -> impossible`);
+    else { requires += overflow; notes.push(`difficulty ${rawDifficulty} > 10 -> +${overflow} required success${overflow === 1 ? "" : "es"}`); }
+  }
+  if (unknownTags.length) notes.push(`unknown tag${unknownTags.length === 1 ? "" : "s"}: ${unknownTags.join(", ")}`);
+
+  return {
+    spec, breakdown, dice: Math.max(0, dice), dieDifficulty, requires,
+    automaticSuccesses, nAgain, rawDifficulty, overflow, impossible, appliedTags, unknownTags, notes,
+  };
+}
+
+type RollOutcomeKind = "success" | "failure" | "botch" | "impossible";
+interface RollExecution {
+  resolved: ResolvedRoll;
+  result: RollResult | null;   // null when impossible (never rolled)
+  met: boolean;                // requirement met
+  outcome: RollOutcomeKind;
+}
+
+function executeRoll(
+  spec: RollSpec, resolve: TraitResolver,
+  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy } = {}
+): RollExecution {
+  const resolved = resolveSpec(spec, resolve, opts);
+  if (resolved.impossible) return { resolved, result: null, met: false, outcome: "impossible" };
+  const result = Dice.roll(resolved.dice, {
+    difficulty: resolved.dieDifficulty,
+    nAgain: resolved.nAgain,
+    automaticSuccesses: resolved.automaticSuccesses,
+    rng: opts.rng,
+    label: prettyPool(spec.pool) || "Pool",
+  });
+  const met = !result.isBotch && result.net >= resolved.requires;
+  const outcome: RollOutcomeKind = result.isBotch ? "botch" : (met ? "success" : "failure");
+  return { resolved, result, met, outcome };
+}
+
+// A single-line summary (no character name; the caller prefixes that).
+function formatExecution(exec: RollExecution): string {
+  if (exec.outcome === "impossible") {
+    return `${prettyPool(exec.resolved.spec.pool)}: impossible - difficulty ${exec.resolved.rawDifficulty} exceeds 10.`;
+  }
+  const r = exec.result!;
+  const verdict = r.isBotch ? "botch"
+    : (exec.met ? `meets requirement (${exec.resolved.requires})` : `short of requirement (${exec.resolved.requires})`);
+  const extra = exec.resolved.notes.length ? ` [${exec.resolved.notes.join("; ")}]` : "";
+  return `${r.message} - ${verdict}${extra}`;
+}
+//#endregion src/rolls.ts
+
 //#region src/rules.ts
 // =============================================================================
 // RULES - the Dark Ages data: rulesets, soak tables, templates, disciplines,
 // merits & flaws defaults, and the SRD lorebook seed. Data over logic.
 // =============================================================================
+
+// The nine oWoD Attributes, by group. Fixed across every template, so they live
+// in code (unlike the chronicle-variable ability/background lists in the
+// lorebook). A fresh potential character seeds all nine at 1 (the free dot).
+const ATTRIBUTES = {
+  physical: ["Strength", "Dexterity", "Stamina"],
+  social: ["Charisma", "Manipulation", "Appearance"],
+  mental: ["Perception", "Intelligence", "Wits"],
+} as const;
+const ALL_ATTRIBUTES: readonly string[] = [
+  ...ATTRIBUTES.physical, ...ATTRIBUTES.social, ...ATTRIBUTES.mental,
+];
 
 // --- CONFIGURATION ---
 class RulesetConfig {
@@ -1420,6 +1640,13 @@ class ScopedStorage {
     const existed = await this.has(key);
     await api.v1.storyStorage.remove(this._key(key));
     return existed;
+  }
+  // Keys this manager has set, with the storage prefix stripped back off.
+  async list(): Promise<string[]> {
+    const prefix = `${this.StoragePrefix}_`;
+    return (await api.v1.storyStorage.list())
+      .filter(k => k.startsWith(prefix))
+      .map(k => k.slice(prefix.length));
   }
 
   // temp*: same API against api.v1.tempStorage - scratch state the host clears
@@ -2065,14 +2292,6 @@ class CharacterFactory {
 }
 
 // =============================================================================
-// COMMAND ROUTER - dispatch for inline [[...]] player commands
-// -----------------------------------------------------------------------------
-// Placeholder for the forthcoming command system: onTextAdventureInput below
-// pulls every [[bracketed]] command out of the player's input and hands the
-// inner text here. For now it just returns that text verbatim (a no-op parse);
-// verbs like `roll`, `spend` or `damage` will be dispatched from here later.
-// =============================================================================
-// =============================================================================
 // PLAYABLE CHARACTERS - potential characters created via [[create-playable]]
 // -----------------------------------------------------------------------------
 // A PlayableCharacter is the persisted record of a (possibly in-progress)
@@ -2093,31 +2312,72 @@ interface PlayableCharacter {
   name: string;
   templates: string[];                    // normalized TEMPLATES keys, 1+
   stage: "potential" | "ready";           // potential = not yet buildable
-  attributes: Record<string, number>;     // all buckets start empty
+  // Seeded at creation: Attributes at 1, Abilities at 0, Willpower at 0; the
+  // remaining buckets are allocation space the player fills in.
+  attributes: Record<string, number>;
   abilities: Record<string, number>;
   backgrounds: Record<string, number>;
   virtues: Record<string, number>;
   disciplines: Record<string, number>;
   traits: Record<string, number>;
   poolStarts: Record<string, number>;
+  meritsFlaws: Record<string, number>;    // name -> points; kind via the registry
   tags: string[];                         // free-form (clan, ghoul, ...)
 }
 
 class CharacterStore {
   private static _storage = new ScopedStorage();
+  private static readonly CURRENT_KEY = "current-character";
+  private static readonly DEFAULT_KEY = "default-character";
   private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
   private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
 
-  static newPotential(name: string, templates: string[]): PlayableCharacter {
+  // A fresh potential character: all nine Attributes at 1 (the free dot), every
+  // ability at 0 (so the sheet lists them all), Willpower at 0 (no oWoD template
+  // lacks it), and empty Merits/Flaws & Backgrounds. Other buckets fill in later.
+  static async newPotential(name: string, templates: string[]): Promise<PlayableCharacter> {
+    const attributes: Record<string, number> = {};
+    for (const attr of ALL_ATTRIBUTES) attributes[StringUtil.normalize(attr)] = 1;
+    const abilities: Record<string, number> = {};
+    const abilityNames = [
+      ...await LorebookManager.allTalents(),
+      ...await LorebookManager.allSkills(),
+      ...await LorebookManager.allKnowledges(),
+    ];
+    for (const ab of abilityNames) abilities[StringUtil.normalize(ab)] = 0;
     return {
       id: api.v1.uuid(),
       name,
       templates: templates.map(t => StringUtil.normalize(t)),
       stage: "potential",
-      attributes: {}, abilities: {}, backgrounds: {}, virtues: {},
-      disciplines: {}, traits: {}, poolStarts: {},
+      attributes, abilities,
+      backgrounds: {}, virtues: {}, disciplines: {}, traits: {},
+      poolStarts: { willpower: 0 },
+      meritsFlaws: {},
       tags: [],
     };
+  }
+
+  // --- Active / default character selection ---------------------------------
+  static async setCurrent(name: string): Promise<void> { await CharacterStore._storage.set(CharacterStore.CURRENT_KEY, StringUtil.normalize(name)); }
+  static async setDefault(name: string): Promise<void> { await CharacterStore._storage.set(CharacterStore.DEFAULT_KEY, StringUtil.normalize(name)); }
+  static async getDefaultName(): Promise<string | undefined> { return (await CharacterStore._storage.get(CharacterStore.DEFAULT_KEY)) as string | undefined; }
+
+  // Names of every saved character (from the `pc:`-prefixed storage keys).
+  static async listNames(): Promise<string[]> {
+    return (await CharacterStore._storage.list()).filter(k => k.startsWith("pc:")).map(k => k.slice(3));
+  }
+
+  // The character to act as: the explicit current, else the default, else - when
+  // exactly one character exists - that one. Undefined if nothing resolves.
+  static async getCurrent(): Promise<PlayableCharacter | undefined> {
+    const cur = (await CharacterStore._storage.get(CharacterStore.CURRENT_KEY)) as string | undefined;
+    if (cur) { const c = await CharacterStore.load(cur); if (c) return c; }
+    const def = await CharacterStore.getDefaultName();
+    if (def) { const c = await CharacterStore.load(def); if (c) return c; }
+    const names = await CharacterStore.listNames();
+    if (names.length === 1) return CharacterStore.load(names[0]);
+    return undefined;
   }
 
   private static _entryText(char: PlayableCharacter): string {
@@ -2174,87 +2434,197 @@ class CharacterStore {
 }
 
 // =============================================================================
-// COMMAND ROUTER - dispatch for inline [[...]] player commands
+// COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
-// onTextAdventureInput pulls every [[bracketed]] command out of the player's
-// input, dispatches it here, and replaces it with a single-line
-// ((OOC-Storyteller: ...)) note (the host forbids newlines in inputText).
-// Implemented verbs: creator-mode, create-playable. More (roll, damage,
-// spend, extended-roll) plug into the same table.
+// Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
+// `key=value` (or key="quoted") is a named argument; any other bare or quoted
+// token is positional, in order. Keeping this separate from CommandRouter lets
+// us add commands - and later, lorebook-defined commands - without touching how
+// arguments are parsed.
 // =============================================================================
-interface ParsedCommand { name: string; args: Record<string, string>; }
+interface ParsedCommand {
+  name: string;
+  positional: string[];
+  named: Record<string, string>;
+  raw: string;
+}
+
+class CommandParser {
+  static parse(body: string): ParsedCommand {
+    const raw = body.trim();
+    const name = (raw.match(/^[A-Za-z][\w-]*/)?.[0] ?? "").toLowerCase();
+    const rest = raw.slice(name.length);
+    const positional: string[] = [];
+    const named: Record<string, string> = {};
+    // key=value | key="v" | key='v' | "quoted" | 'quoted' | bareword
+    const tokenRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|\S+)|"([^"]*)"|'([^']*)'|(\S+)/g;
+    for (const m of rest.matchAll(tokenRe)) {
+      if (m[1] !== undefined) named[m[1].toLowerCase()] = m[3] ?? m[4] ?? m[2];
+      else positional.push(m[5] ?? m[6] ?? m[7]);
+    }
+    return { name, positional, named, raw };
+  }
+}
+
+// =============================================================================
+// COMMAND ROUTER - dispatch inline [[...]] player commands to their handlers
+// -----------------------------------------------------------------------------
+// A registry maps a verb to the function that runs it, so a new command is just
+// a register() call (and could one day be defined from a lorebook entry).
+// onTextAdventureInput pulls every [[bracketed]] command out of the input,
+// routes it here, and replaces it with a single-line ((OOC-Storyteller: ...))
+// note (the host forbids newlines in inputText).
+// =============================================================================
+interface CommandContext { rng?: Rng; }
+type CommandHandler = (cmd: ParsedCommand, ctx: CommandContext) => Promise<string>;
 
 class CommandRouter {
   private static _storage = new ScopedStorage();
+  private static _registry = new Map<string, { handler: CommandHandler; help: string }>();
 
-  // `verb key=value key="quoted value"` -> { name: verb, args: {...} }
-  static parse(body: string): ParsedCommand {
-    const trimmed = body.trim();
-    const nameMatch = trimmed.match(/^[A-Za-z][\w-]*/);
-    const name = (nameMatch?.[0] ?? "").toLowerCase();
-    const args: Record<string, string> = {};
-    const argRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|[^\s]+)/g;
-    for (const m of trimmed.slice(name.length).matchAll(argRe)) {
-      args[m[1].toLowerCase()] = m[3] ?? m[4] ?? m[2];
-    }
-    return { name, args };
+  static register(verb: string, handler: CommandHandler, help: string): void {
+    CommandRouter._registry.set(verb.toLowerCase(), { handler, help });
   }
+  static verbs(): string[] { return [...CommandRouter._registry.keys()]; }
 
   static async creatorModeEnabled(): Promise<boolean> {
     return (await CommandRouter._storage.getOrDefault("creator-mode", false)) as boolean;
   }
+  static async setCreatorMode(on: boolean): Promise<void> { await CommandRouter._storage.set("creator-mode", on); }
+
+  /**
+   * @deprecated Use CommandParser.parse. Thin delegate kept during the
+   * parser/router split; remove once callers migrate.
+   */
+  static parse(body: string): ParsedCommand { return CommandParser.parse(body); }
 
   // Routes one command body to its handler; returns the OOC replacement text
   // (always a single line - the host strips newlines from inputText).
-  static async route(body: string): Promise<string> {
-    const cmd = CommandRouter.parse(body);
+  static async route(body: string, ctx: CommandContext = {}): Promise<string> {
+    const cmd = CommandParser.parse(body);
     // While creator mode is on, the player may have edited character entries:
     // pick those edits up before any command runs.
     if (await CommandRouter.creatorModeEnabled()) await CharacterStore.syncFromLorebook();
-
-    switch (cmd.name) {
-      case "creator-mode": return CommandRouter._creatorMode(cmd);
-      case "create-playable": return CommandRouter._createPlayable(cmd);
-      default:
-        return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: creator-mode, create-playable.))`;
-    }
-  }
-
-  private static async _creatorMode(cmd: ParsedCommand): Promise<string> {
-    const set = (cmd.args["set"] ?? "").toLowerCase();
-    if (set !== "true" && set !== "false") {
-      return `((OOC-Storyteller: creator-mode needs set=true or set=false.))`;
-    }
-    if (set === "true") {
-      await CommandRouter._storage.set("creator-mode", true);
-      return `((OOC-Storyteller: Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.))`;
-    }
-    // Leaving creator mode: capture any final lorebook edits, then switch off.
-    const { synced, failed } = await CharacterStore.syncFromLorebook();
-    await CommandRouter._storage.set("creator-mode", false);
-    const parts = [`Creator mode OFF.`];
-    if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
-    if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
-    return `((OOC-Storyteller: ${parts.join(" ")}))`;
-  }
-
-  private static async _createPlayable(cmd: ParsedCommand): Promise<string> {
-    const name = cmd.args["name"]?.trim();
-    if (!name) return `((OOC-Storyteller: create-playable needs name="...".))`;
-    const rawTemplates = (cmd.args["templates"] ?? cmd.args["template"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
-    if (rawTemplates.length === 0) return `((OOC-Storyteller: create-playable needs templates="a,b,..." (at least one).))`;
-    const unknown = rawTemplates.filter(t => !(t in TEMPLATES));
-    if (unknown.length) {
-      return `((OOC-Storyteller: Unknown template(s): ${unknown.join(", ")}. Valid: ${Object.keys(TEMPLATES).join(", ")}.))`;
-    }
-    if (await CharacterStore.load(name)) {
-      return `((OOC-Storyteller: A character named "${name}" already exists. Edit it in creator mode, or pick another name.))`;
-    }
-    const char = CharacterStore.newPotential(name, rawTemplates);
-    await CharacterStore.save(char);
-    return `((OOC-Storyteller: Created playable character "${name}" [${rawTemplates.join("+")}] - all traits unassigned. Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it.))`;
+    const def = CommandRouter._registry.get(cmd.name);
+    if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
+    return def.handler(cmd, ctx);
   }
 }
+
+// --- COMMAND HANDLERS -------------------------------------------------------
+// Each returns a single OOC line. Registered into CommandRouter at the bottom.
+
+async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
+  const set = (cmd.named["set"] ?? cmd.positional[0] ?? "").toLowerCase();
+  if (set !== "true" && set !== "false") {
+    return `((OOC-Storyteller: creator-mode needs set=true or set=false.))`;
+  }
+  if (set === "true") {
+    await CommandRouter.setCreatorMode(true);
+    return `((OOC-Storyteller: Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.))`;
+  }
+  // Leaving creator mode: capture any final lorebook edits, then switch off.
+  const { synced, failed } = await CharacterStore.syncFromLorebook();
+  await CommandRouter.setCreatorMode(false);
+  const parts = [`Creator mode OFF.`];
+  if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
+  if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
+  return `((OOC-Storyteller: ${parts.join(" ")}))`;
+}
+
+async function cmdCreatePlayable(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) return `((OOC-Storyteller: create-playable needs name="...".))`;
+  const rawTemplates = (cmd.named["templates"] ?? cmd.named["template"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  if (rawTemplates.length === 0) return `((OOC-Storyteller: create-playable needs templates="a,b,..." (at least one).))`;
+  const unknown = rawTemplates.filter(t => !(t in TEMPLATES));
+  if (unknown.length) {
+    return `((OOC-Storyteller: Unknown template(s): ${unknown.join(", ")}. Valid: ${Object.keys(TEMPLATES).join(", ")}.))`;
+  }
+  if (await CharacterStore.load(name)) {
+    return `((OOC-Storyteller: A character named "${name}" already exists. Edit it in creator mode, or pick another name.))`;
+  }
+  const char = await CharacterStore.newPotential(name, rawTemplates);
+  await CharacterStore.save(char);
+  // Auto-select the first character created as the default (and current).
+  let note = "";
+  if (!(await CharacterStore.getDefaultName())) {
+    await CharacterStore.setDefault(name);
+    await CharacterStore.setCurrent(name);
+    note = " Selected as your default character.";
+  }
+  return `((OOC-Storyteller: Created playable character "${name}" [${rawTemplates.join("+")}] - Attributes at 1, Abilities at 0, everything else unassigned.${note} Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it.))`;
+}
+
+async function cmdPlay(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) {
+    // No argument: hand control back to the default character.
+    const def = await CharacterStore.getDefaultName();
+    const dc = def ? await CharacterStore.load(def) : undefined;
+    if (!dc) return `((OOC-Storyteller: No default character to return to. Name one with [[play name="..."]].))`;
+    await CharacterStore.setCurrent(dc.name);
+    return `((OOC-Storyteller: Playing your default character, "${dc.name}".))`;
+  }
+  const char = await CharacterStore.load(name);
+  if (!char) return `((OOC-Storyteller: No character named "${name}". Create it with [[create-playable ...]].))`;
+  await CharacterStore.setCurrent(char.name);
+  return `((OOC-Storyteller: Now playing "${char.name}".))`;
+}
+
+// Resolve a trait name to its value from a character record's numeric buckets.
+function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
+  const n = StringUtil.normalize(name);
+  const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
+  for (const b of buckets) if (n in b) return b[n];
+  return 0;
+}
+
+// Build a RollSpec from a parsed command. `offset` is where the pool sits among
+// the positionals (0 for [[roll]], 1 for [[roll-for "Name" ...]]). Difficulty
+// and its modifier may be positional OR named (named wins); requires,
+// dice-modifier and tags are named-only.
+function rollSpecFromCommand(cmd: ParsedCommand, offset: number): RollSpec {
+  const num = (s: string | undefined, fallback: number): number => {
+    if (s === undefined) return fallback;
+    const v = parseInt(s, 10);
+    return Number.isNaN(v) ? fallback : v;
+  };
+  const pool = cmd.positional[offset] ?? "";
+  const difficulty = num(cmd.named["difficulty"] ?? cmd.positional[offset + 1], DEFAULT_DIFFICULTY);
+  const difficultyMod = num(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2], 0);
+  const requires = num(cmd.named["requires"], 1);
+  const diceMod = num(cmd.named["dice-modifier"], 0);
+  const tags = (cmd.named["tags"] ?? "").split(",").map(t => t.trim()).filter(t => t.length > 0);
+  return makeRollSpec({ pool, difficulty, difficultyMod, requires, diceMod, tags });
+}
+
+async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
+  const spec = rollSpecFromCommand(cmd, offset);
+  if (!spec.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]].))`;
+  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
+  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}))`;
+}
+
+async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  return rollAndReport(char, cmd, ctx, 0);
+}
+
+async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const target = cmd.positional[0]?.trim();
+  if (!target) return `((OOC-Storyteller: roll-for needs a character name, e.g. [[roll-for "Erik" strength+brawl]].))`;
+  const char = await CharacterStore.load(target);
+  if (!char) return `((OOC-Storyteller: No character named "${target}".))`;
+  return rollAndReport(char, cmd, ctx, 1);
+}
+
+CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
+CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
+CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
+CommandRouter.register("roll", cmdRoll, "roll <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=");
+CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

@@ -9,6 +9,7 @@ export * from "./host";
 export * from "./core/traits";
 export * from "./core/dice";
 export * from "./core/damage";
+export * from "./rolls";
 export * from "./rules";
 export * from "./services";
 export * from "./game";

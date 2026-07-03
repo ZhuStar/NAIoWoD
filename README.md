@@ -277,26 +277,53 @@ note; if the input contained *only* commands, generation is suppressed (you're
 operating the system, not the story).
 
 ```
-[[creator-mode set=true]]
 [[create-playable name="Erik the Red" templates="vampire,werewolf,mage"]]
-[[creator-mode set=false]]
+[[play name="Erik the Red"]]
+[[roll dexterity+stealth 6 requires=2 tags="off-hand"]]
 ```
 
-- **`create-playable`** makes a *potential* character: a name, one or **more**
-  templates (hybrids are stored as-is; how they merge is resolved later at
-  build time), and every allocation bucket empty. Unknown templates are
-  rejected with the valid list; duplicate names are refused.
-- The character is written to **both** a lorebook entry
-  (`pc:<name>` in the `wod:player-characters` category — instructions above a
-  `=====` marker, the sheet as JSON below it) and `storyStorage`. **The
-  lorebook entry is the source of truth.**
-- **`creator-mode set=true`** lets the player edit those entries directly;
-  edits are synced **lorebook → storage** whenever a command runs and when
-  creator mode is turned off. Unparseable edits are reported and skipped, never
-  synced. The script's own writes (`CharacterStore.save`) go lorebook-first.
+Parsing and dispatch are separate: **`CommandParser`** turns a body into
+`{ name, positional[], named{} }` (positional and named args), and
+**`CommandRouter`** is a verb→handler registry — so adding a command is one
+`register()` call (and could be lorebook-defined later).
 
-🚧 Next for creation: allocation commands (attributes/abilities/etc.),
-multi-template resolution, and turning a finished sheet into a `LiveCharacter`.
+- **`create-playable`** makes a *potential* character: a name and one or
+  **more** templates (hybrids are stored as-is; how they merge is resolved later
+  at build time). The sheet is seeded — all nine **Attributes at 1**, every
+  **Ability at 0**, **Willpower at 0**, empty Merits/Flaws & Backgrounds — the
+  rest is allocation space. Unknown templates are rejected with the valid list;
+  duplicate names are refused. The **first** character created becomes your
+  **default** (and current) automatically.
+- The character is written to **both** a lorebook entry (`pc:<name>` in the
+  `wod:player-characters` category — instructions above a `=====` marker, the
+  sheet as JSON below it) and `storyStorage`; its `id` is a UUID that stays its
+  identity for good. **The lorebook entry is the source of truth.**
+- **`creator-mode set=true`** lets the player edit those entries directly; edits
+  sync **lorebook → storage** whenever a command runs and when creator mode is
+  turned off. Unparseable edits are reported and skipped, never synced.
+- **`play name="…"`** selects who to act as; **`play`** with no name hands
+  control back to the default. **`roll <pool> …`** rolls for the current
+  character; **`roll-for "Name" <pool> …`** rolls on another character's behalf
+  without changing the selection.
+
+### The roll command
+
+`[[roll <pool> [difficulty] [difficulty-mod] requires=N dice-modifier=±N tags="a,b"]]`
+
+- **pool** — one token summed on `+`: a number, `number+number`, a trait
+  (`brawl`), `trait+trait` (`strength+brawl`), or a tracker (`willpower`). Traits
+  resolve against the selected character (0 if absent).
+- **difficulty** (default 6) and its **modifier** may be positional *or* named
+  (`difficulty=`, `difficulty-modifier=`; named wins). A final difficulty above
+  10 isn't clamped away — each point over 10 costs one extra required success.
+- **`requires`** (default 1) is the successes needed; **`dice-modifier`** adds or
+  removes dice; **`tags`** are contextual keys matched against the
+  `RollModifierRegistry` (e.g. `acute-senses` → −2 difficulty, `willpower` → +1
+  automatic success) — the hook for rules-driven modifiers like Merits & Flaws.
+
+🚧 Next: allocation commands (attributes/abilities/…), multi-template
+resolution, turning a finished sheet into a `LiveCharacter`, and **extended
+rolls** (persistent, interval-aware) plus saved **named rolls**.
 
 ## Merits & Flaws
 

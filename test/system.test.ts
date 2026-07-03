@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -9,9 +9,10 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  ScopedStorage, LorebookManager, __resetLorebookMock,
-  CommandRouter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
+  ScopedStorage, LorebookManager, __resetLorebookMock, __resetStorageMock,
+  CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES,
+  makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -790,18 +791,30 @@ describe("LorebookManager.parseList (header marker + comments)", () => {
   });
 });
 
-describe("CommandRouter.parse", () => {
-  test("parses verb, quoted and bare args", () => {
-    const c = CommandRouter.parse('create-playable name="Erik the Red" templates=vampire,werewolf');
-    expect(c.name).toBe("create-playable");
-    expect(c.args.name).toBe("Erik the Red");
-    expect(c.args.templates).toBe("vampire,werewolf");
+describe("CommandParser", () => {
+  test("splits verb, positional args (in order), and named args", () => {
+    const c = CommandParser.parse('roll strength+brawl 7 +1 requires=3 tags="off-hand, ambush"');
+    expect(c.name).toBe("roll");
+    expect(c.positional).toEqual(["strength+brawl", "7", "+1"]);
+    expect(c.named.requires).toBe("3");
+    expect(c.named.tags).toBe("off-hand, ambush");
   });
 
-  test("single-quoted values and case-insensitive keys", () => {
-    const c = CommandRouter.parse("creator-mode SET='true'");
-    expect(c.name).toBe("creator-mode");
-    expect(c.args.set).toBe("true");
+  test("quoted named values, case-insensitive keys, and quoted positionals", () => {
+    const c = CommandParser.parse('create-playable name="Erik the Red" templates=vampire,werewolf');
+    expect(c.name).toBe("create-playable");
+    expect(c.named.name).toBe("Erik the Red");
+    expect(c.named.templates).toBe("vampire,werewolf");
+
+    expect(CommandParser.parse("creator-mode SET='true'").named.set).toBe("true");
+
+    const e = CommandParser.parse('roll-for "Erik the Red" willpower');
+    expect(e.name).toBe("roll-for");
+    expect(e.positional).toEqual(["Erik the Red", "willpower"]);
+  });
+
+  test("CommandRouter.parse still delegates (deprecated)", () => {
+    expect(CommandRouter.parse("play name=x").named.name).toBe("x");
   });
 });
 
@@ -815,7 +828,10 @@ describe("[[create-playable]] and creator mode", () => {
     const stored = await CharacterStore.load("Absurd Al");
     expect(stored!.templates).toEqual(["vampire", "werewolf", "mage"]);
     expect(stored!.stage).toBe("potential");
-    expect(stored!.attributes).toEqual({}); // everything unassigned
+    expect(stored!.attributes.strength).toBe(1);   // nine Attributes seeded at 1
+    expect(stored!.abilities.brawl).toBe(0);        // every Ability seeded at 0
+    expect(stored!.poolStarts.willpower).toBe(0);   // Willpower seeded at 0
+    expect(stored!.meritsFlaws).toEqual({});        // empty container
 
     // lorebook entry is the source of truth
     const text = await LorebookManager.entryText(PLAYER_CHARACTERS_CATEGORY, "pc:absurd-al");
@@ -1121,5 +1137,122 @@ describe("LiveCharacter XP & downtime spending", () => {
     c.AwardDowntime(10);
     c.SpendDowntimeOnAttribute("Strength"); // VAMPIRE uses downtime, cost 5
     expect(c.Attributes.get("strength")!.Value).toBe(3);
+  });
+});
+
+describe("newPotential seeding", () => {
+  test("nine Attributes at 1, every Ability at 0, Willpower at 0, empty containers", async () => {
+    const c = await CharacterStore.newPotential("Seed Test", ["mortal"]);
+    expect(Object.keys(c.attributes).length).toBe(9);
+    expect(c.attributes.strength).toBe(1);
+    expect(c.attributes.wits).toBe(1);
+    expect(Object.keys(c.abilities).length).toBeGreaterThan(0);
+    expect(c.abilities.brawl).toBe(0);
+    expect(Object.values(c.abilities).every(v => v === 0)).toBe(true);
+    expect(c.poolStarts.willpower).toBe(0);
+    expect(c.meritsFlaws).toEqual({});
+    expect(c.backgrounds).toEqual({});
+  });
+});
+
+describe("rolls engine (rolls.ts)", () => {
+  const resolve = (name: string): number =>
+    (({ strength: 3, brawl: 2, dexterity: 4 } as Record<string, number>)[StringUtil.normalize(name)] ?? 0);
+
+  test("parsePoolExpression sums traits and integer literals", () => {
+    expect(parsePoolExpression("strength+brawl", resolve).total).toBe(5);
+    expect(parsePoolExpression("3+2", resolve).total).toBe(5);
+    expect(parsePoolExpression("dexterity", resolve).total).toBe(4);
+    expect(parsePoolExpression("unknown", resolve).total).toBe(0);
+  });
+
+  test("executeRoll meets and falls short of the requirement", () => {
+    const met = executeRoll(makeRollSpec({ pool: "strength+brawl", requires: 2 }), resolve, { rng: seqRng([6, 6, 2, 2, 2]) });
+    expect(met.result!.net).toBe(2);
+    expect(met.met).toBe(true);
+    expect(met.outcome).toBe("success");
+
+    const short = executeRoll(makeRollSpec({ pool: "brawl", requires: 3 }), resolve, { rng: seqRng([6, 2]) });
+    expect(short.met).toBe(false);
+    expect(short.outcome).toBe("failure");
+  });
+
+  test("a botch is reported as a botch", () => {
+    const b = executeRoll(makeRollSpec({ pool: "strength", requires: 1 }), resolve, { rng: seqRng([1, 2, 3]) });
+    expect(b.outcome).toBe("botch");
+    expect(b.met).toBe(false);
+  });
+
+  test("difficulty above 10 costs an extra success per point (not clamped away)", () => {
+    const r = resolveSpec(makeRollSpec({ pool: "3", difficulty: 12, requires: 1 }), resolve);
+    expect(r.dieDifficulty).toBe(10);
+    expect(r.overflow).toBe(2);
+    expect(r.requires).toBe(3);
+  });
+
+  test('the "impossible" policy fails an over-10 roll without rolling', () => {
+    const exec = executeRoll(makeRollSpec({ pool: "5", difficulty: 12 }), resolve, { overDifficulty: "impossible" });
+    expect(exec.outcome).toBe("impossible");
+    expect(exec.result).toBeNull();
+  });
+
+  test("a tag modifier adjusts the roll (Acute Senses lowers difficulty)", () => {
+    const r = resolveSpec(makeRollSpec({ pool: "strength", difficulty: 6, tags: ["Acute Senses"] }), resolve);
+    expect(r.dieDifficulty).toBe(4);
+    expect(r.appliedTags).toContain("acute-senses");
+  });
+
+  test("the Willpower tag grants an automatic success", () => {
+    const r = executeRoll(makeRollSpec({ pool: "0", requires: 1, tags: ["Willpower"] }), resolve);
+    expect(r.result!.automaticSuccesses).toBe(1);
+    expect(r.met).toBe(true);
+  });
+
+  test("an unregistered tag is reported, not applied", () => {
+    const r = resolveSpec(makeRollSpec({ pool: "strength", tags: ["made-up-tag"] }), resolve);
+    expect(r.unknownTags).toContain("made-up-tag");
+    expect(r.dieDifficulty).toBe(DEFAULT_DIFFICULTY);
+  });
+});
+
+describe("[[play]], [[roll]] and [[roll-for]]", () => {
+  beforeEach(() => { __resetStorageMock(); });
+
+  test("the first created character becomes default and current", async () => {
+    const reply = await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    expect(reply).toContain("Selected as your default character");
+    expect((await CharacterStore.getCurrent())!.name).toBe("Rok");
+  });
+
+  test("[[roll]] with no active character asks the player to select one", async () => {
+    expect(await CommandRouter.route("roll strength")).toContain("No active character");
+  });
+
+  test("[[roll]] rolls the current character's resolved pool", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    // Rok's Strength is the seeded 1 -> a one-die pool.
+    const r = await CommandRouter.route("roll strength", { rng: seqRng([6]) });
+    expect(r).toContain("Rok");
+    expect(r).toContain("1 success");
+    expect(r).toContain("meets requirement (1)");
+  });
+
+  test('[[play name=".."]] switches, [[play]] returns to the default', async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    await CommandRouter.route('play name="Sela"');
+    expect((await CharacterStore.getCurrent())!.name).toBe("Sela");
+    const back = await CommandRouter.route("play");
+    expect(back).toContain("default character");
+    expect((await CharacterStore.getCurrent())!.name).toBe("Rok");
+  });
+
+  test('[[roll-for "Name"]] rolls another character without changing selection', async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    const r = await CommandRouter.route('roll-for "Sela" dexterity', { rng: seqRng([6]) });
+    expect(r).toContain("Sela");
+    expect(r).toContain("1 success");
+    expect((await CharacterStore.getCurrent())!.name).toBe("Rok"); // unchanged
   });
 });

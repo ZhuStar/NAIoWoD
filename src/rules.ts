@@ -8,6 +8,18 @@ import {
   HealthLevelDef, STANDARD_HEALTH_LEVELS,
 } from "./core/damage";
 
+// The nine oWoD Attributes, by group. Fixed across every template, so they live
+// in code (unlike the chronicle-variable ability/background lists in the
+// lorebook). A fresh potential character seeds all nine at 1 (the free dot).
+export const ATTRIBUTES = {
+  physical: ["Strength", "Dexterity", "Stamina"],
+  social: ["Charisma", "Manipulation", "Appearance"],
+  mental: ["Perception", "Intelligence", "Wits"],
+} as const;
+export const ALL_ATTRIBUTES: readonly string[] = [
+  ...ATTRIBUTES.physical, ...ATTRIBUTES.social, ...ATTRIBUTES.mental,
+];
+
 // --- CONFIGURATION ---
 export class RulesetConfig {
   constructor(

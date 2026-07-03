@@ -19,6 +19,7 @@ const MODULES = [
   "src/core/traits.ts",
   "src/core/dice.ts",
   "src/core/damage.ts",
+  "src/rolls.ts",
   "src/rules.ts",
   "src/services.ts",
   "src/game.ts",

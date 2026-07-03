@@ -42,6 +42,13 @@ export class ScopedStorage {
     await api.v1.storyStorage.remove(this._key(key));
     return existed;
   }
+  // Keys this manager has set, with the storage prefix stripped back off.
+  async list(): Promise<string[]> {
+    const prefix = `${this.StoragePrefix}_`;
+    return (await api.v1.storyStorage.list())
+      .filter(k => k.startsWith(prefix))
+      .map(k => k.slice(prefix.length));
+  }
 
   // temp*: same API against api.v1.tempStorage - scratch state the host clears
   // whenever the script unloads (refresh, session end, toggling it off/on).

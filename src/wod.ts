@@ -757,9 +757,21 @@ export class Severity {
     return typeof s === "string" ? Severity.fromName(s) : s;
   }
 
+  // Ascending order; index === Rank.
+  static readonly ORDER: readonly Severity[] = [
+    Severity.HARMLESS, Severity.BASHING, Severity.LETHAL, Severity.AGGRAVATED, Severity.FATAL,
+  ];
+  // The singleton at a rank, clamped to [HARMLESS, FATAL].
+  static atRank(rank: number): Severity {
+    return Severity.ORDER[Math.max(0, Math.min(Severity.ORDER.length - 1, Math.round(rank)))];
+  }
+
   IsAtLeast(other: Severity): boolean { return this.Rank >= other.Rank; }
   // The worse (higher-ranked) of two severities.
   Max(other: Severity): Severity { return this.Rank >= other.Rank ? this : other; }
+  // Assume the value of the neighbouring singleton, clamped.
+  Promote(steps: number = 1): Severity { return Severity.atRank(this.Rank + steps); }
+  Demote(steps: number = 1): Severity { return Severity.atRank(this.Rank - steps); }
 }
 
 // --- KIND & SOURCE (open descriptor sets; any normalized string is valid) ---
@@ -916,52 +928,86 @@ export const STANDARD_HEALTH_LEVELS: HealthLevelDef[] = [
   { name: "Incapacitated", penalty: -5 },
 ];
 
+// How a square may be healed.
+export type HealPolicy = "normal" | "never" | "special";
+
+// A single health box. `penalty` is the wound penalty it imposes when it is the
+// deepest damaged box. Everything else is optional, so a plain
+// `{ name, penalty }` (a HealthLevelDef) is a valid square.
+export interface HealthSquareDef {
+  penalty: number;
+  name?: string;
+  condition?: string;   // key linking this box to a ConditionDef
+  heal?: HealPolicy;    // default "normal"
+  healCost?: number;    // healing points to clear this box (default 1)
+}
+
+// A condition wired to one or more boxes; its state depends on how many of its
+// linked boxes are currently damaged.
+export interface ConditionDef {
+  key: string;
+  name?: string;
+  // Given how many linked boxes are damaged (and how many exist), return the
+  // current state label, or null for "inactive". Default: active if any hurt.
+  state?: (damaged: number, total: number) => string | null;
+}
+
+export interface HealthTrackConfig {
+  squares: HealthSquareDef[];
+  conditions?: ConditionDef[];
+}
+
+export interface ConditionState { key: string; name: string; state: string; damaged: number; total: number; }
+
 export interface HealthSummary {
   bashing: number; lethal: number; aggravated: number;
   filled: number; capacity: number; overkill: number;
   penalty: number; level: string;
   isIncapacitated: boolean; isDead: boolean;
+  conditions: ConditionState[];
 }
 
+// Damage is stored PER BOX, so boxes can carry conditions, heal costs, or be
+// unhealable. Simple use (ApplyDamage / Heal / Penalty / Level / counts) needs
+// none of that and behaves exactly like a plain Storyteller track.
 export class HealthTrack {
-  private _bashing = 0;
-  private _lethal = 0;
-  private _aggravated = 0;
+  private readonly _defs: HealthSquareDef[];
+  private readonly _damage: (Severity | null)[];
+  private readonly _conditions: ConditionDef[];
   private _overkill = 0; // damage that spills past a fully-aggravated track
-  private readonly _levels: HealthLevelDef[];
   private readonly _log: Array<{ severity: SeverityName; intensity: number }> = [];
 
-  constructor(levels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS) {
-    if (levels.length === 0) throw new Error("Health track needs at least one level.");
-    this._levels = levels.map(l => ({ ...l }));
+  constructor(config: HealthSquareDef[] | HealthTrackConfig = STANDARD_HEALTH_LEVELS) {
+    const cfg: HealthTrackConfig = Array.isArray(config) ? { squares: config } : config;
+    if (cfg.squares.length === 0) throw new Error("Health track needs at least one square.");
+    this._defs = cfg.squares.map(s => ({ heal: "normal", healCost: 1, ...s }));
+    this._damage = this._defs.map(() => null);
+    this._conditions = (cfg.conditions ?? []).map(c => ({ ...c }));
   }
 
-  get Capacity(): number { return this._levels.length; }
-  get Bashing(): number { return this._bashing; }
-  get Lethal(): number { return this._lethal; }
-  get Aggravated(): number { return this._aggravated; }
+  get Capacity(): number { return this._defs.length; }
   get Overkill(): number { return this._overkill; }
-  get Filled(): number { return this._bashing + this._lethal + this._aggravated; }
+  get Filled(): number { return this._damage.reduce((n, d) => n + (d ? 1 : 0), 0); }
+  get Bashing(): number { return this._count(Severity.BASHING); }
+  get Lethal(): number { return this._count(Severity.LETHAL); }
+  get Aggravated(): number { return this._count(Severity.AGGRAVATED); }
+  get Fatal(): number { return this._count(Severity.FATAL); }
+  CountBySeverity(sev: Severity | SeverityName): number { return this._count(Severity.coerce(sev)); }
+  private _count(sev: Severity): number { return this._damage.reduce((n, d) => n + (d === sev ? 1 : 0), 0); }
 
-  // Wound penalty = penalty of the deepest filled level.
-  get Penalty(): number {
-    const filled = this.Filled;
-    if (filled <= 0) return 0;
-    const idx = Math.min(filled, this.Capacity) - 1;
-    return this._levels[idx].penalty;
+  // Index of the deepest (highest-index) damaged box, or -1 if unhurt.
+  private _deepest(): number {
+    for (let i = this._damage.length - 1; i >= 0; i--) if (this._damage[i]) return i;
+    return -1;
   }
 
-  get Level(): string {
-    const filled = this.Filled;
-    if (filled <= 0) return "Healthy";
-    const idx = Math.min(filled, this.Capacity) - 1;
-    return this._levels[idx].name;
-  }
-
+  // Wound penalty = penalty of the deepest damaged box.
+  get Penalty(): number { const i = this._deepest(); return i < 0 ? 0 : this._defs[i].penalty; }
+  get Level(): string { const i = this._deepest(); return i < 0 ? "Healthy" : (this._defs[i].name ?? `Level ${i + 1}`); }
   get IsIncapacitated(): boolean { return this.Filled >= this.Capacity; }
-
-  // Destroyed: track full of aggravated, or damage spilled beyond it.
-  get IsDead(): boolean { return this._overkill > 0 || this._aggravated >= this.Capacity; }
+  get IsDead(): boolean {
+    return this._overkill > 0 || this.Aggravated >= this.Capacity || this._damage.some(d => d === Severity.FATAL);
+  }
 
   ApplyDamage(severity: Severity | SeverityName, intensity: number): void {
     const sev = Severity.coerce(severity);
@@ -971,60 +1017,78 @@ export class HealthTrack {
     for (let i = 0; i < intensity; i++) this._applyOne(sev);
   }
 
-  // One level of damage. On a full track the wrap-around upgrade rule applies:
-  // a more-severe hit replaces the least-severe existing wound; otherwise the
-  // least-severe wound is upgraded a step (bashing -> lethal -> aggravated).
+  // One level of damage: fill the first empty box; on a full track apply the
+  // wrap-around rule (a more-severe hit replaces the least-severe wound,
+  // otherwise the least-severe wound is upgraded one step).
   private _applyOne(sev: Severity): void {
-    if (this.Filled < this.Capacity) { this._add(sev, 1); return; }
+    const empty = this._damage.indexOf(null);
+    if (empty !== -1) { this._damage[empty] = sev; return; }
 
-    // Least-severe wound currently present (bashing < lethal < aggravated).
-    let least: Severity;
-    if (this._bashing > 0) least = Severity.BASHING;
-    else if (this._lethal > 0) least = Severity.LETHAL;
-    else least = Severity.AGGRAVATED;
-
-    if (sev.Rank > least.Rank) {
-      this._remove(least, 1);
-      this._add(sev, 1);
-    } else if (least === Severity.BASHING) {
-      this._bashing--; this._lethal++;        // bashing wraps to lethal
-    } else if (least === Severity.LETHAL) {
-      this._lethal--; this._aggravated++;     // lethal wraps to aggravated
-    } else {
-      this._overkill++;                       // aggravated track full -> overkill
+    // Full: least-severe filled box (deepest index among ties).
+    let idx = -1, leastRank = Infinity;
+    for (let i = this._damage.length - 1; i >= 0; i--) {
+      const r = this._damage[i]!.Rank;
+      if (r < leastRank) { leastRank = r; idx = i; }
     }
+    const least = this._damage[idx]!;
+    if (sev.Rank > least.Rank) this._damage[idx] = sev;                              // more severe replaces it
+    else if (least.Rank < Severity.AGGRAVATED.Rank) this._damage[idx] = Severity.atRank(least.Rank + 1); // wrap up a step
+    else this._overkill++;                                                           // aggravated+ full -> overkill
   }
 
-  private _add(sev: Severity, n: number): void {
-    if (sev === Severity.BASHING) this._bashing += n;
-    else if (sev === Severity.LETHAL) this._lethal += n;
-    else this._aggravated += n; // aggravated (and fatal) fill the worst boxes
+  // Heals up to `amount` boxes of `severity`, shallowest (highest index) first.
+  // "never" boxes are skipped; "special" ones only with `allowSpecial`. Returns
+  // the number of boxes cleared.
+  Heal(severity: Severity | SeverityName, amount: number, opts: { allowSpecial?: boolean } = {}): number {
+    return this._heal(severity, amount, Infinity, opts.allowSpecial ?? false).healed;
   }
 
-  private _remove(sev: Severity, n: number): void {
-    if (sev === Severity.BASHING) this._bashing -= n;
-    else if (sev === Severity.LETHAL) this._lethal -= n;
-    else this._aggravated -= n;
+  // Cost-aware heal: each box costs its `healCost` from `healingPoints`; stops
+  // when the budget or `amount` runs out. Returns boxes cleared and points spent.
+  HealWithPoints(severity: Severity | SeverityName, amount: number, healingPoints: number, opts: { allowSpecial?: boolean } = {}): { healed: number; pointsSpent: number } {
+    return this._heal(severity, amount, healingPoints, opts.allowSpecial ?? false);
   }
 
-  // Heals up to `amount` boxes of the given severity; returns how many healed.
-  Heal(severity: Severity | SeverityName, amount: number): number {
+  private _heal(severity: Severity | SeverityName, amount: number, budget: number, allowSpecial: boolean): { healed: number; pointsSpent: number } {
     const sev = Severity.coerce(severity);
     if (amount < 0) throw new Error("Heal amount cannot be negative.");
-    const before = sev === Severity.BASHING ? this._bashing : sev === Severity.LETHAL ? this._lethal : this._aggravated;
-    const healed = Math.min(before, amount);
-    this._remove(sev, healed);
-    return healed;
+    let healed = 0, pointsSpent = 0;
+    for (let i = this._damage.length - 1; i >= 0 && healed < amount; i--) {
+      if (this._damage[i] !== sev) continue;
+      const policy = this._defs[i].heal ?? "normal";
+      if (policy === "never") continue;
+      if (policy === "special" && !allowSpecial) continue;
+      const cost = this._defs[i].healCost ?? 1;
+      if (cost > budget) continue;
+      this._damage[i] = null;
+      budget -= cost; pointsSpent += cost; healed++;
+    }
+    return { healed, pointsSpent };
   }
 
-  Reset(): void { this._bashing = this._lethal = this._aggravated = this._overkill = 0; }
+  Reset(): void { for (let i = 0; i < this._damage.length; i++) this._damage[i] = null; this._overkill = 0; }
+
+  // Current state of every active condition wired to the track.
+  Conditions(): ConditionState[] {
+    const out: ConditionState[] = [];
+    for (const c of this._conditions) {
+      let damaged = 0, total = 0;
+      for (let i = 0; i < this._defs.length; i++) {
+        if (this._defs[i].condition === c.key) { total++; if (this._damage[i]) damaged++; }
+      }
+      const state = c.state ? c.state(damaged, total) : (damaged > 0 ? "active" : null);
+      if (state != null) out.push({ key: c.key, name: c.name ?? c.key, state, damaged, total });
+    }
+    return out;
+  }
 
   Summary(): HealthSummary {
     return {
-      bashing: this._bashing, lethal: this._lethal, aggravated: this._aggravated,
+      bashing: this.Bashing, lethal: this.Lethal, aggravated: this.Aggravated,
       filled: this.Filled, capacity: this.Capacity, overkill: this._overkill,
       penalty: this.Penalty, level: this.Level,
       isIncapacitated: this.IsIncapacitated, isDead: this.IsDead,
+      conditions: this.Conditions(),
     };
   }
 }
@@ -1178,37 +1242,76 @@ export const ROAD_OF_THE_BEAST: RoadDefinition = {
   ratingVirtues: ["conviction", "instinct"],
 };
 
+export type MoralityPolarity = "descending" | "ascending";
+
+// A morality rating (a Road/Humanity, or Torment). "descending" traits worsen
+// toward 0 (Humanity 0 = lost to the Beast); "ascending" traits worsen toward
+// the max (Torment 10 = unplayable). Degenerate() always moves toward the bad
+// extreme; Improve() toward the good one.
 export class MoralityTrait {
   private _value: number;
   private readonly _max: number;
+  private readonly _min: number;
+  private readonly _unplayableAt: number;
+  public readonly Polarity: MoralityPolarity;
   private readonly _log: Array<{ delta: number; reason: string; value: number }> = [];
 
-  constructor(public readonly RoadName: string, value: number, max: number = 10) {
-    this._max = max;
-    this._value = Math.max(0, Math.min(value, max));
+  constructor(
+    public readonly RoadName: string,
+    value: number,
+    opts: { max?: number; min?: number; polarity?: MoralityPolarity; unplayableAt?: number } = {}
+  ) {
+    this._max = opts.max ?? 10;
+    this._min = opts.min ?? 0;
+    this.Polarity = opts.polarity ?? "descending";
+    this._unplayableAt = opts.unplayableAt ?? (this.Polarity === "descending" ? this._min : this._max);
+    this._value = Math.max(this._min, Math.min(value, this._max));
   }
 
   get Value(): number { return this._value; }
   get Max(): number { return this._max; }
+  get Min(): number { return this._min; }
   get Category(): Category { return Category.MORALITY; }
   get AuditLog(): Array<{ delta: number; reason: string; value: number }> { return [...this._log]; }
 
-  // Failing a Virtue roll after a sin: lose rating.
-  Degenerate(amount: number = 1, reason: string = "degeneration"): void {
-    this._change(-Math.abs(amount), reason);
+  // True once the rating has reached its unplayable extreme.
+  get IsUnplayable(): boolean {
+    return this.Polarity === "descending" ? this._value <= this._unplayableAt : this._value >= this._unplayableAt;
   }
-  // Penance / redemption: regain rating (XP-gated by the ST elsewhere).
+
+  // Worsen: a sin / failed Virtue roll moves the rating toward its bad extreme.
+  Degenerate(amount: number = 1, reason: string = "degeneration"): void {
+    this._change((this.Polarity === "descending" ? -1 : 1) * Math.abs(amount), reason);
+  }
+  // Improve: penance / redemption moves the rating toward its good extreme.
   Improve(amount: number = 1, reason: string = "penance"): void {
-    this._change(Math.abs(amount), reason);
+    this._change((this.Polarity === "descending" ? 1 : -1) * Math.abs(amount), reason);
   }
 
   private _change(delta: number, reason: string): void {
-    const next = Math.max(0, Math.min(this._value + delta, this._max));
+    const next = Math.max(this._min, Math.min(this._value + delta, this._max));
     const applied = next - this._value;
     this._value = next;
     this._log.push({ delta: applied, reason, value: this._value });
   }
 }
+
+// How a template's morality is configured: which trait it is, its polarity,
+// and how its starting value is derived.
+export interface MoralityConfig {
+  name: string;
+  polarity: MoralityPolarity;
+  road?: RoadDefinition;        // virtue-based moralities (Roads / Humanity)
+  deriveFromVirtues?: boolean;  // start = sum of the Road's two rating Virtues
+  start?: number;               // default start when not derived from Virtues
+}
+
+export const HUMANITY_MORALITY: MoralityConfig = {
+  name: "Road of Humanity",
+  polarity: "descending",
+  road: ROAD_OF_HUMANITY,
+  deriveFromVirtues: true,
+};
 
 // =============================================================================
 // TEMPLATES - per-splat configuration including starting values
@@ -1232,8 +1335,9 @@ export class TemplateConfig {
     public readonly Rules: RulesetConfig,
     public readonly Pools: PoolDef[],
     public readonly Soak: SoakSpec,
-    public readonly HasMorality: boolean,
-    public readonly DefaultRoad: RoadDefinition | null,
+    // The template's morality (a Road/Humanity, or an ascending Torment), or
+    // null for splats without one (Mage, Werewolf).
+    public readonly Morality: MoralityConfig | null,
     public readonly HasVirtues: boolean,
     public readonly HealthLevels: HealthLevelDef[] = STANDARD_HEALTH_LEVELS,
     // Innate damage reactions granted to every character of this template
@@ -1253,7 +1357,7 @@ export const TEMPLATE_MORTAL = new TemplateConfig(
   new RulesetConfig(5, 2, 4, 2, false),
   [{ name: "willpower", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10 }],
   MORTAL_SOAK,
-  true, ROAD_OF_HUMANITY, true
+  HUMANITY_MORALITY, true
 );
 
 export const TEMPLATE_THRALL = new TemplateConfig(
@@ -1265,7 +1369,7 @@ export const TEMPLATE_THRALL = new TemplateConfig(
     { name: "resolve", kind: "tracker", start: 1, startMin: 1, startMax: 1, max: 10 },
   ],
   MORTAL_SOAK,
-  true, ROAD_OF_HUMANITY, true
+  HUMANITY_MORALITY, true
 );
 
 export const TEMPLATE_VAMPIRE = new TemplateConfig(
@@ -1276,7 +1380,7 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
     { name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1, fromGeneration: true },
   ],
   VAMPIRE_SOAK,
-  true, ROAD_OF_HUMANITY, true,
+  HUMANITY_MORALITY, true,
   STANDARD_HEALTH_LEVELS,
   [new UndeadPhysiology()]   // bullets & blades to bashing; fire/sunlight stay aggravated
 );
@@ -1292,21 +1396,21 @@ export const TEMPLATE_MAGE = new TemplateConfig(
     { name: "quintessence", kind: "pool", start: 0, max: 20 },
   ],
   MAGE_SOAK,
-  false, null, false   // Mages have no Road/Humanity and no Virtues
+  null, false   // Mages have no Road/Humanity and no Virtues
 );
 
+// Dark Ages: Devil's Due.
 export const TEMPLATE_DEMON = new TemplateConfig(
-  "Demon",
+  "Demon (Dark Ages: Devil's Due)",
   new RulesetConfig(5, 2, 4, 2, false),
   [
     { name: "willpower", kind: "tracker", start: 5, startMin: 1, startMax: 10, max: 10 },
-    // Resolve (the demon's spiritual power): a fledgling starts in the 3-5 band.
+    // Resolve (the demon's spiritual power, 1-10): a fledgling starts in the 3-5 band.
     { name: "resolve", kind: "tracker", start: 3, startMin: 3, startMax: 5, max: 10 },
-    // Torment: corruption meter, optional and demon-specific.
-    { name: "torment", kind: "tracker", start: 3, startMin: 0, startMax: 10, max: 10 },
   ],
   DEMON_SOAK,
-  false, null, false   // Demons track Torment instead of a Road / Virtues
+  // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
+  { name: "Torment", polarity: "ascending", start: 3 }, false
 );
 
 // A modern-WoD illustration (not Dark Ages canon) kept here so the kind/severity
@@ -1322,7 +1426,7 @@ export const TEMPLATE_WEREWOLF = new TemplateConfig(
     { name: "gnosis", kind: "pool", start: 1, max: 10 },
   ],
   WEREWOLF_SOAK,
-  false, null, false,   // Renown/Rage/Gnosis, not a Road or Virtues
+  null, false,   // Renown/Rage/Gnosis, not a Road or Virtues
   STANDARD_HEALTH_LEVELS,
   [new SilverVulnerability()]
 );
@@ -1344,7 +1448,7 @@ export const TEMPLATE_GHOUL = new TemplateConfig(
     { name: "blood", kind: "pool", start: 0, max: 10, perTurnLimit: 1 },
   ],
   MORTAL_SOAK,
-  true, ROAD_OF_HUMANITY, true   // still human: Road/Humanity + Virtues
+  HUMANITY_MORALITY, true   // still human: Road/Humanity + Virtues
 );
 
 export const TEMPLATES: Record<string, TemplateConfig> = {
@@ -1796,7 +1900,7 @@ export class LiveCharacter {
       disciplines: Array.from(this.Disciplines.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
       tags: [...this.Tags],
       meritsFlaws: Array.from(this.MeritsFlaws.values()).map(({ def, points }) => ({ name: StringUtil.normalize(def.name), kind: def.kind, points })),
-      morality: this.Morality ? { road: this.Morality.RoadName, value: this.Morality.Value } : null,
+      morality: this.Morality ? { road: this.Morality.RoadName, value: this.Morality.Value, polarity: this.Morality.Polarity, unplayable: this.Morality.IsUnplayable } : null,
       health: this.Health.Summary(),
     };
 
@@ -1831,7 +1935,7 @@ export class CharacterFactory {
     const traits = CharacterFactory._statMap(opts.traits, Category.VITAL);
     const disciplines = CharacterFactory._statMap(opts.disciplines, Category.DISCIPLINE);
     const virtuesProvided = opts.virtues !== undefined;
-    const road = opts.road ?? template.DefaultRoad ?? ROAD_OF_HUMANITY;
+    const road = opts.road ?? template.Morality?.road ?? ROAD_OF_HUMANITY;
 
     // Virtues (1-5) - only for templates that use them.
     const virtues = new Map<string, Stat>();
@@ -1886,15 +1990,17 @@ export class CharacterFactory {
     // like armour - so severity/kind rewrites happen before mitigation.
     character.Reactions = [...template.Reactions, ...(opts.reactions ?? [])];
 
-    // Morality (Road / Humanity) - derive starting rating from the two rating
-    // Virtues when the player engaged with Virtues; otherwise a sane default.
-    if (template.HasMorality) {
-      let rating = 5;
-      if (template.HasVirtues && virtuesProvided) {
-        const [a, b] = road.ratingVirtues;
-        rating = (virtues.get(StringUtil.normalize(a))?.Value ?? 0) + (virtues.get(StringUtil.normalize(b))?.Value ?? 0);
+    // Morality (a Road/Humanity, or an ascending Torment). Derive the start
+    // from the two rating Virtues when the player engaged with Virtues.
+    if (template.Morality) {
+      const mc = template.Morality;
+      let start = mc.start ?? (mc.polarity === "ascending" ? 0 : 5);
+      if (mc.deriveFromVirtues && template.HasVirtues && virtuesProvided) {
+        const r = mc.road ?? road;
+        const [a, b] = r.ratingVirtues;
+        start = (virtues.get(StringUtil.normalize(a))?.Value ?? 0) + (virtues.get(StringUtil.normalize(b))?.Value ?? 0);
       }
-      character.Morality = new MoralityTrait(road.name, rating);
+      character.Morality = new MoralityTrait(mc.name, start, { polarity: mc.polarity });
     }
 
     // Tags before merits/flaws, so tag-based prerequisites can be satisfied.

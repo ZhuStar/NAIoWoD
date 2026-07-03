@@ -316,9 +316,12 @@ describe("Templates: starting-value constraints", () => {
   });
 
   test("a demon's Resolve may start in the 3-5 band", () => {
-    const demon = CharacterFactory.create(TEMPLATE_DEMON, "Fallen", { poolStarts: { resolve: 5 } });
+    const demon = CharacterFactory.create(TEMPLATE_DEMON, "Devil", { poolStarts: { resolve: 5 } });
     expect(demon.Trackers.get("resolve")!.Value).toBe(5);
-    expect(demon.Trackers.get("torment")!.Value).toBe(3);
+    // Torment is an ascending morality now, not a tracker.
+    expect(demon.Morality!.RoadName).toBe("Torment");
+    expect(demon.Morality!.Value).toBe(3);
+    expect(demon.Morality!.Polarity).toBe("ascending");
     expect(() => CharacterFactory.create(TEMPLATE_DEMON, "Bad", { poolStarts: { resolve: 2 } }))
       .toThrow(/resolve must start between 3 and 5/);
     expect(() => CharacterFactory.create(TEMPLATE_DEMON, "Bad", { poolStarts: { resolve: 6 } }))
@@ -528,7 +531,7 @@ describe("LiveCharacter: pools, willpower and persistence", () => {
     const data = await v.SaveToStory();
     expect(data.name).toBe("Archive");
     expect(data.template).toBe("Vampire (Dark Ages)");
-    expect(data.morality).toEqual({ road: "Road of Humanity", value: 5 });
+    expect(data.morality).toEqual({ road: "Road of Humanity", value: 5, polarity: "descending", unplayable: false });
     expect(data.pools.find(p => p.name === "blood")!.max).toBe(13);
     expect(data.health.bashing).toBe(2);
   });
@@ -888,5 +891,101 @@ describe("processAdventureInput (the [[...]] hook)", () => {
   test("unknown commands answer with the available list", async () => {
     const r = await processAdventureInput("[[frobnicate now=please]]");
     expect(r!.inputText).toContain('Unknown command "frobnicate"');
+  });
+});
+
+describe("Morality polarity (Torment vs Humanity)", () => {
+  test("an ascending Torment degenerates upward toward an unplayable 10", () => {
+    const t = new MoralityTrait("Torment", 3, { polarity: "ascending" });
+    expect(t.Polarity).toBe("ascending");
+    t.Degenerate(2);                 // sins push Torment UP
+    expect(t.Value).toBe(5);
+    expect(t.IsUnplayable).toBe(false);
+    t.Improve(1);                    // penance pulls it back DOWN
+    expect(t.Value).toBe(4);
+    t.Degenerate(20);                // clamps at the max
+    expect(t.Value).toBe(10);
+    expect(t.IsUnplayable).toBe(true);
+  });
+
+  test("a descending Humanity degenerates downward toward an unplayable 0", () => {
+    const h = new MoralityTrait("Road of Humanity", 2); // descending by default
+    h.Degenerate(2);
+    expect(h.Value).toBe(0);
+    expect(h.IsUnplayable).toBe(true);
+  });
+});
+
+describe("Health: per-square penalties, conditions & heal policies", () => {
+  test("extra levels and custom penalties come from the squares array", () => {
+    const track = new HealthTrack([
+      { name: "OK", penalty: 0 }, { name: "OK", penalty: 0 },
+      { name: "Winded", penalty: -1 }, { name: "Down", penalty: -4 },
+    ]);
+    track.ApplyDamage("bashing", 2);
+    expect(track.Penalty).toBe(0);
+    track.ApplyDamage("bashing", 1);
+    expect(track.Level).toBe("Winded");
+    expect(track.Penalty).toBe(-1);
+  });
+
+  test("a condition reflects how many of its linked boxes are damaged", () => {
+    const h = new HealthTrack({
+      squares: [
+        { name: "A", penalty: 0 },
+        { name: "Gut", penalty: -1, condition: "poison" },
+        { name: "Gut", penalty: -2, condition: "poison" },
+      ],
+      conditions: [{
+        key: "poison", name: "Poisoned",
+        state: (d) => d === 0 ? null : d === 1 ? "queasy" : "retching",
+      }],
+    });
+    expect(h.Conditions()).toHaveLength(0);
+    h.ApplyDamage("lethal", 2);   // fills boxes 0 and 1 -> one poison box
+    expect(h.Conditions()[0]).toMatchObject({ state: "queasy", damaged: 1, total: 2 });
+    h.ApplyDamage("lethal", 1);   // fills box 2 -> both poison boxes
+    expect(h.Conditions()[0].state).toBe("retching");
+  });
+
+  test("unhealable boxes resist Heal; shallow wounds clear first", () => {
+    const h = new HealthTrack([
+      { name: "A", penalty: 0, heal: "never" },
+      { name: "B", penalty: -1 },
+      { name: "C", penalty: -1 },
+    ]);
+    h.ApplyDamage("lethal", 3);
+    expect(h.Heal("lethal", 5)).toBe(2); // boxes 2 and 1 clear; box 0 ("never") can't
+    expect(h.Lethal).toBe(1);
+  });
+
+  test("HealWithPoints stops when the budget runs out", () => {
+    const h = new HealthTrack([
+      { name: "A", penalty: 0, healCost: 2 },
+      { name: "B", penalty: -1, healCost: 2 },
+    ]);
+    h.ApplyDamage("bashing", 2);
+    expect(h.HealWithPoints("bashing", 2, 3)).toEqual({ healed: 1, pointsSpent: 2 });
+  });
+
+  test("special boxes only heal with allowSpecial", () => {
+    const h = new HealthTrack([{ name: "A", penalty: 0, heal: "special" }]);
+    h.ApplyDamage("aggravated", 1);
+    expect(h.Heal("aggravated", 1)).toBe(0);
+    expect(h.Heal("aggravated", 1, { allowSpecial: true })).toBe(1);
+  });
+
+  test("Summary includes active conditions; harmless no-ops; fatal kills", () => {
+    const h = new HealthTrack({
+      squares: [{ name: "A", penalty: 0, condition: "burning" }, { name: "B", penalty: -1 }],
+      conditions: [{ key: "burning" }],
+    });
+    h.ApplyDamage("harmless", 3);
+    expect(h.Filled).toBe(0);
+    h.ApplyDamage("aggravated", 1);
+    expect(h.Summary().conditions[0]).toMatchObject({ key: "burning", state: "active", damaged: 1 });
+    h.ApplyDamage("fatal", 1);
+    expect(h.Fatal).toBe(1);
+    expect(h.IsDead).toBe(true);
   });
 });

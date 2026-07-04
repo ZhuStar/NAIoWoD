@@ -156,6 +156,7 @@ export interface ResourceEffect {
   difficultyMod?: number;   // e.g. Resolve -2 (magnitude is configurable data)
   diceMod?: number;
   autoSuccesses?: number;   // e.g. Willpower +1
+  nAgain?: number;          // tighten n-again (e.g. 8 for 8-again)
   maxPerRoll?: number;      // stacking cap per roll (default 1)
 }
 
@@ -173,22 +174,37 @@ export interface ResourceDef {
   perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
   roles?: string[];         // abstract capabilities this resource fills
-  effect?: ResourceEffect;  // what spending it does to a roll
+  effect?: ResourceEffect;  // the default (unnamed) spend effect
+  effects?: Record<string, ResourceEffect>; // named context effects (cast, resist, fuel, …)
 }
 /** @deprecated Renamed to ResourceDef. */
 export type PoolDef = ResourceDef;
+
+// A resource's spend effect: a named context effect if `name` is given, else the
+// default. Named effects let one resource behave differently by situation (a
+// Mage's Resolve "cast" bundle vs. its plain difficulty drop).
+export function resourceEffect(def: ResourceDef, name?: string): ResourceEffect | undefined {
+  return name ? def.effects?.[StringUtil.normalize(name)] : def.effect;
+}
 
 // Reusable builders so shared roles/effects are configured once.
 export function willpowerResource(start: number): ResourceDef {
   return {
     name: "willpower", kind: "tracker", start, startMin: 1, startMax: 10, max: 10,
-    roles: ["willpower"], effect: { label: "Willpower: +1 automatic success", autoSuccesses: 1 },
+    roles: ["willpower"],
+    effect: { label: "Willpower: +1 automatic success", autoSuccesses: 1 },
+    // Willpower is also static spell fuel (Sorcerers, some Thaumaturgy): a
+    // mandatory cost with no dice bonus - `spend=willpower:fuel!`.
+    effects: { fuel: { label: "Willpower spent as static spell fuel", cost: 1 } },
   };
 }
 export function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "resolve", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10,
-    roles: ["resolve", "magic-fuel"], effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
+    roles: ["resolve", "magic-fuel"],
+    effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
+    // The whole deal when a mage channels Resolve into a spell.
+    effects: { cast: { label: "Resolve fuels the spell: +1 success, 8-again, -2 difficulty", autoSuccesses: 1, nAgain: 8, difficultyMod: -2 } },
     ...over,
   };
 }
@@ -260,7 +276,8 @@ export const TEMPLATE_MAGE = new TemplateConfig(
   RulesetConfig.MAGE,
   [
     willpowerResource(5),
-    { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"] },
+    { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"],
+      effect: { label: "Quintessence: -1 casting difficulty per point", difficultyMod: -1 } },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues

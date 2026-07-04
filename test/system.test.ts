@@ -15,7 +15,7 @@ import {
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
-  resourcesForTemplates, CharacterResources,
+  resourcesForTemplates, resourceEffect, CharacterResources,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -1524,5 +1524,57 @@ describe("resource commands", () => {
     expect(await CommandRouter.route("spend blood 3")).toContain("Now 7/10");
     expect(await CommandRouter.route("gain blood 100")).toContain("Now 10/10");
     expect(await CommandRouter.route("spend willpower")).toContain("no willpower to spend"); // seeded at 0
+  });
+});
+
+describe("resources v2: named effects, nAgain, mandatory costs", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("resourceEffect picks a named context effect or the default", () => {
+    const resolve = resourcesForTemplates(["demon"]).find(r => r.name === "resolve")!;
+    expect(resourceEffect(resolve)!.difficultyMod).toBe(-2);   // default
+    const cast = resourceEffect(resolve, "cast")!;
+    expect(cast.autoSuccesses).toBe(1);
+    expect(cast.nAgain).toBe(8);
+    expect(cast.difficultyMod).toBe(-2);
+    expect(resourceEffect(resolve, "nope")).toBeUndefined();
+  });
+
+  test("an effect's nAgain reaches the dice (via the extra modifier)", () => {
+    const r0 = () => 0;
+    // difficulty 6, 8-again: the 8 succeeds AND explodes into one more die.
+    const exec = executeRoll(makeRollSpec({ pool: "1", difficulty: 6 }), r0, { rng: seqRng([8, 2]), extra: { nAgain: 8 } });
+    expect(exec.result!.dice.length).toBe(2);
+    expect(exec.result!.successes).toBe(1);
+  });
+
+  test("[[roll spend=resolve:cast]] applies the whole bundle", async () => {
+    await CommandRouter.route('create-playable name="Zul" templates=demon'); // Resolve starts 3
+    const r = await CommandRouter.route("roll strength difficulty=8 spend=resolve:cast", { rng: seqRng([2]) });
+    expect(r).toContain("vs diff 6");                // 8 - 2
+    expect(r).toContain("spent 1 resolve (cast)");
+    expect(r).toContain("1 success");                // 0 dice + 1 automatic from the bundle
+  });
+
+  test("a mandatory spend refuses (and does not roll) when unaffordable", async () => {
+    await CommandRouter.route('create-playable name="Odo" templates=sorcerer'); // Willpower seeded 0
+    const r = await CommandRouter.route("roll strength spend=willpower!", { rng: seqRng([6]) });
+    expect(r).toContain("can't");
+    expect(r).toContain("not enough willpower");
+    expect(r).not.toContain("success");              // never rolled
+  });
+
+  test("Willpower spent as pure spell fuel deducts without a dice bonus", async () => {
+    await CommandRouter.route('create-playable name="Odo" templates=sorcerer');
+    await CommandRouter.route("gain willpower 2");
+    const r = await CommandRouter.route("roll strength spend=willpower:fuel", { rng: seqRng([2]) });
+    expect(r).toContain("spent 1 willpower (fuel)");
+    expect(r).toContain("Failure");                  // face 2, no auto-success from fuel
+    expect(await CommandRouter.route("resources")).toContain("willpower 1/10");
+  });
+
+  test("an unknown named effect is refused", async () => {
+    await CommandRouter.route('create-playable name="Zul" templates=demon');
+    expect(await CommandRouter.route("roll strength spend=resolve:bogus", { rng: seqRng([6]) })).toContain('no "bogus" effect');
   });
 });

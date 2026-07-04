@@ -375,26 +375,33 @@ Some actions take several rolls to finish — you accumulate successes toward a
 
 Resources (Willpower, Blood, Resolve, Quintessence, …) are **abstract and
 configurable** (`ResourceDef` in `src/rules.ts`): each carries optional **roles**
-(abstract capabilities like `resolve` or `magic-fuel`) and a **spend effect** (a
-configurable `−difficulty` / `+dice` / `+auto-success`). A character's resources
-are the **union of its templates'**, so hybrids compose them — and because a
-resource can be resolved *by role*, one resource can do another's job (give
-Quintessence the `resolve` role and `spend=resolve` draws from Quintessence).
+(abstract capabilities like `resolve` or `magic-fuel`) and one or more **spend
+effects** — each a configurable bundle of `−difficulty` / `+dice` /
+`+auto-success` / `n-again`. A character's resources are the **union of its
+templates'**, so hybrids compose them — and because a resource resolves *by
+role*, one resource can do another's job (give Quintessence the `resolve` role
+and `spend=resolve` draws from Quintessence).
 
 ```
 [[resources]]
-[[roll strength+brawl spend=willpower]]   # -1 Willpower, +1 automatic success
-[[roll stealth difficulty=8 spend=resolve]]  # Resolve: -2 difficulty
+[[roll strength+brawl spend=willpower]]        # -1 Willpower, +1 automatic success
+[[roll stealth difficulty=8 spend=resolve:cast]]  # named bundle: +1 success, 8-again, -2 diff
+[[roll intelligence spend=willpower:fuel!]]    # mandatory pure cost: pay or the roll is refused
 [[spend blood 2 reason="heal"]]
 [[gain willpower]]
 ```
 
-- **`spend=<resource|role>`** on any `roll` / `roll-for` deducts the resource and
-  folds its effect into that roll (magnitudes are data — Resolve reducing
-  difficulty "much more" is one number). Add `spend-amount=N` to apply it N times
-  (capped by the effect's `maxPerRoll`).
+- **`spend=<resource|role>[:effect][!]`** on any `roll` / `roll-for` deducts the
+  resource and folds its effect into the roll. A **named `:effect`** picks one of
+  the resource's context bundles (e.g. `resolve:cast` = success + 8-again +
+  −difficulty in one); the default effect is used without one. A trailing **`!`**
+  makes it **mandatory** — if the character can't pay, the action is refused and
+  nothing is rolled (Willpower/Resolve as *required spell fuel*). `spend-amount=N`
+  stacks the effect (capped by its `maxPerRoll`). A pure-cost effect (no
+  modifiers) just pays.
 - **`spend <resource> [amount]`** / **`gain <resource> [amount]`** adjust a
-  resource outside a roll (clamped to 0…max); **`resources`** shows the sheet.
+  resource outside a roll (clamped to 0…max); **`resources`** shows the sheet
+  (current/max, roles, and named `spend:` effects).
 - Current values persist per character (story storage) and default to the
   template start until changed — nothing needs allocating to start playing.
 

@@ -10,7 +10,7 @@ import {
 import {
   RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, ResourceDef,
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
-  resourcesForTemplates,
+  resourcesForTemplates, resourceEffect,
 } from "./rules";
 import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
 import {
@@ -944,27 +944,39 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   return args;
 }
 
-// Read a spend=<resource|role> [spend-amount=N] request off a command, deduct it
-// from the character, and return the effect to fold into the roll (plus a note).
-async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<{ extra?: Partial<RollModifier>; note: string }> {
-  const which = cmd.named["spend"];
-  if (!which) return { note: "" };
-  const def = CharacterResources.resolveDef(char, which);
-  if (!def) return { note: `no resource "${which}" to spend` };
-  const e = def.effect;
+// Read a spend=<resource|role>[:effect][!] request off a command (with optional
+// spend-amount=N stacking), deduct it, and return the effect to fold into the
+// roll. A trailing "!" makes it MANDATORY: if it can't be paid, `refuse` is set
+// and the caller does NOT roll (Willpower/Resolve as required spell fuel). A
+// named :effect selects one of the resource's context bundles (e.g. resolve:cast).
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
+  const raw = cmd.named["spend"];
+  if (!raw) return { note: "" };
+  let token = raw.trim();
+  const mandatory = token.endsWith("!");
+  if (mandatory) token = token.slice(0, -1).trim();
+  const [nameOrRole, effectName] = token.split(":").map(s => s.trim());
+  const def = CharacterResources.resolveDef(char, nameOrRole);
+  if (!def) return mandatory ? { note: "", refuse: `has no resource "${nameOrRole}"` } : { note: `no resource "${nameOrRole}" to spend` };
+  const e = resourceEffect(def, effectName || undefined);
+  if (effectName && !e) return { note: "", refuse: `${def.name} has no "${effectName}" effect` };
   const cost = Math.max(1, e?.cost ?? 1);
   const want = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
   const have = await CharacterResources.current(char, def);
   const applications = Math.min(e?.maxPerRoll ?? want, want, Math.floor(have / cost));
-  if (applications < 1) return { note: `not enough ${def.name} to spend` };
-  const { spent } = await CharacterResources.spend(char, which, applications * cost);
-  if (!e) return { note: `spent ${spent} ${def.name}` };
+  if (applications < 1) {
+    return mandatory ? { note: "", refuse: `not enough ${def.name} (needs ${cost})` } : { note: `not enough ${def.name} to spend` };
+  }
+  const { spent } = await CharacterResources.spend(char, nameOrRole, applications * cost);
+  const tag = effectName ? ` (${effectName})` : "";
+  if (!e) return { note: `spent ${spent} ${def.name}${tag}` };
   const extra: Partial<RollModifier> = {
     difficultyMod: (e.difficultyMod ?? 0) * applications,
     diceMod: (e.diceMod ?? 0) * applications,
     autoSuccesses: (e.autoSuccesses ?? 0) * applications,
+    nAgain: e.nAgain,
   };
-  return { extra, note: `spent ${spent} ${def.name}: ${e.label}` };
+  return { extra, note: `spent ${spent} ${def.name}${tag}: ${e.label}` };
 }
 
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
@@ -981,9 +993,10 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
-  const { extra, note } = await applySpend(char, cmd);
-  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng, extra });
-  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${note ? ` - ${note}` : ""}))`;
+  const spend = await applySpend(char, cmd);
+  if (spend.refuse) return `((OOC-Storyteller: ${char.name} can't: ${spend.refuse}.))`;
+  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng, extra: spend.extra });
+  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${spend.note ? ` - ${spend.note}` : ""}))`;
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -1113,7 +1126,12 @@ async function cmdResources(): Promise<string> {
   if (!views.length) return `((OOC-Storyteller: ${char.name} has no resources.))`;
   const items = views.map(v => {
     const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
-    const meta = [roles.length ? `roles: ${roles.join("/")}` : "", v.def.effect?.label ?? ""].filter(Boolean).join("; ");
+    const named = Object.keys(v.def.effects ?? {});
+    const meta = [
+      roles.length ? `roles: ${roles.join("/")}` : "",
+      v.def.effect?.label ?? "",
+      named.length ? `spend:${named.join("/")}` : "",
+    ].filter(Boolean).join("; ");
     return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
   }).join("; ");
   return `((OOC-Storyteller: ${char.name} resources - ${items}.))`;
@@ -1149,8 +1167,8 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=');
+CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]");
+CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]');
 CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
 CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
 CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");

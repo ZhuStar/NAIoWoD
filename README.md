@@ -418,6 +418,26 @@ and `spend=resolve` draws from Quintessence).
 - Current values persist per character (story storage) and default to the
   template start until changed — nothing needs allocating to start playing.
 
+### Configuration wizards & house rules
+
+House-ruling is **changing data through some UI** — a lorebook entry, a wizard,
+or (later) modal windows. All of them edit the same thing:
+
+- **`wod:config:resources`** is the story's resource override entry: a JSON map
+  `name → partial definition` merged over the template defaults (change `start`/
+  `max`/`roles`/effect numbers, or add a whole custom resource). Hand-edit it in
+  creator mode, or let the wizard write it.
+- **`[[configure-resources]]`** starts a guided setup for the current
+  character's resources. It's a text **prompt → reply** conversation: while the
+  wizard runs, your plain messages answer it (numbered options, `keep` accepts
+  the default, `cancel` exits; `[[commands]]` still work mid-wizard). It walks
+  each resource (keep or customize start/max/effect), offers **extra roles**
+  ("quintessence: resolve" spends Quintessence as Resolve), shows a change
+  summary, and saves to the entry above.
+- The wizard core (`src/wizard.ts`) is **medium-agnostic**: definitions emit
+  structured prompts and consume replies, so the same wizard can later render
+  as `api.v1.ui` modals/windows without changing its logic.
+
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
 resolution, and turning a finished sheet into a `LiveCharacter`.
 

@@ -966,6 +966,92 @@ interface SoakSpec {
 }
 //#endregion src/core/damage.ts
 
+//#region src/wizard.ts
+// =============================================================================
+// WIZARD - a medium-agnostic engine for guided, multi-step configuration
+// -----------------------------------------------------------------------------
+// A wizard definition is a small state machine over PLAIN-JSON state: start()
+// yields the first prompt, answer(state, reply) consumes a normalized reply and
+// yields the next prompt (or done). Prompts are STRUCTURED (kind, options with
+// value+label, default, progress) so any medium can render them: the text
+// "prompt -> reply" renderer below is one medium; a future api.v1.ui renderer
+// can map the same prompts to windows with buttons and feed replies to the same
+// answer(). The engine knows nothing about storage or the host - sessions are
+// persisted by the caller (game layer).
+// =============================================================================
+
+interface WizardOption { value: string; label: string; description?: string }
+
+interface WizardPrompt {
+  step: string;                                   // step id (stable per prompt)
+  title: string;
+  body: string;
+  kind: "choice" | "number" | "text" | "confirm";
+  options?: WizardOption[];                       // for kind "choice"
+  default?: string;                               // "keep" / empty accepts this
+  progress?: { at: number; of: number };
+}
+
+type WizardStateData = Record<string, unknown>;
+
+interface WizardResult {
+  state?: WizardStateData;   // updated state (present while the wizard runs)
+  prompt?: WizardPrompt;     // next prompt (absent when done)
+  error?: string;            // reply rejected; re-ask the same prompt
+  done?: boolean;
+  summary?: string;          // closing message when done
+}
+
+interface WizardDefinition {
+  id: string;
+  title: string;
+  start(ctx: unknown): WizardResult | Promise<WizardResult>;
+  answer(state: WizardStateData, reply: string): WizardResult | Promise<WizardResult>;
+}
+
+// Normalize a raw reply against a prompt: option number/value/label for a
+// choice, integer for a number, yes/no for a confirm, verbatim for text.
+// "keep" (or an empty reply) accepts the prompt's default when one exists.
+// "cancel" is NOT handled here - the session layer owns exiting.
+function resolveReply(prompt: WizardPrompt, raw: string): { value: string } | { error: string } {
+  const t = raw.trim();
+  if ((t === "" || /^keep$/i.test(t)) && prompt.default !== undefined) return { value: prompt.default };
+  switch (prompt.kind) {
+    case "choice": {
+      const opts = prompt.options ?? [];
+      const i = parseInt(t, 10);
+      if (!Number.isNaN(i) && i >= 1 && i <= opts.length) return { value: opts[i - 1].value };
+      const hit = opts.find(o => o.value.toLowerCase() === t.toLowerCase() || o.label.toLowerCase() === t.toLowerCase());
+      return hit ? { value: hit.value } : { error: `reply with an option (1-${opts.length})` };
+    }
+    case "number": {
+      const v = parseInt(t, 10);
+      return Number.isNaN(v) ? { error: "reply with a number" } : { value: String(v) };
+    }
+    case "confirm": {
+      if (/^(y|yes|true)$/i.test(t)) return { value: "yes" };
+      if (/^(n|no|false)$/i.test(t)) return { value: "no" };
+      return { error: 'reply "yes" or "no"' };
+    }
+    default:
+      return { value: t };
+  }
+}
+
+// The text medium: one prompt -> one single-line message (the host forbids
+// newlines in inputText anyway).
+function renderPromptText(p: WizardPrompt): string {
+  const prog = p.progress ? `[${p.progress.at}/${p.progress.of}] ` : "";
+  const opts = (p.options ?? []).map((o, i) => `${i + 1}) ${o.label}${o.description ? ` - ${o.description}` : ""}`).join("  ");
+  const hint = p.kind === "number" ? "reply with a number"
+    : p.kind === "confirm" ? 'reply "yes" or "no"'
+    : p.kind === "choice" ? "reply with an option number"
+    : "reply with text";
+  const keep = p.default !== undefined ? `; "keep" = ${p.default === "" ? "skip" : p.default}` : "";
+  return `${prog}${p.title} - ${p.body}${opts ? ` ${opts}.` : ""} (${hint}${keep}; "cancel" exits)`;
+}
+//#endregion src/wizard.ts
+
 //#region src/rolls.ts
 // =============================================================================
 // ROLLS - turn a player's roll request into dice, with contextual modifiers
@@ -1651,8 +1737,12 @@ const TEMPLATES: Record<string, TemplateConfig> = {
 
 // The resources a character has = the union of its templates' resources, deduped
 // by name (first template wins for numbers; roles are merged). Unknown or zero
-// templates yield the mortal baseline (just Willpower).
-function resourcesForTemplates(keys: string[]): ResourceDef[] {
+// templates yield the mortal baseline (just Willpower). Story-level `overrides`
+// (the house-rule layer, e.g. from the configuration wizard or a hand-edited
+// lorebook entry) are applied last: a patch merges onto its resource by
+// normalized name, and a patch naming a NEW resource (with kind/start/max) adds
+// a custom one.
+function resourcesForTemplates(keys: string[], overrides?: Record<string, Partial<ResourceDef>>): ResourceDef[] {
   const byName = new Map<string, ResourceDef>();
   const out: ResourceDef[] = [];
   const add = (def: ResourceDef): void => {
@@ -1669,6 +1759,18 @@ function resourcesForTemplates(keys: string[]): ResourceDef[] {
   };
   const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
   for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
+
+  for (const [name, patch] of Object.entries(overrides ?? {})) {
+    const key = StringUtil.normalize(name);
+    const existing = byName.get(key);
+    if (existing) {
+      Object.assign(existing, patch, { name: existing.name }); // a patch never renames
+    } else if (patch.kind && patch.start !== undefined && patch.max !== undefined) {
+      const custom: ResourceDef = { ...(patch as ResourceDef), name: key };
+      byName.set(key, custom);
+      out.push(custom);
+    }
+  }
   return out;
 }
 
@@ -2756,6 +2858,63 @@ class ExtendedRollStore {
 }
 
 // =============================================================================
+// RESOURCE OVERRIDES - the story's house-rule layer for resources
+// -----------------------------------------------------------------------------
+// One lorebook entry (wod:config / wod:config:resources) holds a JSON map
+// { resourceName: partial-def } below the header marker. The configuration
+// wizard WRITES this entry and creator mode can hand-edit it - both are just
+// UIs over the same data. Cached here for synchronous reads (the same pattern
+// as MeritFlawRegistry); reloaded at init, when a wizard finishes, and on the
+// creator-mode sync path.
+// =============================================================================
+const RESOURCE_CONFIG_CATEGORY = "wod:config";
+const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
+
+class ResourceOverrides {
+  private static _cache: Record<string, Partial<ResourceDef>> = {};
+
+  static current(): Record<string, Partial<ResourceDef>> { return ResourceOverrides._cache; }
+  static reset(): void { ResourceOverrides._cache = {}; }
+
+  private static _entryText(map: Record<string, Partial<ResourceDef>>): string {
+    return [
+      "Story overrides for resources (the house-rule layer). The JSON below the",
+      "marker maps a resource name to the fields you want to change (start, max,",
+      "roles, effect, effects, ...). A name that matches no template resource and",
+      "carries kind/start/max adds a custom resource. [[configure-resources]]",
+      "edits this for you; you may also edit it by hand in creator mode.",
+      SRD_HEADER_MARKER,
+      JSON.stringify(map, null, 2),
+    ].join("\n");
+  }
+
+  // Read the entry into the cache ({} when missing or unparseable).
+  static async loadFromLorebook(): Promise<number> {
+    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY);
+    ResourceOverrides._cache = {};
+    if (text) {
+      const body = LorebookManager.contentBelowHeader(text).trim();
+      if (body.startsWith("{")) {
+        try {
+          const o = JSON.parse(body);
+          if (o && typeof o === "object" && !Array.isArray(o)) ResourceOverrides._cache = o as Record<string, Partial<ResourceDef>>;
+        } catch { /* unparseable: keep {} - the entry stays for the player to fix */ }
+      }
+    }
+    return Object.keys(ResourceOverrides._cache).length;
+  }
+
+  // Write the whole map (create the category/entry on first use) + cache it.
+  static async save(map: Record<string, Partial<ResourceDef>>): Promise<void> {
+    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    const text = ResourceOverrides._entryText(map);
+    const created = await LorebookManager.ensureEntry(id, RESOURCE_CONFIG_ENTRY, text);
+    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, text);
+    ResourceOverrides._cache = map;
+  }
+}
+
+// =============================================================================
 // CHARACTER RESOURCES - live current values for a character's resources
 // -----------------------------------------------------------------------------
 // A character's resources are the union of its templates' ResourceDefs; current
@@ -2770,7 +2929,7 @@ class CharacterResources {
   private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
 
-  static defsFor(char: PlayableCharacter): ResourceDef[] { return resourcesForTemplates(char.templates); }
+  static defsFor(char: PlayableCharacter): ResourceDef[] { return resourcesForTemplates(char.templates, ResourceOverrides.current()); }
 
   // A resource by exact name, else by a role it fills (the "use X as Y" hook).
   static resolveDef(char: PlayableCharacter, nameOrRole: string): ResourceDef | undefined {
@@ -2933,6 +3092,216 @@ class CharacterBoosts {
 }
 
 // =============================================================================
+// WIZARD SESSION - persistence + the text medium for wizard.ts definitions
+// -----------------------------------------------------------------------------
+// One wizard may run at a time; its {definition, state, prompt} live in story
+// storage so a session survives across turns. While active, plain (command-less)
+// player input is treated as the reply - see processAdventureInput.
+// =============================================================================
+interface ActiveWizard { def: string; state: WizardStateData; prompt: WizardPrompt; }
+
+class WizardSession {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "wizard:active";
+  static async get(): Promise<ActiveWizard | undefined> {
+    return (await WizardSession._storage.get(WizardSession.KEY)) as ActiveWizard | undefined;
+  }
+  static async set(a: ActiveWizard): Promise<void> { await WizardSession._storage.set(WizardSession.KEY, a); }
+  static async clear(): Promise<void> { await WizardSession._storage.delete(WizardSession.KEY); }
+}
+
+// --- The "resources" wizard: a guided editor for ResourceOverrides -----------
+interface RwState {
+  charName: string;
+  defs: ResourceDef[];                              // snapshot, overrides applied
+  overrides: Record<string, Partial<ResourceDef>>;  // edits being built
+  queue: string[];                                  // resources still to visit
+  current: string;                                  // resource being customized
+  phase: "pick" | "start" | "max" | "effect" | "roles" | "confirm";
+  total: number;
+}
+const rwState = (s: RwState): WizardStateData => s as unknown as WizardStateData;
+
+const rw = {
+  def(state: RwState, name: string): ResourceDef {
+    const k = StringUtil.normalize(name);
+    return state.defs.find(d => StringUtil.normalize(d.name) === k)!;
+  },
+  patch(state: RwState, name: string): Partial<ResourceDef> {
+    const k = StringUtil.normalize(name);
+    return (state.overrides[k] ??= {});
+  },
+  steps(state: RwState): number { return state.total + 2; }, // resources + roles + confirm
+
+  pickPrompt(state: RwState): WizardPrompt {
+    const def = rw.def(state, state.queue[0]);
+    const eff = def.effect ? ` Spend: ${def.effect.label}.` : "";
+    return {
+      step: `pick:${def.name}`, title: `Resource "${def.name}"`,
+      body: `${def.kind}, start ${def.start}, max ${def.max}.${eff}`,
+      kind: "choice",
+      options: [
+        { value: "keep", label: "Keep as is" },
+        { value: "customize", label: "Customize start/max/effect" },
+      ],
+      default: "keep",
+      progress: { at: state.total - state.queue.length + 1, of: rw.steps(state) },
+    };
+  },
+  numberPrompt(state: RwState, field: "start" | "max", current: number): WizardPrompt {
+    return {
+      step: `${field}:${state.current}`, title: `"${state.current}" ${field}`,
+      body: `currently ${current}.`, kind: "number", default: String(current),
+      progress: { at: state.total - state.queue.length, of: rw.steps(state) },
+    };
+  },
+  effectPrompt(state: RwState): WizardPrompt {
+    const e = rw.def(state, state.current).effect!;
+    const knob = e.difficultyMod !== undefined ? "difficulty modifier" : "automatic successes";
+    const cur = e.difficultyMod ?? e.autoSuccesses ?? 0;
+    return {
+      step: `effect:${state.current}`, title: `"${state.current}" spend effect`,
+      body: `${e.label} - new ${knob} (currently ${cur}).`, kind: "number", default: String(cur),
+      progress: { at: state.total - state.queue.length, of: rw.steps(state) },
+    };
+  },
+  rolesPrompt(state: RwState): WizardPrompt {
+    const added = Object.entries(state.overrides)
+      .filter(([, p]) => p.roles !== undefined)
+      .map(([k, p]) => `${k}: ${(p.roles ?? []).join("/")}`).join("; ");
+    return {
+      step: "roles", title: "Extra roles",
+      body: `Let one resource fill another's job: reply "resource: role" (e.g. "quintessence: resolve" spends Quintessence as Resolve).${added ? ` Set: ${added}.` : ""} "done" moves on.`,
+      kind: "text", default: "done",
+      progress: { at: state.total + 1, of: rw.steps(state) },
+    };
+  },
+  confirmPrompt(state: RwState): WizardPrompt {
+    const changes = Object.entries(state.overrides)
+      .filter(([, p]) => Object.keys(p).length > 0)
+      .map(([k, p]) => `${k} ${JSON.stringify(p)}`).join("; ");
+    return {
+      step: "confirm", title: "Save changes?",
+      body: changes ? `Changes: ${changes}.` : "No changes were made.",
+      kind: "confirm", default: "yes",
+      progress: { at: state.total + 2, of: rw.steps(state) },
+    };
+  },
+  advance(state: RwState): WizardResult {
+    state.current = "";
+    if (state.queue.length > 0) { state.phase = "pick"; return { state: rwState(state), prompt: rw.pickPrompt(state) }; }
+    state.phase = "roles";
+    return { state: rwState(state), prompt: rw.rolesPrompt(state) };
+  },
+};
+
+const RESOURCES_WIZARD: WizardDefinition = {
+  id: "resources",
+  title: "Resource configuration",
+  start(ctx: unknown): WizardResult {
+    const { charName, defs } = ctx as { charName: string; defs: ResourceDef[] };
+    const state: RwState = {
+      charName, defs, overrides: {},
+      queue: defs.map(d => StringUtil.normalize(d.name)),
+      current: "", phase: "pick", total: defs.length,
+    };
+    return { state: rwState(state), prompt: rw.pickPrompt(state) };
+  },
+  async answer(stateData: WizardStateData, reply: string): Promise<WizardResult> {
+    const state = stateData as unknown as RwState;
+    switch (state.phase) {
+      case "pick": {
+        if (reply === "customize") {
+          state.current = state.queue.shift()!;
+          state.phase = "start";
+          return { state: rwState(state), prompt: rw.numberPrompt(state, "start", rw.def(state, state.current).start) };
+        }
+        state.queue.shift();
+        return rw.advance(state);
+      }
+      case "start": {
+        const v = parseInt(reply, 10);
+        const def = rw.def(state, state.current);
+        if (v !== def.start) rw.patch(state, state.current).start = v;
+        state.phase = "max";
+        return { state: rwState(state), prompt: rw.numberPrompt(state, "max", def.max) };
+      }
+      case "max": {
+        const v = parseInt(reply, 10);
+        const def = rw.def(state, state.current);
+        if (v !== def.max) rw.patch(state, state.current).max = v;
+        const hasKnob = def.effect !== undefined && (def.effect.difficultyMod !== undefined || def.effect.autoSuccesses !== undefined);
+        if (hasKnob) { state.phase = "effect"; return { state: rwState(state), prompt: rw.effectPrompt(state) }; }
+        return rw.advance(state);
+      }
+      case "effect": {
+        const v = parseInt(reply, 10);
+        const e = rw.def(state, state.current).effect!;
+        const knob = e.difficultyMod !== undefined ? "difficultyMod" : "autoSuccesses";
+        if (v !== (e.difficultyMod ?? e.autoSuccesses)) rw.patch(state, state.current).effect = { ...e, [knob]: v };
+        return rw.advance(state);
+      }
+      case "roles": {
+        if (reply === "done" || reply === "") {
+          state.phase = "confirm";
+          return { state: rwState(state), prompt: rw.confirmPrompt(state) };
+        }
+        const m = reply.match(/^([^:]+):(.+)$/);
+        if (!m) return { error: 'use "resource: role" (e.g. "quintessence: resolve"), or "done"' };
+        const name = StringUtil.normalize(m[1]);
+        const role = StringUtil.normalize(m[2]);
+        const def = state.defs.find(d => StringUtil.normalize(d.name) === name);
+        if (!def) return { error: `no resource "${name}" on this character` };
+        const patch = rw.patch(state, name);
+        patch.roles = [...new Set([...(patch.roles ?? def.roles ?? []), role])];
+        return { state: rwState(state), prompt: rw.rolesPrompt(state) };
+      }
+      case "confirm": {
+        if (reply !== "yes") return { done: true, summary: "Discarded - existing configuration kept." };
+        const map = { ...ResourceOverrides.current() };
+        let changed = 0;
+        for (const [k, p] of Object.entries(state.overrides)) {
+          if (Object.keys(p).length === 0) continue;
+          map[k] = { ...(map[k] ?? {}), ...p };
+          changed++;
+        }
+        if (changed === 0) return { done: true, summary: "Nothing changed - existing configuration kept." };
+        await ResourceOverrides.save(map);
+        return { done: true, summary: `Saved ${changed} resource override${changed === 1 ? "" : "s"} to "${RESOURCE_CONFIG_ENTRY}" - view or hand-edit that lorebook entry anytime.` };
+      }
+    }
+    return { error: "wizard state is confused - reply cancel and restart" };
+  },
+};
+
+const WIZARD_DEFS: Record<string, WizardDefinition> = { resources: RESOURCES_WIZARD };
+
+// Feed a plain-input reply to the active wizard; returns the OOC line.
+async function answerActiveWizard(active: ActiveWizard, raw: string): Promise<string> {
+  if (/^\s*cancel\s*$/i.test(raw)) {
+    await WizardSession.clear();
+    return `((OOC-Storyteller: Wizard cancelled - nothing saved.))`;
+  }
+  const def = WIZARD_DEFS[active.def];
+  if (!def) {
+    await WizardSession.clear();
+    return `((OOC-Storyteller: The active wizard "${active.def}" no longer exists - session cleared.))`;
+  }
+  const resolved = resolveReply(active.prompt, raw);
+  if ("error" in resolved) {
+    return `((OOC-Storyteller: ${resolved.error}. ${renderPromptText(active.prompt)}))`;
+  }
+  const r = await def.answer(active.state, resolved.value);
+  if (r.error) return `((OOC-Storyteller: ${r.error}. ${renderPromptText(active.prompt)}))`;
+  if (r.done) {
+    await WizardSession.clear();
+    return `((OOC-Storyteller: ${def.title} finished. ${r.summary ?? ""}))`;
+  }
+  await WizardSession.set({ def: active.def, state: r.state!, prompt: r.prompt! });
+  return `((OOC-Storyteller: ${renderPromptText(r.prompt!)}))`;
+}
+
+// =============================================================================
 // COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
 // Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -3001,9 +3370,12 @@ class CommandRouter {
   // (always a single line - the host strips newlines from inputText).
   static async route(body: string, ctx: CommandContext = {}): Promise<string> {
     const cmd = CommandParser.parse(body);
-    // While creator mode is on, the player may have edited character entries:
-    // pick those edits up before any command runs.
-    if (await CommandRouter.creatorModeEnabled()) await CharacterStore.syncFromLorebook();
+    // While creator mode is on, the player may have edited character entries or
+    // the resource-override entry: pick those edits up before any command runs.
+    if (await CommandRouter.creatorModeEnabled()) {
+      await CharacterStore.syncFromLorebook();
+      await ResourceOverrides.loadFromLorebook();
+    }
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
     return def.handler(cmd, ctx);
@@ -3024,6 +3396,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   }
   // Leaving creator mode: capture any final lorebook edits, then switch off.
   const { synced, failed } = await CharacterStore.syncFromLorebook();
+  await ResourceOverrides.loadFromLorebook();
   await CommandRouter.setCreatorMode(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
@@ -3052,7 +3425,7 @@ async function cmdCreatePlayable(cmd: ParsedCommand): Promise<string> {
     await CharacterStore.setCurrent(name);
     note = " Selected as your default character.";
   }
-  return `((OOC-Storyteller: Created playable character "${name}" [${rawTemplates.join("+")}] - Attributes at 1, Abilities at 0, everything else unassigned.${note} Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it.))`;
+  return `((OOC-Storyteller: Created playable character "${name}" [${rawTemplates.join("+")}] - Attributes at 1, Abilities at 0, everything else unassigned.${note} Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it. Tip: [[configure-resources]] walks you through tuning how resources work.))`;
 }
 
 async function cmdPlay(cmd: ParsedCommand): Promise<string> {
@@ -3391,6 +3764,23 @@ async function cmdClearBoosts(): Promise<string> {
   return `((OOC-Storyteller: ${char.name}'s attribute boosts fade.))`;
 }
 
+async function cmdConfigureResources(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]] first - the wizard configures the resources your templates grant.))`;
+  if (await WizardSession.get()) return `((OOC-Storyteller: A wizard is already running - answer it, or [[cancel-wizard]].))`;
+  const defs = CharacterResources.defsFor(char);
+  const r = await RESOURCES_WIZARD.start({ charName: char.name, defs });
+  if (r.done || !r.prompt || !r.state) return `((OOC-Storyteller: ${r.summary ?? "Nothing to configure."}))`;
+  await WizardSession.set({ def: RESOURCES_WIZARD.id, state: r.state, prompt: r.prompt });
+  return `((OOC-Storyteller: ${RESOURCES_WIZARD.title} - your next plain messages answer the wizard. ${renderPromptText(r.prompt)}))`;
+}
+
+async function cmdCancelWizard(): Promise<string> {
+  if (!(await WizardSession.get())) return `((OOC-Storyteller: No wizard is running.))`;
+  await WizardSession.clear();
+  return `((OOC-Storyteller: Wizard cancelled - nothing saved.))`;
+}
+
 async function cmdGain(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
@@ -3421,6 +3811,8 @@ CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
 CommandRouter.register("damage", cmdDamage, "damage <bashing|lethal|aggravated> [n]");
 CommandRouter.register("health", cmdHealth, "health");
 CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
+CommandRouter.register("configure-resources", cmdConfigureResources, "configure-resources (guided setup; plain replies answer it)");
+CommandRouter.register("cancel-wizard", cmdCancelWizard, "cancel-wizard");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
@@ -3429,7 +3821,16 @@ const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 // generation is suppressed - the player is operating the system, not the story.
 async function processAdventureInput(rawInputText: string): Promise<OnTextAdventureInputReturnValue | undefined> {
   const matches = [...rawInputText.matchAll(COMMAND_PATTERN)];
-  if (matches.length === 0) return undefined; // not ours; leave input untouched
+  if (matches.length === 0) {
+    // A running wizard claims plain (command-less) input as its reply - the
+    // text "prompt -> reply" medium. [[commands]] still route normally below.
+    const active = await WizardSession.get();
+    if (active) {
+      const out = await answerActiveWizard(active, rawInputText);
+      return { inputText: out.replace(/\n/g, " "), stopGeneration: true };
+    }
+    return undefined; // not ours; leave input untouched
+  }
 
   let out = "";
   let cursor = 0;
@@ -3464,7 +3865,8 @@ async function init(): Promise<{ setupMessage: string | null }> {
   });
   const boot = await LorebookManager.bootstrap();
   const merits = await MeritFlawRegistry.loadFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}`);
+  const overrides = await ResourceOverrides.loadFromLorebook();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

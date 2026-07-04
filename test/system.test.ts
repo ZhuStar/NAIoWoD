@@ -17,6 +17,7 @@ import {
   ExtendedRoll, applyInterval, ExtendedRollStore,
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
+  resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, RESOURCE_CONFIG_CATEGORY,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -1679,5 +1680,143 @@ describe("heal & boost in play", () => {
     const r = await CommandRouter.route("roll strength spend=blood:heal", { rng: seqRng([6]) });
     expect(r).toContain("healing effect");
     expect(r).toContain("outside a roll");
+  });
+});
+
+describe("wizard engine (wizard.ts)", () => {
+  const choice = {
+    step: "s", title: "T", body: "b", kind: "choice" as const, default: "keep",
+    options: [{ value: "keep", label: "Keep as is" }, { value: "customize", label: "Customize" }],
+  };
+
+  test("resolveReply: choices by number, value, label; keep; errors", () => {
+    expect(resolveReply(choice, "2")).toEqual({ value: "customize" });
+    expect(resolveReply(choice, "customize")).toEqual({ value: "customize" });
+    expect(resolveReply(choice, "Keep as is")).toEqual({ value: "keep" });
+    expect(resolveReply(choice, "keep")).toEqual({ value: "keep" });   // default
+    expect(resolveReply(choice, "")).toEqual({ value: "keep" });        // empty -> default
+    expect("error" in resolveReply(choice, "banana")).toBe(true);
+    expect("error" in resolveReply(choice, "7")).toBe(true);
+  });
+
+  test("resolveReply: numbers and confirms", () => {
+    const num = { step: "n", title: "N", body: "", kind: "number" as const, default: "3" };
+    expect(resolveReply(num, "8")).toEqual({ value: "8" });
+    expect(resolveReply(num, "keep")).toEqual({ value: "3" });
+    expect("error" in resolveReply(num, "abc")).toBe(true);
+    const yn = { step: "c", title: "C", body: "", kind: "confirm" as const };
+    expect(resolveReply(yn, "y")).toEqual({ value: "yes" });
+    expect(resolveReply(yn, "NO")).toEqual({ value: "no" });
+    expect("error" in resolveReply(yn, "maybe")).toBe(true);
+  });
+
+  test("renderPromptText is a single line with options and hints", () => {
+    const line = renderPromptText({ ...choice, progress: { at: 1, of: 3 } });
+    expect(line).toContain("[1/3]");
+    expect(line).toContain("1) Keep as is");
+    expect(line).toContain('"cancel" exits');
+    expect(line.includes("\n")).toBe(false);
+  });
+});
+
+describe("resource overrides (the house-rule layer)", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset();
+    await LorebookManager.bootstrap();
+  });
+
+  test("resourcesForTemplates applies patches and adds custom resources", () => {
+    const defs = resourcesForTemplates(["mage"], {
+      quintessence: { start: 5, roles: ["magic-fuel", "resolve"] },
+      "hearth-luck": { kind: "pool", start: 1, max: 5 },
+    });
+    const q = defs.find(d => d.name === "quintessence")!;
+    expect(q.start).toBe(5);
+    expect(q.roles).toContain("resolve");
+    expect(defs.find(d => d.name === "hearth-luck")!.max).toBe(5); // custom added
+  });
+
+  test("save/load round-trips through the lorebook; hand-edits are honored", async () => {
+    await ResourceOverrides.save({ willpower: { max: 8 } });
+    ResourceOverrides.reset();
+    expect(await ResourceOverrides.loadFromLorebook()).toBe(1);
+    expect(ResourceOverrides.current().willpower.max).toBe(8);
+
+    // The player hand-edits the entry (what creator mode allows).
+    const edited = `notes\n=====\n${JSON.stringify({ willpower: { max: 6 } })}`;
+    await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, edited);
+    await ResourceOverrides.loadFromLorebook();
+    expect(ResourceOverrides.current().willpower.max).toBe(6);
+  });
+});
+
+describe("[[configure-resources]] wizard (text medium)", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset();
+    await LorebookManager.bootstrap();
+  });
+  // Plain input goes through the adventure hook - that's the reply channel.
+  const reply = async (text: string): Promise<string> => {
+    const r = await processAdventureInput(text);
+    return r?.inputText ?? "";
+  };
+
+  test("full walk: customize willpower, add a role, save to the lorebook", async () => {
+    await CommandRouter.route('create-playable name="Odo" templates=mortal'); // one resource: willpower
+    const first = await CommandRouter.route("configure-resources");
+    expect(first).toContain('Resource "willpower"');
+
+    expect(await reply("2")).toContain("start");         // customize -> start prompt
+    expect(await reply("5")).toContain("max");           // start=5 -> max prompt
+    expect(await reply("8")).toContain("spend effect");  // max=8 -> effect prompt
+    const roles = await reply("2");                      // autoSuccesses 1 -> 2
+    expect(roles).toContain("Extra roles");
+    const confirm = await reply("done");
+    expect(confirm).toContain("Save changes?");
+    const done = await reply("yes");
+    expect(done).toContain("finished");
+    expect(done).toContain("Saved 1 resource override");
+
+    // The data landed and is live.
+    const wp = ResourceOverrides.current().willpower;
+    expect(wp.start).toBe(5);
+    expect(wp.max).toBe(8);
+    expect(wp.effect!.autoSuccesses).toBe(2);
+    expect(await CommandRouter.route("resources")).toContain("willpower 0/8"); // record's chosen start (0) still wins; max is patched
+    // The wizard released plain input.
+    expect(await processAdventureInput("just walking")).toBeUndefined();
+  });
+
+  test("roles step lets Quintessence serve as Resolve (by role)", async () => {
+    await CommandRouter.route('create-playable name="Merlin" templates=mage');
+    await CommandRouter.route("configure-resources");
+    await reply("keep");                                  // willpower: keep
+    await reply("keep");                                  // quintessence: keep
+    await reply("quintessence: resolve");                 // add the role
+    await reply("done");
+    const done = await reply("yes");
+    expect(done).toContain("Saved 1 resource override");
+    const merlin = (await CharacterStore.getCurrent())!;
+    expect(CharacterResources.resolveDef(merlin, "resolve")!.name).toBe("quintessence");
+  });
+
+  test("bad replies re-prompt; cancel exits without saving", async () => {
+    await CommandRouter.route('create-playable name="Odo" templates=mortal');
+    await CommandRouter.route("configure-resources");
+    const err = await reply("banana");
+    expect(err).toContain("reply with an option");
+    expect(err).toContain('Resource "willpower"');        // same prompt again
+    const bye = await reply("cancel");
+    expect(bye).toContain("cancelled");
+    expect(ResourceOverrides.current()).toEqual({});
+    expect(await processAdventureInput("free again")).toBeUndefined();
+  });
+
+  test("needs a character; refuses a second concurrent wizard", async () => {
+    expect(await CommandRouter.route("configure-resources")).toContain("No active character");
+    await CommandRouter.route('create-playable name="Odo" templates=mortal');
+    await CommandRouter.route("configure-resources");
+    expect(await CommandRouter.route("configure-resources")).toContain("already running");
+    await CommandRouter.route("cancel-wizard");
   });
 });

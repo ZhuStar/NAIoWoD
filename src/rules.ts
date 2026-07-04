@@ -377,8 +377,12 @@ export const TEMPLATES: Record<string, TemplateConfig> = {
 
 // The resources a character has = the union of its templates' resources, deduped
 // by name (first template wins for numbers; roles are merged). Unknown or zero
-// templates yield the mortal baseline (just Willpower).
-export function resourcesForTemplates(keys: string[]): ResourceDef[] {
+// templates yield the mortal baseline (just Willpower). Story-level `overrides`
+// (the house-rule layer, e.g. from the configuration wizard or a hand-edited
+// lorebook entry) are applied last: a patch merges onto its resource by
+// normalized name, and a patch naming a NEW resource (with kind/start/max) adds
+// a custom one.
+export function resourcesForTemplates(keys: string[], overrides?: Record<string, Partial<ResourceDef>>): ResourceDef[] {
   const byName = new Map<string, ResourceDef>();
   const out: ResourceDef[] = [];
   const add = (def: ResourceDef): void => {
@@ -395,6 +399,18 @@ export function resourcesForTemplates(keys: string[]): ResourceDef[] {
   };
   const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
   for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
+
+  for (const [name, patch] of Object.entries(overrides ?? {})) {
+    const key = StringUtil.normalize(name);
+    const existing = byName.get(key);
+    if (existing) {
+      Object.assign(existing, patch, { name: existing.name }); // a patch never renames
+    } else if (patch.kind && patch.start !== undefined && patch.max !== undefined) {
+      const custom: ResourceDef = { ...(patch as ResourceDef), name: key };
+      byName.set(key, custom);
+      out.push(custom);
+    }
+  }
   return out;
 }
 

@@ -16,6 +16,7 @@ import {
   overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
   resourcesForTemplates, resourceEffect, CharacterResources,
+  CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -1576,5 +1577,107 @@ describe("resources v2: named effects, nAgain, mandatory costs", () => {
   test("an unknown named effect is refused", async () => {
     await CommandRouter.route('create-playable name="Zul" templates=demon');
     expect(await CommandRouter.route("roll strength spend=resolve:bogus", { rng: seqRng([6]) })).toContain('no "bogus" effect');
+  });
+});
+
+describe("live health (CharacterHealth)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("damage rebuilds a real track: penalties, counts, incapacitation", async () => {
+    const c = await CharacterStore.newPotential("Hurt Guy", ["mortal"]);
+    expect((await CharacterHealth.summary(c)).penalty).toBe(0);
+    await CharacterHealth.damage(c, "lethal", 3);
+    const s = await CharacterHealth.summary(c);
+    expect(s.lethal).toBe(3);
+    expect(s.penalty).toBe(-1);          // 3 filled on the standard track -> Injured
+    expect(s.level).toBe("Injured");
+    await CharacterHealth.damage(c, "bashing", 4);
+    expect((await CharacterHealth.summary(c)).isIncapacitated).toBe(true);
+  });
+
+  test("heal is worst-first among the allowed severities", async () => {
+    const c = await CharacterStore.newPotential("Mender", ["vampire"]);
+    await CharacterHealth.damage(c, "bashing", 2);
+    await CharacterHealth.damage(c, "lethal", 2);
+    await CharacterHealth.damage(c, "aggravated", 1);
+    // Allowed bashing+lethal only: heals the 2 lethal first, then 1 bashing.
+    const { healed, summary } = await CharacterHealth.heal(c, ["bashing", "lethal"], 3);
+    expect(healed).toBe(3);
+    expect(summary.lethal).toBe(0);
+    expect(summary.bashing).toBe(1);
+    expect(summary.aggravated).toBe(1);  // untouched: not in the allowed list
+  });
+
+  test("healthLevelsForTemplates falls back to mortal", () => {
+    expect(healthLevelsForTemplates([]).length).toBe(7);
+    expect(healthLevelsForTemplates(["vampire"]).length).toBe(7);
+  });
+});
+
+describe("attribute boosts (CharacterBoosts)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+  const physOnly = { categories: ["physical"], perPoint: 1 };
+
+  test("validates category, caps, and clears", async () => {
+    const c = await CharacterStore.newPotential("Surger", ["vampire"]);
+    expect(CharacterBoosts.validateTarget("charisma", physOnly)).toContain("not a boostable");
+    expect(CharacterBoosts.validateTarget("strength", physOnly)).toBeNull();
+    const r = await CharacterBoosts.add(c, "strength", 2, { ...physOnly, cap: 3 });
+    expect(r.ok && r.total === 2).toBe(true);
+    const r2 = await CharacterBoosts.add(c, "strength", 5, { ...physOnly, cap: 3 });
+    expect(r2.ok && r2.added === 1).toBe(true);   // capped at +3 total
+    await CharacterBoosts.clear(c);
+    expect(await CharacterBoosts.all(c)).toEqual({});
+  });
+});
+
+describe("heal & boost in play", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("[[damage]] -> [[health]] -> the wound penalty shrinks the next roll", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const dmg = await CommandRouter.route("damage lethal 3");
+    expect(dmg).toContain("penalty -1");
+    expect(await CommandRouter.route("health")).toContain("Injured");
+    // Pool of literal 5 with -1 wound penalty -> exactly 4 dice: seqRng(4 faces)
+    // would throw if a 5th die were rolled.
+    const r = await CommandRouter.route("roll 5", { rng: seqRng([6, 6, 6, 6]) });
+    expect(r).toContain("wound penalty -1");
+    expect(r).toContain("4 successes");
+  });
+
+  test("[[spend blood:heal]] heals worst-first and reports both lines", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire'); // blood starts 10
+    await CommandRouter.route("damage lethal 2");
+    const r = await CommandRouter.route("spend blood:heal 2");
+    expect(r).toContain("healing 2 boxes");
+    expect(r).toContain("0B/0L/0A");
+    expect(r).toContain("blood now 8/10");
+  });
+
+  test("[[spend blood:boost strength 2]] raises Strength for rolls until cleared", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const boost = await CommandRouter.route("spend blood:boost strength 2");
+    expect(boost).toContain("Strength +2");
+    // Strength 1 + boost 2 = 3 dice.
+    const r = await CommandRouter.route("roll strength", { rng: seqRng([6, 6, 6]) });
+    expect(r).toContain("3 successes");
+    await CommandRouter.route("clear-boosts");
+    const r2 = await CommandRouter.route("roll strength", { rng: seqRng([6]) });
+    expect(r2).toContain("1 success");
+  });
+
+  test("boosting a non-allowed category is refused without spending", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const r = await CommandRouter.route("spend blood:boost charisma 2");
+    expect(r).toContain("not a boostable");
+    expect(await CommandRouter.route("resources")).toContain("blood 10/10"); // nothing spent
+  });
+
+  test("heal/boost effects are refused inside a roll, pointing at [[spend]]", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const r = await CommandRouter.route("roll strength spend=blood:heal", { rng: seqRng([6]) });
+    expect(r).toContain("healing effect");
+    expect(r).toContain("outside a roll");
   });
 });

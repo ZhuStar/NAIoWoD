@@ -10,7 +10,7 @@ import {
 import {
   RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, ResourceDef,
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
-  resourcesForTemplates, resourceEffect,
+  resourcesForTemplates, resourceEffect, healthLevelsForTemplates, ATTRIBUTES, ResourceEffect,
 } from "./rules";
 import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
 import {
@@ -770,6 +770,108 @@ export class CharacterResources {
 }
 
 // =============================================================================
+// CHARACTER HEALTH - live damage for playable characters
+// -----------------------------------------------------------------------------
+// Stored as severity counts (hp:<char>) and rebuilt into a HealthTrack on
+// demand (aggravated marks first, then lethal, then bashing) - so penalties,
+// wrap-around and incapacitation all come from the real track. Custom squares/
+// conditions stay a LiveCharacter concern for now.
+// =============================================================================
+export interface HealthCounts { bashing: number; lethal: number; aggravated: number; }
+const HEAL_ORDER: (keyof HealthCounts)[] = ["aggravated", "lethal", "bashing"];
+
+export class CharacterHealth {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `hp:${StringUtil.normalize(name)}`; }
+
+  static async counts(char: PlayableCharacter): Promise<HealthCounts> {
+    return ((await CharacterHealth._storage.get(CharacterHealth._key(char.name))) as HealthCounts | undefined)
+      ?? { bashing: 0, lethal: 0, aggravated: 0 };
+  }
+
+  static async track(char: PlayableCharacter): Promise<HealthTrack> {
+    const c = await CharacterHealth.counts(char);
+    const t = new HealthTrack(healthLevelsForTemplates(char.templates));
+    if (c.aggravated > 0) t.ApplyDamage("aggravated", c.aggravated);
+    if (c.lethal > 0) t.ApplyDamage("lethal", c.lethal);
+    if (c.bashing > 0) t.ApplyDamage("bashing", c.bashing);
+    return t;
+  }
+
+  static async summary(char: PlayableCharacter): Promise<HealthSummary> {
+    return (await CharacterHealth.track(char)).Summary();
+  }
+
+  static async damage(char: PlayableCharacter, severity: keyof HealthCounts, amount: number): Promise<HealthSummary> {
+    const c = await CharacterHealth.counts(char);
+    c[severity] += Math.max(0, amount);
+    await CharacterHealth._storage.set(CharacterHealth._key(char.name), c);
+    return CharacterHealth.summary(char);
+  }
+
+  // Heal `amount` boxes among the allowed severities, worst first. Returns how
+  // many were actually healed (you can't heal what isn't there).
+  static async heal(char: PlayableCharacter, severities: string[], amount: number): Promise<{ healed: number; summary: HealthSummary }> {
+    const allowed = new Set(severities.map(s => StringUtil.normalize(s)));
+    const c = await CharacterHealth.counts(char);
+    let left = Math.max(0, amount);
+    let healed = 0;
+    for (const sev of HEAL_ORDER) {
+      if (left <= 0 || !allowed.has(sev)) continue;
+      const take = Math.min(c[sev], left);
+      c[sev] -= take; left -= take; healed += take;
+    }
+    await CharacterHealth._storage.set(CharacterHealth._key(char.name), c);
+    return { healed, summary: await CharacterHealth.summary(char) };
+  }
+}
+
+// =============================================================================
+// CHARACTER BOOSTS - temporary attribute increases (e.g. blood-surged Strength)
+// -----------------------------------------------------------------------------
+// boost:<char> -> { attribute: bonus }. Rolls read these on top of the record's
+// dots. Duration is Storyteller-adjudicated until a turn system exists;
+// [[clear-boosts]] ends them.
+// =============================================================================
+export class CharacterBoosts {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `boost:${StringUtil.normalize(name)}`; }
+
+  static async all(char: PlayableCharacter): Promise<Record<string, number>> {
+    return ((await CharacterBoosts._storage.get(CharacterBoosts._key(char.name))) as Record<string, number> | undefined) ?? {};
+  }
+
+  // The trait must be an Attribute in one of the boost config's allowed
+  // categories. Returns the reason it isn't, or null when it's fine.
+  static validateTarget(trait: string, boost: NonNullable<ResourceEffect["boost"]>): string | null {
+    const key = StringUtil.normalize(trait);
+    const cats = (boost.categories ?? ["physical"]).map(c => StringUtil.normalize(c));
+    const allowedNames = cats.flatMap(c => (ATTRIBUTES as Record<string, readonly string[]>)[c] ?? [])
+      .map(a => StringUtil.normalize(a));
+    return allowedNames.includes(key) ? null : `${trait} is not a boostable Attribute here (allowed: ${cats.join("/")})`;
+  }
+
+  // Add a validated boost; the total bonus respects the cap.
+  static async add(char: PlayableCharacter, trait: string, amount: number, boost: NonNullable<ResourceEffect["boost"]>): Promise<{ ok: true; added: number; total: number } | { ok: false; error: string }> {
+    const key = StringUtil.normalize(trait);
+    const invalid = CharacterBoosts.validateTarget(trait, boost);
+    if (invalid) return { ok: false, error: invalid };
+    const map = await CharacterBoosts.all(char);
+    const cur = map[key] ?? 0;
+    const cap = boost.cap ?? Infinity;
+    const added = Math.max(0, Math.min(amount, cap - cur));
+    if (added === 0) return { ok: false, error: `${trait} is already at its boost cap` };
+    map[key] = cur + added;
+    await CharacterBoosts._storage.set(CharacterBoosts._key(char.name), map);
+    return { ok: true, added, total: map[key] };
+  }
+
+  static async clear(char: PlayableCharacter): Promise<void> {
+    await CharacterBoosts._storage.delete(CharacterBoosts._key(char.name));
+  }
+}
+
+// =============================================================================
 // COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
 // -----------------------------------------------------------------------------
 // Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -960,6 +1062,10 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<
   if (!def) return mandatory ? { note: "", refuse: `has no resource "${nameOrRole}"` } : { note: `no resource "${nameOrRole}" to spend` };
   const e = resourceEffect(def, effectName || undefined);
   if (effectName && !e) return { note: "", refuse: `${def.name} has no "${effectName}" effect` };
+  if (e && (e.heal || e.boost)) {
+    const kind = e.heal ? "healing" : "boost";
+    return { note: "", refuse: `${def.name}:${effectName} is a ${kind} effect - use [[spend ${def.name}:${effectName} ...]] outside a roll` };
+  }
   const cost = Math.max(1, e?.cost ?? 1);
   const want = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
   const have = await CharacterResources.current(char, def);
@@ -995,8 +1101,16 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   }
   const spend = await applySpend(char, cmd);
   if (spend.refuse) return `((OOC-Storyteller: ${char.name} can't: ${spend.refuse}.))`;
-  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng, extra: spend.extra });
-  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${spend.note ? ` - ${spend.note}` : ""}))`;
+  // Rolls see live state: boosted Attributes add to the record's dots, and the
+  // wound penalty (negative) comes off the dice pool.
+  const boosts = await CharacterBoosts.all(char);
+  const penalty = (await CharacterHealth.summary(char)).penalty;
+  const extra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
+  if (penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + penalty;
+  const resolver = (n: string): number => resolveTraitFromRecord(char, n) + (boosts[StringUtil.normalize(n)] ?? 0);
+  const exec = executeRoll(spec, resolver, { rng: ctx.rng, extra });
+  const notes = [spend.note, penalty !== 0 ? `wound penalty ${penalty}` : ""].filter(Boolean).join("; ");
+  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -1137,19 +1251,83 @@ async function cmdResources(): Promise<string> {
   return `((OOC-Storyteller: ${char.name} resources - ${items}.))`;
 }
 
+// One line of health state for OOC replies.
+function healthLine(s: HealthSummary): string {
+  const state = s.isDead ? " - DEAD" : s.isIncapacitated ? " - INCAPACITATED" : "";
+  const overkill = s.overkill ? ` +${s.overkill} overkill` : "";
+  return `${s.level} (penalty ${s.penalty}): ${s.bashing}B/${s.lethal}L/${s.aggravated}A, ${s.filled}/${s.capacity}${overkill}${state}`;
+}
+
+// spend <resource[:effect]> [target] [amount] - plain deduction, or a named
+// standalone effect: heal (worst-first boxes) / boost (raise an Attribute).
 async function cmdSpend(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
-  const which = cmd.positional[0]?.trim();
-  if (!which) return `((OOC-Storyteller: spend needs a resource, e.g. [[spend willpower]] or [[spend blood 2]].))`;
-  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+  const raw = cmd.positional[0]?.trim();
+  if (!raw) return `((OOC-Storyteller: spend needs a resource, e.g. [[spend willpower]], [[spend blood:heal 2]] or [[spend blood:boost strength 2]].))`;
+  const [which, effectName] = raw.split(":").map(s => s.trim());
   const def = CharacterResources.resolveDef(char, which);
   if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  const e = resourceEffect(def, effectName || undefined);
+  if (effectName && !e) return `((OOC-Storyteller: ${def.name} has no "${effectName}" effect.))`;
+
+  if (e?.boost) {
+    const target = cmd.positional[1]?.trim();
+    if (!target) return `((OOC-Storyteller: ${def.name}:${effectName} needs an Attribute, e.g. [[spend ${def.name}:${effectName} strength 2]].))`;
+    const invalid = CharacterBoosts.validateTarget(target, e.boost);
+    if (invalid) return `((OOC-Storyteller: ${invalid}.))`;
+    const points = Math.max(1, parseInt(cmd.positional[2] ?? "1", 10) || 1);
+    const { spent } = await CharacterResources.spend(char, which, points);
+    if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
+    const r = await CharacterBoosts.add(char, target, spent * (e.boost.perPoint ?? 1), e.boost);
+    const now = await CharacterResources.current(char, def);
+    if (!r.ok) return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}, but ${r.error}. ${def.name} now ${now}/${def.max}.))`;
+    return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}: ${StringUtil.toTitleCase(target)} +${r.added} (boost total +${r.total}). ${def.name} now ${now}/${def.max}. [[clear-boosts]] when it fades.))`;
+  }
+
+  if (e?.heal) {
+    const points = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+    const { spent } = await CharacterResources.spend(char, which, points);
+    if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
+    const { healed, summary } = await CharacterHealth.heal(char, e.heal.severities, spent * (e.heal.amount ?? 1));
+    const now = await CharacterResources.current(char, def);
+    return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}, healing ${healed} box${healed === 1 ? "" : "es"}. Health: ${healthLine(summary)}. ${def.name} now ${now}/${def.max}.))`;
+  }
+
+  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
   const { spent } = await CharacterResources.spend(char, which, amount);
   if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
   const now = await CharacterResources.current(char, def);
   const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
   return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
+}
+
+async function cmdDamage(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const severity = (cmd.positional[0] ?? "").trim().toLowerCase();
+  if (severity !== "bashing" && severity !== "lethal" && severity !== "aggravated") {
+    return `((OOC-Storyteller: damage needs a severity (bashing, lethal or aggravated), e.g. [[damage lethal 2]].))`;
+  }
+  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+  const summary = await CharacterHealth.damage(char, severity, amount);
+  return `((OOC-Storyteller: ${char.name} takes ${amount} ${severity}. Health: ${healthLine(summary)}.))`;
+}
+
+async function cmdHealth(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const summary = await CharacterHealth.summary(char);
+  const boosts = await CharacterBoosts.all(char);
+  const boostBits = Object.entries(boosts).map(([k, v]) => `${StringUtil.toTitleCase(k)} +${v}`).join(", ");
+  return `((OOC-Storyteller: ${char.name} - ${healthLine(summary)}${boostBits ? `. Boosts: ${boostBits}` : ""}.))`;
+}
+
+async function cmdClearBoosts(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  await CharacterBoosts.clear(char);
+  return `((OOC-Storyteller: ${char.name}'s attribute boosts fade.))`;
 }
 
 async function cmdGain(cmd: ParsedCommand): Promise<string> {
@@ -1177,8 +1355,11 @@ CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [di
 CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
 CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
 CommandRouter.register("resources", cmdResources, "resources");
-CommandRouter.register("spend", cmdSpend, 'spend <resource> [amount] [reason="..."]');
+CommandRouter.register("spend", cmdSpend, 'spend <resource[:effect]> [target] [amount] [reason="..."]');
 CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
+CommandRouter.register("damage", cmdDamage, "damage <bashing|lethal|aggravated> [n]");
+CommandRouter.register("health", cmdHealth, "health");
+CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

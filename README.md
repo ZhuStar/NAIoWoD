@@ -399,9 +399,22 @@ and `spend=resolve` draws from Quintessence).
   nothing is rolled (Willpower/Resolve as *required spell fuel*). `spend-amount=N`
   stacks the effect (capped by its `maxPerRoll`). A pure-cost effect (no
   modifiers) just pays.
-- **`spend <resource> [amount]`** / **`gain <resource> [amount]`** adjust a
-  resource outside a roll (clamped to 0…max); **`resources`** shows the sheet
-  (current/max, roles, and named `spend:` effects).
+- **`spend <resource[:effect]> [target] [amount]`** / **`gain <resource> [amount]`**
+  adjust a resource outside a roll (clamped to 0…max); **`resources`** shows the
+  sheet (current/max, roles, and named `spend:` effects).
+- Effects can also **heal** and **boost Attributes** — standalone spends, not
+  roll modifiers (using one inside a roll is refused with a pointer):
+  - `[[spend blood:heal 2]]` — heal effect: N boxes per point, **worst allowed
+    severity first** (Blood ships healing bashing/lethal).
+  - `[[spend blood:boost strength 2]]` — boost effect: raise an Attribute per
+    point; **which categories are boostable is data** (Blood ships Physical-only,
+    per the classic rule). Boosted values apply to every roll until
+    `[[clear-boosts]]` (duration is Storyteller-adjudicated until the turn
+    system lands).
+- **Live health**: `[[damage <severity> <n>]]` marks a real health track for the
+  current character, `[[health]]` shows it (level, penalty, counts, boosts), and
+  the **wound penalty automatically reduces roll dice pools** (shown in the roll
+  note). Healing effects act on this track.
 - Current values persist per character (story storage) and default to the
   template start until changed — nothing needs allocating to start playing.
 

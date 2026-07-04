@@ -5,7 +5,7 @@
 import { StringUtil, MoralityPolarity } from "./core/traits";
 import {
   SoakSpec, DamageReaction, UndeadPhysiology, SilverVulnerability,
-  HealthLevelDef, STANDARD_HEALTH_LEVELS,
+  HealthLevelDef, STANDARD_HEALTH_LEVELS, SeverityName,
 } from "./core/damage";
 
 // The nine oWoD Attributes, by group. Fixed across every template, so they live
@@ -158,6 +158,12 @@ export interface ResourceEffect {
   autoSuccesses?: number;   // e.g. Willpower +1
   nAgain?: number;          // tighten n-again (e.g. 8 for 8-again)
   maxPerRoll?: number;      // stacking cap per roll (default 1)
+  // Standalone (non-roll) effects, used via [[spend resource:effect ...]]:
+  // heal N boxes per point spent, worst allowed severity first.
+  heal?: { severities: SeverityName[]; amount?: number };
+  // raise an Attribute per point spent; which categories are boostable is
+  // data (Physical only in the current games, but configurable).
+  boost?: { categories?: string[]; perPoint?: number; cap?: number };
 }
 
 // A resource is a tracker/pool PLUS abstract `roles` it can fill and an optional
@@ -205,6 +211,17 @@ export function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
     effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
     // The whole deal when a mage channels Resolve into a spell.
     effects: { cast: { label: "Resolve fuels the spell: +1 success, 8-again, -2 difficulty", autoSuccesses: 1, nAgain: 8, difficultyMod: -2 } },
+    ...over,
+  };
+}
+export function bloodResource(over: Partial<ResourceDef> = {}): ResourceDef {
+  return {
+    name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1,
+    roles: ["blood"],
+    effects: {
+      heal: { label: "Blood knits the body: heal 1 bashing/lethal per point", heal: { severities: ["bashing", "lethal"], amount: 1 } },
+      boost: { label: "Blood surges a Physical Attribute: +1 per point", boost: { categories: ["physical"], perPoint: 1 } },
+    },
     ...over,
   };
 }
@@ -260,7 +277,7 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
   RulesetConfig.VAMPIRE,
   [
     willpowerResource(5),
-    { name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1, fromGeneration: true },
+    bloodResource({ fromGeneration: true }),
   ],
   VAMPIRE_SOAK,
   HUMANITY_MORALITY, true,
@@ -329,7 +346,7 @@ export const TEMPLATE_GHOUL = new TemplateConfig(
   new RulesetConfig(5, 2, 4, 2, false),
   [
     willpowerResource(3),
-    { name: "blood", kind: "pool", start: 0, max: 10, perTurnLimit: 1 },
+    bloodResource({ start: 0 }),
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true   // still human: Road/Humanity + Virtues
@@ -379,6 +396,13 @@ export function resourcesForTemplates(keys: string[]): ResourceDef[] {
   const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
   for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
   return out;
+}
+
+// The health track a character uses: the FIRST of its templates decides (same
+// first-wins rule as resource numbers). No/unknown templates -> mortal.
+export function healthLevelsForTemplates(keys: string[]): HealthLevelDef[] {
+  const t = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).find((x): x is TemplateConfig => !!x);
+  return (t ?? TEMPLATE_MORTAL).HealthLevels;
 }
 
 // =============================================================================

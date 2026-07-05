@@ -5,7 +5,7 @@
 import { StringUtil, MoralityPolarity } from "./core/traits";
 import {
   SoakSpec, DamageReaction, UndeadPhysiology, SilverVulnerability,
-  HealthLevelDef, STANDARD_HEALTH_LEVELS, SeverityName,
+  HealthLevelDef, STANDARD_HEALTH_LEVELS,
 } from "./core/damage";
 
 // The nine oWoD Attributes, by group. Fixed across every template, so they live
@@ -150,20 +150,49 @@ export type PoolKind = "tracker" | "pool";
 // What spending `cost` points of a resource grants to a roll. Maps onto the
 // RollModifier fields in rolls.ts (difficulty/dice/auto-successes), so a resource
 // effect and a tag modifier flow through the same pipeline.
-export interface ResourceEffect {
+// --- THE EFFECT GRAMMAR ---
+// One declarative sentence: spend [cost] -> apply [op] to [target] at [amount]
+// per unit, lasting [duration], at most [limits]. `op` and `target` are OPEN
+// vocabularies: a word the engine doesn't know yet ("arcana", "seduction",
+// "majesty") is stored, shown, and adjudicated by the Storyteller until its
+// interpreter lands - nothing is hardcoded to today's mechanics.
+//
+// Ops with interpreters today: "difficulty" | "dice" | "successes" | "nagain"
+// (roll modifiers; an optional `target` names an action tag the roll must
+// carry), "increase" (raise a trait via the boost layer; `target` is a
+// constraint - an attribute group, a record bucket, or a specific trait),
+// "heal" (`target` = comma-separated severities or "all").
+export interface EffectOp {
+  op: string;
+  target?: string;
+  amount?: number;          // magnitude per effect unit (default 1)
+  fillToCap?: boolean;      // one application raises/heals to the cap
+  cap?: number | string;    // literal, or a pool expression ("stamina+3") on the character
+}
+export interface EffectCost {
+  units?: number;           // resource units per application (default 1)
+  buys?: number;            // effect units per application (default 1)
+  // A roll that reduces the units paid (possibly to zero) - e.g. Iron Will.
+  reducedBy?: { pool: string; difficulty?: number; perSuccess?: number };
+}
+export interface EffectDuration {
+  kind: "instant" | "real" | "st" | "until";
+  n?: number;               // count of `unit` ("real": minutes/hours; "st": turns/scenes)
+  unit?: string;
+  until?: string;           // kind "until": free-form condition
+}
+export interface EffectLimits {
+  maxPerUse?: number;                  // applications per command (enforced)
+  uses?: { n: number; per: string };   // tracked in the ledger; ST-enforced for now
+  cooldown?: { n: number; unit: string }; // stored; ST-enforced for now
+}
+export interface EffectSpec {
   label: string;
-  cost?: number;            // points spent per application (default 1)
-  difficultyMod?: number;   // e.g. Resolve -2 (magnitude is configurable data)
-  diceMod?: number;
-  autoSuccesses?: number;   // e.g. Willpower +1
-  nAgain?: number;          // tighten n-again (e.g. 8 for 8-again)
-  maxPerRoll?: number;      // stacking cap per roll (default 1)
-  // Standalone (non-roll) effects, used via [[spend resource:effect ...]]:
-  // heal N boxes per point spent, worst allowed severity first.
-  heal?: { severities: SeverityName[]; amount?: number };
-  // raise an Attribute per point spent; which categories are boostable is
-  // data (Physical only in the current games, but configurable).
-  boost?: { categories?: string[]; perPoint?: number; cap?: number };
+  apply: EffectOp[];        // [] = a pure cost (static spell fuel)
+  cost?: EffectCost;
+  duration?: EffectDuration;
+  limits?: EffectLimits;
+  targetMustBe?: string[];  // for effects on others; stored until targeting lands
 }
 
 // A resource is a tracker/pool PLUS abstract `roles` it can fill and an optional
@@ -180,8 +209,12 @@ export interface ResourceDef {
   perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
   roles?: string[];         // abstract capabilities this resource fills
-  effect?: ResourceEffect;  // the default (unnamed) spend effect
-  effects?: Record<string, ResourceEffect>; // named context effects (cast, resist, fuel, …)
+  // "Specifically replace any other resource": this resource takes over the
+  // named ones - they are hidden from the character and their names resolve
+  // here. Resource-level identity, not a spend effect.
+  replaces?: string[];
+  effect?: EffectSpec;      // the default (unnamed) spend effect
+  effects?: Record<string, EffectSpec>; // named context effects (cast, heal, fuel, …)
 }
 /** @deprecated Renamed to ResourceDef. */
 export type PoolDef = ResourceDef;
@@ -189,8 +222,25 @@ export type PoolDef = ResourceDef;
 // A resource's spend effect: a named context effect if `name` is given, else the
 // default. Named effects let one resource behave differently by situation (a
 // Mage's Resolve "cast" bundle vs. its plain difficulty drop).
-export function resourceEffect(def: ResourceDef, name?: string): ResourceEffect | undefined {
+export function resourceEffect(def: ResourceDef, name?: string): EffectSpec | undefined {
   return name ? def.effects?.[StringUtil.normalize(name)] : def.effect;
+}
+
+// Compact one-liner for [[resources]] listings and spend notes: the label plus
+// any non-default cost/duration/limit dimensions.
+export function describeEffect(spec: EffectSpec): string {
+  const bits: string[] = [spec.label];
+  const c = spec.cost;
+  if (c && ((c.units ?? 1) !== 1 || (c.buys ?? 1) !== 1 || c.reducedBy)) {
+    bits.push(`cost ${c.units ?? 1} for ${c.buys ?? 1}${c.reducedBy ? `, roll ${c.reducedBy.pool} to reduce` : ""}`);
+  }
+  if (spec.duration && spec.duration.kind !== "instant") {
+    const d = spec.duration;
+    bits.push(`lasts ${d.kind === "until" ? `until ${d.until}` : `${d.n ?? 1} ${d.unit ?? d.kind}`}`);
+  }
+  if (spec.limits?.uses) bits.push(`${spec.limits.uses.n}/${spec.limits.uses.per}`);
+  if (spec.limits?.cooldown) bits.push(`cooldown ${spec.limits.cooldown.n} ${spec.limits.cooldown.unit}`);
+  return bits.join("; ");
 }
 
 // Reusable builders so shared roles/effects are configured once.
@@ -198,19 +248,26 @@ export function willpowerResource(start: number): ResourceDef {
   return {
     name: "willpower", kind: "tracker", start, startMin: 1, startMax: 10, max: 10,
     roles: ["willpower"],
-    effect: { label: "Willpower: +1 automatic success", autoSuccesses: 1 },
+    effect: { label: "Willpower: +1 automatic success", apply: [{ op: "successes", amount: 1 }] },
     // Willpower is also static spell fuel (Sorcerers, some Thaumaturgy): a
-    // mandatory cost with no dice bonus - `spend=willpower:fuel!`.
-    effects: { fuel: { label: "Willpower spent as static spell fuel", cost: 1 } },
+    // mandatory pure cost with no dice bonus - `spend=willpower:fuel!`.
+    effects: { fuel: { label: "Willpower spent as static spell fuel", apply: [], cost: { units: 1 } } },
   };
 }
 export function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "resolve", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10,
     roles: ["resolve", "magic-fuel"],
-    effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
-    // The whole deal when a mage channels Resolve into a spell.
-    effects: { cast: { label: "Resolve fuels the spell: +1 success, 8-again, -2 difficulty", autoSuccesses: 1, nAgain: 8, difficultyMod: -2 } },
+    effect: { label: "Resolve: -2 difficulty", apply: [{ op: "difficulty", amount: -2 }] },
+    // The whole deal when a mage channels Resolve into a spell (limited per
+    // scene as a usage-ledger demo; the Storyteller enforces the reset).
+    effects: {
+      cast: {
+        label: "Resolve fuels the spell: +1 success, 8-again, -2 difficulty",
+        apply: [{ op: "successes", amount: 1 }, { op: "nagain", amount: 8 }, { op: "difficulty", amount: -2 }],
+        limits: { uses: { n: 3, per: "scene" } },
+      },
+    },
     ...over,
   };
 }
@@ -219,8 +276,15 @@ export function bloodResource(over: Partial<ResourceDef> = {}): ResourceDef {
     name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1,
     roles: ["blood"],
     effects: {
-      heal: { label: "Blood knits the body: heal 1 bashing/lethal per point", heal: { severities: ["bashing", "lethal"], amount: 1 } },
-      boost: { label: "Blood surges a Physical Attribute: +1 per point", boost: { categories: ["physical"], perPoint: 1 } },
+      heal: {
+        label: "Blood knits the body: heal 1 bashing/lethal per point",
+        apply: [{ op: "heal", target: "bashing,lethal", amount: 1 }],
+      },
+      boost: {
+        label: "Blood surges a Physical Attribute: +1 per point",
+        apply: [{ op: "increase", target: "physical", amount: 1 }],
+        duration: { kind: "st", n: 1, unit: "scene" },
+      },
     },
     ...over,
   };
@@ -294,7 +358,7 @@ export const TEMPLATE_MAGE = new TemplateConfig(
   [
     willpowerResource(5),
     { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"],
-      effect: { label: "Quintessence: -1 casting difficulty per point", difficultyMod: -1 } },
+      effect: { label: "Quintessence: -1 casting difficulty per point", apply: [{ op: "difficulty", amount: -1 }] } },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues

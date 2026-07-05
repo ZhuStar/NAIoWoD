@@ -1458,9 +1458,9 @@ describe("resources: model", () => {
   });
 
   test("Willpower and Resolve carry their configured effects/roles", () => {
-    expect(resourcesForTemplates(["mortal"])[0].effect?.autoSuccesses).toBe(1);
+    expect(resourcesForTemplates(["mortal"])[0].effect?.apply).toEqual([{ op: "successes", amount: 1 }]);
     const resolve = resourcesForTemplates(["demon"]).find(r => r.name === "resolve")!;
-    expect(resolve.effect?.difficultyMod).toBe(-2);
+    expect(resolve.effect?.apply).toEqual([{ op: "difficulty", amount: -2 }]);
     expect(resolve.roles).toContain("resolve");
   });
 });
@@ -1534,11 +1534,12 @@ describe("resources v2: named effects, nAgain, mandatory costs", () => {
 
   test("resourceEffect picks a named context effect or the default", () => {
     const resolve = resourcesForTemplates(["demon"]).find(r => r.name === "resolve")!;
-    expect(resourceEffect(resolve)!.difficultyMod).toBe(-2);   // default
+    expect(resourceEffect(resolve)!.apply[0]).toEqual({ op: "difficulty", amount: -2 }); // default
     const cast = resourceEffect(resolve, "cast")!;
-    expect(cast.autoSuccesses).toBe(1);
-    expect(cast.nAgain).toBe(8);
-    expect(cast.difficultyMod).toBe(-2);
+    const ops = Object.fromEntries(cast.apply.map(o => [o.op, o.amount]));
+    expect(ops["successes"]).toBe(1);
+    expect(ops["nagain"]).toBe(8);
+    expect(ops["difficulty"]).toBe(-2);
     expect(resourceEffect(resolve, "nope")).toBeUndefined();
   });
 
@@ -1617,16 +1618,26 @@ describe("live health (CharacterHealth)", () => {
 
 describe("attribute boosts (CharacterBoosts)", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
-  const physOnly = { categories: ["physical"], perPoint: 1 };
 
-  test("validates category, caps, and clears", async () => {
+  test("resolves increase targets against constraints", async () => {
     const c = await CharacterStore.newPotential("Surger", ["vampire"]);
-    expect(CharacterBoosts.validateTarget("charisma", physOnly)).toContain("not a boostable");
-    expect(CharacterBoosts.validateTarget("strength", physOnly)).toBeNull();
-    const r = await CharacterBoosts.add(c, "strength", 2, { ...physOnly, cap: 3 });
-    expect(r.ok && r.total === 2).toBe(true);
-    const r2 = await CharacterBoosts.add(c, "strength", 5, { ...physOnly, cap: 3 });
-    expect(r2.ok && r2.added === 1).toBe(true);   // capped at +3 total
+    // group constraint: needs a pick, and the pick must fall inside it
+    expect(CharacterBoosts.resolveIncreaseTarget(c, "physical", undefined)).toHaveProperty("need");
+    expect(CharacterBoosts.resolveIncreaseTarget(c, "physical", "charisma")).toHaveProperty("error");
+    expect(CharacterBoosts.resolveIncreaseTarget(c, "physical", "strength")).toEqual({ trait: "strength" });
+    // bucket constraint: picks within the record's abilities
+    expect(CharacterBoosts.resolveIncreaseTarget(c, "abilities", "brawl")).toEqual({ trait: "brawl" });
+    expect(CharacterBoosts.resolveIncreaseTarget(c, "abilities", "strength")).toHaveProperty("error");
+    // a specific-trait constraint needs no argument
+    expect(CharacterBoosts.resolveIncreaseTarget(c, "brawl", undefined)).toEqual({ trait: "brawl" });
+  });
+
+  test("caps bound the TOTAL (record dots + boost) and clear works", async () => {
+    const c = await CharacterStore.newPotential("Surger", ["vampire"]); // Strength dots = 1
+    const r = await CharacterBoosts.add(c, "strength", 2, 4);
+    expect(r.added).toBe(2);                       // 1 + 2 = 3, under the cap of 4
+    const r2 = await CharacterBoosts.add(c, "strength", 5, 4);
+    expect(r2.added).toBe(1);                      // only 1 more fits under 4 total
     await CharacterBoosts.clear(c);
     expect(await CharacterBoosts.all(c)).toEqual({});
   });
@@ -1781,7 +1792,7 @@ describe("[[configure-resources]] wizard (text medium)", () => {
     const wp = ResourceOverrides.current().willpower;
     expect(wp.start).toBe(5);
     expect(wp.max).toBe(8);
-    expect(wp.effect!.autoSuccesses).toBe(2);
+    expect(wp.effect!.apply[0]).toEqual({ op: "successes", amount: 2 });
     expect(await CommandRouter.route("resources")).toContain("willpower 0/8"); // record's chosen start (0) still wins; max is patched
     // The wizard released plain input.
     expect(await processAdventureInput("just walking")).toBeUndefined();
@@ -1818,5 +1829,104 @@ describe("[[configure-resources]] wizard (text medium)", () => {
     await CommandRouter.route("configure-resources");
     expect(await CommandRouter.route("configure-resources")).toContain("already running");
     await CommandRouter.route("cancel-wizard");
+  });
+});
+
+describe("effect grammar v3 (open ops, costs, limits, ledger)", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset();
+    await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Odo" templates=mortal'); // Wits 1, Stamina 1, Brawl 0
+    // A custom house-ruled resource exercising one grammar dimension per effect.
+    await ResourceOverrides.save({
+      mana: {
+        kind: "pool", start: 10, max: 20,
+        effects: {
+          cheap:   { label: "Cheap trick", apply: [{ op: "dice", amount: 1 }], cost: { units: 3, reducedBy: { pool: "wits+2", perSuccess: 1 } } },
+          bulk:    { label: "Bulk buy", apply: [{ op: "dice", amount: 1 }], cost: { units: 1, buys: 3 } },
+          capped:  { label: "Capped", apply: [{ op: "dice", amount: 1 }], limits: { maxPerUse: 2 } },
+          mend:    { label: "Mend", apply: [{ op: "heal", target: "all", fillToCap: true }] },
+          empower: { label: "Empower Brawl", apply: [{ op: "increase", target: "brawl", fillToCap: true, cap: "stamina+2" }] },
+          ward:    { label: "Ward of Clarity", apply: [{ op: "suspend", target: "majesty" }], limits: { uses: { n: 2, per: "scene" } } },
+          precise: { label: "Precise", apply: [{ op: "difficulty", amount: -1, target: "melee" }] },
+        },
+      },
+    });
+  });
+
+  test("a cost-reduction roll cuts the price (Iron Will style)", async () => {
+    // Reduction roll first (wits+2 = 3 dice: 2 net), then the main roll (str 1 + 1 bonus die).
+    const r = await CommandRouter.route("roll strength spend=mana:cheap", { rng: seqRng([6, 6, 2, 6, 6]) });
+    expect(r).toContain("wits+2 roll offsets 2 cost");
+    expect(r).toContain("spent 1 mana (cheap)");   // 3 - 2
+    expect(r).toContain("2 successes");
+    expect(await CommandRouter.route("resources")).toContain("mana 9/20");
+  });
+
+  test("`buys` prices one resource unit for several effect units", async () => {
+    const r = await CommandRouter.route("roll strength spend=mana:bulk", { rng: seqRng([6, 6, 6, 6]) });
+    expect(r).toContain("spent 1 mana (bulk)");
+    expect(r).toContain("4 successes");            // 1 die + 3 bonus dice, all hits
+  });
+
+  test("maxPerUse clamps stacked applications", async () => {
+    const r = await CommandRouter.route("roll strength spend=mana:capped spend-amount=5", { rng: seqRng([6, 6, 6]) });
+    expect(r).toContain("capped at 2 per use");
+    expect(r).toContain("spent 2 mana (capped)");
+    expect(r).toContain("3 successes");            // 1 die + 2 bonus dice
+  });
+
+  test('heal "all" with fillToCap mends everything in one application', async () => {
+    await CommandRouter.route("damage lethal 2");
+    await CommandRouter.route("damage aggravated 1");
+    const r = await CommandRouter.route("spend mana:mend");
+    expect(r).toContain("healing 3 boxes");
+    expect(r).toContain("0B/0L/0A");
+    expect(r).toContain("mana now 9/20");
+  });
+
+  test("fillToCap increase honors a pool-expression cap", async () => {
+    // cap = stamina+2 = 3; Brawl dots 0 -> boost fills to +3.
+    const r = await CommandRouter.route("spend mana:empower");
+    expect(r).toContain("Brawl +3");
+    const roll = await CommandRouter.route("roll brawl", { rng: seqRng([6, 6, 6]) });
+    expect(roll).toContain("3 successes");
+  });
+
+  test("an unknown op is preserved, noted, and counted in the ledger", async () => {
+    const r1 = await CommandRouter.route("spend mana:ward");
+    expect(r1).toContain("suspend majesty: recorded - Storyteller adjudicates");
+    expect(r1).toContain("use 1/2 per scene");
+    await CommandRouter.route("spend mana:ward");
+    const r3 = await CommandRouter.route("spend mana:ward");
+    expect(r3).toContain("use 3/2 per scene - OVER LIMIT");
+    expect(await CommandRouter.route("resources")).toContain("ward (used 3)");
+    expect(await CommandRouter.route("reset-uses")).toContain("counters reset");
+    expect(await CommandRouter.route("resources")).not.toContain("(used");
+  });
+
+  test("an action-tag roll op applies only when the roll carries the tag", async () => {
+    const miss = await CommandRouter.route("roll strength spend=mana:precise", { rng: seqRng([6]) });
+    expect(miss).toContain('difficulty needs tag "melee" - skipped');
+    expect(miss).toContain("vs diff 6");
+    const hit = await CommandRouter.route("roll strength tags=melee spend=mana:precise", { rng: seqRng([6]) });
+    expect(hit).toContain("vs diff 5");
+  });
+
+  test("a resource can replace another outright", async () => {
+    await ResourceOverrides.save({
+      focus: {
+        kind: "tracker", start: 4, max: 10, replaces: ["willpower"],
+        effect: { label: "Focus: +1 automatic success", apply: [{ op: "successes", amount: 1 }] },
+      },
+    });
+    const odo = (await CharacterStore.getCurrent())!;
+    expect(CharacterResources.defsFor(odo).map(d => d.name)).not.toContain("willpower"); // hidden
+    expect(CharacterResources.resolveDef(odo, "willpower")!.name).toBe("focus");         // redirected
+    const list = await CommandRouter.route("resources");
+    expect(list).toContain("replaces: willpower");
+    const r = await CommandRouter.route("roll strength spend=willpower", { rng: seqRng([2]) });
+    expect(r).toContain("spent 1 focus");
+    expect(r).toContain("1 success"); // the auto-success came from Focus
   });
 });

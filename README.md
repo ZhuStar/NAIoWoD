@@ -375,46 +375,48 @@ Some actions take several rolls to finish — you accumulate successes toward a
 
 Resources (Willpower, Blood, Resolve, Quintessence, …) are **abstract and
 configurable** (`ResourceDef` in `src/rules.ts`): each carries optional **roles**
-(abstract capabilities like `resolve` or `magic-fuel`) and one or more **spend
-effects** — each a configurable bundle of `−difficulty` / `+dice` /
-`+auto-success` / `n-again`. A character's resources are the **union of its
-templates'**, so hybrids compose them — and because a resource resolves *by
-role*, one resource can do another's job (give Quintessence the `resolve` role
-and `spend=resolve` draws from Quintessence).
+(abstract capabilities like `resolve` or `magic-fuel`), can **replace** other
+resources outright (`replaces: ["willpower"]` hides Willpower and answers to its
+name), and defines spend effects in **one declarative grammar**. A character's
+resources are the **union of its templates'**, so hybrids compose them — and
+because a resource resolves *by role*, one resource can do another's job.
 
-```
-[[resources]]
-[[roll strength+brawl spend=willpower]]        # -1 Willpower, +1 automatic success
-[[roll stealth difficulty=8 spend=resolve:cast]]  # named bundle: +1 success, 8-again, -2 diff
-[[roll intelligence spend=willpower:fuel!]]    # mandatory pure cost: pay or the roll is refused
-[[spend blood 2 reason="heal"]]
-[[gain willpower]]
+**The effect grammar** (`EffectSpec`): every effect is the same sentence —
+*spend [cost] → apply [op] to [target] at [amount] per unit, lasting [duration],
+at most [limits]*. `op` and `target` are **open vocabularies**: words the engine
+doesn't know yet (`"arcana"`, `"seduction"`, `"majesty"`) are stored, shown, and
+Storyteller-adjudicated until their interpreter lands — nothing is hardcoded.
+
+```jsonc
+{ "label": "Resolve fuels the spell: +1 success, 8-again, -2 difficulty",
+  "apply": [ { "op": "successes", "amount": 1 },
+             { "op": "nagain", "amount": 8 },
+             { "op": "difficulty", "amount": -2 } ],
+  "cost": { "units": 1, "reducedBy": { "pool": "willpower", "perSuccess": 1 } },
+  "duration": { "kind": "st", "n": 1, "unit": "scene" },
+  "limits": { "maxPerUse": 1, "uses": { "n": 3, "per": "scene" } } }
 ```
 
-- **`spend=<resource|role>[:effect][!]`** on any `roll` / `roll-for` deducts the
-  resource and folds its effect into the roll. A **named `:effect`** picks one of
-  the resource's context bundles (e.g. `resolve:cast` = success + 8-again +
-  −difficulty in one); the default effect is used without one. A trailing **`!`**
-  makes it **mandatory** — if the character can't pay, the action is refused and
-  nothing is rolled (Willpower/Resolve as *required spell fuel*). `spend-amount=N`
-  stacks the effect (capped by its `maxPerRoll`). A pure-cost effect (no
-  modifiers) just pays.
-- **`spend <resource[:effect]> [target] [amount]`** / **`gain <resource> [amount]`**
-  adjust a resource outside a roll (clamped to 0…max); **`resources`** shows the
-  sheet (current/max, roles, and named `spend:` effects).
-- Effects can also **heal** and **boost Attributes** — standalone spends, not
-  roll modifiers (using one inside a roll is refused with a pointer):
-  - `[[spend blood:heal 2]]` — heal effect: N boxes per point, **worst allowed
-    severity first** (Blood ships healing bashing/lethal).
-  - `[[spend blood:boost strength 2]]` — boost effect: raise an Attribute per
-    point; **which categories are boostable is data** (Blood ships Physical-only,
-    per the classic rule). Boosted values apply to every roll until
-    `[[clear-boosts]]` (duration is Storyteller-adjudicated until the turn
-    system lands).
-- **Live health**: `[[damage <severity> <n>]]` marks a real health track for the
-  current character, `[[health]]` shows it (level, penalty, counts, boosts), and
-  the **wound penalty automatically reduces roll dice pools** (shown in the roll
-  note). Healing effects act on this track.
+- **Ops with interpreters today**: `difficulty` / `dice` / `successes` /
+  `nagain` (roll modifiers — an optional `target` names an **action tag** the
+  roll must carry, e.g. only `tags=melee` rolls); `increase` (raise a trait via
+  the boost layer — `target` is a constraint: a group like `physical`, a bucket
+  like `abilities`, or a specific trait; supports `fillToCap` and caps as **pool
+  expressions** like `"stamina+3"`); `heal` (`target` = `"bashing,lethal"` or
+  `"all"`, worst first). Anything else is preserved and noted for the ST.
+- **Costs**: `units` per application, `buys` (one resource unit → several effect
+  units), and `reducedBy` — a roll whose net successes cut the price, possibly
+  to zero (Iron Will-style).
+- **Durations & limits**: `maxPerUse` is enforced now; `uses` per scene/turn and
+  `cooldown` are **counted in a real usage ledger** and shown (`used 2/3 per
+  scene — ST-enforced`); `[[reset-uses]]` clears the counters at a scene change.
+  The future turn system inherits this data and starts enforcing it.
+- **`spend=<resource|role>[:effect][!]`** on any `roll`/`roll-for` pays and folds
+  roll-op effects in; trailing `!` = **mandatory** (can't pay → nothing rolls —
+  spell fuel). `[[spend <resource[:effect]> [target] [n]]]` runs standalone
+  effects (heal, increase, advisory ops); `gain`, `resources`, `damage`,
+  `health`, `clear-boosts` as before. The wound penalty still auto-applies to
+  rolls, and boosted traits resolve higher until cleared.
 - Current values persist per character (story storage) and default to the
   template start until changed — nothing needs allocating to start playing.
 

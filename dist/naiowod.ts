@@ -1510,20 +1510,49 @@ type PoolKind = "tracker" | "pool";
 // What spending `cost` points of a resource grants to a roll. Maps onto the
 // RollModifier fields in rolls.ts (difficulty/dice/auto-successes), so a resource
 // effect and a tag modifier flow through the same pipeline.
-interface ResourceEffect {
+// --- THE EFFECT GRAMMAR ---
+// One declarative sentence: spend [cost] -> apply [op] to [target] at [amount]
+// per unit, lasting [duration], at most [limits]. `op` and `target` are OPEN
+// vocabularies: a word the engine doesn't know yet ("arcana", "seduction",
+// "majesty") is stored, shown, and adjudicated by the Storyteller until its
+// interpreter lands - nothing is hardcoded to today's mechanics.
+//
+// Ops with interpreters today: "difficulty" | "dice" | "successes" | "nagain"
+// (roll modifiers; an optional `target` names an action tag the roll must
+// carry), "increase" (raise a trait via the boost layer; `target` is a
+// constraint - an attribute group, a record bucket, or a specific trait),
+// "heal" (`target` = comma-separated severities or "all").
+interface EffectOp {
+  op: string;
+  target?: string;
+  amount?: number;          // magnitude per effect unit (default 1)
+  fillToCap?: boolean;      // one application raises/heals to the cap
+  cap?: number | string;    // literal, or a pool expression ("stamina+3") on the character
+}
+interface EffectCost {
+  units?: number;           // resource units per application (default 1)
+  buys?: number;            // effect units per application (default 1)
+  // A roll that reduces the units paid (possibly to zero) - e.g. Iron Will.
+  reducedBy?: { pool: string; difficulty?: number; perSuccess?: number };
+}
+interface EffectDuration {
+  kind: "instant" | "real" | "st" | "until";
+  n?: number;               // count of `unit` ("real": minutes/hours; "st": turns/scenes)
+  unit?: string;
+  until?: string;           // kind "until": free-form condition
+}
+interface EffectLimits {
+  maxPerUse?: number;                  // applications per command (enforced)
+  uses?: { n: number; per: string };   // tracked in the ledger; ST-enforced for now
+  cooldown?: { n: number; unit: string }; // stored; ST-enforced for now
+}
+interface EffectSpec {
   label: string;
-  cost?: number;            // points spent per application (default 1)
-  difficultyMod?: number;   // e.g. Resolve -2 (magnitude is configurable data)
-  diceMod?: number;
-  autoSuccesses?: number;   // e.g. Willpower +1
-  nAgain?: number;          // tighten n-again (e.g. 8 for 8-again)
-  maxPerRoll?: number;      // stacking cap per roll (default 1)
-  // Standalone (non-roll) effects, used via [[spend resource:effect ...]]:
-  // heal N boxes per point spent, worst allowed severity first.
-  heal?: { severities: SeverityName[]; amount?: number };
-  // raise an Attribute per point spent; which categories are boostable is
-  // data (Physical only in the current games, but configurable).
-  boost?: { categories?: string[]; perPoint?: number; cap?: number };
+  apply: EffectOp[];        // [] = a pure cost (static spell fuel)
+  cost?: EffectCost;
+  duration?: EffectDuration;
+  limits?: EffectLimits;
+  targetMustBe?: string[];  // for effects on others; stored until targeting lands
 }
 
 // A resource is a tracker/pool PLUS abstract `roles` it can fill and an optional
@@ -1540,8 +1569,12 @@ interface ResourceDef {
   perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
   roles?: string[];         // abstract capabilities this resource fills
-  effect?: ResourceEffect;  // the default (unnamed) spend effect
-  effects?: Record<string, ResourceEffect>; // named context effects (cast, resist, fuel, …)
+  // "Specifically replace any other resource": this resource takes over the
+  // named ones - they are hidden from the character and their names resolve
+  // here. Resource-level identity, not a spend effect.
+  replaces?: string[];
+  effect?: EffectSpec;      // the default (unnamed) spend effect
+  effects?: Record<string, EffectSpec>; // named context effects (cast, heal, fuel, …)
 }
 /** @deprecated Renamed to ResourceDef. */
 type PoolDef = ResourceDef;
@@ -1549,8 +1582,25 @@ type PoolDef = ResourceDef;
 // A resource's spend effect: a named context effect if `name` is given, else the
 // default. Named effects let one resource behave differently by situation (a
 // Mage's Resolve "cast" bundle vs. its plain difficulty drop).
-function resourceEffect(def: ResourceDef, name?: string): ResourceEffect | undefined {
+function resourceEffect(def: ResourceDef, name?: string): EffectSpec | undefined {
   return name ? def.effects?.[StringUtil.normalize(name)] : def.effect;
+}
+
+// Compact one-liner for [[resources]] listings and spend notes: the label plus
+// any non-default cost/duration/limit dimensions.
+function describeEffect(spec: EffectSpec): string {
+  const bits: string[] = [spec.label];
+  const c = spec.cost;
+  if (c && ((c.units ?? 1) !== 1 || (c.buys ?? 1) !== 1 || c.reducedBy)) {
+    bits.push(`cost ${c.units ?? 1} for ${c.buys ?? 1}${c.reducedBy ? `, roll ${c.reducedBy.pool} to reduce` : ""}`);
+  }
+  if (spec.duration && spec.duration.kind !== "instant") {
+    const d = spec.duration;
+    bits.push(`lasts ${d.kind === "until" ? `until ${d.until}` : `${d.n ?? 1} ${d.unit ?? d.kind}`}`);
+  }
+  if (spec.limits?.uses) bits.push(`${spec.limits.uses.n}/${spec.limits.uses.per}`);
+  if (spec.limits?.cooldown) bits.push(`cooldown ${spec.limits.cooldown.n} ${spec.limits.cooldown.unit}`);
+  return bits.join("; ");
 }
 
 // Reusable builders so shared roles/effects are configured once.
@@ -1558,19 +1608,26 @@ function willpowerResource(start: number): ResourceDef {
   return {
     name: "willpower", kind: "tracker", start, startMin: 1, startMax: 10, max: 10,
     roles: ["willpower"],
-    effect: { label: "Willpower: +1 automatic success", autoSuccesses: 1 },
+    effect: { label: "Willpower: +1 automatic success", apply: [{ op: "successes", amount: 1 }] },
     // Willpower is also static spell fuel (Sorcerers, some Thaumaturgy): a
-    // mandatory cost with no dice bonus - `spend=willpower:fuel!`.
-    effects: { fuel: { label: "Willpower spent as static spell fuel", cost: 1 } },
+    // mandatory pure cost with no dice bonus - `spend=willpower:fuel!`.
+    effects: { fuel: { label: "Willpower spent as static spell fuel", apply: [], cost: { units: 1 } } },
   };
 }
 function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "resolve", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10,
     roles: ["resolve", "magic-fuel"],
-    effect: { label: "Resolve: -2 difficulty", difficultyMod: -2 },
-    // The whole deal when a mage channels Resolve into a spell.
-    effects: { cast: { label: "Resolve fuels the spell: +1 success, 8-again, -2 difficulty", autoSuccesses: 1, nAgain: 8, difficultyMod: -2 } },
+    effect: { label: "Resolve: -2 difficulty", apply: [{ op: "difficulty", amount: -2 }] },
+    // The whole deal when a mage channels Resolve into a spell (limited per
+    // scene as a usage-ledger demo; the Storyteller enforces the reset).
+    effects: {
+      cast: {
+        label: "Resolve fuels the spell: +1 success, 8-again, -2 difficulty",
+        apply: [{ op: "successes", amount: 1 }, { op: "nagain", amount: 8 }, { op: "difficulty", amount: -2 }],
+        limits: { uses: { n: 3, per: "scene" } },
+      },
+    },
     ...over,
   };
 }
@@ -1579,8 +1636,15 @@ function bloodResource(over: Partial<ResourceDef> = {}): ResourceDef {
     name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1,
     roles: ["blood"],
     effects: {
-      heal: { label: "Blood knits the body: heal 1 bashing/lethal per point", heal: { severities: ["bashing", "lethal"], amount: 1 } },
-      boost: { label: "Blood surges a Physical Attribute: +1 per point", boost: { categories: ["physical"], perPoint: 1 } },
+      heal: {
+        label: "Blood knits the body: heal 1 bashing/lethal per point",
+        apply: [{ op: "heal", target: "bashing,lethal", amount: 1 }],
+      },
+      boost: {
+        label: "Blood surges a Physical Attribute: +1 per point",
+        apply: [{ op: "increase", target: "physical", amount: 1 }],
+        duration: { kind: "st", n: 1, unit: "scene" },
+      },
     },
     ...over,
   };
@@ -1654,7 +1718,7 @@ const TEMPLATE_MAGE = new TemplateConfig(
   [
     willpowerResource(5),
     { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"],
-      effect: { label: "Quintessence: -1 casting difficulty per point", difficultyMod: -1 } },
+      effect: { label: "Quintessence: -1 casting difficulty per point", apply: [{ op: "difficulty", amount: -1 }] } },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues
@@ -2929,14 +2993,22 @@ class CharacterResources {
   private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
 
-  static defsFor(char: PlayableCharacter): ResourceDef[] { return resourcesForTemplates(char.templates, ResourceOverrides.current()); }
+  // The character's resources, with replacement applied: a resource whose
+  // `replaces` names others HIDES them (their names then resolve to it).
+  static defsFor(char: PlayableCharacter): ResourceDef[] {
+    const defs = resourcesForTemplates(char.templates, ResourceOverrides.current());
+    const replaced = new Set(defs.flatMap(d => (d.replaces ?? []).map(r => StringUtil.normalize(r))));
+    return defs.filter(d => !replaced.has(StringUtil.normalize(d.name)));
+  }
 
-  // A resource by exact name, else by a role it fills (the "use X as Y" hook).
+  // A resource by exact name, else by a role it fills ("use X as Y"), else as
+  // the replacement for the requested resource.
   static resolveDef(char: PlayableCharacter, nameOrRole: string): ResourceDef | undefined {
     const key = StringUtil.normalize(nameOrRole);
     const defs = CharacterResources.defsFor(char);
     return defs.find(d => StringUtil.normalize(d.name) === key)
-      ?? defs.find(d => (d.roles ?? []).some(r => StringUtil.normalize(r) === key));
+      ?? defs.find(d => (d.roles ?? []).some(r => StringUtil.normalize(r) === key))
+      ?? defs.find(d => (d.replaces ?? []).some(r => StringUtil.normalize(r) === key));
   }
 
   private static _startOf(char: PlayableCharacter, def: ResourceDef): number {
@@ -3061,33 +3133,81 @@ class CharacterBoosts {
     return ((await CharacterBoosts._storage.get(CharacterBoosts._key(char.name))) as Record<string, number> | undefined) ?? {};
   }
 
-  // The trait must be an Attribute in one of the boost config's allowed
-  // categories. Returns the reason it isn't, or null when it's fine.
-  static validateTarget(trait: string, boost: NonNullable<ResourceEffect["boost"]>): string | null {
-    const key = StringUtil.normalize(trait);
-    const cats = (boost.categories ?? ["physical"]).map(c => StringUtil.normalize(c));
-    const allowedNames = cats.flatMap(c => (ATTRIBUTES as Record<string, readonly string[]>)[c] ?? [])
-      .map(a => StringUtil.normalize(a));
-    return allowedNames.includes(key) ? null : `${trait} is not a boostable Attribute here (allowed: ${cats.join("/")})`;
+  // Resolve which trait an "increase" op raises. The op's `target` is a
+  // CONSTRAINT: an attribute group ("physical"), a whole record bucket
+  // ("attributes", "abilities", "disciplines", ...), or a specific trait. A
+  // group/bucket constraint needs the command's target argument to pick within
+  // it; a specific trait needs none.
+  static resolveIncreaseTarget(char: PlayableCharacter, constraint: string | undefined, targetArg: string | undefined):
+    { trait: string } | { need: string } | { error: string } {
+    const c = StringUtil.normalize(constraint ?? "attributes");
+    const groups: Record<string, readonly string[]> = {
+      physical: ATTRIBUTES.physical, social: ATTRIBUTES.social, mental: ATTRIBUTES.mental,
+      attributes: ALL_ATTRIBUTES,
+    };
+    let allowed: string[] | undefined;
+    if (c in groups) allowed = groups[c].map(a => StringUtil.normalize(a));
+    else {
+      const bucket = c === "abilities" ? char.abilities : c === "backgrounds" ? char.backgrounds
+        : c === "disciplines" ? char.disciplines : c === "traits" ? char.traits : undefined;
+      if (bucket) allowed = Object.keys(bucket);
+    }
+    if (!allowed) return { trait: c };   // the constraint IS the trait
+    if (!targetArg) return { need: `pick one (${c})` };
+    const t = StringUtil.normalize(targetArg);
+    return allowed.includes(t) ? { trait: t } : { error: `${targetArg} is not a boostable trait here (allowed: ${c})` };
   }
 
-  // Add a validated boost; the total bonus respects the cap.
-  static async add(char: PlayableCharacter, trait: string, amount: number, boost: NonNullable<ResourceEffect["boost"]>): Promise<{ ok: true; added: number; total: number } | { ok: false; error: string }> {
+  // Raise a trait's boost so the character's TOTAL (record dots + boost) never
+  // exceeds `cap`; returns how much was actually added.
+  static async add(char: PlayableCharacter, trait: string, amount: number, cap = Infinity): Promise<{ added: number; total: number }> {
     const key = StringUtil.normalize(trait);
-    const invalid = CharacterBoosts.validateTarget(trait, boost);
-    if (invalid) return { ok: false, error: invalid };
     const map = await CharacterBoosts.all(char);
     const cur = map[key] ?? 0;
-    const cap = boost.cap ?? Infinity;
-    const added = Math.max(0, Math.min(amount, cap - cur));
-    if (added === 0) return { ok: false, error: `${trait} is already at its boost cap` };
-    map[key] = cur + added;
-    await CharacterBoosts._storage.set(CharacterBoosts._key(char.name), map);
-    return { ok: true, added, total: map[key] };
+    const base = resolveTraitFromRecord(char, key);
+    const added = Math.max(0, Math.min(amount, cap - (base + cur)));
+    if (added > 0) {
+      map[key] = cur + added;
+      await CharacterBoosts._storage.set(CharacterBoosts._key(char.name), map);
+    }
+    return { added, total: cur + added };
   }
 
   static async clear(char: PlayableCharacter): Promise<void> {
     await CharacterBoosts._storage.delete(CharacterBoosts._key(char.name));
+  }
+}
+
+// =============================================================================
+// EFFECT USES - the usage ledger for limited effects
+// -----------------------------------------------------------------------------
+// Counts every application of a limited effect (uses:<char> -> count per
+// resource:effect). Limits like "3/scene" are Storyteller-enforced until the
+// turn system lands, but the counting is real - [[reset-uses]] clears it at a
+// scene/turn change, and the future turn system inherits this data.
+// =============================================================================
+class EffectUses {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `uses:${StringUtil.normalize(name)}`; }
+  private static _slot(resource: string, effectName: string): string {
+    return effectName ? `${StringUtil.normalize(resource)}:${StringUtil.normalize(effectName)}` : StringUtil.normalize(resource);
+  }
+
+  static async counts(char: PlayableCharacter): Promise<Record<string, number>> {
+    return ((await EffectUses._storage.get(EffectUses._key(char.name))) as Record<string, number> | undefined) ?? {};
+  }
+  static async record(char: PlayableCharacter, resource: string, effectName: string, n = 1): Promise<number> {
+    const map = await EffectUses.counts(char);
+    const slot = EffectUses._slot(resource, effectName);
+    map[slot] = (map[slot] ?? 0) + n;
+    await EffectUses._storage.set(EffectUses._key(char.name), map);
+    return map[slot];
+  }
+  static async count(char: PlayableCharacter, resource: string, effectName: string): Promise<number> {
+    return (await EffectUses.counts(char))[EffectUses._slot(resource, effectName)] ?? 0;
+  }
+  static async resetAll(char: PlayableCharacter): Promise<void> {
+    await EffectUses._storage.delete(EffectUses._key(char.name));
   }
 }
 
@@ -3121,6 +3241,11 @@ interface RwState {
   total: number;
 }
 const rwState = (s: RwState): WizardStateData => s as unknown as WizardStateData;
+
+// The wizard tunes the first numeric roll op of a default effect (its "knob").
+const TUNABLE_OPS = ["difficulty", "dice", "successes"];
+const knobIndex = (e?: EffectSpec): number =>
+  e ? e.apply.findIndex(o => TUNABLE_OPS.includes(o.op.toLowerCase())) : -1;
 
 const rw = {
   def(state: RwState, name: string): ResourceDef {
@@ -3157,11 +3282,11 @@ const rw = {
   },
   effectPrompt(state: RwState): WizardPrompt {
     const e = rw.def(state, state.current).effect!;
-    const knob = e.difficultyMod !== undefined ? "difficulty modifier" : "automatic successes";
-    const cur = e.difficultyMod ?? e.autoSuccesses ?? 0;
+    const op = e.apply[knobIndex(e)];
+    const cur = op.amount ?? 1;
     return {
       step: `effect:${state.current}`, title: `"${state.current}" spend effect`,
-      body: `${e.label} - new ${knob} (currently ${cur}).`, kind: "number", default: String(cur),
+      body: `${e.label} - new ${op.op} amount (currently ${cur}).`, kind: "number", default: String(cur),
       progress: { at: state.total - state.queue.length, of: rw.steps(state) },
     };
   },
@@ -3230,15 +3355,16 @@ const RESOURCES_WIZARD: WizardDefinition = {
         const v = parseInt(reply, 10);
         const def = rw.def(state, state.current);
         if (v !== def.max) rw.patch(state, state.current).max = v;
-        const hasKnob = def.effect !== undefined && (def.effect.difficultyMod !== undefined || def.effect.autoSuccesses !== undefined);
-        if (hasKnob) { state.phase = "effect"; return { state: rwState(state), prompt: rw.effectPrompt(state) }; }
+        if (knobIndex(def.effect) >= 0) { state.phase = "effect"; return { state: rwState(state), prompt: rw.effectPrompt(state) }; }
         return rw.advance(state);
       }
       case "effect": {
         const v = parseInt(reply, 10);
         const e = rw.def(state, state.current).effect!;
-        const knob = e.difficultyMod !== undefined ? "difficultyMod" : "autoSuccesses";
-        if (v !== (e.difficultyMod ?? e.autoSuccesses)) rw.patch(state, state.current).effect = { ...e, [knob]: v };
+        const i = knobIndex(e);
+        if (v !== (e.apply[i].amount ?? 1)) {
+          rw.patch(state, state.current).effect = { ...e, apply: e.apply.map((o, j) => j === i ? { ...o, amount: v } : o) };
+        }
         return rw.advance(state);
       }
       case "roles": {
@@ -3480,12 +3606,133 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   return args;
 }
 
+// Ops the roll pipeline executes directly (as the roll's `extra` modifier).
+const ROLL_OPS = new Set(["difficulty", "dice", "successes", "nagain"]);
+const isRollOp = (o: EffectOp): boolean => ROLL_OPS.has(o.op.toLowerCase());
+
+// =============================================================================
+// THE EFFECT INTERPRETER - execute one EffectSpec for a character
+// -----------------------------------------------------------------------------
+// Pays the cost (after any cost-reducing roll), records limited uses in the
+// ledger, then walks `apply`: roll ops accumulate into an `extra` modifier
+// (optionally gated on an action tag the roll must carry); "increase" raises a
+// trait through the boost layer (constraint targets, expression caps, fill-to-
+// cap); "heal" mends the live track; anything else - "suspend", "resist",
+// words that don't exist yet - is preserved and NOTED for the Storyteller to
+// adjudicate until its interpreter lands.
+// =============================================================================
+interface EffectApplication {
+  extra?: Partial<RollModifier>;
+  notes: string[];
+  refuse?: string;        // configuration problem (bad target, missing effect) - always surface
+  insufficient?: string;  // can't pay - caller decides (mandatory refuses, optional just notes)
+}
+
+async function applyEffectSpec(
+  char: PlayableCharacter, def: ResourceDef, effectName: string, spec: EffectSpec,
+  opts: { targetArg?: string; applications?: number; rng?: Rng; rollTags?: string[] } = {}
+): Promise<EffectApplication> {
+  const notes: string[] = [];
+  const resolver = (n: string): number => resolveTraitFromRecord(char, n);
+  const tag = effectName ? ` (${effectName})` : "";
+
+  // Validate increase targets BEFORE any cost is paid - a misconfigured
+  // command must not charge the character.
+  for (const op of spec.apply) {
+    if (op.op.toLowerCase() !== "increase") continue;
+    const res = CharacterBoosts.resolveIncreaseTarget(char, op.target, opts.targetArg);
+    if ("need" in res) return { notes, refuse: `${def.name}${tag} needs a target - ${res.need}` };
+    if ("error" in res) return { notes, refuse: res.error };
+  }
+
+  // Applications, clamped by the per-use limit.
+  let applications = Math.max(1, opts.applications ?? 1);
+  if (spec.limits?.maxPerUse !== undefined && applications > spec.limits.maxPerUse) {
+    applications = Math.max(1, spec.limits.maxPerUse);
+    notes.push(`capped at ${applications} per use`);
+  }
+
+  // Cost, minus the reduction roll (Iron Will and friends) - can reach zero.
+  let units = Math.max(0, (spec.cost?.units ?? 1) * applications);
+  if (spec.cost?.reducedBy && units > 0) {
+    const rb = spec.cost.reducedBy;
+    const exec = executeRoll(makeRollSpec({ pool: rb.pool, difficulty: rb.difficulty }), resolver, { rng: opts.rng });
+    const cut = Math.min(units, Math.max(0, exec.result?.net ?? 0) * (rb.perSuccess ?? 1));
+    if (cut > 0) { units -= cut; notes.push(`${rb.pool} roll offsets ${cut} cost`); }
+  }
+  const have = await CharacterResources.current(char, def);
+  if (units > have) return { notes, insufficient: `not enough ${def.name} (needs ${units})` };
+  if (units > 0) await CharacterResources.spend(char, def.name, units);
+  notes.unshift(`spent ${units} ${def.name}${tag}`);
+  const effectUnits = applications * Math.max(1, spec.cost?.buys ?? 1);
+
+  // Usage ledger for limited effects (ST-enforced until the turn system).
+  if (spec.limits?.uses || spec.limits?.cooldown) {
+    const used = await EffectUses.record(char, def.name, effectName);
+    if (spec.limits.uses) {
+      const { n, per } = spec.limits.uses;
+      notes.push(`use ${used}/${n} per ${per}${used > n ? " - OVER LIMIT" : ""} (ST-enforced; [[reset-uses]] at ${per} change)`);
+    }
+    if (spec.limits.cooldown) notes.push(`cooldown ${spec.limits.cooldown.n} ${spec.limits.cooldown.unit} (ST-enforced)`);
+  }
+
+  // Execute the operations.
+  const extra: Partial<RollModifier> = {};
+  let anyRollOp = false;
+  for (const op of spec.apply) {
+    const kind = op.op.toLowerCase();
+    if (isRollOp(op)) {
+      // An action-tag target gates the op on the roll carrying that tag.
+      if (op.target) {
+        const wanted = StringUtil.normalize(op.target);
+        if (!(opts.rollTags ?? []).includes(wanted)) { notes.push(`${kind} needs tag "${wanted}" - skipped`); continue; }
+      }
+      anyRollOp = true;
+      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + (op.amount ?? 1) * effectUnits;
+      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + (op.amount ?? 1) * effectUnits;
+      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + (op.amount ?? 1) * effectUnits;
+      else if (kind === "nagain") extra.nAgain = Math.min(extra.nAgain ?? 10, op.amount ?? 10);
+    } else if (kind === "increase") {
+      const res = CharacterBoosts.resolveIncreaseTarget(char, op.target, opts.targetArg);
+      if ("need" in res || "error" in res) continue; // pre-validated above; defensive
+      const cap = op.cap === undefined ? (op.fillToCap ? 5 : Infinity)
+        : typeof op.cap === "number" ? op.cap
+        : parsePoolExpression(op.cap, resolver).total;
+      const boosts = await CharacterBoosts.all(char);
+      const base = resolveTraitFromRecord(char, res.trait) + (boosts[res.trait] ?? 0);
+      const want = op.fillToCap ? Math.max(0, cap - base) : (op.amount ?? 1) * effectUnits;
+      const { added, total } = await CharacterBoosts.add(char, res.trait, want, cap);
+      notes.push(added > 0
+        ? `${StringUtil.toTitleCase(res.trait)} +${added} (boost total +${total})`
+        : `${StringUtil.toTitleCase(res.trait)} is already at its cap`);
+    } else if (kind === "heal") {
+      const targets = (op.target ?? "all").toLowerCase() === "all"
+        ? ["bashing", "lethal", "aggravated"]
+        : (op.target ?? "").split(",").map(s => s.trim()).filter(s => s.length > 0);
+      const amount = op.fillToCap ? Number.MAX_SAFE_INTEGER : (op.amount ?? 1) * effectUnits;
+      const { healed, summary } = await CharacterHealth.heal(char, targets, amount);
+      notes.push(`healing ${healed} box${healed === 1 ? "" : "es"}. Health: ${healthLine(summary)}`);
+    } else {
+      // Open vocabulary: preserved, surfaced, adjudicated - not rejected.
+      notes.push(`${kind}${op.target ? ` ${op.target}` : ""}: recorded - Storyteller adjudicates (no interpreter yet)`);
+    }
+  }
+
+  // Non-instant durations are advisory until the turn system exists.
+  if (spec.duration && spec.duration.kind !== "instant") {
+    const d = spec.duration;
+    notes.push(`lasts ${d.kind === "until" ? `until ${d.until}` : `${d.n ?? 1} ${d.unit ?? d.kind}`} (ST-enforced)`);
+  }
+
+  return { extra: anyRollOp ? extra : undefined, notes };
+}
+
 // Read a spend=<resource|role>[:effect][!] request off a command (with optional
-// spend-amount=N stacking), deduct it, and return the effect to fold into the
-// roll. A trailing "!" makes it MANDATORY: if it can't be paid, `refuse` is set
-// and the caller does NOT roll (Willpower/Resolve as required spell fuel). A
-// named :effect selects one of the resource's context bundles (e.g. resolve:cast).
-async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
+// spend-amount=N stacking), pay it, and return the roll modifier. A trailing
+// "!" makes it MANDATORY: if it can't be paid, `refuse` is set and the caller
+// does NOT roll (Willpower/Resolve as required spell fuel). Only roll-op (or
+// pure-cost) effects belong inside a roll; standalone ops point at [[spend]].
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[]): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
   const raw = cmd.named["spend"];
   if (!raw) return { note: "" };
   let token = raw.trim();
@@ -3496,27 +3743,27 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand): Promise<
   if (!def) return mandatory ? { note: "", refuse: `has no resource "${nameOrRole}"` } : { note: `no resource "${nameOrRole}" to spend` };
   const e = resourceEffect(def, effectName || undefined);
   if (effectName && !e) return { note: "", refuse: `${def.name} has no "${effectName}" effect` };
-  if (e && (e.heal || e.boost)) {
-    const kind = e.heal ? "healing" : "boost";
+
+  const applications = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
+
+  if (!e) {
+    // No effect configured: a plain deduction rides along with the roll.
+    const { spent } = await CharacterResources.spend(char, nameOrRole, applications);
+    if (spent === 0) return mandatory ? { note: "", refuse: `not enough ${def.name}` } : { note: `not enough ${def.name} to spend` };
+    return { note: `spent ${spent} ${def.name}` };
+  }
+
+  const standalone = e.apply.find(o => !isRollOp(o));
+  if (standalone) {
+    const kind = standalone.op.toLowerCase() === "heal" ? "healing"
+      : standalone.op.toLowerCase() === "increase" ? "boost" : `"${standalone.op}"`;
     return { note: "", refuse: `${def.name}:${effectName} is a ${kind} effect - use [[spend ${def.name}:${effectName} ...]] outside a roll` };
   }
-  const cost = Math.max(1, e?.cost ?? 1);
-  const want = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
-  const have = await CharacterResources.current(char, def);
-  const applications = Math.min(e?.maxPerRoll ?? want, want, Math.floor(have / cost));
-  if (applications < 1) {
-    return mandatory ? { note: "", refuse: `not enough ${def.name} (needs ${cost})` } : { note: `not enough ${def.name} to spend` };
-  }
-  const { spent } = await CharacterResources.spend(char, nameOrRole, applications * cost);
-  const tag = effectName ? ` (${effectName})` : "";
-  if (!e) return { note: `spent ${spent} ${def.name}${tag}` };
-  const extra: Partial<RollModifier> = {
-    difficultyMod: (e.difficultyMod ?? 0) * applications,
-    diceMod: (e.diceMod ?? 0) * applications,
-    autoSuccesses: (e.autoSuccesses ?? 0) * applications,
-    nAgain: e.nAgain,
-  };
-  return { extra, note: `spent ${spent} ${def.name}${tag}: ${e.label}` };
+
+  const r = await applyEffectSpec(char, def, effectName ?? "", e, { applications, rng: ctx.rng, rollTags });
+  if (r.insufficient) return mandatory ? { note: "", refuse: r.insufficient } : { note: `${r.insufficient} - spent nothing` };
+  if (r.refuse) return { note: "", refuse: r.refuse };
+  return { extra: r.extra, note: `${r.notes.join("; ")}: ${e.label}` };
 }
 
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
@@ -3533,7 +3780,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
-  const spend = await applySpend(char, cmd);
+  const spend = await applySpend(char, cmd, ctx, spec.tags);
   if (spend.refuse) return `((OOC-Storyteller: ${char.name} can't: ${spend.refuse}.))`;
   // Rolls see live state: boosted Attributes add to the record's dots, and the
   // wound penalty (negative) comes off the dice pool.
@@ -3672,12 +3919,17 @@ async function cmdResources(): Promise<string> {
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
   const views = await CharacterResources.all(char);
   if (!views.length) return `((OOC-Storyteller: ${char.name} has no resources.))`;
+  const uses = await EffectUses.counts(char);
   const items = views.map(v => {
     const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
-    const named = Object.keys(v.def.effects ?? {});
+    const named = Object.keys(v.def.effects ?? {}).map(n => {
+      const used = uses[`${StringUtil.normalize(v.def.name)}:${StringUtil.normalize(n)}`] ?? 0;
+      return `${n}${used > 0 ? ` (used ${used})` : ""}`;
+    });
     const meta = [
+      v.def.replaces?.length ? `replaces: ${v.def.replaces.join("/")}` : "",
       roles.length ? `roles: ${roles.join("/")}` : "",
-      v.def.effect?.label ?? "",
+      v.def.effect ? describeEffect(v.def.effect) : "",
       named.length ? `spend:${named.join("/")}` : "",
     ].filter(Boolean).join("; ");
     return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
@@ -3692,9 +3944,11 @@ function healthLine(s: HealthSummary): string {
   return `${s.level} (penalty ${s.penalty}): ${s.bashing}B/${s.lethal}L/${s.aggravated}A, ${s.filled}/${s.capacity}${overkill}${state}`;
 }
 
-// spend <resource[:effect]> [target] [amount] - plain deduction, or a named
-// standalone effect: heal (worst-first boxes) / boost (raise an Attribute).
-async function cmdSpend(cmd: ParsedCommand): Promise<string> {
+// spend <resource[:effect]> [target] [applications] - a plain deduction, or any
+// configured effect run through the interpreter (heal, increase, pure cost,
+// advisory ops...). The target argument is only consumed when an "increase" op
+// has a group/bucket constraint to pick within.
+async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
   const raw = cmd.positional[0]?.trim();
@@ -3705,35 +3959,39 @@ async function cmdSpend(cmd: ParsedCommand): Promise<string> {
   const e = resourceEffect(def, effectName || undefined);
   if (effectName && !e) return `((OOC-Storyteller: ${def.name} has no "${effectName}" effect.))`;
 
-  if (e?.boost) {
-    const target = cmd.positional[1]?.trim();
-    if (!target) return `((OOC-Storyteller: ${def.name}:${effectName} needs an Attribute, e.g. [[spend ${def.name}:${effectName} strength 2]].))`;
-    const invalid = CharacterBoosts.validateTarget(target, e.boost);
-    if (invalid) return `((OOC-Storyteller: ${invalid}.))`;
-    const points = Math.max(1, parseInt(cmd.positional[2] ?? "1", 10) || 1);
-    const { spent } = await CharacterResources.spend(char, which, points);
+  if (!e) {
+    // No effect configured: plain deduction (with optional reason).
+    const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
+    const { spent } = await CharacterResources.spend(char, which, amount);
     if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
-    const r = await CharacterBoosts.add(char, target, spent * (e.boost.perPoint ?? 1), e.boost);
     const now = await CharacterResources.current(char, def);
-    if (!r.ok) return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}, but ${r.error}. ${def.name} now ${now}/${def.max}.))`;
-    return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}: ${StringUtil.toTitleCase(target)} +${r.added} (boost total +${r.total}). ${def.name} now ${now}/${def.max}. [[clear-boosts]] when it fades.))`;
+    const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
+    return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
   }
 
-  if (e?.heal) {
-    const points = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
-    const { spent } = await CharacterResources.spend(char, which, points);
-    if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
-    const { healed, summary } = await CharacterHealth.heal(char, e.heal.severities, spent * (e.heal.amount ?? 1));
-    const now = await CharacterResources.current(char, def);
-    return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}, healing ${healed} box${healed === 1 ? "" : "es"}. Health: ${healthLine(summary)}. ${def.name} now ${now}/${def.max}.))`;
+  // Does any increase op need the player to pick a trait within a constraint?
+  const needsTarget = e.apply.some(o =>
+    o.op.toLowerCase() === "increase" && "need" in CharacterBoosts.resolveIncreaseTarget(char, o.target, undefined));
+  const targetArg = needsTarget ? cmd.positional[1]?.trim() : undefined;
+  if (needsTarget && !targetArg) {
+    return `((OOC-Storyteller: ${def.name}${effectName ? `:${effectName}` : ""} needs a trait, e.g. [[spend ${raw} strength 2]].))`;
   }
+  const applications = Math.max(1, parseInt(cmd.positional[needsTarget ? 2 : 1] ?? "1", 10) || 1);
 
-  const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
-  const { spent } = await CharacterResources.spend(char, which, amount);
-  if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
+  const r = await applyEffectSpec(char, def, effectName ?? "", e, { targetArg, applications, rng: ctx.rng });
+  if (r.insufficient) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend - ${r.insufficient}.))`;
+  if (r.refuse) return `((OOC-Storyteller: ${r.refuse}.))`;
   const now = await CharacterResources.current(char, def);
-  const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
-  return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
+  const rollOnly = r.extra !== undefined && e.apply.every(isRollOp) && e.apply.length > 0;
+  const tail = rollOnly ? " (roll modifiers apply only inside a roll - use [[roll ... spend=...]])" : "";
+  return `((OOC-Storyteller: ${char.name} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}))`;
+}
+
+async function cmdResetUses(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  await EffectUses.resetAll(char);
+  return `((OOC-Storyteller: ${char.name}'s effect-use counters reset (new scene/turn).))`;
 }
 
 async function cmdDamage(cmd: ParsedCommand): Promise<string> {
@@ -3811,6 +4069,7 @@ CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
 CommandRouter.register("damage", cmdDamage, "damage <bashing|lethal|aggravated> [n]");
 CommandRouter.register("health", cmdHealth, "health");
 CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
+CommandRouter.register("reset-uses", cmdResetUses, "reset-uses (scene/turn change: clears effect-use counters)");
 CommandRouter.register("configure-resources", cmdConfigureResources, "configure-resources (guided setup; plain replies answer it)");
 CommandRouter.register("cancel-wizard", cmdCancelWizard, "cancel-wizard");
 

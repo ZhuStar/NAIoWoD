@@ -1,0 +1,635 @@
+# NAIoWoD — Project Memory
+
+> **Purpose of this file.** This is the project's externalized memory: enough
+> for a fresh Claude session (or any developer) to rebuild full context without
+> the original conversation. It maps everything implemented to its files,
+> classes and functions; records every design decision **and its reason**; and
+> lists everything not yet built. **Keep it current: any commit that changes
+> behavior, architecture, commands, data shapes, or the roadmap must update
+> this file in the same commit.** Docs-only commits don't require a re-sync.
+> **Last synced with the code as of commit `de4ebb8`** ("Effects v3: one
+> declarative grammar for all resource effects").
+
+---
+
+## 1. What this project is
+
+**NAIoWoD** implements **World of Darkness** (classic Storyteller system,
+**Dark Ages** flavour) as a **NovelAI script** — a rules engine for characters,
+dice, health, damage, soak, resources and morality. The end goal is a
+single-player game where **the AI is the Storyteller** (via `api.v1.generate`,
+not yet built). The player operates the system through `[[bracketed]]`
+commands typed into NovelAI's text-adventure input, and edits game data
+directly in the **Lorebook**, which the engine treats as its editable database.
+
+- Repo: `ZhuStar/NAIoWoD`. All work goes to **`main`** via ordinary
+  fast-forward pushes (the owner authorized pushing straight to main; extra
+  branches kept appearing from other tools and were deleted).
+- Runtime target: NovelAI's scripting host — a single, import-free TS context
+  that injects a global `api` (`api.v1.*`). Everything is data-driven and
+  player-editable because **house-ruling = changing data through some UI**
+  (lorebook entry, wizard, future modal windows — all edit the same data).
+
+## 2. How to work on it
+
+```bash
+bun test            # 190 tests across test/system.test.ts + test/build.test.ts
+bun run typecheck   # tsc --noEmit (strict; no npm install needed, Bun runs TS)
+bun run build       # regenerate dist/naiowod.ts (scripts/build-single.ts)
+```
+
+**The full verification battery used before every push** (all must pass):
+1. `bun run build` then `bun test` (includes the dist-sync test) — 0 fail.
+2. `bun x tsc --noEmit` clean.
+3. Standalone type-check of the artifact (copy `dist/naiowod.ts` to a temp dir
+   outside the project, run tsc on it alone with
+   `--strict --skipLibCheck --target ES2021 --lib ES2021,DOM,DOM.Iterable`).
+   This catches global-scope collisions the per-module check can't (it once
+   caught `StorageManager` shadowing the DOM global → renamed `ScopedStorage`).
+4. Import purity: `bun -e 'await import("./src/index.ts")'` must print nothing
+   (side effects live only in `init()`).
+5. A live e2e: `init()` then drive `processAdventureInput("[[...]]")`.
+
+**Commit conventions**: descriptive body; end with the
+`Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` and `Claude-Session:`
+trailers (see git log for the exact format). Push with retries/backoff.
+Stop-hook warnings about "Unverified commits" are non-actionable (unsigned
+commits; ignore). **Do not create PRs** unless asked; do not rewrite history.
+
+**Deprecation convention** (user rule): anything kept only for backwards
+compatibility is tagged `@deprecated` with a pointer to its replacement, so a
+later pass can delete it. Current deprecated surface: `PoolDef` (=
+`ResourceDef`, rules.ts) and `CommandRouter.parse` (= `CommandParser.parse`).
+
+## 3. Architecture & deployment
+
+Real ES modules with strict layering, enforced by imports (a module may only
+import from layers above it in this list):
+
+```
+src/host.ts          host contract + off-host mock (ONLY file touching globalThis)
+src/core/traits.ts   pure: names, Stat/Tracker/Pool, morality
+src/core/dice.ts     pure: the d10 roller
+src/core/damage.ts   pure: Severity/Kind, packets, reactions, HealthTrack, soak
+src/wizard.ts        pure: medium-agnostic wizard engine
+src/rolls.ts         pure: roll specs, modifiers, extended-roll state machine
+src/rules.ts         DATA: templates, resources, effect grammar, roads, SRD seeds
+src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry, LorebookParser
+src/game.ts          everything live: characters, stores, interpreter, commands
+src/index.ts         re-exports * + init()  (importing = zero side effects)
+src/main.ts          runtime entry: init().catch(...)
+```
+
+**Deployment artifact**: `bun run build` **concatenates** the modules in the
+order above (see `MODULES` in `scripts/build-single.ts`), strips only the
+inter-module `import`/`export` wiring, and writes **`dist/naiowod.ts`** — a
+single **readable, editable, paste-ready TypeScript file** with `//#region`
+markers per module. It is **committed**, and `test/build.test.ts` fails the
+suite if it drifts from `src/` (so it can never go stale). It is **not** a
+bundle: nothing is minified or transpiled.
+- **Why no `.naiscript` frontmatter**: NovelAI's script editor takes plain TS;
+  the YAML `/*--- ---*/` header (with an embedded script id) only matters for
+  the export/import flow, which the user avoids because baked-in ids cause
+  confusion. So the file starts with a `//` comment note, never `/*---`
+  (guardrails + tests enforce this).
+- **Why readable concatenation, not an IIFE bundle**: the user wants the single
+  file to be hand-readable/editable ("naiscript is just TS with a metadata
+  header above"). An earlier IIFE build was replaced.
+
+**Host vs mock** (`src/host.ts`): `const __host = globalThis as {api?}` — if
+the real NovelAI `api` exists it is used; otherwise an in-memory mock (4
+storage stores as Maps, an empty lorebook, uuid fallback, hooks.register that
+just logs). Test helpers: `__resetLorebookMock()`, `__resetStorageMock()`.
+`log(...)` routes through `api.v1.log`.
+
+**`init()`** (`src/index.ts`): registers the `onTextAdventureInput` hook →
+`processAdventureInput(rawInputText)`, then `LorebookManager.bootstrap()`,
+`MeritFlawRegistry.loadFromLorebook()`, `ResourceOverrides.loadFromLorebook()`,
+logs a summary, returns `{ setupMessage }` (the OOC note when SRD categories
+were created).
+
+## 4. NovelAI host facts (details in `docs/novelai-api.md` + `docs/*.html` mirror)
+
+- Four storage stores share `get/set/remove/list` (all async):
+  `api.v1.storage` (per script), `storyStorage` (per story — **we use this**,
+  via `ScopedStorage`), `historyStorage` (story + undo-aware — planned home for
+  mechanical state), `tempStorage` (session, self-clearing). **No
+  `setIfAbsent`** on the host (ScopedStorage emulates it).
+- Lorebook: `entries(categoryId?)/categories()/entry/createCategory/createEntry`
+  (create* resolve to the **new id**; pass `api.v1.uuid()` to control ids),
+  `updateEntry/removeEntry`. Entries filter by category **id**, not name.
+- `onTextAdventureInput` handler gets `{continuityId, inputText, rawInputText,
+  mode}` and may return `{inputText?, mode?, stopGeneration?,
+  stopFurtherScripts?}`. **The host strips newlines from returned inputText**
+  → all OOC replies are single-line `((OOC-Storyteller: ...))`.
+- `api.v1.uuid()`, `api.v1.generate` (future Storyteller loop), UI extension
+  API (`api.v1.ui.*` — future wizard renderer), permissions for document edit.
+
+## 5. Fine-grained module map
+
+### src/host.ts (156 lines)
+- Types: `OnTextAdventureInputReturnValue`, `OnTextAdventureInput`,
+  `LorebookEntryData`, `LorebookCategoryData`, `LorebookCondition`; internal
+  `StorageApi`, `WodApi`.
+- `api` (the guarded mock/real switch), `log()`, `__resetLorebookMock()`,
+  `__resetStorageMock()`.
+
+### src/core/traits.ts (276)
+- `StringUtil.normalize` (lowercase, trim, spaces→hyphens — **every key in the
+  system goes through this**) and `toTitleCase`.
+- `Category` / `PointSource` — frozen value objects (PHYSICAL/…/DISCIPLINE;
+  BASE/FREEBIE/EXPERIENCE/DOWNTIME).
+- `LedgerEntry`, `StatModifier` (buffs; may bypass cap), `Stat` (dotted trait
+  with audit ledger `AuditLog`, creation vs absolute caps, `EffectiveValue`),
+  `Tracker` (Stat + spendable temporary: Willpower, Resolve),
+  `Pool` (counter with max + per-turn limit: Blood, Quintessence;
+  `Spend/Gain/Refill`, per-turn limit **not enforced** — no turn system yet).
+- `MoralityPolarity` = "ascending"|"descending"; `MoralityTrait` (value 0–10,
+  `Degenerate/Improve` move WITH the polarity, `IsUnplayable` at 10-ascending /
+  0-descending).
+
+### src/core/dice.ts (116)
+- `Rng` = () => number in [0,1); `Random(min,max,rng)`.
+- `Dice.roll(input: number | RollTrait[], options)` → `RollResult`: difficulty
+  (default 6), `nAgain` (default 10; 11 disables), `automaticSuccesses` (free
+  successes — kept separate from their source by design), explosion chain
+  (MAX_DICE 200), botch = initial roll has ≥1 one, 0 successes AND 0 auto
+  (a cancelled success is a failure, not a botch). `message` is a full audit
+  line with emoji faces (💣 one, 💥 explode, ✅ hit, ❌ miss).
+
+### src/core/damage.ts (401)
+- `Severity` — **class** with singletons HARMLESS(0)/BASHING(1)/LETHAL(2)/
+  AGGRAVATED(3)/FATAL(4), `ORDER`, `atRank`, `fromName`, `coerce`, `IsAtLeast`,
+  `Max`, `Promote()/Demote()` (rank shift, clamped). HARMLESS never marks
+  boxes; FATAL = instant dead. **Why a class**: user wanted promote/demote
+  mechanics with a hidden numeric rank.
+- `DamageKind`/`DamageSource` — **plain strings** (open sets) with `Kind` /
+  `Source` constant bags. **Why separate from Severity**: "kind" (fire,
+  piercing, silver) is orthogonal to "severity" (bashing/lethal/agg) — a
+  packet carries both.
+- `DamagePacket` — immutable `{Intensity, Severity, Kinds:Set, Source,
+  Soakable}` with `with()`-style copies and `describe()`.
+- `ReactionTarget { TraitValue(name) }` — how reactions read a character
+  without importing game (keeps core pure).
+- `DamageReaction` (interface: `Label`, `Apply(packet, target)`) +
+  `UndeadPhysiology` (bullets/blades → bashing; fire/sunlight stay agg),
+  `SilverVulnerability` (silver/fire → aggravated AND unsoakable),
+  `ArmorReaction` (rating eats intensity for covered kinds).
+- **Square-based `HealthTrack`**: per-square `HealthSquareDef {name, penalty,
+  heal: "normal"|"never"|"special", healCost, condition?}`, `ConditionDef`
+  (state label from damaged/total linked boxes — e.g. poison), wrap-around
+  upgrade (bashing past capacity upgrades existing), `Overkill`, `Penalty`
+  (deepest filled square, values are NEGATIVE: -1, -2, -5), `Level`,
+  `IsIncapacitated/IsDead`, `ApplyDamage/Heal/HealWithPoints`, `Summary()` →
+  `HealthSummary {bashing, lethal, aggravated, filled, capacity, overkill,
+  penalty, level, isIncapacitated, isDead, conditions}`.
+  `STANDARD_HEALTH_LEVELS` = classic 7 (Bruised 0 … Incapacitated -5).
+  **Why squares**: conditions, unhealable/costed boxes; was regressed by a
+  fork once and deliberately restored — keep the simple API working on top.
+- `SoakTypeRule {soakable, pool: traitNames[]}`, `SoakSpec {bashing, lethal,
+  aggravated, difficulty}`.
+
+### src/wizard.ts (83) — medium-agnostic wizard engine
+- `WizardPrompt {step, title, body, kind: choice|number|text|confirm,
+  options?, default?, progress?}` — **structured** so a future `api.v1.ui`
+  modal renderer can map options to buttons and call the same `answer()`.
+- `WizardDefinition {id, title, start(ctx), answer(state, reply)}` over
+  **plain-JSON `WizardStateData`** (state persists across turns in storage).
+- `resolveReply(prompt, raw)` — option number/value/label, ints, yes/no,
+  `keep`/empty → default. ("cancel" is the session layer's job.)
+- `renderPromptText(prompt)` — the text medium: one single-line prompt with
+  numbered options + hints.
+- **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
+  later, same wizard logic.
+
+### src/rolls.ts (309) — pure roll machinery
+- `RollSpec {pool, difficulty(6), difficultyMod, requires(≥1), diceMod,
+  tags[]}` — serializable (that's what enables named rolls); `makeRollSpec`.
+- `parsePoolExpression(expr, resolve)` — `+`-separated integer literals or
+  trait names via a `TraitResolver`; also reused for **expression caps**
+  (`"stamina+3"`). Pool source is one token (no spaces).
+- `RollModifier {tag, difficultyMod?, diceMod?, autoSuccesses?, nAgain?}` +
+  `RollModifierRegistry` — **tag-driven contextual modifiers**: a roll's
+  `tags=` are matched against registered modifiers. Defaults: `acute-senses`
+  (-2 diff), `off-hand` (+1), `ambidextrous` (-1), `willpower` (+1 auto),
+  `specialty` (9-again). This is how merits/flaws will hook rolls.
+- `resolveSpec(spec, resolve, {overDifficulty, extra})` → `ResolvedRoll`:
+  applies tag modifiers + an optional ad-hoc `extra` modifier (used by
+  resource spends), then **over-10 rule**: die difficulty clamps to [2,10] but
+  every point above 10 adds **+1 required success** (`overflow` →
+  `effectiveRequires`); policy `"impossible"` refuses instead. **Why**: user
+  explicitly rejected silent clamping.
+- `executeRoll(...)` → `RollExecution {resolved, result, met, outcome:
+  success|failure|botch|impossible}`; `formatExecution` one-liner.
+- `overrideSpec(base, overrides)` — partial override, **pool is never
+  overridden** (that would be a different roll). The shared primitive behind
+  named-roll per-use overrides AND extended-roll continuations (helpers).
+- `describeSpec` — one-line spec summary.
+- **Extended rolls (pure state machine)**: `ExtendedRoll {id, label, base,
+  target, maxRolls, interval(advisory string), onBotch, accumulated,
+  rollsUsed, status: open|succeeded|failed, log: ExtendedInterval[]}`;
+  `parseBotchPolicy` ("fail" default | "lose-successes"/"lose"/"reset" |
+  "ignore"/"continue"); `applyInterval(action, exec, by)` — pure, returns new
+  action + note: non-botch adds `max(0, net)`; **botch normally fails the
+  whole action** (user rule), lose-successes zeroes progress, ignore wastes
+  the interval; then target reached → succeeded, out of rolls → failed.
+  `describeExtended` status line. Interval spacing is **advisory** (stored +
+  shown; ST decides when the next roll happens — no clock yet).
+
+### src/rules.ts (626) — all game DATA
+- `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
+- `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
+  engine; `VAMPIRE`, `MAGE` presets).
+- Soak specs: `MORTAL_SOAK` (bashing only, Stamina), `VAMPIRE_SOAK`
+  (b/l Stamina+Fortitude, agg Fortitude only), `MAGE_SOAK` (=mortal),
+  `DEMON_SOAK` (all three, Stamina), `WEREWOLF_SOAK` (all three; silver/fire
+  handled by reaction instead).
+- `bloodForGeneration(gen)` — classic table gen 3–15 → `{max, perTurn}`.
+- Roads: `RoadDefinition {name, virtues[3], ratingVirtues[2]}` —
+  `ROAD_OF_HUMANITY` (conscience/self-control/courage), `ROAD_OF_KINGS`
+  (conviction/self-control), `ROAD_OF_THE_BEAST` (conviction/instinct).
+  `MoralityConfig {name, polarity, road?, deriveFromVirtues?, start?}`;
+  `HUMANITY_MORALITY` (descending, derive from virtues).
+- **THE EFFECT GRAMMAR** (the "complete abstraction" — every resource effect
+  is one sentence: *spend [cost] → apply [op] to [target] at [amount] per
+  unit, lasting [duration], at most [limits]*):
+  - `EffectOp {op, target?, amount?, fillToCap?, cap?: number|string}` —
+    **`op` and `target` are OPEN string vocabularies**; unknown words are
+    stored/shown/ST-adjudicated until an interpreter lands (user requirement:
+    abilities/powers that don't exist yet can't be hardcoded). Interpreted
+    ops today: `difficulty|dice|successes|nagain` (roll modifiers; `target` =
+    optional action tag the roll must carry), `increase` (trait raise;
+    `target` = constraint: group/bucket/specific trait), `heal`
+    (`target` = "bashing,lethal" or "all").
+  - `EffectCost {units?, buys?, reducedBy?: {pool, difficulty?, perSuccess?}}`
+    — multi-unit pricing + Iron-Will-style cost-reduction roll (can hit 0).
+  - `EffectDuration {kind: instant|real|st|until, n?, unit?, until?}` —
+    stored + shown "(ST-enforced)" until the turn system.
+  - `EffectLimits {maxPerUse? (enforced), uses? {n, per} (ledger-counted,
+    ST-enforced), cooldown? (stored)}`.
+  - `EffectSpec {label, apply: EffectOp[], cost?, duration?, limits?,
+    targetMustBe?}` — one cost buys a bundle of ops; `apply: []` = pure cost
+    (static spell fuel). `targetMustBe` awaits targeting-others.
+- `ResourceDef` — tracker/pool numbers (`start/startMin/startMax/startOptions/
+  max/perTurnLimit/fromGeneration`) + `roles?: string[]` (abstract
+  capabilities: a resource with role "resolve" answers to `spend=resolve` —
+  "use Quintessence as Resolve" is pure data) + `replaces?: string[]` (this
+  resource HIDES the named ones and answers to their names) + `effect?`
+  (default) / `effects?` (named contexts: cast/heal/boost/fuel…).
+  `PoolDef` is the `@deprecated` alias.
+- `resourceEffect(def, name?)`, `describeEffect(spec)`.
+- Resource factories: `willpowerResource(start)` (+1 auto success; named
+  `fuel` = pure cost — Sorcerers/Thaumaturgy pay Willpower as spell fuel),
+  `resolveResource(over)` (default -2 difficulty; named `cast` = +1 success +
+  8-again + -2 diff bundle, 3/scene ledger demo), `bloodResource(over)`
+  (named `heal` = 1 bashing/lethal per point; named `boost` = +1 Physical
+  attribute per point, 1-scene duration demo).
+- `TemplateConfig(Name, Rules, Pools, Soak, Morality|null, HasVirtues,
+  HealthLevels?, Reactions?)`; `get Resources()` alias; `GetPool(name)`.
+- Templates (`TEMPLATES` registry keys): `mortal`, `thrall` (Resolve locked
+  to start 1 — a thrall's flicker of power), `vampire` ("Vampire (Dark
+  Ages)": blood `fromGeneration`, UndeadPhysiology), `mage` ("Mage (Dark
+  Ages)": **Foundation & Pillars, NOT Spheres; no Paradox**; Quintessence
+  only pool; no morality/virtues), `demon` ("Demon (Dark Ages: Devil's
+  Due)": Resolve 1–10 start 3–5; **Torment = ASCENDING morality start 3,
+  unplayable at 10**; has **Arcana not Lores** — Lores may come later as a
+  DtF-style option), `werewolf` (modern-WoD illustration for
+  SilverVulnerability; Rage/Gnosis), `ghoul` (mortal + blood pool they do
+  NOT generate, starts 0; 2 discipline dots incl. Potence is documented but
+  **unenforced** until creation is modelled), `sorcerer` (**static/linear
+  magic**; mechanically mortal until Paths land).
+- `resourcesForTemplates(keys, overrides?)` — union across templates deduped
+  by name (first wins numbers, roles merged), then **overrides** (the
+  house-rule layer) patch by name or append custom resources (need
+  kind+start+max). Zero/unknown templates → mortal baseline.
+- `healthLevelsForTemplates(keys)` — first template's track wins.
+- Disciplines: `DISCIPLINES` registry (name, arena, in-clan Dark Ages clans).
+  Wired mechanics: **Potence** (rating = auto successes via
+  `LiveCharacter.Roll {potence:true}`), **Fortitude** (soak dice; lets you
+  soak what your template can't); the rest are dots + generic
+  `bonusDiceFrom` until per-power effects exist.
+- Merits & Flaws: `MeritFlawDef {name, kind, points: n|n[], requires?
+  {templates any-of, tags all-of, meritsFlaws all-of}, description}`;
+  `DEFAULT_MERITS_FLAWS` (13 examples incl. Iron Will, Acute Senses…).
+- SRD lorebook seeds: `SRD_HEADER_MARKER = "====="` — **every data entry is
+  human instructions ABOVE the marker, data BELOW it** (user design: the
+  tutorial lives in the entry card itself, no separate readme). `srdEntryText`
+  helper; `SRD_CATEGORIES`: `srd:abilities` (entries `srd:abilities:talents`
+  /`:skills`/`:knowledges` — one name per line, `#`//`//` comments),
+  `srd:backgrounds` (`srd:backgrounds:all`), `srd:merits-flaws`
+  (`srd:merits-flaws:custom` — JSON array merged over defaults).
+
+### src/services.ts (259)
+- `ScopedStorage(prefix = api.v1.script.id)` — story-scoped KV where every key
+  is `<prefix>_<key>`: `get/getOrDefault/set/setIfAbsent/has/delete/list`
+  (list strips the prefix back off) + `temp*` variants on tempStorage.
+- `LorebookManager` — name→id resolution (`categoryIdByName`), reads
+  (`entriesInCategory`, `entryText`), the marker convention
+  (`contentBelowHeader` — everything above a `={3,}` line is ignored;
+  `parseList` — line list with comment stripping; `listFrom`), writes
+  (`updateEntryText`, `ensureCategory`, `ensureEntry` — create-if-missing
+  keeping `api.v1.uuid()` ids), ability list accessors (`allTalents/allSkills/
+  allKnowledges/allBackgrounds`), and `bootstrap(specs=SRD_CATEGORIES)` —
+  creates missing categories + seeds tutorial entries, returns the OOC setup
+  message. **Existing player categories are never touched.**
+- `MeritFlawRegistry` — in-code defaults + `loadFromLorebook()` merging any
+  JSON arrays found in `srd:merits-flaws`; `get/all/register/reset`.
+- `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
+  ability/background lists.
+
+### src/game.ts (1883) — the live layer
+**Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
+and the future "ready character" path):
+- `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
+  Trackers, Pools, Virtues, Traits, Disciplines, Tags, MeritsFlaws, Morality?,
+  Soak, Reactions, Health (`HealthTrack`), XP/downtime awarding + spending;
+  `TraitValue(name)` across buckets; `MeetsRequirements` (template/tags/
+  merits prereqs with waive); `AddMeritFlaw`; `Roll(input, {potence,
+  bonusDiceFrom, automaticSuccesses…})`; soak pipeline: `_soakRule` (+
+  Fortitude fallback), `SoakPoolFor`, `RollSoak`, `ResolveIncoming` (folds
+  `Reactions` over a packet with trace), `TakePacket`/`TakeDamage` →
+  `DamageReport`; `SaveToStory()` (serializes to `char_<name>` via
+  ScopedStorage — legacy path, marked for unification).
+- `CharacterFactory.create(template, name, opts: CharacterCreationOptions)` —
+  builds a LiveCharacter honoring `PoolDef` start constraints
+  (`_resolveStart`), virtues (default 1), Willpower=Courage derivation when
+  virtues were engaged, generation-sized blood, morality (derived from the
+  road's two rating virtues when `deriveFromVirtues`), tags→merits ordering.
+
+**Playable characters (the current creation path)**:
+- `PlayableCharacter` record: `{id: uuid (the FOREVER identity — recoverable
+  from storyStorage even if the lorebook entry is deleted), name, templates[]
+  (1+, hybrids legal, merge resolved later), stage: "potential"|"ready",
+  attributes, abilities, backgrounds, virtues, disciplines, traits,
+  poolStarts, meritsFlaws, tags[]}`.
+- `CharacterStore` — `newPotential(name, templates)` seeds **all nine
+  attributes at 1, every lorebook ability at 0, willpower poolStart 0, empty
+  meritsFlaws/backgrounds** ("play before allocating anything" principle);
+  write-through `save()` (lorebook entry FIRST — it is the source of truth —
+  then storage), `load`, `syncFromLorebook()` (lorebook→storage, player edits
+  win, unparseable reported not synced), selection: `setCurrent/getCurrent`
+  (current → default → the single existing character), `setDefault/
+  getDefaultName`, `listNames`. Keys `pc:<name>`; pointers
+  `current-character`, `default-character`. First created character becomes
+  default+current automatically.
+- Lorebook: category `wod:player-characters`, entry `pc:<normalized-name>`,
+  instructions above `=====`, character JSON below.
+
+**Named rolls**: `NamedRollStore` — ONE lorebook entry
+(`wod:named-rolls` / `wod:named-rolls:library`) holding a JSON map
+`{name: RollSpec}`; **read fresh every call** (no cache) so hand edits are
+always live; `all/get/names/save/remove`.
+
+**Extended rolls**: `ExtendedRollStore` — storage keys `xroll:<id>` + pointer
+`current-extended`; `resolve(id?)` = explicit id → current-if-open →
+single-open (else undefined/ambiguous).
+
+**Resource overrides (house-rule layer)**: `ResourceOverrides` — lorebook
+`wod:config` / `wod:config:resources`, JSON map `name → Partial<ResourceDef>`
+below the marker; **cached module-level for sync reads** (MeritFlawRegistry
+pattern); `loadFromLorebook()` (re-run at init, on wizard save, and on BOTH
+creator-mode sync points), `save(map)`, `current()`, `reset()` (tests).
+
+**Live per-character state** (all story-scoped via ScopedStorage, keyed by
+normalized character name; all default lazily from the record/template):
+- `CharacterResources` — `res:<char>` → `{resourceName: current}`. `defsFor`
+  (union + overrides + replaces-filter), `resolveDef(nameOrRole)` (name →
+  role → replaces), `current/all/spend/gain` (clamped 0..max; start =
+  `poolStarts[name] ?? def.start`).
+- `CharacterHealth` — `hp:<char>` → `{bashing, lethal, aggravated}` counts;
+  `track()` rebuilds a real HealthTrack (agg→lethal→bashing order) from
+  `healthLevelsForTemplates`, so penalty/incapacitation/overkill are computed
+  by the real engine; `damage/heal (worst-first among allowed)/summary`.
+- `CharacterBoosts` — `boost:<char>` → `{trait: bonus}`;
+  `resolveIncreaseTarget(char, constraint, targetArg)` (constraint = attribute
+  group | record bucket | specific trait; group/bucket needs the arg) and
+  `add(char, trait, amount, cap)` where **cap bounds record dots + boost
+  total**; `all/clear`. Boost duration is ST-adjudicated (`[[clear-boosts]]`)
+  until the turn system.
+- `EffectUses` — `uses:<char>` → `{resource:effect → count}`; `record/count/
+  counts/resetAll`. The advisory usage ledger; the turn system will enforce
+  from this data.
+
+**The effect interpreter**: `applyEffectSpec(char, def, effectName, spec,
+{targetArg?, applications?, rng?, rollTags?})` →
+`{extra?, notes[], refuse?, insufficient?}`:
+increase-targets are validated **before any cost is paid**; applications clamp
+to `maxPerUse`; cost = units×applications minus the `reducedBy` roll's net
+successes × perSuccess (floor 0); `insufficient` when unaffordable (caller
+maps: mandatory → refuse, optional → note-and-roll-anyway); ledger recording +
+"use N/M per X (ST-enforced)" notes; ops: roll ops accumulate into `extra`
+(action-tag gated: skipped + noted if the roll lacks the tag), `increase` via
+boosts (expression caps via `parsePoolExpression`, `fillToCap`), `heal` via
+CharacterHealth, **anything else → "recorded — Storyteller adjudicates (no
+interpreter yet)"**; non-instant durations noted "(ST-enforced)".
+
+**Wizards (session + the resources wizard)**:
+- `WizardSession` — storage `wizard:active` = `{def, state, prompt}`.
+- `RESOURCES_WIZARD` (`WIZARD_DEFS.resources`) — per-resource
+  keep/customize → start → max → effect knob (first `difficulty|dice|
+  successes` op's amount, via `knobIndex`) → roles step (text: `"resource:
+  role"` repeatable, "done") → confirm (diff summary) → saves via
+  `ResourceOverrides.save` + reload. State `RwState` is plain JSON.
+- `answerActiveWizard` — "cancel" exits; `resolveReply` errors re-prompt;
+  `done` clears session + summary.
+- `cmdConfigureResources` / `cmdCancelWizard`.
+- **Input seam**: in `processAdventureInput`, when a wizard is active and the
+  input contains **no** `[[commands]]`, the whole input is the wizard reply
+  (prompt→reply conversation, `stopGeneration: true`); `[[commands]]` still
+  route normally mid-wizard.
+
+**Command layer**:
+- `CommandParser.parse(body)` → `ParsedCommand {name, positional[], named{},
+  raw}` — quote-aware; `key=value`/`key="v"` named (lowercased keys), bare or
+  quoted tokens positional in order. **Why split from routing**: user wants
+  parser and router to be different things (future lorebook-defined commands).
+- `CommandRouter` — verb → `{handler(cmd, ctx), help}` registry
+  (`register/verbs/route`); `CommandContext {rng?}` (tests inject `seqRng`);
+  creator-mode pre-sync (characters + overrides reload) before every command
+  while creator mode is on; unknown verb lists all verbs.
+  `CommandRouter.parse` is `@deprecated`.
+- `processAdventureInput(rawInputText)` — extracts every `[[...]]`, routes
+  each, replaces with single-line OOC notes; prose-free input →
+  `stopGeneration: true`; non-command input → wizard reply (if active) else
+  untouched (`undefined`).
+
+**The command surface** (registered verbs, exact grammars in the register
+calls at the bottom of game.ts):
+`creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
+`play [name="…"]` (no name → default) · `roll <pool|@name> [difficulty]
+[diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]` ·
+`roll-for "Name" <pool|@name> …` (doesn't change selection) ·
+`name-roll <name> <pool> …` · `list-rolls` · `forget-roll <name>` ·
+`extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=]
+[on-botch=…] + roll knobs` (rolls interval 1; `requires` is repurposed as the
+ACCUMULATED target) · `continue-roll [id] [named overrides]` (whoever is
+current continues — collaborative; named-only overrides so the id positional
+can't be mistaken for a pool) · `roll-status [id]` · `cancel-roll [id]` ·
+`resources` · `spend <resource[:effect]> [target] [amount] [reason="…"]` ·
+`gain <resource> [amount]` · `damage <severity> [n]` · `health` ·
+`clear-boosts` · `reset-uses` · `configure-resources` · `cancel-wizard`.
+
+Roll plumbing shared by roll/roll-for: `extractRollArgs(cmd, offset)` returns
+only **supplied** fields (so overrides distinguish keep vs reset; difficulty +
+diff-mod positional OR named, named wins); `@name` loads a saved spec +
+`overrideSpec`; `applySpend` handles `spend=` (mandatory `!`, named `:effect`,
+roll-ops-only rule — standalone effects refuse with a pointer to `[[spend]]`);
+`rollAndReport` pre-loads boosts into the resolver and folds the **wound
+penalty into extra.diceMod** (noted). `rollOverridesFromNamed` for
+continue-roll. `resolveTraitFromRecord(char, name)` checks attributes →
+abilities → backgrounds → virtues → disciplines → traits → poolStarts → 0.
+
+### src/index.ts / src/main.ts
+Re-export everything + `init()`; main calls `init().catch`.
+
+### scripts/build-single.ts (86)
+`MODULES` order (= layering), `stripModule` regexes (whole-line re-exports,
+import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
+(exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
+import/export lines survive).
+
+### test/ (1932 + 20 lines, 190 tests, 53 describes)
+`test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
+plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
+rng values; **throws when exhausted** — used to prove exact dice counts),
+`allTens`; `beforeAll` bootstraps the lorebook once; suites that touch
+storage/lorebook/overrides do `__resetStorageMock(); __resetLorebookMock();
+ResourceOverrides.reset(); await LorebookManager.bootstrap();` in
+`beforeEach`; command e2e via `CommandRouter.route(body, {rng})`; wizard e2e
+replies via `processAdventureInput` (plain text). `types/bun-test.d.ts` +
+`types/bun.d.ts` are minimal ambient shims so tsc runs without bun-types
+(note: `expect.objectContaining` is NOT in the shim — assert fields directly).
+
+## 6. Persistent state map (complete)
+
+**ScopedStorage keys** (all under prefix `<scriptId>_` in `storyStorage`):
+`pc:<name>` character records · `current-character` / `default-character`
+pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
+`current-extended` pointer · `res:<char>` resource currents · `hp:<char>`
+health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
+· `wizard:active` wizard session · `char_<name>` (legacy LiveCharacter
+serialization).
+
+**Lorebook** (all data entries = instructions above `=====`, data below):
+`srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
+`srd:merits-flaws` (JSON defs merged over defaults) · `wod:player-characters`
+(`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
+(`wod:named-rolls:library` JSON map) · `wod:config`
+(`wod:config:resources` overrides map).
+
+## 7. Design decisions and their WHY (chronological-ish)
+
+1. **Lorebook = editable database.** Rule lists and configs live in lorebook
+   entries the player can edit; the engine creates categories if missing and
+   seeds them WITH the tutorial in the entry card (above the `=====` marker).
+   No id bookkeeping — `api.v1.uuid()`.
+2. **Free successes are separate from their source** (Potence, spent
+   Willpower) — `automaticSuccesses` is a roll-level number, sources add to it.
+3. **DamagePacket**: severity (class w/ promote/demote) ⊥ kind (string set) ⊥
+   source; reactions rewrite packets before soak; "complicated systems must
+   not get in the way of simple dirty damage" (simple API preserved).
+4. **Demon is Dark Ages: Devil's Due** — NOT Demon: the Fallen. Resolve 1–10.
+   Torment ascends to unplayable 10. Arcana, not Lores (Lores = possible
+   future option for DtF-style play).
+5. **Dark Ages Mage**: Foundation & Pillars (not Spheres), no Paradox.
+6. **Characters**: uuid = forever identity; lorebook entry = source of truth;
+   sync strictly lorebook→storage (player edits win); storage copy makes the
+   character recoverable if the entry is deleted. **Playable before any
+   allocation** (attrs 1 / abilities 0 / willpower 0) — allocation is opt-in,
+   an undecided character ≈ a plain mortal.
+7. **Parser ≠ router** so commands are cheap to add and could someday be
+   lorebook-defined.
+8. **Difficulty > 10 is never silently clamped** — +1 required success per
+   point over 10 (or "impossible" policy).
+9. **Named rolls** = saved RollSpec + per-use overrides; **pool is never
+   overridable**; `@name` sigil inside the existing roll verbs; ONE global
+   chronicle library (lorebook), read live.
+10. **Extended rolls**: persistent, collaborative (one starts, others
+    continue), per-continuation overrides (helpers change dice), **botch
+    normally kills the whole action** (configurable: fail / lose-successes /
+    ignore), interval + max rolls both first-class; interval spacing advisory
+    until a turn system exists.
+11. **Resources are abstract**: roles ("use X as Y" is data), replaces
+    (identity takeover), and the **effect grammar** — the user's insight that
+    every effect type on their wishlist is the same sentence with different
+    words, so ops/targets are open vocabularies and unknown words must be
+    STORED not rejected. Executable dims now; time-based dims stored +
+    advisory + ledger-counted (the turn system will inherit and enforce).
+12. **The advisory pattern** (used 3×: extended-roll intervals, boost
+    durations, use limits/cooldowns): store the config, show it, count what
+    can be counted, mark "(ST-enforced)", never block on a missing system.
+13. **Wizards are UIs over data**: the wizard writes the same lorebook entry a
+    player can hand-edit in creator mode; the engine is medium-agnostic
+    (structured prompts; text renderer now, api.v1.ui modals later); while a
+    wizard runs, plain input = reply, commands still work; "cancel" always
+    escapes.
+14. **Single readable artifact, committed, sync-tested; no frontmatter** (see §3).
+15. **Willpower is universal** (every oWoD template), and is BOTH +1 auto
+    success AND static spell fuel (named `fuel` effect) — the same resource,
+    different named contexts. Mandatory costs use the `!` suffix: can't pay →
+    the action doesn't happen.
+
+## 8. Roadmap — NOT yet implemented (with the user's requirements)
+
+Ordered roughly by unlock value:
+
+1. **Turn/time system** — the biggest unlock. Makes real: effect durations,
+   cooldowns, uses-per-scene (enforce from the existing `EffectUses` ledger),
+   boost expiry, `Pool.perTurnLimit` (e.g. blood per turn — field exists,
+   unenforced), extended-roll interval enforcement, willpower-per-turn rules.
+2. **Resisted & contest rolls** — roll vs static resistance; opposed
+   two-character contests comparing successes; **contests can be extended**
+   (both sides accumulate). "Before we're done with rolls."
+3. **Conditions on live characters** — attach ConditionDef-style states to
+   PlayableCharacters; then the `suspend` op executes (broad "all mental
+   disciplines" AND narrow "effect of Majesty" — granular configuration), and
+   **Willpower-to-shrug-off** (spend to cancel or suspend a condition,
+   typically for one turn).
+4. **Targeting others** — healing others (with "others must be X" —
+   `targetMustBe` field already stored), enemy-resistance effects (`resist`
+   op), `roll-for` was the precedent; needs resisted rolls for opposition.
+5. **Allocation + creation budgets** — customizable per-template budgets;
+   attribute/ability **priorities (primary/secondary/tertiary)**; freebies;
+   merits/flaws taken at creation (`meritsFlaws` bucket exists, empty);
+   ALL OPT-IN (play-before-allocating stays sacred); **hybrids need a
+   budget-merge rule**; probably delivered as a creation wizard on the
+   existing engine + allocation commands.
+6. **Template choices** — clans (vampires), families (revenants), fellowships
+   (mages) as selectable data configuring the character (in-clan disciplines
+   etc.). `DISCIPLINES` already carries clan lists.
+7. **Sorcerer Paths** (static magic) + the "other powers": dynamic magic,
+   blood sorcery, ritual magic, Arcana — all currently just words the effect
+   grammar can already reference.
+8. **Merits/flaws → automatic roll modifiers** — derive RollModifierRegistry
+   entries from a character's owned merits (today the ST tags rolls manually;
+   Iron-Will-style cost reduction exists as effect data).
+9. **Named-roll + spend integration** — let a saved roll carry its spend;
+   composed/multi-resource spends in one command.
+10. **LiveCharacter ⇄ PlayableCharacter unification** — build a LiveCharacter
+    from a "ready" record so rolls fold in Discipline auto-successes, real
+    pools, soak and the square-based track; retire `serializeLiveCharacter`/
+    `char_<name>` path; then stage: "ready".
+11. **historyStorage migration** — move mechanical state (health, resources,
+    boosts, extended actions, ledger) so story UNDO rewinds mechanics.
+12. **Modal/window wizard renderer** on `api.v1.ui` (same WizardDefinitions).
+13. **Creation-budget wizard** (same engine).
+14. **Aliases + redefinable default character** (`play`/`roll-for` honor
+    alias→canonical).
+15. **The Storyteller loop itself** — `api.v1.generate` narration, UI panels
+    (`ui-extensions`/`ui-parts`/`modals` docs already mirrored), token budget
+    handling. The reason the project exists; everything above serves it.
+16. Old `RulesetConfig` XP/freebie numbers → replaced by the real cost engine
+    (5); creation-cap enforcement in `Stat` is partially unused until then.
+
+## 9. Session-restart checklist
+
+1. Read this file, then `README.md` (player-facing view of the same facts).
+2. `git log --oneline -15` — anything after the "Last synced" commit above
+   means this file may be stale: diff those commits and update it FIRST.
+3. `bun test && bun x tsc --noEmit` to confirm a green baseline.
+4. The user speaks in WoD terms (splats, freebies, botches, soak); prefers
+   plans confirmed via questions before big passes; wants everything
+   configurable-as-data; accepts advisory enforcement when a system is
+   missing; and pushes straight to `main`.
+5. When in doubt about NovelAI host behavior: `docs/novelai-api.md`, then the
+   mirrored `docs/*.html` (api-reference.html is the index).

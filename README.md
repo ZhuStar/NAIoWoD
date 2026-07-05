@@ -9,11 +9,14 @@ damage, soak, resource pools and morality. UI and game loop come later.
 
 | Path | What |
 | --- | --- |
+| `CLAUDE.md` + `docs/memory.md` | **The project's externalized memory** — session bootstrap + the fine-grained map of everything (files/classes/functions, state, decisions & rationale, roadmap). Updated in the same commit as any change it describes. |
 | `src/host.ts` | NovelAI API contract + the off-host mock — the only module that touches `globalThis`. |
 | `src/core/` | Pure mechanics (`traits`, `dice`, `damage`) — no host imports. |
-| `src/rules.ts` | The Dark Ages **data**: templates, soak tables, disciplines, merits, the SRD lorebook seed. |
+| `src/wizard.ts` | Medium-agnostic wizard engine (structured prompts; text renderer now, modals later). |
+| `src/rolls.ts` | Pure roll machinery: specs, pool expressions, tag modifiers, extended-roll state machine. |
+| `src/rules.ts` | The Dark Ages **data**: templates, resources + the effect grammar, roads, disciplines, merits, SRD seeds. |
 | `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser. |
-| `src/game.ts` | `LiveCharacter`, factory, character store, `[[…]]` command router. |
+| `src/game.ts` | The live layer: characters & stores, effect interpreter, wizards, `[[…]]` commands. |
 | `src/index.ts` | Re-exports everything + `init()` — the one entry point with side effects. |
 | `src/main.ts` | Runtime entry — boots the engine by calling `init()` (runs last in the built artifact). |
 | `scripts/build-single.ts` → `dist/naiowod.ts` | Concatenates `src/*` into one readable, editable TS file — **the deployment artifact** (see below). |

@@ -18,7 +18,7 @@ export * from "./game";
 import { api, log, OnTextAdventureInput } from "./host";
 import { LorebookManager } from "./services";
 import { MeritFlawRegistry } from "./services";
-import { processAdventureInput, ResourceOverrides } from "./game";
+import { processAdventureInput, ResourceOverrides, loadSuccessTablesFromLorebook } from "./game";
 
 // Wire the engine to the host: input hook, lorebook seed, custom merits/flaws.
 // Returns the bootstrap result so the caller can surface the setup note.
@@ -29,6 +29,7 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   const boot = await LorebookManager.bootstrap();
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const overrides = await ResourceOverrides.loadFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}`);
+  const tables = await loadSuccessTablesFromLorebook();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}`);
   return { setupMessage: boot.message };
 }

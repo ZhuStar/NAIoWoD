@@ -374,6 +374,74 @@ Some actions take several rolls to finish — you accumulate successes toward a
   persists across turns (story storage) and defaults to the action in progress,
   so you rarely need the id.
 
+### Success tables — what a number of successes *means*
+
+A roll never interprets its own result. It produces a **count** and hands it to
+a **success table** — pure data that says what that count means. The same
+machinery covers the classic degrees of success, a discipline's per-success
+ladder, and the "direct function" cases (damage and soak are just tables whose
+output is a **number**, one level per success).
+
+```
+[[roll dexterity+melee table=degrees]]     # 3 successes -> "Complete"
+[[roll strength+potence table=damage]]     # 4 successes -> = 4 (levels)
+[[tables]]                                  # list them; [[tables damage]] lays one out
+```
+
+- A `SuccessTable` (`src/rolls.ts`) has any of: **`rows`** (a `{ at, label, value? }`
+  ladder — the highest `at` ≤ the count applies), **`valuePerSuccess`** (the direct
+  numeric function), **`cap`** (extras beyond it are *wasted*), **`overflow`** (a
+  rule-specified bonus per batch of extras past the last row), and **`botch`** /
+  **`failure`** lines.
+- Built-ins always present: **`degrees`** (Marginal → Phenomenal), **`damage`** and
+  **`soak`** (1 per success). Add your own in a lorebook entry
+  (`wod:config:success-tables`, a JSON array of tables *or* a `name → table` map
+  below the `=====` marker); it's overlaid on the built-ins at init and whenever
+  creator mode syncs.
+- **`table=<name>`** on any `roll` / `roll-for` / `resist` / `contest` reads the
+  result through that table (an unknown name is reported, never applied).
+
+### Resisted & contested rolls
+
+Two rolls, one adjudication. The active character is one side; the opposition is
+either **another character** (`vs="Erik"`, who rolls their own pool against their
+own traits) or an **ad-hoc** obstacle (`vs="the sturdy lock"`, or no `vs=` at all
+— its pool is rolled with only literal numbers counting).
+
+```
+[[resist dexterity+stealth 6 perception+alertness vs="Erik"]]
+[[contest wits+brawl strength+brawl vs="Rival" table=degrees]]
+```
+
+- **`resist <your-pool> <their-pool> [vs="Name"] …`** — *oWoD classic*: only your
+  **margin over the resister** counts. A tie, or the resister edging you, means the
+  action is simply **resisted** (you fail). Your `difficulty=`, their
+  `vs-difficulty=`; `spend=` and `table=` work as on `roll` (the table reads your
+  winning margin).
+- **`contest <your-pool> <their-pool> …`** — symmetric: the **higher total wins**,
+  a tie is a **draw**. A **botched** side counts 0 and is flagged; both botching is
+  a mutual disaster.
+
+### Extended contests — first to the goal wins
+
+Both sides **accumulate** toward a shared target across rounds; whoever reaches it
+**first** wins (a dead heat in the same round stays open — nobody got there first).
+
+```
+[[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5 label="Duel of wills"]]
+[[continue-contest]]                 # each round re-rolls both sides live
+[[continue-contest vs-difficulty=8]] # per-round knobs; yours are difficulty=, tags=, …
+[[contest-status]]
+```
+
+- **`extended-contest <your-pool> <their-pool> target=<n> rounds=<max> …`** opens it
+  and rolls round 1. Each named character re-rolls **live** every round (traits,
+  boosts, wound penalty); an ad-hoc side rolls its literal pool. `on-botch` is per
+  round: `fail` (default — a botch loses outright), `lose-successes`, or `ignore`.
+- **`continue-contest [id] …`**, **`contest-status [id]`**, **`cancel-contest [id]`**
+  mirror the extended-roll family; state persists across turns and defaults to the
+  contest in progress.
+
 ### Resources
 
 Resources (Willpower, Blood, Resolve, Quintessence, …) are **abstract and

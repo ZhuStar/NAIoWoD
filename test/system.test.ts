@@ -15,6 +15,10 @@ import {
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
+  readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry,
+  compareRolls, applyContestRound, describeContest,
+  ExtendedContestStore, loadSuccessTablesFromLorebook, SUCCESS_TABLES_ENTRY,
+  type SuccessTable, type ExtendedContest, type RollExecution,
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, RESOURCE_CONFIG_CATEGORY,
@@ -1928,5 +1932,280 @@ describe("effect grammar v3 (open ops, costs, limits, ledger)", () => {
     const r = await CommandRouter.route("roll strength spend=willpower", { rng: seqRng([2]) });
     expect(r).toContain("spent 1 focus");
     expect(r).toContain("1 success"); // the auto-success came from Focus
+  });
+});
+
+// =============================================================================
+// SUCCESS TABLES & CONTESTS
+// =============================================================================
+describe("success tables (readSuccessTable / describeTable)", () => {
+  const degrees: SuccessTable = {
+    name: "degrees", failure: "Failure", botch: "Botch",
+    rows: [
+      { at: 1, label: "Marginal" }, { at: 2, label: "Moderate" }, { at: 3, label: "Complete" },
+      { at: 4, label: "Exceptional" }, { at: 5, label: "Phenomenal" },
+    ],
+  };
+  const damage: SuccessTable = { name: "damage", valuePerSuccess: 1, failure: "No damage", botch: "Hit an ally" };
+  const capped: SuccessTable = { name: "capped", cap: 5, rows: [{ at: 1, label: "one" }, { at: 5, label: "five" }] };
+  const overflowing: SuccessTable = { name: "of", rows: [{ at: 1, label: "one" }, { at: 5, label: "five" }], overflow: { per: 2, value: 1, label: "bonus" } };
+  const highBar: SuccessTable = { name: "hb", failure: "not enough", rows: [{ at: 3, label: "ok" }] };
+
+  test("a ladder returns the highest row at or below the count", () => {
+    expect(readSuccessTable(degrees, "success", 3).label).toBe("Complete");
+    const top = readSuccessTable(degrees, "success", 6);   // no cap: extras are not wasted
+    expect(top.label).toBe("Phenomenal");
+    expect(top.wasted).toBe(0);
+  });
+
+  test("failure and botch read their own lines", () => {
+    expect(readSuccessTable(degrees, "failure", 0).label).toBe("Failure");
+    expect(readSuccessTable(degrees, "success", 0).label).toBe("Failure"); // zero successes = failure
+    expect(readSuccessTable(damage, "botch", 0).label).toBe("Hit an ally");
+    expect(readSuccessTable(highBar, "success", 2).label).toBe("not enough"); // below the lowest row
+  });
+
+  test("valuePerSuccess is the direct numeric function (damage/soak)", () => {
+    const r = readSuccessTable(damage, "success", 4);
+    expect(r.value).toBe(4);
+    expect(describeTableReading(r)).toBe("4 successes = 4");
+  });
+
+  test("cap wastes extra successes", () => {
+    const r = readSuccessTable(capped, "success", 7);
+    expect(r.successes).toBe(5);
+    expect(r.wasted).toBe(2);
+    expect(r.label).toBe("five");
+  });
+
+  test("overflow adds a rule-specified bonus per batch beyond the last row", () => {
+    const r = readSuccessTable(overflowing, "success", 9); // (9-5)/2 = 2 batches
+    expect(r.value).toBe(2);
+    expect(r.extra).toContain("bonus");
+  });
+
+  test("describeTable lays out the ladder and dimensions", () => {
+    expect(describeTable(degrees)).toContain("1:Marginal");
+    expect(describeTable(degrees)).toContain("5:Phenomenal");
+    expect(describeTable(damage)).toContain("1/success");
+  });
+
+  test("the built-in tables are always registered", () => {
+    expect(SuccessTableRegistry.get("damage")!.valuePerSuccess).toBe(1);
+    expect(SuccessTableRegistry.get("degrees")!.rows!.length).toBe(5);
+    expect(SuccessTableRegistry.get("soak")).toBeDefined();
+  });
+});
+
+describe("resisted & contested rolls (compareRolls)", () => {
+  const exec = (pool: string, faces: number[]): RollExecution =>
+    executeRoll(makeRollSpec({ pool }), () => 0, { rng: seqRng(faces) });
+  const three = exec("5", [6, 6, 6, 2, 2]);
+  const two = exec("4", [6, 6, 2, 2]);
+  const one = exec("3", [6, 2, 2]);
+  const botchA = exec("2", [1, 2]);
+  const botchB = exec("2", [1, 2]);
+
+  test("resisted: only the actor's margin over the resister counts", () => {
+    const o = compareRolls("resisted", three, one);
+    expect(o.winner).toBe("a");
+    expect(o.margin).toBe(2);
+    expect(o.note).toContain("prevails by 2");
+  });
+
+  test("resisted: a tie (or the resister winning) means the action fails", () => {
+    expect(compareRolls("resisted", two, two).winner).toBe("none");
+    expect(compareRolls("resisted", two, two).note).toContain("resisted");
+    expect(compareRolls("resisted", one, three).winner).toBe("none");
+  });
+
+  test("resisted: an actor botch fails and is flagged", () => {
+    const o = compareRolls("resisted", botchA, one);
+    expect(o.winner).toBe("none");
+    expect(o.aBotch).toBe(true);
+    expect(o.aNet).toBe(0);
+    expect(o.note).toContain("botches");
+  });
+
+  test("contested: higher total wins, symmetric", () => {
+    expect(compareRolls("contested", three, one).note).toContain("wins by 2");
+    expect(compareRolls("contested", one, three).winner).toBe("b");
+    expect(compareRolls("contested", one, three).note).toContain("loses by 2");
+    expect(compareRolls("contested", two, two).note).toBe("tie");
+  });
+
+  test("both sides botching is a mutual disaster", () => {
+    expect(compareRolls("contested", botchA, botchB).note).toContain("mutual disaster");
+  });
+});
+
+describe("extended contests (applyContestRound)", () => {
+  const exec = (pool: string, faces: number[]): RollExecution =>
+    executeRoll(makeRollSpec({ pool }), () => 0, { rng: seqRng(faces) });
+  const three = exec("3", [6, 6, 6]);
+  const one = exec("3", [6, 2, 2]);
+  const botch = exec("2", [1, 2]);
+  const base: ExtendedContest = {
+    id: "c", label: "",
+    a: { name: "Anja", base: makeRollSpec({ pool: "3" }), accumulated: 0 },
+    b: { name: "Bram", base: makeRollSpec({ pool: "3" }), accumulated: 0 },
+    target: 5, maxRounds: 3, interval: "", onBotch: "fail", rounds: 0, status: "open", log: [],
+  };
+
+  test("both accumulate; the first to the goal wins", () => {
+    let c = applyContestRound(base, three, one).contest;   // Anja 3, Bram 1
+    expect(c.a.accumulated).toBe(3);
+    expect(c.b.accumulated).toBe(1);
+    expect(c.status).toBe("open");
+    c = applyContestRound(c, three, one).contest;          // Anja 6 >= 5 -> wins
+    expect(c.status).toBe("a");
+  });
+
+  test("a dead heat in the same round stays open (nobody got there first)", () => {
+    const t3: ExtendedContest = { ...base, target: 3, maxRounds: 5, a: { ...base.a }, b: { ...base.b } };
+    const r = applyContestRound(t3, three, three);         // both hit 3 -> equal -> open
+    expect(r.contest.status).toBe("open");
+  });
+
+  test("under the fail policy, a botch loses the round outright", () => {
+    expect(applyContestRound(base, botch, one).contest.status).toBe("b");
+    expect(applyContestRound(base, botch, one).note).toContain("botches");
+    expect(applyContestRound(base, botch, botch).contest.status).toBe("draw"); // both botch
+  });
+
+  test("running out of rounds is a draw", () => {
+    let c: ExtendedContest = { ...base, target: 100, maxRounds: 2, a: { ...base.a }, b: { ...base.b } };
+    c = applyContestRound(c, three, one).contest;
+    c = applyContestRound(c, three, one).contest;
+    expect(c.status).toBe("draw");
+  });
+});
+
+describe("table= reading on rolls", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); SuccessTableRegistry.reset(); await LorebookManager.bootstrap(); });
+
+  test("a roll hands its successes to a named table", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("roll 4 table=degrees", { rng: seqRng([6, 6, 6, 2]) }); // 3 successes
+    expect(r).toContain("degrees:");
+    expect(r).toContain("Complete");
+  });
+
+  test("the damage table turns successes straight into levels", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("roll 3 table=damage", { rng: seqRng([6, 6, 2]) }); // 2 successes
+    expect(r).toContain("damage:");
+    expect(r).toContain("= 2");
+  });
+
+  test("failure reads the table's failure line; an unknown table is reported", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const miss = await CommandRouter.route("roll 3 table=damage", { rng: seqRng([2, 2, 2]) }); // 0 successes
+    expect(miss).toContain("No damage");
+    const unknown = await CommandRouter.route("roll 3 table=nope", { rng: seqRng([6, 2, 2]) });
+    expect(unknown).toContain('unknown table "nope"');
+  });
+});
+
+describe("resisted & contested rolls (commands)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); SuccessTableRegistry.reset(); await LorebookManager.bootstrap(); });
+
+  test("resist: the actor's margin over a named resister decides it", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Rok"');
+    // Rok rolls 4 dice, then Erik rolls 3 - they share the sequence in order.
+    const r = await CommandRouter.route('resist 4 3 vs="Erik"', { rng: seqRng([6, 6, 6, 2, 6, 2, 2]) });
+    expect(r).toContain("resisted");
+    expect(r).toContain("Rok:");
+    expect(r).toContain("Erik:");
+    expect(r).toContain("prevails by 2");
+  });
+
+  test("resist: a tie means the action is resisted (oWoD classic), ad-hoc opposition", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("resist 4 3", { rng: seqRng([6, 6, 2, 2, 6, 6, 2]) }); // 2 vs 2
+    expect(r).toContain("the action is resisted");
+    expect(r).toContain("the resistance"); // default ad-hoc label
+  });
+
+  test("contest: higher total wins; the note is from the actor's view", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const win = await CommandRouter.route("contest 4 3", { rng: seqRng([6, 6, 6, 2, 6, 2, 2]) }); // 3 vs 1
+    expect(win).toContain("contested");
+    expect(win).toContain("wins by 2");
+    const lose = await CommandRouter.route("contest 3 4", { rng: seqRng([6, 2, 2, 6, 6, 6, 2]) }); // 1 vs 3
+    expect(lose).toContain("loses by 2");
+  });
+
+  test("contest: a table reads the winning margin", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("contest 5 3 table=damage", { rng: seqRng([6, 6, 6, 6, 2, 6, 2, 2]) }); // 4 vs 1 -> margin 3
+    expect(r).toContain("damage:");
+    expect(r).toContain("= 3");
+  });
+});
+
+describe("extended contests (commands)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("open, continue, and race to the target against a named rival", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Rok"');
+    const open = await CommandRouter.route('extended-contest 3 3 vs="Erik" target=5 rounds=4 label="Arm-wrestle"', { rng: seqRng([6, 6, 6, 6, 2, 2]) });
+    expect(open).toContain("Rok opens");
+    expect(open).toContain("Arm-wrestle");
+    expect(open).toContain("Rok 3/5");
+    const cont = await CommandRouter.route("continue-contest", { rng: seqRng([6, 6, 6, 2, 2, 2]) }); // Rok 6/5 wins
+    expect(cont).toContain("Rok WINS");
+  });
+
+  test("contest-status, then cancel-contest", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('extended-contest 3 2 target=20 rounds=5 label="Long haul"', { rng: seqRng([6, 6, 6, 6, 2]) });
+    const status = await CommandRouter.route("contest-status");
+    expect(status).toContain("Long haul");
+    expect(status).toContain("recent:");
+    expect(await CommandRouter.route("cancel-contest")).toContain("Cancelled contest");
+    expect(await CommandRouter.route("contest-status")).toContain("No extended contest");
+  });
+});
+
+describe("success tables: lorebook overlay & [[tables]]", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); SuccessTableRegistry.reset(); await LorebookManager.bootstrap(); });
+
+  test("[[tables]] lists the built-ins; [[tables name]] lays one out", async () => {
+    const list = await CommandRouter.route("tables");
+    expect(list).toContain("degrees");
+    expect(list).toContain("damage");
+    expect(list).toContain("soak");
+    const one = await CommandRouter.route("tables degrees");
+    expect(one).toContain("Marginal");
+    expect(one).toContain("Phenomenal");
+  });
+
+  test("a lorebook entry overlays new tables (array form), usable via table=", async () => {
+    const tables = [{ name: "intimidate", rows: [{ at: 1, label: "Cowed" }, { at: 3, label: "Terrified" }] }];
+    const text = `Success tables (JSON below the marker).\n=====\n${JSON.stringify(tables)}`;
+    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    await LorebookManager.ensureEntry(id, SUCCESS_TABLES_ENTRY, text);
+    expect(await loadSuccessTablesFromLorebook()).toBe(1);
+    expect(SuccessTableRegistry.get("intimidate")!.rows!.length).toBe(2);
+
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("roll 5 table=intimidate", { rng: seqRng([6, 6, 6, 2, 2]) }); // 3 successes
+    expect(r).toContain("intimidate:");
+    expect(r).toContain("Terrified");
+  });
+
+  test("the map form (name -> table) also registers, defaults are re-seeded", async () => {
+    const map = { luck: { valuePerSuccess: 2, failure: "no luck" } };
+    const text = `notes\n=====\n${JSON.stringify(map)}`;
+    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    await LorebookManager.ensureEntry(id, SUCCESS_TABLES_ENTRY, text);
+    await loadSuccessTablesFromLorebook();
+    expect(readSuccessTable(SuccessTableRegistry.get("luck")!, "success", 3).value).toBe(6);
+    expect(SuccessTableRegistry.get("damage")).toBeDefined(); // built-ins survive the overlay
   });
 });

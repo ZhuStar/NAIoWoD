@@ -307,3 +307,234 @@ export function describeExtended(a: ExtendedRoll): string {
   bits.push(a.status);
   return `${head}[${describeSpec(a.base)}] - ${bits.join(", ")}`;
 }
+
+// =============================================================================
+// SUCCESS TABLES - what a number of successes MEANS
+// -----------------------------------------------------------------------------
+// A roll never interprets its own successes; it hands the count to a table.
+// Tables are pure data: qualitative ladders (discipline effects, the classic
+// degrees of success), direct numeric functions (damage: 1 level per success),
+// or both. `cap` makes extra successes useless; `overflow` gives each batch of
+// extras a rule-specified bonus beyond the last row.
+// =============================================================================
+export interface SuccessTableRow { at: number; label: string; value?: number }
+export interface SuccessTable {
+  name: string;
+  description?: string;
+  rows?: SuccessTableRow[];      // sorted ascending; the highest `at` <= n applies
+  valuePerSuccess?: number;      // direct numeric output: value = counted * this
+  cap?: number;                  // successes beyond this are useless
+  overflow?: { per: number; label?: string; value?: number }; // per batch beyond the last row
+  botch?: string;                // what a botch means here
+  failure?: string;              // what failure means here
+}
+export interface SuccessReading {
+  table: string;
+  outcome: RollOutcomeKind;
+  successes: number;             // counted (after cap)
+  wasted: number;                // beyond the cap
+  label: string;
+  value?: number;                // numeric output when the table defines one
+  extra?: string;                // overflow annotation
+}
+
+export function readSuccessTable(table: SuccessTable, outcome: RollOutcomeKind, successes: number): SuccessReading {
+  const base: SuccessReading = { table: table.name, outcome, successes: 0, wasted: 0, label: "" };
+  if (outcome === "botch") return { ...base, label: table.botch ?? "Botch" };
+  if (outcome !== "success" || successes <= 0) return { ...base, label: table.failure ?? "Failure" };
+
+  const counted = table.cap !== undefined ? Math.min(successes, table.cap) : successes;
+  const wasted = successes - counted;
+  let label = `${counted} success${counted === 1 ? "" : "es"}`;
+  let value: number | undefined;
+  let extra: string | undefined;
+
+  if (table.valuePerSuccess !== undefined) value = counted * table.valuePerSuccess;
+  const rows = [...(table.rows ?? [])].sort((a, b) => a.at - b.at);
+  if (rows.length > 0) {
+    const hit = [...rows].reverse().find(r => r.at <= counted);
+    if (!hit) return { ...base, successes: counted, wasted, label: table.failure ?? "Failure" };
+    label = hit.label;
+    if (hit.value !== undefined) value = (value ?? 0) + hit.value;
+    const last = rows[rows.length - 1];
+    if (table.overflow && counted > last.at) {
+      const batches = Math.floor((counted - last.at) / Math.max(1, table.overflow.per));
+      if (batches > 0) {
+        if (table.overflow.value !== undefined) value = (value ?? 0) + batches * table.overflow.value;
+        extra = `+${batches} x ${table.overflow.label ?? "overflow"}`;
+      }
+    }
+  }
+  return { table: table.name, outcome, successes: counted, wasted, label, value, extra };
+}
+
+export function describeTableReading(r: SuccessReading): string {
+  const bits = [r.label];
+  if (r.value !== undefined) bits.push(`= ${r.value}`);
+  if (r.extra) bits.push(r.extra);
+  if (r.wasted > 0) bits.push(`(${r.wasted} wasted)`);
+  return bits.join(" ");
+}
+
+// A whole table laid out (for [[tables <name>]]): its ladder and every dimension
+// that shapes a reading, so a Storyteller can see exactly what it does.
+export function describeTable(t: SuccessTable): string {
+  const dims: string[] = [];
+  const rows = [...(t.rows ?? [])].sort((a, b) => a.at - b.at);
+  if (rows.length > 0) {
+    dims.push(rows.map(r => `${r.at}:${r.label}${r.value !== undefined ? `=${r.value}` : ""}`).join(", "));
+  }
+  if (t.valuePerSuccess !== undefined) dims.push(`${t.valuePerSuccess}/success`);
+  if (t.cap !== undefined) dims.push(`cap ${t.cap}`);
+  if (t.overflow) dims.push(`overflow ${t.overflow.value ?? "?"}/${t.overflow.per} (${t.overflow.label ?? "overflow"})`);
+  if (t.botch) dims.push(`botch: ${t.botch}`);
+  if (t.failure) dims.push(`failure: ${t.failure}`);
+  const head = t.description ? `${t.name} - ${t.description}` : t.name;
+  return dims.length ? `${head} [${dims.join("; ")}]` : head;
+}
+
+// The classic ladders every chronicle starts with; the lorebook can overlay
+// more (wod:config:success-tables). Damage and soak are the "direct function"
+// generalization: same mechanism, numeric output.
+export const DEFAULT_SUCCESS_TABLES: SuccessTable[] = [
+  {
+    name: "degrees", description: "Classic degrees of success",
+    botch: "Botch - catastrophic failure", failure: "Failure",
+    rows: [
+      { at: 1, label: "Marginal" }, { at: 2, label: "Moderate" }, { at: 3, label: "Complete" },
+      { at: 4, label: "Exceptional" }, { at: 5, label: "Phenomenal" },
+    ],
+  },
+  { name: "damage", description: "Each success is one level of damage", valuePerSuccess: 1, botch: "Botch - you may hit an ally or yourself", failure: "No damage" },
+  { name: "soak", description: "Each success soaks one level", valuePerSuccess: 1, failure: "Nothing soaked" },
+];
+
+export class SuccessTableRegistry {
+  private static _tables: Map<string, SuccessTable> =
+    new Map(DEFAULT_SUCCESS_TABLES.map(t => [StringUtil.normalize(t.name), { ...t, name: StringUtil.normalize(t.name) }]));
+
+  static register(table: SuccessTable): void {
+    const name = StringUtil.normalize(table.name);
+    SuccessTableRegistry._tables.set(name, { ...table, name });
+  }
+  static get(name: string): SuccessTable | undefined { return SuccessTableRegistry._tables.get(StringUtil.normalize(name)); }
+  static all(): SuccessTable[] { return [...SuccessTableRegistry._tables.values()]; }
+  static reset(): void {
+    SuccessTableRegistry._tables = new Map(DEFAULT_SUCCESS_TABLES.map(t => [StringUtil.normalize(t.name), { ...t, name: StringUtil.normalize(t.name) }]));
+  }
+}
+
+// =============================================================================
+// RESISTED & CONTESTED ROLLS - two rolls, one comparison
+// -----------------------------------------------------------------------------
+// oWoD classic defaults: RESISTED - only the actor's margin over the resister
+// counts; a tie (or the resister winning) means the action simply fails.
+// CONTESTED - symmetric: more successes wins, a tie is a draw. A botched side
+// contributes 0 successes (flagged); both sides botching is a mutual disaster.
+// =============================================================================
+export type ContestMode = "resisted" | "contested";
+export interface ContestOutcome {
+  mode: ContestMode;
+  aNet: number; bNet: number;       // successes counted for each side (botch -> 0)
+  aBotch: boolean; bBotch: boolean;
+  winner: "a" | "b" | "none";
+  margin: number;                   // the winner's lead (0 when none)
+  note: string;
+}
+
+export function compareRolls(mode: ContestMode, a: RollExecution, b: RollExecution): ContestOutcome {
+  const aBotch = a.outcome === "botch";
+  const bBotch = b.outcome === "botch";
+  const aNet = aBotch ? 0 : Math.max(0, a.result?.net ?? 0);
+  const bNet = bBotch ? 0 : Math.max(0, b.result?.net ?? 0);
+  const base = { mode, aNet, bNet, aBotch, bBotch };
+
+  if (aBotch && bBotch) return { ...base, winner: "none", margin: 0, note: "both sides botch - mutual disaster" };
+  if (mode === "resisted") {
+    if (aBotch) return { ...base, winner: "none", margin: 0, note: "the actor botches" };
+    const margin = aNet - bNet;
+    if (margin > 0) return { ...base, winner: "a", margin, note: `prevails by ${margin}${bBotch ? " (resister botched)" : ""}` };
+    return { ...base, winner: "none", margin: 0, note: "the action is resisted" };
+  }
+  // contested
+  if (aNet > bNet) return { ...base, winner: "a", margin: aNet - bNet, note: `wins by ${aNet - bNet}${bBotch ? " (opponent botched)" : ""}` };
+  if (bNet > aNet) return { ...base, winner: "b", margin: bNet - aNet, note: `loses by ${bNet - aNet}${aBotch ? " (own botch)" : ""}` };
+  return { ...base, winner: "none", margin: 0, note: "tie" };
+}
+
+// =============================================================================
+// EXTENDED CONTESTS - both sides accumulate; first to the goal wins
+// =============================================================================
+// `char` is an opaque game-layer key (a character name, or undefined for an
+// ad-hoc side); rolls.ts never reads it - the interpreter uses it to re-resolve
+// this side's pool each round.
+export interface ContestSide { name: string; base: RollSpec; accumulated: number; char?: string; }
+export type ContestStatus = "open" | "a" | "b" | "draw";
+export interface ExtendedContest {
+  id: string;
+  label: string;
+  a: ContestSide;
+  b: ContestSide;
+  target: number;
+  maxRounds: number;
+  interval: string;                 // advisory spacing, like extended rolls
+  onBotch: BotchPolicy;             // per side: fail -> that side loses outright
+  rounds: number;
+  status: ContestStatus;
+  log: { round: number; aNet: number; bNet: number; note: string }[];
+}
+
+// One round: both sides have rolled; accumulate and settle. Pure.
+export function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExec: RollExecution): { contest: ExtendedContest; note: string } {
+  const next: ExtendedContest = { ...c, a: { ...c.a }, b: { ...c.b }, log: [...c.log] };
+  next.rounds += 1;
+  const aBotch = aExec.outcome === "botch";
+  const bBotch = bExec.outcome === "botch";
+  const aNet = aBotch ? 0 : Math.max(0, aExec.result?.net ?? 0);
+  const bNet = bBotch ? 0 : Math.max(0, bExec.result?.net ?? 0);
+  let note: string;
+
+  if (aBotch || bBotch) {
+    if (c.onBotch === "fail") {
+      if (aBotch && bBotch) { next.status = "draw"; note = "both sides botch - the contest collapses"; }
+      else if (aBotch) { next.status = "b"; note = `${c.a.name} botches - ${c.b.name} wins outright`; }
+      else { next.status = "a"; note = `${c.b.name} botches - ${c.a.name} wins outright`; }
+      next.log.push({ round: next.rounds, aNet, bNet, note });
+      return { contest: next, note };
+    }
+    if (c.onBotch === "lose-successes") {
+      if (aBotch) next.a.accumulated = 0;
+      if (bBotch) next.b.accumulated = 0;
+      note = "botch - progress lost";
+    } else note = "botch - a wasted round";
+  } else note = "";
+
+  next.a.accumulated += aNet;
+  next.b.accumulated += bNet;
+  const aDone = next.a.accumulated >= c.target;
+  const bDone = next.b.accumulated >= c.target;
+  if (aDone || bDone) {
+    if (aDone && bDone) {
+      if (next.a.accumulated > next.b.accumulated) next.status = "a";
+      else if (next.b.accumulated > next.a.accumulated) next.status = "b";
+      // dead heat: stays open - nobody got there FIRST
+    } else next.status = aDone ? "a" : "b";
+  }
+  if (next.status === "open" && next.rounds >= c.maxRounds) next.status = "draw";
+  const progress = `${c.a.name} ${next.a.accumulated}/${c.target} vs ${c.b.name} ${next.b.accumulated}/${c.target}`;
+  note = note ? `${note}; ${progress}` : progress;
+  next.log.push({ round: next.rounds, aNet, bNet, note });
+  return { contest: next, note };
+}
+
+export function describeContest(c: ExtendedContest): string {
+  const head = c.label ? `"${c.label}" ` : "";
+  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? c.a.name : c.b.name} WINS`;
+  const bits = [
+    `${c.a.name} ${c.a.accumulated}/${c.target} vs ${c.b.name} ${c.b.accumulated}/${c.target}`,
+    `round ${c.rounds}/${c.maxRounds}`,
+  ];
+  if (c.interval) bits.push(`interval ${c.interval}`);
+  bits.push(state);
+  return `${head}${bits.join(", ")}`;
+}

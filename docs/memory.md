@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `de4ebb8`** ("Effects v3: one
-> declarative grammar for all resource effects").
+> **Last synced with the code as of commit `76bbb82`** ("Resisted &
+> contested rolls, extended contests, and success tables").
 
 ---
 
@@ -202,7 +202,7 @@ were created).
 - **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
   later, same wizard logic.
 
-### src/rolls.ts (309) — pure roll machinery
+### src/rolls.ts (540) — pure roll machinery
 - `RollSpec {pool, difficulty(6), difficultyMod, requires(≥1), diceMod,
   tags[]}` — serializable (that's what enables named rolls); `makeRollSpec`.
 - `parsePoolExpression(expr, resolve)` — `+`-separated integer literals or
@@ -235,6 +235,36 @@ were created).
   the interval; then target reached → succeeded, out of rolls → failed.
   `describeExtended` status line. Interval spacing is **advisory** (stored +
   shown; ST decides when the next roll happens — no clock yet).
+- **Success tables (the "table-thing")**: a roll never interprets its own count
+  — it hands the number to a table. `SuccessTable {name, description?, rows?:
+  {at,label,value?}[], valuePerSuccess?, cap?, overflow?:{per,label?,value?},
+  botch?, failure?}`; `readSuccessTable(table, outcome, successes)` →
+  `SuccessReading {table, outcome, successes(counted after cap), wasted, label,
+  value?, extra?}`. Rules: botch/failure/≤0 read their own lines; else counted =
+  `min(successes, cap)`, `valuePerSuccess` gives the direct numeric output
+  (damage/soak = 1/success), `rows` pick the highest `at ≤ counted` (below the
+  lowest row = failure), `overflow` adds a bonus per batch past the last row.
+  `describeTableReading` (compact) + `describeTable` (full layout).
+  `DEFAULT_SUCCESS_TABLES` = **degrees** (Marginal→Phenomenal), **damage**,
+  **soak**; `SuccessTableRegistry` (static Map seeded from defaults; normalized
+  keys; `register`/`get`/`all`/`reset`). **Why**: the user's key insight — one
+  mechanism generalizes degrees-of-success ladders, discipline per-success
+  effects, AND damage/soak (a table whose output is just a number).
+- **Resisted & contested (single comparison)**: `type ContestMode =
+  "resisted"|"contested"`; `compareRolls(mode, aExec, bExec)` → `ContestOutcome
+  {mode, aNet, bNet, aBotch, bBotch, winner: a|b|none, margin, note}`. **oWoD
+  classic** (user choice): a botched side counts 0 (flagged); both botch = mutual
+  disaster; RESISTED = only the actor's margin over the resister counts (tie /
+  resister-wins → actor fails); CONTESTED = higher total wins, tie = draw.
+- **Extended contests (pure state machine)**: `ContestSide {name, base,
+  accumulated, char?}` (`char` = opaque game-layer key — a character name, or
+  undefined for ad-hoc; rolls.ts never reads it, the interpreter re-resolves the
+  pool each round); `ExtendedContest {id, label, a, b, target, maxRounds,
+  interval, onBotch, rounds, status: open|a|b|draw, log[]}`; `applyContestRound(c,
+  aExec, bExec)` — pure: per-side botch under `fail` loses that side outright
+  (both = draw), `lose-successes` zeroes, `ignore` wastes; else accumulate net;
+  **first to `target` wins** (a same-round dead heat stays open — nobody got there
+  first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
 ### src/rules.ts (626) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
@@ -337,7 +367,7 @@ were created).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/game.ts (1883) — the live layer
+### src/game.ts (2139) — the live layer
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -383,6 +413,16 @@ always live; `all/get/names/save/remove`.
 **Extended rolls**: `ExtendedRollStore` — storage keys `xroll:<id>` + pointer
 `current-extended`; `resolve(id?)` = explicit id → current-if-open →
 single-open (else undefined/ambiguous).
+
+**Extended contests**: `ExtendedContestStore` — mirrors ExtendedRollStore;
+storage keys `xcontest:<id>` + pointer `current-contest`; same `resolve(id?)`.
+
+**Success tables (live)**: `loadSuccessTablesFromLorebook()` — resets the
+registry to defaults, then overlays an optional lorebook entry
+`wod:config` / `wod:config:success-tables` (`SUCCESS_TABLES_ENTRY`): JSON below
+the marker, either an **array** of `SuccessTable` or a **map** `name → table`.
+Re-run at init, and on BOTH creator-mode sync points (alongside
+ResourceOverrides). Same config family as overrides.
 
 **Resource overrides (house-rule layer)**: `ResourceOverrides` — lorebook
 `wod:config` / `wod:config:resources`, JSON map `name → Partial<ResourceDef>`
@@ -467,17 +507,35 @@ current continues — collaborative; named-only overrides so the id positional
 can't be mistaken for a pool) · `roll-status [id]` · `cancel-roll [id]` ·
 `resources` · `spend <resource[:effect]> [target] [amount] [reason="…"]` ·
 `gain <resource> [amount]` · `damage <severity> [n]` · `health` ·
-`clear-boosts` · `reset-uses` · `configure-resources` · `cancel-wizard`.
+`clear-boosts` · `reset-uses` · `configure-resources` · `cancel-wizard` ·
+`resist <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=]
+[table=] [spend=…]` · `contest <your-pool> <their-pool> …` (same shape) ·
+`extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"]
+[label=] [interval=] [on-botch=…] [difficulty=] [vs-difficulty=]` ·
+`continue-contest [id] [difficulty=] [vs-difficulty=] [named overrides]` ·
+`contest-status [id]` · `cancel-contest [id]` · `tables [name]`.
 
 Roll plumbing shared by roll/roll-for: `extractRollArgs(cmd, offset)` returns
 only **supplied** fields (so overrides distinguish keep vs reset; difficulty +
 diff-mod positional OR named, named wins); `@name` loads a saved spec +
 `overrideSpec`; `applySpend` handles `spend=` (mandatory `!`, named `:effect`,
 roll-ops-only rule — standalone effects refuse with a pointer to `[[spend]]`);
-`rollAndReport` pre-loads boosts into the resolver and folds the **wound
-penalty into extra.diceMod** (noted). `rollOverridesFromNamed` for
-continue-roll. `resolveTraitFromRecord(char, name)` checks attributes →
-abilities → backgrounds → virtues → disciplines → traits → poolStarts → 0.
+`characterRollEnv(char)` = `{resolver (traits+boosts), penalty}` shared by rolls
+AND contests; `rollAndReport` folds the **wound penalty into extra.diceMod**
+(noted) and reads `table=` via `tableNote(cmd, outcome, successes)`.
+`rollOverridesFromNamed` for continue-roll. `resolveTraitFromRecord(char, name)`
+checks attributes → abilities → backgrounds → virtues → disciplines → traits →
+poolStarts → 0.
+
+Contest plumbing (`cmdVersus(mode, cmd, ctx)` behind `resist`/`contest`): side A
+is the current character (may `spend=` on its own roll); side B is `vs="Name"`
+(a stored character rolls live) or ad-hoc (`vs="the lock"`/omitted → literal
+pool, `oppName` labels it). `execContestSide(base, charName?, rng, extra?)` rolls
+one side — a named character via `characterRollEnv` (+wound penalty), else a
+zero resolver so only literals count; a deleted char degrades to ad-hoc.
+`contestTableInput(outcome)` feeds `table=` the actor's winning **margin** (botch
+→ botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
+`execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
 ### src/index.ts / src/main.ts
 Re-export everything + `init()`; main calls `init().catch`.
@@ -488,7 +546,7 @@ import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
 (exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
 import/export lines survive).
 
-### test/ (1932 + 20 lines, 190 tests, 53 describes)
+### test/ (2211 + 20 lines, 218 tests, 60 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -505,7 +563,8 @@ replies via `processAdventureInput` (plain text). `types/bun-test.d.ts` +
 **ScopedStorage keys** (all under prefix `<scriptId>_` in `storyStorage`):
 `pc:<name>` character records · `current-character` / `default-character`
 pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
-`current-extended` pointer · `res:<char>` resource currents · `hp:<char>`
+`current-extended` pointer · `xcontest:<id>` extended contests ·
+`current-contest` pointer · `res:<char>` resource currents · `hp:<char>`
 health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
 · `wizard:active` wizard session · `char_<name>` (legacy LiveCharacter
 serialization).
@@ -515,7 +574,8 @@ serialization).
 `srd:merits-flaws` (JSON defs merged over defaults) · `wod:player-characters`
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
 (`wod:named-rolls:library` JSON map) · `wod:config`
-(`wod:config:resources` overrides map).
+(`wod:config:resources` overrides map; `wod:config:success-tables` optional
+success-table overlay — array or `name → table` map).
 
 ## 7. Design decisions and their WHY (chronological-ish)
 
@@ -568,6 +628,19 @@ serialization).
     success AND static spell fuel (named `fuel` effect) — the same resource,
     different named contexts. Mandatory costs use the `!` suffix: can't pay →
     the action doesn't happen.
+16. **Success tables are the "table-thing"** (the user's insight): the dice
+    roll produces a count and is NOT responsible for knowing what it means; a
+    separate `SuccessTable` interprets it. ONE mechanism spans qualitative
+    ladders (degrees, discipline per-success effects) and the **direct numeric
+    function** (damage/soak = `valuePerSuccess:1`), with `cap` (wasted extras)
+    and `overflow` (rule-specified bonus per batch) for the ">5 successes"
+    cases. Tables are pure data, lorebook-overlayable, attached to any roll with
+    `table=`. **Resisted vs contested is oWoD classic** (user choice): resisted
+    counts only the actor's margin over the resister (tie = fail); contested is
+    symmetric (higher wins, tie = draw); a botched side scores 0 and is flagged.
+    **Extended contests** = both accumulate, first to the goal wins (dead heat
+    stays open). `ContestSide.char` keeps rolls.ts character-agnostic while the
+    game layer re-resolves each side's live pool every round.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -577,9 +650,13 @@ Ordered roughly by unlock value:
    cooldowns, uses-per-scene (enforce from the existing `EffectUses` ledger),
    boost expiry, `Pool.perTurnLimit` (e.g. blood per turn — field exists,
    unenforced), extended-roll interval enforcement, willpower-per-turn rules.
-2. **Resisted & contest rolls** — roll vs static resistance; opposed
-   two-character contests comparing successes; **contests can be extended**
-   (both sides accumulate). "Before we're done with rolls."
+2. **Roll-system residuals** — resisted / contested / extended contests and
+   success tables **shipped** (§5, §7.16). Left: **auto-applying a table's
+   numeric output** (damage/soak currently read the count for display but don't
+   yet mark the live track from a roll — the `damage` command still takes the
+   number directly); **per-round spends** inside contests (single `resist`/
+   `contest` already allow the actor to `spend=`); and folding table readings
+   into the LiveCharacter soak/damage pipeline once records go "ready".
 3. **Conditions on live characters** — attach ConditionDef-style states to
    PlayableCharacters; then the `suspend` op executes (broad "all mental
    disciplines" AND narrow "effect of Majesty" — granular configuration), and
@@ -587,7 +664,8 @@ Ordered roughly by unlock value:
    typically for one turn).
 4. **Targeting others** — healing others (with "others must be X" —
    `targetMustBe` field already stored), enemy-resistance effects (`resist`
-   op), `roll-for` was the precedent; needs resisted rolls for opposition.
+   op); `roll-for` and now the `resist`/`contest` two-side machinery are the
+   precedents — a spend effect that opposes a target can reuse `compareRolls`.
 5. **Allocation + creation budgets** — customizable per-template budgets;
    attribute/ability **priorities (primary/secondary/tertiary)**; freebies;
    merits/flaws taken at creation (`meritsFlaws` bucket exists, empty);

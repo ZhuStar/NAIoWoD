@@ -1360,6 +1360,237 @@ function describeExtended(a: ExtendedRoll): string {
   bits.push(a.status);
   return `${head}[${describeSpec(a.base)}] - ${bits.join(", ")}`;
 }
+
+// =============================================================================
+// SUCCESS TABLES - what a number of successes MEANS
+// -----------------------------------------------------------------------------
+// A roll never interprets its own successes; it hands the count to a table.
+// Tables are pure data: qualitative ladders (discipline effects, the classic
+// degrees of success), direct numeric functions (damage: 1 level per success),
+// or both. `cap` makes extra successes useless; `overflow` gives each batch of
+// extras a rule-specified bonus beyond the last row.
+// =============================================================================
+interface SuccessTableRow { at: number; label: string; value?: number }
+interface SuccessTable {
+  name: string;
+  description?: string;
+  rows?: SuccessTableRow[];      // sorted ascending; the highest `at` <= n applies
+  valuePerSuccess?: number;      // direct numeric output: value = counted * this
+  cap?: number;                  // successes beyond this are useless
+  overflow?: { per: number; label?: string; value?: number }; // per batch beyond the last row
+  botch?: string;                // what a botch means here
+  failure?: string;              // what failure means here
+}
+interface SuccessReading {
+  table: string;
+  outcome: RollOutcomeKind;
+  successes: number;             // counted (after cap)
+  wasted: number;                // beyond the cap
+  label: string;
+  value?: number;                // numeric output when the table defines one
+  extra?: string;                // overflow annotation
+}
+
+function readSuccessTable(table: SuccessTable, outcome: RollOutcomeKind, successes: number): SuccessReading {
+  const base: SuccessReading = { table: table.name, outcome, successes: 0, wasted: 0, label: "" };
+  if (outcome === "botch") return { ...base, label: table.botch ?? "Botch" };
+  if (outcome !== "success" || successes <= 0) return { ...base, label: table.failure ?? "Failure" };
+
+  const counted = table.cap !== undefined ? Math.min(successes, table.cap) : successes;
+  const wasted = successes - counted;
+  let label = `${counted} success${counted === 1 ? "" : "es"}`;
+  let value: number | undefined;
+  let extra: string | undefined;
+
+  if (table.valuePerSuccess !== undefined) value = counted * table.valuePerSuccess;
+  const rows = [...(table.rows ?? [])].sort((a, b) => a.at - b.at);
+  if (rows.length > 0) {
+    const hit = [...rows].reverse().find(r => r.at <= counted);
+    if (!hit) return { ...base, successes: counted, wasted, label: table.failure ?? "Failure" };
+    label = hit.label;
+    if (hit.value !== undefined) value = (value ?? 0) + hit.value;
+    const last = rows[rows.length - 1];
+    if (table.overflow && counted > last.at) {
+      const batches = Math.floor((counted - last.at) / Math.max(1, table.overflow.per));
+      if (batches > 0) {
+        if (table.overflow.value !== undefined) value = (value ?? 0) + batches * table.overflow.value;
+        extra = `+${batches} x ${table.overflow.label ?? "overflow"}`;
+      }
+    }
+  }
+  return { table: table.name, outcome, successes: counted, wasted, label, value, extra };
+}
+
+function describeTableReading(r: SuccessReading): string {
+  const bits = [r.label];
+  if (r.value !== undefined) bits.push(`= ${r.value}`);
+  if (r.extra) bits.push(r.extra);
+  if (r.wasted > 0) bits.push(`(${r.wasted} wasted)`);
+  return bits.join(" ");
+}
+
+// A whole table laid out (for [[tables <name>]]): its ladder and every dimension
+// that shapes a reading, so a Storyteller can see exactly what it does.
+function describeTable(t: SuccessTable): string {
+  const dims: string[] = [];
+  const rows = [...(t.rows ?? [])].sort((a, b) => a.at - b.at);
+  if (rows.length > 0) {
+    dims.push(rows.map(r => `${r.at}:${r.label}${r.value !== undefined ? `=${r.value}` : ""}`).join(", "));
+  }
+  if (t.valuePerSuccess !== undefined) dims.push(`${t.valuePerSuccess}/success`);
+  if (t.cap !== undefined) dims.push(`cap ${t.cap}`);
+  if (t.overflow) dims.push(`overflow ${t.overflow.value ?? "?"}/${t.overflow.per} (${t.overflow.label ?? "overflow"})`);
+  if (t.botch) dims.push(`botch: ${t.botch}`);
+  if (t.failure) dims.push(`failure: ${t.failure}`);
+  const head = t.description ? `${t.name} - ${t.description}` : t.name;
+  return dims.length ? `${head} [${dims.join("; ")}]` : head;
+}
+
+// The classic ladders every chronicle starts with; the lorebook can overlay
+// more (wod:config:success-tables). Damage and soak are the "direct function"
+// generalization: same mechanism, numeric output.
+const DEFAULT_SUCCESS_TABLES: SuccessTable[] = [
+  {
+    name: "degrees", description: "Classic degrees of success",
+    botch: "Botch - catastrophic failure", failure: "Failure",
+    rows: [
+      { at: 1, label: "Marginal" }, { at: 2, label: "Moderate" }, { at: 3, label: "Complete" },
+      { at: 4, label: "Exceptional" }, { at: 5, label: "Phenomenal" },
+    ],
+  },
+  { name: "damage", description: "Each success is one level of damage", valuePerSuccess: 1, botch: "Botch - you may hit an ally or yourself", failure: "No damage" },
+  { name: "soak", description: "Each success soaks one level", valuePerSuccess: 1, failure: "Nothing soaked" },
+];
+
+class SuccessTableRegistry {
+  private static _tables: Map<string, SuccessTable> =
+    new Map(DEFAULT_SUCCESS_TABLES.map(t => [StringUtil.normalize(t.name), { ...t, name: StringUtil.normalize(t.name) }]));
+
+  static register(table: SuccessTable): void {
+    const name = StringUtil.normalize(table.name);
+    SuccessTableRegistry._tables.set(name, { ...table, name });
+  }
+  static get(name: string): SuccessTable | undefined { return SuccessTableRegistry._tables.get(StringUtil.normalize(name)); }
+  static all(): SuccessTable[] { return [...SuccessTableRegistry._tables.values()]; }
+  static reset(): void {
+    SuccessTableRegistry._tables = new Map(DEFAULT_SUCCESS_TABLES.map(t => [StringUtil.normalize(t.name), { ...t, name: StringUtil.normalize(t.name) }]));
+  }
+}
+
+// =============================================================================
+// RESISTED & CONTESTED ROLLS - two rolls, one comparison
+// -----------------------------------------------------------------------------
+// oWoD classic defaults: RESISTED - only the actor's margin over the resister
+// counts; a tie (or the resister winning) means the action simply fails.
+// CONTESTED - symmetric: more successes wins, a tie is a draw. A botched side
+// contributes 0 successes (flagged); both sides botching is a mutual disaster.
+// =============================================================================
+type ContestMode = "resisted" | "contested";
+interface ContestOutcome {
+  mode: ContestMode;
+  aNet: number; bNet: number;       // successes counted for each side (botch -> 0)
+  aBotch: boolean; bBotch: boolean;
+  winner: "a" | "b" | "none";
+  margin: number;                   // the winner's lead (0 when none)
+  note: string;
+}
+
+function compareRolls(mode: ContestMode, a: RollExecution, b: RollExecution): ContestOutcome {
+  const aBotch = a.outcome === "botch";
+  const bBotch = b.outcome === "botch";
+  const aNet = aBotch ? 0 : Math.max(0, a.result?.net ?? 0);
+  const bNet = bBotch ? 0 : Math.max(0, b.result?.net ?? 0);
+  const base = { mode, aNet, bNet, aBotch, bBotch };
+
+  if (aBotch && bBotch) return { ...base, winner: "none", margin: 0, note: "both sides botch - mutual disaster" };
+  if (mode === "resisted") {
+    if (aBotch) return { ...base, winner: "none", margin: 0, note: "the actor botches" };
+    const margin = aNet - bNet;
+    if (margin > 0) return { ...base, winner: "a", margin, note: `prevails by ${margin}${bBotch ? " (resister botched)" : ""}` };
+    return { ...base, winner: "none", margin: 0, note: "the action is resisted" };
+  }
+  // contested
+  if (aNet > bNet) return { ...base, winner: "a", margin: aNet - bNet, note: `wins by ${aNet - bNet}${bBotch ? " (opponent botched)" : ""}` };
+  if (bNet > aNet) return { ...base, winner: "b", margin: bNet - aNet, note: `loses by ${bNet - aNet}${aBotch ? " (own botch)" : ""}` };
+  return { ...base, winner: "none", margin: 0, note: "tie" };
+}
+
+// =============================================================================
+// EXTENDED CONTESTS - both sides accumulate; first to the goal wins
+// =============================================================================
+// `char` is an opaque game-layer key (a character name, or undefined for an
+// ad-hoc side); rolls.ts never reads it - the interpreter uses it to re-resolve
+// this side's pool each round.
+interface ContestSide { name: string; base: RollSpec; accumulated: number; char?: string; }
+type ContestStatus = "open" | "a" | "b" | "draw";
+interface ExtendedContest {
+  id: string;
+  label: string;
+  a: ContestSide;
+  b: ContestSide;
+  target: number;
+  maxRounds: number;
+  interval: string;                 // advisory spacing, like extended rolls
+  onBotch: BotchPolicy;             // per side: fail -> that side loses outright
+  rounds: number;
+  status: ContestStatus;
+  log: { round: number; aNet: number; bNet: number; note: string }[];
+}
+
+// One round: both sides have rolled; accumulate and settle. Pure.
+function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExec: RollExecution): { contest: ExtendedContest; note: string } {
+  const next: ExtendedContest = { ...c, a: { ...c.a }, b: { ...c.b }, log: [...c.log] };
+  next.rounds += 1;
+  const aBotch = aExec.outcome === "botch";
+  const bBotch = bExec.outcome === "botch";
+  const aNet = aBotch ? 0 : Math.max(0, aExec.result?.net ?? 0);
+  const bNet = bBotch ? 0 : Math.max(0, bExec.result?.net ?? 0);
+  let note: string;
+
+  if (aBotch || bBotch) {
+    if (c.onBotch === "fail") {
+      if (aBotch && bBotch) { next.status = "draw"; note = "both sides botch - the contest collapses"; }
+      else if (aBotch) { next.status = "b"; note = `${c.a.name} botches - ${c.b.name} wins outright`; }
+      else { next.status = "a"; note = `${c.b.name} botches - ${c.a.name} wins outright`; }
+      next.log.push({ round: next.rounds, aNet, bNet, note });
+      return { contest: next, note };
+    }
+    if (c.onBotch === "lose-successes") {
+      if (aBotch) next.a.accumulated = 0;
+      if (bBotch) next.b.accumulated = 0;
+      note = "botch - progress lost";
+    } else note = "botch - a wasted round";
+  } else note = "";
+
+  next.a.accumulated += aNet;
+  next.b.accumulated += bNet;
+  const aDone = next.a.accumulated >= c.target;
+  const bDone = next.b.accumulated >= c.target;
+  if (aDone || bDone) {
+    if (aDone && bDone) {
+      if (next.a.accumulated > next.b.accumulated) next.status = "a";
+      else if (next.b.accumulated > next.a.accumulated) next.status = "b";
+      // dead heat: stays open - nobody got there FIRST
+    } else next.status = aDone ? "a" : "b";
+  }
+  if (next.status === "open" && next.rounds >= c.maxRounds) next.status = "draw";
+  const progress = `${c.a.name} ${next.a.accumulated}/${c.target} vs ${c.b.name} ${next.b.accumulated}/${c.target}`;
+  note = note ? `${note}; ${progress}` : progress;
+  next.log.push({ round: next.rounds, aNet, bNet, note });
+  return { contest: next, note };
+}
+
+function describeContest(c: ExtendedContest): string {
+  const head = c.label ? `"${c.label}" ` : "";
+  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? c.a.name : c.b.name} WINS`;
+  const bits = [
+    `${c.a.name} ${c.a.accumulated}/${c.target} vs ${c.b.name} ${c.b.accumulated}/${c.target}`,
+    `round ${c.rounds}/${c.maxRounds}`,
+  ];
+  if (c.interval) bits.push(`interval ${c.interval}`);
+  bits.push(state);
+  return `${head}${bits.join(", ")}`;
+}
 //#endregion src/rolls.ts
 
 //#region src/rules.ts
@@ -2922,6 +3153,38 @@ class ExtendedRollStore {
 }
 
 // =============================================================================
+// EXTENDED CONTESTS - persistence (mirrors ExtendedRollStore)
+// =============================================================================
+class ExtendedContestStore {
+  private static _storage = new ScopedStorage();
+  private static readonly CURRENT_KEY = "current-contest";
+  private static _key(id: string): string { return `xcontest:${id}`; }
+
+  static async save(c: ExtendedContest): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore._key(c.id), c); }
+  static async load(id: string): Promise<ExtendedContest | undefined> {
+    return (await ExtendedContestStore._storage.get(ExtendedContestStore._key(id))) as ExtendedContest | undefined;
+  }
+  static async remove(id: string): Promise<void> { await ExtendedContestStore._storage.delete(ExtendedContestStore._key(id)); }
+  static async setCurrent(id: string): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore.CURRENT_KEY, id); }
+  static async currentId(): Promise<string | undefined> { return (await ExtendedContestStore._storage.get(ExtendedContestStore.CURRENT_KEY)) as string | undefined; }
+  static async clearCurrent(): Promise<void> { await ExtendedContestStore._storage.delete(ExtendedContestStore.CURRENT_KEY); }
+  static async ids(): Promise<string[]> {
+    return (await ExtendedContestStore._storage.list()).filter(k => k.startsWith("xcontest:")).map(k => k.slice(9));
+  }
+  static async resolve(id?: string): Promise<ExtendedContest | undefined> {
+    if (id) return ExtendedContestStore.load(id);
+    const cur = await ExtendedContestStore.currentId();
+    if (cur) { const c = await ExtendedContestStore.load(cur); if (c && c.status === "open") return c; }
+    const open: ExtendedContest[] = [];
+    for (const cid of await ExtendedContestStore.ids()) {
+      const c = await ExtendedContestStore.load(cid);
+      if (c && c.status === "open") open.push(c);
+    }
+    return open.length === 1 ? open[0] : undefined;
+  }
+}
+
+// =============================================================================
 // RESOURCE OVERRIDES - the story's house-rule layer for resources
 // -----------------------------------------------------------------------------
 // One lorebook entry (wod:config / wod:config:resources) holds a JSON map
@@ -2976,6 +3239,30 @@ class ResourceOverrides {
     if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, text);
     ResourceOverrides._cache = map;
   }
+}
+
+// Success tables live in the same config family: an optional lorebook entry
+// (JSON array of tables, or a map name -> table, below the marker) overlaid on
+// the built-in defaults (degrees/damage/soak). Reloaded with the overrides.
+const SUCCESS_TABLES_ENTRY = "wod:config:success-tables";
+
+async function loadSuccessTablesFromLorebook(): Promise<number> {
+  SuccessTableRegistry.reset();
+  const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, SUCCESS_TABLES_ENTRY);
+  if (!text) return 0;
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return 0; }
+  const list: SuccessTable[] = Array.isArray(parsed)
+    ? parsed as SuccessTable[]
+    : (parsed && typeof parsed === "object")
+      ? Object.entries(parsed as Record<string, Omit<SuccessTable, "name">>).map(([name, t]) => ({ ...t, name }))
+      : [];
+  let count = 0;
+  for (const t of list) {
+    if (t && typeof t.name === "string") { SuccessTableRegistry.register(t); count++; }
+  }
+  return count;
 }
 
 // =============================================================================
@@ -3501,6 +3788,7 @@ class CommandRouter {
     if (await CommandRouter.creatorModeEnabled()) {
       await CharacterStore.syncFromLorebook();
       await ResourceOverrides.loadFromLorebook();
+      await loadSuccessTablesFromLorebook();
     }
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
@@ -3523,6 +3811,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   // Leaving creator mode: capture any final lorebook edits, then switch off.
   const { synced, failed } = await CharacterStore.syncFromLorebook();
   await ResourceOverrides.loadFromLorebook();
+  await loadSuccessTablesFromLorebook();
   await CommandRouter.setCreatorMode(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
@@ -3766,6 +4055,27 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
   return { extra: r.extra, note: `${r.notes.join("; ")}: ${e.label}` };
 }
 
+// A character's live roll environment: traits + active boosts, and the wound
+// penalty to fold into the dice pool. Shared by rolls and contests.
+async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n: string) => number; penalty: number }> {
+  const boosts = await CharacterBoosts.all(char);
+  const penalty = (await CharacterHealth.summary(char)).penalty;
+  return {
+    resolver: (n: string): number => resolveTraitFromRecord(char, n) + (boosts[StringUtil.normalize(n)] ?? 0),
+    penalty,
+  };
+}
+
+// Read a table=<name> arg against an outcome. The roll itself never interprets
+// its successes - the table does (or the reading is an unknown-table note).
+function tableNote(cmd: ParsedCommand, outcome: RollOutcomeKind, successes: number): string {
+  const name = cmd.named["table"];
+  if (!name) return "";
+  const table = SuccessTableRegistry.get(name);
+  if (!table) return `unknown table "${name}" (see [[tables]])`;
+  return `${table.name}: ${describeTableReading(readSuccessTable(table, outcome, successes))}`;
+}
+
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
   const args = extractRollArgs(cmd, offset);
   if (!args.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].))`;
@@ -3784,13 +4094,15 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   if (spend.refuse) return `((OOC-Storyteller: ${char.name} can't: ${spend.refuse}.))`;
   // Rolls see live state: boosted Attributes add to the record's dots, and the
   // wound penalty (negative) comes off the dice pool.
-  const boosts = await CharacterBoosts.all(char);
-  const penalty = (await CharacterHealth.summary(char)).penalty;
+  const env = await characterRollEnv(char);
   const extra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
-  if (penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + penalty;
-  const resolver = (n: string): number => resolveTraitFromRecord(char, n) + (boosts[StringUtil.normalize(n)] ?? 0);
-  const exec = executeRoll(spec, resolver, { rng: ctx.rng, extra });
-  const notes = [spend.note, penalty !== 0 ? `wound penalty ${penalty}` : ""].filter(Boolean).join("; ");
+  if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
+  const exec = executeRoll(spec, env.resolver, { rng: ctx.rng, extra });
+  const notes = [
+    spend.note,
+    env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
+    tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
+  ].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
 }
 
@@ -4051,6 +4363,172 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: ${char.name} regains ${def.name}. Now ${value}/${def.max}.))`;
 }
 
+// =============================================================================
+// RESISTED / CONTESTED ROLLS - two pools, one adjudication
+// -----------------------------------------------------------------------------
+// The active character is side A; side B is either a named character
+// (vs="Erik", who rolls their pool against their own traits) or an ad-hoc
+// opposition (vs="the sturdy lock", or no vs= at all, rolling its pool with only
+// literal numbers counting). oWoD classic tie rules live in compareRolls; an
+// optional table= reads what the actor's winning margin MEANS.
+// =============================================================================
+function intOrUndef(s: string | undefined): number | undefined {
+  if (s === undefined) return undefined;
+  const v = parseInt(s, 10);
+  return Number.isNaN(v) ? undefined : v;
+}
+
+// Roll one side of a contest. A named character rolls live (traits + boosts +
+// wound penalty); an ad-hoc side rolls its pool with a zero resolver, so only
+// literal numbers count. A char that no longer exists degrades to ad-hoc.
+async function execContestSide(base: RollSpec, charName: string | undefined, rng: Rng | undefined, extra?: Partial<RollModifier>): Promise<RollExecution> {
+  if (charName) {
+    const c = await CharacterStore.load(charName);
+    if (c) {
+      const env = await characterRollEnv(c);
+      const merged: Partial<RollModifier> = { ...(extra ?? {}) };
+      if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
+      return executeRoll(base, env.resolver, { rng, extra: merged });
+    }
+  }
+  return executeRoll(base, () => 0, { rng, extra });
+}
+
+// From the actor's side, what does a table read? The actor's winning margin (the
+// successes that actually land) at "success"; an actor botch reads as botch; any
+// non-win (resisted, out-contested, tie) reads as failure.
+function contestTableInput(o: ContestOutcome): { outcome: RollOutcomeKind; successes: number } {
+  if (o.aBotch) return { outcome: "botch", successes: 0 };
+  if (o.winner !== "a") return { outcome: "failure", successes: 0 };
+  return { outcome: "success", successes: o.margin };
+}
+
+async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const me = await CharacterStore.getCurrent();
+  if (!me) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const myPool = cmd.positional[0]?.trim();
+  const theirPool = cmd.positional[1]?.trim();
+  const verb = mode === "resisted" ? "resist" : "contest";
+  if (!myPool || !theirPool) {
+    return `((OOC-Storyteller: ${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].))`;
+  }
+  const oppArg = cmd.named["vs"]?.trim();
+  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
+  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the resistance" : "the opposition"));
+
+  const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
+  const mySpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags });
+  const theirSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) });
+
+  // The actor may spend on their own roll (fuel / roll-op effects only), exactly
+  // like [[roll spend=...]]; standalone effects refuse with the [[spend]] pointer.
+  const spend = await applySpend(me, cmd, ctx, mySpec.tags);
+  if (spend.refuse) return `((OOC-Storyteller: ${me.name} can't: ${spend.refuse}.))`;
+
+  const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
+  const myEnv = await characterRollEnv(me);
+  if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
+  const myExec = executeRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
+  const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
+
+  const outcome = compareRolls(mode, myExec, theirExec);
+  const t = contestTableInput(outcome);
+  const notes = [outcome.note, tableNote(cmd, t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  return `((OOC-Storyteller: ${mode} - ${me.name}: ${formatExecution(myExec)} vs ${oppName}: ${formatExecution(theirExec)} - ${notes}))`;
+}
+
+const cmdResist: CommandHandler = (cmd, ctx) => cmdVersus("resisted", cmd, ctx);
+const cmdContest: CommandHandler = (cmd, ctx) => cmdVersus("contested", cmd, ctx);
+
+// =============================================================================
+// EXTENDED CONTESTS - both sides accumulate across rounds; first to the goal wins
+// =============================================================================
+async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const me = await CharacterStore.getCurrent();
+  if (!me) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const myPool = cmd.positional[0]?.trim();
+  const theirPool = cmd.positional[1]?.trim();
+  if (!myPool || !theirPool) {
+    return `((OOC-Storyteller: extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].))`;
+  }
+  const oppArg = cmd.named["vs"]?.trim();
+  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
+  const oppName = oppChar ? oppChar.name : (oppArg || "the opposition");
+
+  const target = intOrUndef(cmd.named["target"] ?? cmd.named["requires"]) ?? 0;
+  if (target < 1) return `((OOC-Storyteller: extended-contest needs target=<successes> (the goal both race to).))`;
+  const maxRounds = intOrUndef(cmd.named["rounds"] ?? cmd.named["intervals"]) ?? 0;
+  if (maxRounds < 1) return `((OOC-Storyteller: extended-contest needs rounds=<max> (at least 1).))`;
+
+  const aSpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), requires: 1 });
+  const bSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]), requires: 1 });
+  const contest: ExtendedContest = {
+    id: api.v1.uuid(),
+    label: cmd.named["label"] ?? "",
+    a: { name: me.name, base: aSpec, accumulated: 0, char: me.name },
+    b: { name: oppName, base: bSpec, accumulated: 0, char: oppChar?.name },
+    target, maxRounds,
+    interval: cmd.named["interval"] ?? "",
+    onBotch: parseBotchPolicy(cmd.named["on-botch"]),
+    rounds: 0, status: "open", log: [],
+  };
+  const aExec = await execContestSide(aSpec, me.name, ctx.rng);
+  const bExec = await execContestSide(bSpec, oppChar?.name, ctx.rng);
+  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
+  await ExtendedContestStore.save(after);
+  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
+  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  return `((OOC-Storyteller: ${me.name} opens ${describeContest(after)}. Round 1: ${note}.${tail}))`;
+}
+
+async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
+  if (!contest) return `((OOC-Storyteller: No open contest. Start one with [[extended-contest ...]] or name its id.))`;
+  if (contest.status !== "open") {
+    const who = contest.status === "draw" ? "a draw" : `won by ${contest.status === "a" ? contest.a.name : contest.b.name}`;
+    return `((OOC-Storyteller: That contest is already ${who}.))`;
+  }
+  const aSpec = overrideSpec(contest.a.base, rollOverridesFromNamed(cmd));
+  const vDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+  const bSpec = vDiff !== undefined ? overrideSpec(contest.b.base, { difficulty: vDiff }) : contest.b.base;
+  const aExec = await execContestSide(aSpec, contest.a.char, ctx.rng);
+  const bExec = await execContestSide(bSpec, contest.b.char, ctx.rng);
+  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
+  await ExtendedContestStore.save(after);
+  if (after.status !== "open" && (await ExtendedContestStore.currentId()) === after.id) await ExtendedContestStore.clearCurrent();
+  return `((OOC-Storyteller: ${describeContest(after)}. This round: ${note}.))`;
+}
+
+async function cmdContestStatus(cmd: ParsedCommand): Promise<string> {
+  const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
+  if (!contest) return `((OOC-Storyteller: No extended contest found. Start one with [[extended-contest ...]].))`;
+  const recent = contest.log.slice(-3).map(l => `r${l.round}: ${contest.a.name} +${l.aNet}/${contest.b.name} +${l.bNet}`).join(", ");
+  return `((OOC-Storyteller: ${describeContest(contest)}${recent ? ` | recent: ${recent}` : ""}.))`;
+}
+
+async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
+  const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
+  if (!contest) return `((OOC-Storyteller: No extended contest to cancel.))`;
+  await ExtendedContestStore.remove(contest.id);
+  if ((await ExtendedContestStore.currentId()) === contest.id) await ExtendedContestStore.clearCurrent();
+  const progress = `${contest.a.name} ${contest.a.accumulated}/${contest.target} vs ${contest.b.name} ${contest.b.accumulated}/${contest.target}`;
+  return `((OOC-Storyteller: Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).))`;
+}
+
+// List the success tables, or lay one out in full. A table interprets a number
+// of successes; attach table=<name> to a roll/resist/contest to read it.
+async function cmdTables(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (name) {
+    const t = SuccessTableRegistry.get(name);
+    if (!t) return `((OOC-Storyteller: No success table "${StringUtil.normalize(name)}". See [[tables]].))`;
+    return `((OOC-Storyteller: ${describeTable(t)}.))`;
+  }
+  const all = SuccessTableRegistry.all();
+  const items = all.map(t => t.description ? `${t.name} (${t.description})` : t.name).join("; ");
+  return `((OOC-Storyteller: Success tables: ${items}. [[tables <name>]] for detail; add table=<name> to a roll/resist/contest.))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
@@ -4072,6 +4550,13 @@ CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
 CommandRouter.register("reset-uses", cmdResetUses, "reset-uses (scene/turn change: clears effect-use counters)");
 CommandRouter.register("configure-resources", cmdConfigureResources, "configure-resources (guided setup; plain replies answer it)");
 CommandRouter.register("cancel-wizard", cmdCancelWizard, "cancel-wizard");
+CommandRouter.register("resist", cmdResist, 'resist <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[:effect][!]]');
+CommandRouter.register("contest", cmdContest, 'contest <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[:effect][!]]');
+CommandRouter.register("extended-contest", cmdExtendedContest, 'extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=] [interval=] [on-botch=fail|lose-successes|ignore] [difficulty=] [vs-difficulty=]');
+CommandRouter.register("continue-contest", cmdContinueContest, "continue-contest [id] [difficulty=] [vs-difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
+CommandRouter.register("contest-status", cmdContestStatus, "contest-status [id]");
+CommandRouter.register("cancel-contest", cmdCancelContest, "cancel-contest [id]");
+CommandRouter.register("tables", cmdTables, "tables [name]  (list success tables, or lay one out in full)");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
@@ -4125,7 +4610,8 @@ async function init(): Promise<{ setupMessage: string | null }> {
   const boot = await LorebookManager.bootstrap();
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const overrides = await ResourceOverrides.loadFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}`);
+  const tables = await loadSuccessTablesFromLorebook();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

@@ -690,6 +690,13 @@ Ordered roughly by unlock value:
 11. **historyStorage migration** — move mechanical state (health, resources,
     boosts, extended actions, ledger) so story UNDO rewinds mechanics.
 12. **Modal/window wizard renderer** on `api.v1.ui` (same WizardDefinitions).
+    First target is the `[[win-roll]]` roll-builder **window** (basis for all
+    wizards). UI docs transcribed to `docs/ui-{parts,extensions,api-reference}.md`
+    + `docs/modals-and-windows.md`; the concrete window spec + decisions (window
+    not modal; difficulty-as-expression; **advisory** `self:`/`ally:`/`target:`/
+    `opposition:` prefixes) live in the "Design notes" section of
+    `docs/ui-parts.md`. Needs `api.v1.ui` added to `src/host.ts` (contract+mock)
+    first — it is not there yet.
 13. **Creation-budget wizard** (same engine).
 14. **Aliases + redefinable default character** (`play`/`roll-for` honor
     alias→canonical).

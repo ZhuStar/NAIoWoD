@@ -57,6 +57,50 @@ interface StorageApi {
   list: () => Promise<string[]>;
 }
 
+// --- UI PARTS (the subset our windows use; full reference in docs/ui-api-reference.md).
+// A window is just a tree of these parts; inputs bind to tempStorage via storageKey,
+// and buttons run a callback. Off-host the mock records the tree and fires callbacks.
+export interface UIStyle { [k: string]: string | number }
+export interface UIPartText { type: "text"; id?: string; text?: string; markdown?: boolean; noTemplate?: boolean; style?: UIStyle }
+export interface UIPartTextInput { type: "textInput"; id?: string; initialValue?: string; storageKey?: string; onChange?: (v: string) => void; onSubmit?: (v: string) => void; label?: string; placeholder?: string; disabled?: boolean; style?: UIStyle }
+export interface UIPartNumberInput { type: "numberInput"; id?: string; initialValue?: number; storageKey?: string; onChange?: (v: string) => void; onSubmit?: (v: string) => void; label?: string; placeholder?: string; disabled?: boolean; style?: UIStyle }
+export interface UIPartButton { type: "button"; id?: string; text?: string; callback: () => void; disabled?: boolean; disabledWhileCallbackRunning?: boolean; style?: UIStyle }
+export interface UIPartRow { type: "row"; id?: string; content: UIPart[]; spacing?: string; alignment?: string; wrap?: boolean; style?: UIStyle }
+export interface UIPartColumn { type: "column"; id?: string; content: UIPart[]; spacing?: string; alignment?: string; wrap?: boolean; style?: UIStyle }
+export interface UIPartBox { type: "box"; id?: string; content: UIPart[]; style?: UIStyle }
+export interface UIPartCollapsibleSection { type: "collapsibleSection"; id?: string; title: string; initialCollapsed?: boolean; storageKey?: string; content: UIPart[]; style?: UIStyle }
+export type UIPart =
+  | UIPartText | UIPartTextInput | UIPartNumberInput | UIPartButton
+  | UIPartRow | UIPartColumn | UIPartBox | UIPartCollapsibleSection;
+
+export interface WindowOptions { id?: string; title?: string; content: UIPart[]; defaultWidth?: number | string; defaultHeight?: number | string; resizable?: boolean; }
+export interface ModalOptions { id?: string; title?: string; size?: "full" | "large" | "medium" | "small"; content: UIPart[]; }
+// The handle open() resolves to: re-render with update(), close(), inspect, and
+// await closure.
+export interface UIHandle {
+  update: (options: Partial<WindowOptions & ModalOptions>) => Promise<void>;
+  close: () => Promise<void>;
+  isClosed: () => boolean;
+  closed: Promise<void>;
+}
+// Convenience part builders (they add the correct `type`).
+export interface UiPartHelpers {
+  text: (c: Omit<UIPartText, "type">) => UIPartText;
+  textInput: (c: Omit<UIPartTextInput, "type">) => UIPartTextInput;
+  numberInput: (c: Omit<UIPartNumberInput, "type">) => UIPartNumberInput;
+  button: (c: Omit<UIPartButton, "type">) => UIPartButton;
+  row: (c: Omit<UIPartRow, "type">) => UIPartRow;
+  column: (c: Omit<UIPartColumn, "type">) => UIPartColumn;
+  box: (c: Omit<UIPartBox, "type">) => UIPartBox;
+  collapsibleSection: (c: Omit<UIPartCollapsibleSection, "type">) => UIPartCollapsibleSection;
+}
+export interface UiApi {
+  window: { open: (options: WindowOptions) => Promise<UIHandle> };
+  modal: { open: (options: ModalOptions) => Promise<UIHandle> };
+  part: UiPartHelpers;
+  toast: (message: string, options?: { autoClose?: number | false; type?: string }) => Promise<void>;
+}
+
 interface WodApi {
   v1: {
     script: { id: string; name?: string; version?: string; author?: string };
@@ -84,6 +128,10 @@ interface WodApi {
       removeEntry: (id: string) => Promise<void>;
     };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
+    // Custom UI: modals (blocking, centered) and windows (floating). Both take a
+    // UIPart tree and return a handle. Our wizard-windows use this to render a
+    // form and, on submit, emit a [[command]] - see src/window.ts.
+    ui: UiApi;
   };
 }
 
@@ -116,6 +164,62 @@ export function __resetLorebookMock(): void { __mockCategories = []; __mockEntri
 // A no-op concern on-host, where the real `api` is used instead of this mock.
 export function __resetStorageMock(): void { __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); }
 
+// --- UI MOCK ---
+// Off-host there is no real window manager, so the mock records every opened
+// window/modal and its current UIPart tree, and lets tests fire button
+// callbacks. This exercises the whole window -> command path without rendering.
+interface MockWindow { kind: "window" | "modal"; options: WindowOptions | ModalOptions; closed: boolean; }
+let __mockWindows: MockWindow[] = [];
+function __openMockWindow(kind: "window" | "modal", options: WindowOptions | ModalOptions): UIHandle {
+  const rec: MockWindow = { kind, options, closed: false };
+  let resolveClosed: () => void = () => {};
+  const closed = new Promise<void>(res => { resolveClosed = res; });
+  __mockWindows.push(rec);
+  return {
+    update: async (opts) => { rec.options = { ...rec.options, ...opts } as WindowOptions | ModalOptions; },
+    close: async () => { rec.closed = true; resolveClosed(); },
+    isClosed: () => rec.closed,
+    closed,
+  };
+}
+const __mockPart: UiPartHelpers = {
+  text: (c) => ({ type: "text", ...c }),
+  textInput: (c) => ({ type: "textInput", ...c }),
+  numberInput: (c) => ({ type: "numberInput", ...c }),
+  button: (c) => ({ type: "button", ...c }),
+  row: (c) => ({ type: "row", ...c }),
+  column: (c) => ({ type: "column", ...c }),
+  box: (c) => ({ type: "box", ...c }),
+  collapsibleSection: (c) => ({ type: "collapsibleSection", ...c }),
+};
+function __flattenParts(parts: UIPart[]): UIPart[] {
+  const out: UIPart[] = [];
+  for (const p of parts) {
+    if (!p) continue;
+    out.push(p);
+    const kids = (p as { content?: UIPart[] }).content;
+    if (Array.isArray(kids)) out.push(...__flattenParts(kids));
+  }
+  return out;
+}
+
+// Test/off-host helpers (no-op concerns on-host):
+export function __resetUiMock(): void { __mockWindows = []; }
+export function __uiWindows(): { kind: string; options: WindowOptions | ModalOptions }[] {
+  return __mockWindows.filter(w => !w.closed).map(w => ({ kind: w.kind, options: w.options }));
+}
+// Find a button by its text across all open windows and run its callback.
+export async function __uiClickButton(text: string): Promise<boolean> {
+  for (const w of __mockWindows) {
+    if (w.closed) continue;
+    const btn = __flattenParts(w.options.content ?? []).find(
+      (p): p is UIPartButton => !!p && p.type === "button" && (p as UIPartButton).text === text
+    );
+    if (btn) { await Promise.resolve(btn.callback()); return true; }
+  }
+  return false;
+}
+
 export const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },
@@ -147,6 +251,12 @@ export const api: WodApi = __host.api ?? {
       register: (event: "onTextAdventureInput", _handler: OnTextAdventureInput) => {
         log(`[HOOK REGISTER] ${event}`);
       }
+    },
+    ui: {
+      window: { open: async (options: WindowOptions) => __openMockWindow("window", options) },
+      modal: { open: async (options: ModalOptions) => __openMockWindow("modal", options) },
+      part: __mockPart,
+      toast: async (_message: string) => { /* off-host: no toast surface */ },
     }
   }
 };

@@ -10,13 +10,14 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | Path | What |
 | --- | --- |
 | `CLAUDE.md` + `docs/memory.md` | **The project's externalized memory** — session bootstrap + the fine-grained map of everything (files/classes/functions, state, decisions & rationale, roadmap). Updated in the same commit as any change it describes. |
-| `src/host.ts` | NovelAI API contract + the off-host mock — the only module that touches `globalThis`. |
+| `src/host.ts` | NovelAI API contract (storage, lorebook, hooks, **`ui`**) + the off-host mock — the only module that touches `globalThis`. |
 | `src/core/` | Pure mechanics (`traits`, `dice`, `damage`) — no host imports. |
 | `src/wizard.ts` | Medium-agnostic wizard engine (structured prompts; text renderer now, modals later). |
 | `src/rolls.ts` | Pure roll machinery: specs, pool expressions, tag modifiers, extended-roll state machine. |
 | `src/rules.ts` | The Dark Ages **data**: templates, resources + the effect grammar, roads, disciplines, merits, SRD seeds. |
 | `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser. |
 | `src/game.ts` | The live layer: characters & stores, effect interpreter, wizards, `[[…]]` commands. |
+| `src/window.ts` | `api.v1.ui` wizard-windows that **emit commands** (no second path); the first is `[[win-constraint]]`. |
 | `src/index.ts` | Re-exports everything + `init()` — the one entry point with side effects. |
 | `src/main.ts` | Runtime entry — boots the engine by calling `init()` (runs last in the built artifact). |
 | `scripts/build-single.ts` → `dist/naiowod.ts` | Concatenates `src/*` into one readable, editable TS file — **the deployment artifact** (see below). |
@@ -29,7 +30,7 @@ damage, soak, resource pools and morality. UI and game loop come later.
 NovelAI's runtime is a single, import-free context that injects a global
 `api`. That's a **deployment** constraint, not a source one: the code is
 ordinary ES modules with a strict layering (`core` → `rules` → `services` →
-`game`), and `bun run build` concatenates them **in dependency order** into one
+`game` → `window`), and `bun run build` concatenates them **in dependency order** into one
 readable, editable TypeScript file — `dist/naiowod.ts` — stripping the
 inter-module `import`/`export` wiring. It is **not** minified or bundled: every
 declaration keeps its original source, so the single file reads like the modules
@@ -510,6 +511,46 @@ or (later) modal windows. All of them edit the same thing:
 - The wizard core (`src/wizard.ts`) is **medium-agnostic**: definitions emit
   structured prompts and consume replies, so the same wizard can later render
   as `api.v1.ui` modals/windows without changing its logic.
+
+### Constraint groups (exclusive / restricted / forbidden)
+
+A **constraint group** is a reusable allow/deny rule over Backgrounds or
+Merits/Flaws — the raw material clans and templates will use to say what a
+character may take. Groups are **data** (a `wod:config:constraints` lorebook
+entry), stored and surfaced now, enforced at creation later.
+
+```
+[[define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1]]
+[[define-constraint name="clan-secrets" relation=forbidden domain=flaw members="dark-secret" scope="vampire"]]
+[[constraints]]              # list them; [[constraint <name>]] lays one out
+[[check-constraints]]        # flag the current character's conflicts
+```
+
+- **`relation`** — `exclusive` (hold at most `max`, default 1, of the members —
+  mutual exclusion), `restricted` (members available **only** to characters in
+  `scope`), or `forbidden` (members **disallowed** for characters in `scope`).
+  Both senses of "exclusive" are covered: mutually-exclusive members vs reserved
+  access.
+- **`domain`** — which bucket the members live in: `background`, `merit`,
+  `flaw`, `meritflaw`, or `any`.
+- **`scope`** — the templates/choices it applies to (comma-separated; empty =
+  everyone). A group's `scope` is how a future clan/template will own its rules.
+- **`[[check-constraints]]`** validates the current character's owned Backgrounds
+  and Merits/Flaws against every group and reports violations (ST-enforced until
+  the creation engine consumes them). **`[[forget-constraint <name>]]`** removes
+  one; defining an existing name replaces it.
+
+### Windows are just command emitters
+
+`[[win-constraint]]` opens an **`api.v1.ui` window** — a form (name; relation and
+domain button-rows; members, max, scope, note) with a **Create** button. Create
+does nothing special: it composes a `define-constraint …` string and routes it
+through the **same `CommandRouter`** every command uses. **A window is an
+abstraction over the command layer, not a second execution path** — anything a
+window can do, a typed command can do, and vice-versa. The host UI contract +
+off-host mock added here (`src/host.ts`, `src/window.ts`) are the shared
+foundation every future wizard-window renders on; the full UI reference lives in
+`docs/ui-*.md`.
 
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
 resolution, and turning a finished sheet into a `LiveCharacter`.

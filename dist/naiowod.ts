@@ -69,6 +69,50 @@ interface StorageApi {
   list: () => Promise<string[]>;
 }
 
+// --- UI PARTS (the subset our windows use; full reference in docs/ui-api-reference.md).
+// A window is just a tree of these parts; inputs bind to tempStorage via storageKey,
+// and buttons run a callback. Off-host the mock records the tree and fires callbacks.
+interface UIStyle { [k: string]: string | number }
+interface UIPartText { type: "text"; id?: string; text?: string; markdown?: boolean; noTemplate?: boolean; style?: UIStyle }
+interface UIPartTextInput { type: "textInput"; id?: string; initialValue?: string; storageKey?: string; onChange?: (v: string) => void; onSubmit?: (v: string) => void; label?: string; placeholder?: string; disabled?: boolean; style?: UIStyle }
+interface UIPartNumberInput { type: "numberInput"; id?: string; initialValue?: number; storageKey?: string; onChange?: (v: string) => void; onSubmit?: (v: string) => void; label?: string; placeholder?: string; disabled?: boolean; style?: UIStyle }
+interface UIPartButton { type: "button"; id?: string; text?: string; callback: () => void; disabled?: boolean; disabledWhileCallbackRunning?: boolean; style?: UIStyle }
+interface UIPartRow { type: "row"; id?: string; content: UIPart[]; spacing?: string; alignment?: string; wrap?: boolean; style?: UIStyle }
+interface UIPartColumn { type: "column"; id?: string; content: UIPart[]; spacing?: string; alignment?: string; wrap?: boolean; style?: UIStyle }
+interface UIPartBox { type: "box"; id?: string; content: UIPart[]; style?: UIStyle }
+interface UIPartCollapsibleSection { type: "collapsibleSection"; id?: string; title: string; initialCollapsed?: boolean; storageKey?: string; content: UIPart[]; style?: UIStyle }
+type UIPart =
+  | UIPartText | UIPartTextInput | UIPartNumberInput | UIPartButton
+  | UIPartRow | UIPartColumn | UIPartBox | UIPartCollapsibleSection;
+
+interface WindowOptions { id?: string; title?: string; content: UIPart[]; defaultWidth?: number | string; defaultHeight?: number | string; resizable?: boolean; }
+interface ModalOptions { id?: string; title?: string; size?: "full" | "large" | "medium" | "small"; content: UIPart[]; }
+// The handle open() resolves to: re-render with update(), close(), inspect, and
+// await closure.
+interface UIHandle {
+  update: (options: Partial<WindowOptions & ModalOptions>) => Promise<void>;
+  close: () => Promise<void>;
+  isClosed: () => boolean;
+  closed: Promise<void>;
+}
+// Convenience part builders (they add the correct `type`).
+interface UiPartHelpers {
+  text: (c: Omit<UIPartText, "type">) => UIPartText;
+  textInput: (c: Omit<UIPartTextInput, "type">) => UIPartTextInput;
+  numberInput: (c: Omit<UIPartNumberInput, "type">) => UIPartNumberInput;
+  button: (c: Omit<UIPartButton, "type">) => UIPartButton;
+  row: (c: Omit<UIPartRow, "type">) => UIPartRow;
+  column: (c: Omit<UIPartColumn, "type">) => UIPartColumn;
+  box: (c: Omit<UIPartBox, "type">) => UIPartBox;
+  collapsibleSection: (c: Omit<UIPartCollapsibleSection, "type">) => UIPartCollapsibleSection;
+}
+interface UiApi {
+  window: { open: (options: WindowOptions) => Promise<UIHandle> };
+  modal: { open: (options: ModalOptions) => Promise<UIHandle> };
+  part: UiPartHelpers;
+  toast: (message: string, options?: { autoClose?: number | false; type?: string }) => Promise<void>;
+}
+
 interface WodApi {
   v1: {
     script: { id: string; name?: string; version?: string; author?: string };
@@ -96,6 +140,10 @@ interface WodApi {
       removeEntry: (id: string) => Promise<void>;
     };
     hooks: { register: (event: "onTextAdventureInput", handler: OnTextAdventureInput) => void };
+    // Custom UI: modals (blocking, centered) and windows (floating). Both take a
+    // UIPart tree and return a handle. Our wizard-windows use this to render a
+    // form and, on submit, emit a [[command]] - see src/window.ts.
+    ui: UiApi;
   };
 }
 
@@ -128,6 +176,62 @@ function __resetLorebookMock(): void { __mockCategories = []; __mockEntries = []
 // A no-op concern on-host, where the real `api` is used instead of this mock.
 function __resetStorageMock(): void { __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); }
 
+// --- UI MOCK ---
+// Off-host there is no real window manager, so the mock records every opened
+// window/modal and its current UIPart tree, and lets tests fire button
+// callbacks. This exercises the whole window -> command path without rendering.
+interface MockWindow { kind: "window" | "modal"; options: WindowOptions | ModalOptions; closed: boolean; }
+let __mockWindows: MockWindow[] = [];
+function __openMockWindow(kind: "window" | "modal", options: WindowOptions | ModalOptions): UIHandle {
+  const rec: MockWindow = { kind, options, closed: false };
+  let resolveClosed: () => void = () => {};
+  const closed = new Promise<void>(res => { resolveClosed = res; });
+  __mockWindows.push(rec);
+  return {
+    update: async (opts) => { rec.options = { ...rec.options, ...opts } as WindowOptions | ModalOptions; },
+    close: async () => { rec.closed = true; resolveClosed(); },
+    isClosed: () => rec.closed,
+    closed,
+  };
+}
+const __mockPart: UiPartHelpers = {
+  text: (c) => ({ type: "text", ...c }),
+  textInput: (c) => ({ type: "textInput", ...c }),
+  numberInput: (c) => ({ type: "numberInput", ...c }),
+  button: (c) => ({ type: "button", ...c }),
+  row: (c) => ({ type: "row", ...c }),
+  column: (c) => ({ type: "column", ...c }),
+  box: (c) => ({ type: "box", ...c }),
+  collapsibleSection: (c) => ({ type: "collapsibleSection", ...c }),
+};
+function __flattenParts(parts: UIPart[]): UIPart[] {
+  const out: UIPart[] = [];
+  for (const p of parts) {
+    if (!p) continue;
+    out.push(p);
+    const kids = (p as { content?: UIPart[] }).content;
+    if (Array.isArray(kids)) out.push(...__flattenParts(kids));
+  }
+  return out;
+}
+
+// Test/off-host helpers (no-op concerns on-host):
+function __resetUiMock(): void { __mockWindows = []; }
+function __uiWindows(): { kind: string; options: WindowOptions | ModalOptions }[] {
+  return __mockWindows.filter(w => !w.closed).map(w => ({ kind: w.kind, options: w.options }));
+}
+// Find a button by its text across all open windows and run its callback.
+async function __uiClickButton(text: string): Promise<boolean> {
+  for (const w of __mockWindows) {
+    if (w.closed) continue;
+    const btn = __flattenParts(w.options.content ?? []).find(
+      (p): p is UIPartButton => !!p && p.type === "button" && (p as UIPartButton).text === text
+    );
+    if (btn) { await Promise.resolve(btn.callback()); return true; }
+  }
+  return false;
+}
+
 const api: WodApi = __host.api ?? {
   v1: {
     script: { id: "a1b2c3d4-script-uuid" },
@@ -159,6 +263,12 @@ const api: WodApi = __host.api ?? {
       register: (event: "onTextAdventureInput", _handler: OnTextAdventureInput) => {
         log(`[HOOK REGISTER] ${event}`);
       }
+    },
+    ui: {
+      window: { open: async (options: WindowOptions) => __openMockWindow("window", options) },
+      modal: { open: async (options: ModalOptions) => __openMockWindow("modal", options) },
+      part: __mockPart,
+      toast: async (_message: string) => { /* off-host: no toast surface */ },
     }
   }
 };
@@ -2156,6 +2266,112 @@ const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   { name: "Hunted", kind: "flaw", points: 4, description: "Someone dangerous wants you destroyed." },
 ];
 
+// =============================================================================
+// CONSTRAINT GROUPS - reusable allow/deny rules over trait options
+// -----------------------------------------------------------------------------
+// A named list of backgrounds and/or merits/flaws with a relation the creation
+// engine (when it lands) will enforce, and which [[check-constraints]] surfaces
+// now: EXCLUSIVE = take at most `max` of the members (mutual exclusion);
+// RESTRICTED = members available ONLY to characters in `scope`; FORBIDDEN =
+// members disallowed for characters in `scope`. Pure data - stored, surfaced,
+// and checked on demand; ST-enforced until creation consumes it. `scope` holds
+// template/choice tags (empty = applies to everyone). Both senses of "exclusive"
+// are covered: mutually-exclusive members (exclusive) vs reserved access
+// (restricted).
+// =============================================================================
+type ConstraintDomain = "background" | "merit" | "flaw" | "meritflaw" | "any";
+type ConstraintRelation = "exclusive" | "restricted" | "forbidden";
+interface ConstraintGroup {
+  name: string;                  // normalized group id
+  relation: ConstraintRelation;
+  domain: ConstraintDomain;      // which trait bucket the members live in
+  members: string[];             // normalized trait names
+  max?: number;                  // exclusive: at most N (default 1)
+  scope?: string[];              // templates/choices it applies to (empty = everyone)
+  note?: string;
+}
+interface ConstraintViolation {
+  group: string;
+  relation: ConstraintRelation;
+  detail: string;
+}
+
+const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
+const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
+
+// Fill defaults and normalize. An unknown relation falls back to "exclusive",
+// an unknown domain to "any" - a misconfigured group is still stored, never lost.
+function makeConstraintGroup(parts: Partial<ConstraintGroup> & { name: string }): ConstraintGroup {
+  const relation = CONSTRAINT_RELATIONS.includes(parts.relation as ConstraintRelation) ? (parts.relation as ConstraintRelation) : "exclusive";
+  const domain = CONSTRAINT_DOMAINS.includes(parts.domain as ConstraintDomain) ? (parts.domain as ConstraintDomain) : "any";
+  const g: ConstraintGroup = {
+    name: StringUtil.normalize(parts.name),
+    relation,
+    domain,
+    members: (parts.members ?? []).map(m => StringUtil.normalize(m)).filter(m => m.length > 0),
+    scope: (parts.scope ?? []).map(s => StringUtil.normalize(s)).filter(s => s.length > 0),
+  };
+  if (relation === "exclusive") g.max = Math.max(1, parts.max ?? 1);
+  else if (parts.max !== undefined) g.max = parts.max;
+  if (parts.note && parts.note.trim()) g.note = parts.note.trim();
+  return g;
+}
+
+function describeConstraint(g: ConstraintGroup): string {
+  const bits = [`${g.name} [${g.relation}/${g.domain}${g.relation === "exclusive" ? ` max ${g.max ?? 1}` : ""}]`];
+  bits.push(`{${g.members.map(m => StringUtil.toTitleCase(m)).join(", ")}}`);
+  if (g.scope && g.scope.length) bits.push(`scope: ${g.scope.join(", ")}`);
+  if (g.note) bits.push(`- ${g.note}`);
+  return bits.join(" ");
+}
+
+// What a character owns, for checkConstraints. All names normalized.
+interface OwnedTraits {
+  backgrounds: string[];
+  merits: string[];
+  flaws: string[];
+  templates: string[];
+}
+
+function ownedForDomain(owned: OwnedTraits, domain: ConstraintDomain): string[] {
+  switch (domain) {
+    case "background": return owned.backgrounds;
+    case "merit": return owned.merits;
+    case "flaw": return owned.flaws;
+    case "meritflaw": return [...owned.merits, ...owned.flaws];
+    default: return [...owned.backgrounds, ...owned.merits, ...owned.flaws];
+  }
+}
+
+// Empty scope = applies to everyone; else the character must share a scope tag
+// (its templates, for now - choices join this later).
+function inScope(g: ConstraintGroup, owned: OwnedTraits): boolean {
+  if (!g.scope || g.scope.length === 0) return true;
+  return g.scope.some(s => owned.templates.includes(s));
+}
+
+// Report every group the character violates. All three relations respect scope
+// (empty scope = universal); restricted is the inverted case (violated when the
+// member is held OUTSIDE its reserved scope).
+function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits): ConstraintViolation[] {
+  const violations: ConstraintViolation[] = [];
+  const title = (names: string[]): string => names.map(m => StringUtil.toTitleCase(m)).join(", ");
+  for (const g of groups) {
+    const held = g.members.filter(m => ownedForDomain(owned, g.domain).includes(m));
+    if (held.length === 0) continue;
+    const scoped = inScope(g, owned);
+    if (g.relation === "exclusive") {
+      const max = g.max ?? 1;
+      if (scoped && held.length > max) violations.push({ group: g.name, relation: g.relation, detail: `holds ${held.length} of "${g.name}" (max ${max}): ${title(held)}` });
+    } else if (g.relation === "forbidden") {
+      if (scoped) violations.push({ group: g.name, relation: g.relation, detail: `holds forbidden ${title(held)}` });
+    } else { // restricted
+      if (!scoped) violations.push({ group: g.name, relation: g.relation, detail: `holds ${title(held)} restricted to ${(g.scope ?? []).join(", ")}` });
+    }
+  }
+  return violations;
+}
+
 // A lorebook data entry is a human-readable header, then a marker line of '='
 // (>= 3), then the data. On read, everything above the marker is ignored - so
 // the instructions live right in the entry card the player edits, no separate
@@ -3266,6 +3482,85 @@ async function loadSuccessTablesFromLorebook(): Promise<number> {
 }
 
 // =============================================================================
+// CONSTRAINT GROUPS - the story's allow/deny rules over trait options
+// -----------------------------------------------------------------------------
+// Same config family as resources/tables: one lorebook entry (wod:config /
+// wod:config:constraints) holds a JSON array of ConstraintGroups (or a
+// name -> group map) below the marker. Entirely ST-defined (no built-in
+// defaults); cached for sync reads (the ResourceOverrides pattern); reloaded at
+// init and on both creator-mode sync points. [[define-constraint]] writes it and
+// creator mode can hand-edit it. Enforced at creation later; surfaced now via
+// [[check-constraints]].
+// =============================================================================
+const CONSTRAINTS_ENTRY = "wod:config:constraints";
+
+class ConstraintRegistry {
+  private static _cache: ConstraintGroup[] = [];
+
+  static all(): ConstraintGroup[] { return ConstraintRegistry._cache; }
+  static get(name: string): ConstraintGroup | undefined {
+    const n = StringUtil.normalize(name);
+    return ConstraintRegistry._cache.find(g => g.name === n);
+  }
+  static reset(): void { ConstraintRegistry._cache = []; }
+
+  private static _entryText(groups: ConstraintGroup[]): string {
+    return [
+      "Constraint groups: the story's allow/deny rules over Backgrounds and",
+      "Merits/Flaws. The JSON array below the marker lists groups; each has a name,",
+      "relation (exclusive|restricted|forbidden), domain",
+      "(background|merit|flaw|meritflaw|any), members, optional max (exclusive),",
+      "scope (templates/choices it applies to), and note. [[define-constraint]]",
+      "edits this for you; you may also edit it by hand in creator mode.",
+      SRD_HEADER_MARKER,
+      JSON.stringify(groups, null, 2),
+    ].join("\n");
+  }
+
+  // Read the entry into the cache ([] when missing or unparseable). Accepts a
+  // JSON array of groups OR a name -> group map; each is normalized.
+  static async loadFromLorebook(): Promise<number> {
+    ConstraintRegistry._cache = [];
+    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY);
+    if (!text) return 0;
+    const body = LorebookManager.contentBelowHeader(text).trim();
+    let parsed: unknown;
+    try { parsed = JSON.parse(body); } catch { return 0; }
+    const list: Array<Partial<ConstraintGroup> & { name: string }> = Array.isArray(parsed)
+      ? parsed as Array<Partial<ConstraintGroup> & { name: string }>
+      : (parsed && typeof parsed === "object")
+        ? Object.entries(parsed as Record<string, Partial<ConstraintGroup>>).map(([name, g]) => ({ ...g, name }))
+        : [];
+    ConstraintRegistry._cache = list.filter(g => g && typeof g.name === "string" && g.name.trim().length > 0).map(makeConstraintGroup);
+    return ConstraintRegistry._cache.length;
+  }
+
+  // Replace the whole set (create the category/entry on first use) + cache it.
+  static async save(groups: ConstraintGroup[]): Promise<void> {
+    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    const text = ConstraintRegistry._entryText(groups);
+    const created = await LorebookManager.ensureEntry(id, CONSTRAINTS_ENTRY, text);
+    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY, text);
+    ConstraintRegistry._cache = groups;
+  }
+
+  // Add or replace one group (by normalized name) and persist.
+  static async put(group: ConstraintGroup): Promise<void> {
+    const rest = ConstraintRegistry._cache.filter(g => g.name !== group.name);
+    await ConstraintRegistry.save([...rest, group]);
+  }
+
+  // Remove one group by name; returns whether it existed.
+  static async remove(name: string): Promise<boolean> {
+    const n = StringUtil.normalize(name);
+    const rest = ConstraintRegistry._cache.filter(g => g.name !== n);
+    if (rest.length === ConstraintRegistry._cache.length) return false;
+    await ConstraintRegistry.save(rest);
+    return true;
+  }
+}
+
+// =============================================================================
 // CHARACTER RESOURCES - live current values for a character's resources
 // -----------------------------------------------------------------------------
 // A character's resources are the union of its templates' ResourceDefs; current
@@ -3789,6 +4084,7 @@ class CommandRouter {
       await CharacterStore.syncFromLorebook();
       await ResourceOverrides.loadFromLorebook();
       await loadSuccessTablesFromLorebook();
+      await ConstraintRegistry.loadFromLorebook();
     }
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
@@ -3812,6 +4108,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   const { synced, failed } = await CharacterStore.syncFromLorebook();
   await ResourceOverrides.loadFromLorebook();
   await loadSuccessTablesFromLorebook();
+  await ConstraintRegistry.loadFromLorebook();
   await CommandRouter.setCreatorMode(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
@@ -4529,6 +4826,84 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Success tables: ${items}. [[tables <name>]] for detail; add table=<name> to a roll/resist/contest.))`;
 }
 
+// =============================================================================
+// CONSTRAINT GROUP COMMANDS - define/list/inspect the allow-deny rules, and
+// check the current character against them. [[win-constraint]] (src/window.ts)
+// is a UI over [[define-constraint]] - it composes and routes the same command.
+// =============================================================================
+
+// A character's owned traits, normalized, for checkConstraints. Merit vs flaw is
+// resolved via the registry; an unknown merit/flaw is treated as a merit (only
+// membership matters for the check, so the fallback is harmless).
+function ownedTraitsOf(char: PlayableCharacter): OwnedTraits {
+  const merits: string[] = [];
+  const flaws: string[] = [];
+  for (const name of Object.keys(char.meritsFlaws)) {
+    const def = MeritFlawRegistry.get(name);
+    (def && def.kind === "flaw" ? flaws : merits).push(StringUtil.normalize(name));
+  }
+  return {
+    backgrounds: Object.keys(char.backgrounds).map(n => StringUtil.normalize(n)),
+    merits,
+    flaws,
+    templates: (char.templates ?? []).map(t => StringUtil.normalize(t)),
+  };
+}
+
+async function cmdDefineConstraint(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) return `((OOC-Storyteller: define-constraint needs name="...", e.g. [[define-constraint name="clan-only-backgrounds" relation=restricted domain=background members="cappadocian-lore" scope="cappadocian"]].))`;
+  const members = (cmd.named["members"] ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  const scope = (cmd.named["scope"] ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  const maxRaw = cmd.named["max"];
+  const group = makeConstraintGroup({
+    name,
+    relation: cmd.named["relation"] as ConstraintRelation | undefined,
+    domain: cmd.named["domain"] as ConstraintDomain | undefined,
+    members,
+    scope,
+    max: maxRaw !== undefined ? parseInt(maxRaw, 10) : undefined,
+    note: cmd.named["note"],
+  });
+  await ConstraintRegistry.put(group);
+  return `((OOC-Storyteller: Defined constraint ${describeConstraint(group)}.))`;
+}
+
+async function cmdConstraints(): Promise<string> {
+  const all = ConstraintRegistry.all();
+  if (!all.length) return `((OOC-Storyteller: No constraint groups defined. Add one with [[define-constraint ...]] or [[win-constraint]].))`;
+  const items = all.map(g => `${g.name} (${g.relation}/${g.domain}, ${g.members.length} member${g.members.length === 1 ? "" : "s"})`).join("; ");
+  return `((OOC-Storyteller: Constraint groups: ${items}. [[constraint <name>]] for detail.))`;
+}
+
+async function cmdConstraint(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: constraint needs a name, e.g. [[constraint clan-only-backgrounds]]. [[constraints]] lists them.))`;
+  const g = ConstraintRegistry.get(name);
+  if (!g) return `((OOC-Storyteller: No constraint group "${StringUtil.normalize(name)}". See [[constraints]].))`;
+  return `((OOC-Storyteller: ${describeConstraint(g)}.))`;
+}
+
+async function cmdForgetConstraint(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: forget-constraint needs a name, e.g. [[forget-constraint clan-only-backgrounds]].))`;
+  const key = StringUtil.normalize(name);
+  return (await ConstraintRegistry.remove(key))
+    ? `((OOC-Storyteller: Forgot constraint group "${key}".))`
+    : `((OOC-Storyteller: No constraint group "${key}".))`;
+}
+
+async function cmdCheckConstraints(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const groups = ConstraintRegistry.all();
+  if (!groups.length) return `((OOC-Storyteller: No constraint groups defined - nothing to check.))`;
+  const violations = checkConstraints(groups, ownedTraitsOf(char));
+  if (!violations.length) return `((OOC-Storyteller: ${char.name} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.))`;
+  const lines = violations.map(v => v.detail).join("; ");
+  return `((OOC-Storyteller: ${char.name} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
@@ -4557,6 +4932,11 @@ CommandRouter.register("continue-contest", cmdContinueContest, "continue-contest
 CommandRouter.register("contest-status", cmdContestStatus, "contest-status [id]");
 CommandRouter.register("cancel-contest", cmdCancelContest, "cancel-contest [id]");
 CommandRouter.register("tables", cmdTables, "tables [name]  (list success tables, or lay one out in full)");
+CommandRouter.register("define-constraint", cmdDefineConstraint, 'define-constraint name="..." relation=exclusive|restricted|forbidden domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope="..."] [note="..."]');
+CommandRouter.register("constraints", cmdConstraints, "constraints (list the story's constraint groups)");
+CommandRouter.register("constraint", cmdConstraint, "constraint <name> (show one group in full)");
+CommandRouter.register("forget-constraint", cmdForgetConstraint, "forget-constraint <name>");
+CommandRouter.register("check-constraints", cmdCheckConstraints, "check-constraints (flag the current character's constraint conflicts)");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
@@ -4591,6 +4971,102 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
 }
 //#endregion src/game.ts
 
+//#region src/window.ts
+// =============================================================================
+// WINDOWS - api.v1.ui forms that EMIT commands (no separate execution path)
+// -----------------------------------------------------------------------------
+// A wizard-window is just a UI over the command layer: it renders a form with
+// UI Parts, binds fields to tempStorage via storageKey, and on submit composes a
+// [[command]] string and routes it through the SAME CommandRouter every other
+// command uses. So there is one path; the window is an abstraction over it.
+//
+// This first window builds a constraint group (it emits [[define-constraint]]).
+// A real NovelAI window can't render off-host, so the host mock records the part
+// tree and lets tests fire button callbacks (see host.ts __ui* helpers) - which
+// exercises the whole window -> command -> store path without a screen.
+// =============================================================================
+
+const CKEY = (k: string): string => `win:constraint:${k}`;
+const RELATIONS = ["exclusive", "restricted", "forbidden"];
+const DOMAINS = ["background", "merit", "flaw", "meritflaw", "any"];
+
+// A row of buttons behaving as a single-select: the current value is marked with
+// a bullet; clicking one writes it to tempStorage and re-renders.
+function selectorRow(part: UiPartHelpers, label: string, key: string, options: string[], current: string, rerender: () => Promise<void>): UIPart {
+  const buttons = options.map(o => part.button({
+    text: o === current ? `• ${o}` : o,
+    callback: async () => { await api.v1.tempStorage.set(CKEY(key), o); await rerender(); },
+  }));
+  return part.row({ content: [part.text({ text: `${label}:` }), ...buttons] });
+}
+
+// Read the form's tempStorage fields, compose a define-constraint command, route
+// it, and show the OOC reply in-window.
+async function submitConstraint(rerender: (result?: string) => Promise<void>): Promise<void> {
+  const get = async (k: string): Promise<string> => String((await api.v1.tempStorage.get(CKEY(k))) ?? "").trim();
+  const name = await get("name");
+  if (!name) { await rerender("Needs a name."); return; }
+  const parts = [
+    "define-constraint",
+    `name="${name}"`,
+    `relation=${(await get("relation")) || "exclusive"}`,
+    `domain=${(await get("domain")) || "background"}`,
+  ];
+  const members = await get("members"); if (members) parts.push(`members="${members}"`);
+  const max = await get("max"); if (max) parts.push(`max=${max}`);
+  const scope = await get("scope"); if (scope) parts.push(`scope="${scope}"`);
+  const note = await get("note"); if (note) parts.push(`note="${note}"`);
+  const reply = await CommandRouter.route(parts.join(" "));
+  await rerender(reply);
+}
+
+// Open the constraint-group window and render its form.
+async function openConstraintWindow(): Promise<void> {
+  const part = api.v1.ui.part;
+  const temp = api.v1.tempStorage;
+  if ((await temp.get(CKEY("relation"))) == null) await temp.set(CKEY("relation"), "exclusive");
+  if ((await temp.get(CKEY("domain"))) == null) await temp.set(CKEY("domain"), "background");
+
+  const handle = await api.v1.ui.window.open({ title: "Define constraint group", content: [], defaultWidth: 480, defaultHeight: 600 });
+
+  const render = async (result?: string): Promise<void> => {
+    const relation = String((await temp.get(CKEY("relation"))) ?? "exclusive");
+    const domain = String((await temp.get(CKEY("domain"))) ?? "background");
+    const content: UIPart[] = [
+      part.text({ text: "**Define a constraint group** (exclusive / restricted / forbidden)", markdown: true }),
+      part.text({ text: "Name" }),
+      part.textInput({ storageKey: CKEY("name"), placeholder: "e.g. clan-only-backgrounds" }),
+      selectorRow(part, "Relation", "relation", RELATIONS, relation, () => render()),
+      selectorRow(part, "Domain", "domain", DOMAINS, domain, () => render()),
+      part.text({ text: "Members (comma-separated Backgrounds or Merits/Flaws)" }),
+      part.textInput({ storageKey: CKEY("members"), placeholder: "e.g. status, anonymity" }),
+      part.text({ text: "Max to hold (exclusive only; default 1)" }),
+      part.numberInput({ storageKey: CKEY("max") }),
+      part.text({ text: "Scope: templates/choices it applies to (comma-separated; empty = everyone)" }),
+      part.textInput({ storageKey: CKEY("scope"), placeholder: "e.g. tzimisce" }),
+      part.text({ text: "Note (optional)" }),
+      part.textInput({ storageKey: CKEY("note") }),
+      part.row({ content: [
+        part.button({ text: "Create", callback: () => submitConstraint(render) }),
+        part.button({ text: "Close", callback: () => handle.close() }),
+      ] }),
+    ];
+    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    await handle.update({ content });
+  };
+
+  await render();
+}
+
+// [[win-constraint]] - a UI over [[define-constraint]].
+async function cmdWinConstraint(): Promise<string> {
+  await openConstraintWindow();
+  return `((OOC-Storyteller: Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).))`;
+}
+
+CommandRouter.register("win-constraint", cmdWinConstraint, "win-constraint (open a window to define a constraint group)");
+//#endregion src/window.ts
+
 //#region src/index.ts
 // =============================================================================
 // NAIoWoD - World of Darkness (Dark Ages) engine for NovelAI scripting
@@ -4600,6 +5076,7 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
 // module has NO side effects; the built .naiscript artifact calls init().
 // =============================================================================
 
+// `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
 // Wire the engine to the host: input hook, lorebook seed, custom merits/flaws.
 // Returns the bootstrap result so the caller can surface the setup note.
@@ -4611,7 +5088,8 @@ async function init(): Promise<{ setupMessage: string | null }> {
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const overrides = await ResourceOverrides.loadFromLorebook();
   const tables = await loadSuccessTablesFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}`);
+  const constraints = await ConstraintRegistry.loadFromLorebook();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}; constraint groups: ${constraints}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

@@ -12,6 +12,7 @@ import {
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
   resourcesForTemplates, resourceEffect, healthLevelsForTemplates, ATTRIBUTES,
   EffectSpec, EffectOp, describeEffect,
+  ConstraintGroup, ConstraintRelation, ConstraintDomain, makeConstraintGroup, describeConstraint, checkConstraints, OwnedTraits,
 } from "./rules";
 import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
 import {
@@ -814,6 +815,85 @@ export async function loadSuccessTablesFromLorebook(): Promise<number> {
 }
 
 // =============================================================================
+// CONSTRAINT GROUPS - the story's allow/deny rules over trait options
+// -----------------------------------------------------------------------------
+// Same config family as resources/tables: one lorebook entry (wod:config /
+// wod:config:constraints) holds a JSON array of ConstraintGroups (or a
+// name -> group map) below the marker. Entirely ST-defined (no built-in
+// defaults); cached for sync reads (the ResourceOverrides pattern); reloaded at
+// init and on both creator-mode sync points. [[define-constraint]] writes it and
+// creator mode can hand-edit it. Enforced at creation later; surfaced now via
+// [[check-constraints]].
+// =============================================================================
+export const CONSTRAINTS_ENTRY = "wod:config:constraints";
+
+export class ConstraintRegistry {
+  private static _cache: ConstraintGroup[] = [];
+
+  static all(): ConstraintGroup[] { return ConstraintRegistry._cache; }
+  static get(name: string): ConstraintGroup | undefined {
+    const n = StringUtil.normalize(name);
+    return ConstraintRegistry._cache.find(g => g.name === n);
+  }
+  static reset(): void { ConstraintRegistry._cache = []; }
+
+  private static _entryText(groups: ConstraintGroup[]): string {
+    return [
+      "Constraint groups: the story's allow/deny rules over Backgrounds and",
+      "Merits/Flaws. The JSON array below the marker lists groups; each has a name,",
+      "relation (exclusive|restricted|forbidden), domain",
+      "(background|merit|flaw|meritflaw|any), members, optional max (exclusive),",
+      "scope (templates/choices it applies to), and note. [[define-constraint]]",
+      "edits this for you; you may also edit it by hand in creator mode.",
+      SRD_HEADER_MARKER,
+      JSON.stringify(groups, null, 2),
+    ].join("\n");
+  }
+
+  // Read the entry into the cache ([] when missing or unparseable). Accepts a
+  // JSON array of groups OR a name -> group map; each is normalized.
+  static async loadFromLorebook(): Promise<number> {
+    ConstraintRegistry._cache = [];
+    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY);
+    if (!text) return 0;
+    const body = LorebookManager.contentBelowHeader(text).trim();
+    let parsed: unknown;
+    try { parsed = JSON.parse(body); } catch { return 0; }
+    const list: Array<Partial<ConstraintGroup> & { name: string }> = Array.isArray(parsed)
+      ? parsed as Array<Partial<ConstraintGroup> & { name: string }>
+      : (parsed && typeof parsed === "object")
+        ? Object.entries(parsed as Record<string, Partial<ConstraintGroup>>).map(([name, g]) => ({ ...g, name }))
+        : [];
+    ConstraintRegistry._cache = list.filter(g => g && typeof g.name === "string" && g.name.trim().length > 0).map(makeConstraintGroup);
+    return ConstraintRegistry._cache.length;
+  }
+
+  // Replace the whole set (create the category/entry on first use) + cache it.
+  static async save(groups: ConstraintGroup[]): Promise<void> {
+    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    const text = ConstraintRegistry._entryText(groups);
+    const created = await LorebookManager.ensureEntry(id, CONSTRAINTS_ENTRY, text);
+    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY, text);
+    ConstraintRegistry._cache = groups;
+  }
+
+  // Add or replace one group (by normalized name) and persist.
+  static async put(group: ConstraintGroup): Promise<void> {
+    const rest = ConstraintRegistry._cache.filter(g => g.name !== group.name);
+    await ConstraintRegistry.save([...rest, group]);
+  }
+
+  // Remove one group by name; returns whether it existed.
+  static async remove(name: string): Promise<boolean> {
+    const n = StringUtil.normalize(name);
+    const rest = ConstraintRegistry._cache.filter(g => g.name !== n);
+    if (rest.length === ConstraintRegistry._cache.length) return false;
+    await ConstraintRegistry.save(rest);
+    return true;
+  }
+}
+
+// =============================================================================
 // CHARACTER RESOURCES - live current values for a character's resources
 // -----------------------------------------------------------------------------
 // A character's resources are the union of its templates' ResourceDefs; current
@@ -1337,6 +1417,7 @@ export class CommandRouter {
       await CharacterStore.syncFromLorebook();
       await ResourceOverrides.loadFromLorebook();
       await loadSuccessTablesFromLorebook();
+      await ConstraintRegistry.loadFromLorebook();
     }
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
@@ -1360,6 +1441,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   const { synced, failed } = await CharacterStore.syncFromLorebook();
   await ResourceOverrides.loadFromLorebook();
   await loadSuccessTablesFromLorebook();
+  await ConstraintRegistry.loadFromLorebook();
   await CommandRouter.setCreatorMode(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
@@ -2077,6 +2159,84 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Success tables: ${items}. [[tables <name>]] for detail; add table=<name> to a roll/resist/contest.))`;
 }
 
+// =============================================================================
+// CONSTRAINT GROUP COMMANDS - define/list/inspect the allow-deny rules, and
+// check the current character against them. [[win-constraint]] (src/window.ts)
+// is a UI over [[define-constraint]] - it composes and routes the same command.
+// =============================================================================
+
+// A character's owned traits, normalized, for checkConstraints. Merit vs flaw is
+// resolved via the registry; an unknown merit/flaw is treated as a merit (only
+// membership matters for the check, so the fallback is harmless).
+function ownedTraitsOf(char: PlayableCharacter): OwnedTraits {
+  const merits: string[] = [];
+  const flaws: string[] = [];
+  for (const name of Object.keys(char.meritsFlaws)) {
+    const def = MeritFlawRegistry.get(name);
+    (def && def.kind === "flaw" ? flaws : merits).push(StringUtil.normalize(name));
+  }
+  return {
+    backgrounds: Object.keys(char.backgrounds).map(n => StringUtil.normalize(n)),
+    merits,
+    flaws,
+    templates: (char.templates ?? []).map(t => StringUtil.normalize(t)),
+  };
+}
+
+async function cmdDefineConstraint(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) return `((OOC-Storyteller: define-constraint needs name="...", e.g. [[define-constraint name="clan-only-backgrounds" relation=restricted domain=background members="cappadocian-lore" scope="cappadocian"]].))`;
+  const members = (cmd.named["members"] ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  const scope = (cmd.named["scope"] ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  const maxRaw = cmd.named["max"];
+  const group = makeConstraintGroup({
+    name,
+    relation: cmd.named["relation"] as ConstraintRelation | undefined,
+    domain: cmd.named["domain"] as ConstraintDomain | undefined,
+    members,
+    scope,
+    max: maxRaw !== undefined ? parseInt(maxRaw, 10) : undefined,
+    note: cmd.named["note"],
+  });
+  await ConstraintRegistry.put(group);
+  return `((OOC-Storyteller: Defined constraint ${describeConstraint(group)}.))`;
+}
+
+async function cmdConstraints(): Promise<string> {
+  const all = ConstraintRegistry.all();
+  if (!all.length) return `((OOC-Storyteller: No constraint groups defined. Add one with [[define-constraint ...]] or [[win-constraint]].))`;
+  const items = all.map(g => `${g.name} (${g.relation}/${g.domain}, ${g.members.length} member${g.members.length === 1 ? "" : "s"})`).join("; ");
+  return `((OOC-Storyteller: Constraint groups: ${items}. [[constraint <name>]] for detail.))`;
+}
+
+async function cmdConstraint(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: constraint needs a name, e.g. [[constraint clan-only-backgrounds]]. [[constraints]] lists them.))`;
+  const g = ConstraintRegistry.get(name);
+  if (!g) return `((OOC-Storyteller: No constraint group "${StringUtil.normalize(name)}". See [[constraints]].))`;
+  return `((OOC-Storyteller: ${describeConstraint(g)}.))`;
+}
+
+async function cmdForgetConstraint(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: forget-constraint needs a name, e.g. [[forget-constraint clan-only-backgrounds]].))`;
+  const key = StringUtil.normalize(name);
+  return (await ConstraintRegistry.remove(key))
+    ? `((OOC-Storyteller: Forgot constraint group "${key}".))`
+    : `((OOC-Storyteller: No constraint group "${key}".))`;
+}
+
+async function cmdCheckConstraints(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const groups = ConstraintRegistry.all();
+  if (!groups.length) return `((OOC-Storyteller: No constraint groups defined - nothing to check.))`;
+  const violations = checkConstraints(groups, ownedTraitsOf(char));
+  if (!violations.length) return `((OOC-Storyteller: ${char.name} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.))`;
+  const lines = violations.map(v => v.detail).join("; ");
+  return `((OOC-Storyteller: ${char.name} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
+}
+
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
@@ -2105,6 +2265,11 @@ CommandRouter.register("continue-contest", cmdContinueContest, "continue-contest
 CommandRouter.register("contest-status", cmdContestStatus, "contest-status [id]");
 CommandRouter.register("cancel-contest", cmdCancelContest, "cancel-contest [id]");
 CommandRouter.register("tables", cmdTables, "tables [name]  (list success tables, or lay one out in full)");
+CommandRouter.register("define-constraint", cmdDefineConstraint, 'define-constraint name="..." relation=exclusive|restricted|forbidden domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope="..."] [note="..."]');
+CommandRouter.register("constraints", cmdConstraints, "constraints (list the story's constraint groups)");
+CommandRouter.register("constraint", cmdConstraint, "constraint <name> (show one group in full)");
+CommandRouter.register("forget-constraint", cmdForgetConstraint, "forget-constraint <name>");
+CommandRouter.register("check-constraints", cmdCheckConstraints, "check-constraints (flag the current character's constraint conflicts)");
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

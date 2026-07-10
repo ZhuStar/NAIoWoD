@@ -565,6 +565,112 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   { name: "Hunted", kind: "flaw", points: 4, description: "Someone dangerous wants you destroyed." },
 ];
 
+// =============================================================================
+// CONSTRAINT GROUPS - reusable allow/deny rules over trait options
+// -----------------------------------------------------------------------------
+// A named list of backgrounds and/or merits/flaws with a relation the creation
+// engine (when it lands) will enforce, and which [[check-constraints]] surfaces
+// now: EXCLUSIVE = take at most `max` of the members (mutual exclusion);
+// RESTRICTED = members available ONLY to characters in `scope`; FORBIDDEN =
+// members disallowed for characters in `scope`. Pure data - stored, surfaced,
+// and checked on demand; ST-enforced until creation consumes it. `scope` holds
+// template/choice tags (empty = applies to everyone). Both senses of "exclusive"
+// are covered: mutually-exclusive members (exclusive) vs reserved access
+// (restricted).
+// =============================================================================
+export type ConstraintDomain = "background" | "merit" | "flaw" | "meritflaw" | "any";
+export type ConstraintRelation = "exclusive" | "restricted" | "forbidden";
+export interface ConstraintGroup {
+  name: string;                  // normalized group id
+  relation: ConstraintRelation;
+  domain: ConstraintDomain;      // which trait bucket the members live in
+  members: string[];             // normalized trait names
+  max?: number;                  // exclusive: at most N (default 1)
+  scope?: string[];              // templates/choices it applies to (empty = everyone)
+  note?: string;
+}
+export interface ConstraintViolation {
+  group: string;
+  relation: ConstraintRelation;
+  detail: string;
+}
+
+const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
+const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
+
+// Fill defaults and normalize. An unknown relation falls back to "exclusive",
+// an unknown domain to "any" - a misconfigured group is still stored, never lost.
+export function makeConstraintGroup(parts: Partial<ConstraintGroup> & { name: string }): ConstraintGroup {
+  const relation = CONSTRAINT_RELATIONS.includes(parts.relation as ConstraintRelation) ? (parts.relation as ConstraintRelation) : "exclusive";
+  const domain = CONSTRAINT_DOMAINS.includes(parts.domain as ConstraintDomain) ? (parts.domain as ConstraintDomain) : "any";
+  const g: ConstraintGroup = {
+    name: StringUtil.normalize(parts.name),
+    relation,
+    domain,
+    members: (parts.members ?? []).map(m => StringUtil.normalize(m)).filter(m => m.length > 0),
+    scope: (parts.scope ?? []).map(s => StringUtil.normalize(s)).filter(s => s.length > 0),
+  };
+  if (relation === "exclusive") g.max = Math.max(1, parts.max ?? 1);
+  else if (parts.max !== undefined) g.max = parts.max;
+  if (parts.note && parts.note.trim()) g.note = parts.note.trim();
+  return g;
+}
+
+export function describeConstraint(g: ConstraintGroup): string {
+  const bits = [`${g.name} [${g.relation}/${g.domain}${g.relation === "exclusive" ? ` max ${g.max ?? 1}` : ""}]`];
+  bits.push(`{${g.members.map(m => StringUtil.toTitleCase(m)).join(", ")}}`);
+  if (g.scope && g.scope.length) bits.push(`scope: ${g.scope.join(", ")}`);
+  if (g.note) bits.push(`- ${g.note}`);
+  return bits.join(" ");
+}
+
+// What a character owns, for checkConstraints. All names normalized.
+export interface OwnedTraits {
+  backgrounds: string[];
+  merits: string[];
+  flaws: string[];
+  templates: string[];
+}
+
+function ownedForDomain(owned: OwnedTraits, domain: ConstraintDomain): string[] {
+  switch (domain) {
+    case "background": return owned.backgrounds;
+    case "merit": return owned.merits;
+    case "flaw": return owned.flaws;
+    case "meritflaw": return [...owned.merits, ...owned.flaws];
+    default: return [...owned.backgrounds, ...owned.merits, ...owned.flaws];
+  }
+}
+
+// Empty scope = applies to everyone; else the character must share a scope tag
+// (its templates, for now - choices join this later).
+function inScope(g: ConstraintGroup, owned: OwnedTraits): boolean {
+  if (!g.scope || g.scope.length === 0) return true;
+  return g.scope.some(s => owned.templates.includes(s));
+}
+
+// Report every group the character violates. All three relations respect scope
+// (empty scope = universal); restricted is the inverted case (violated when the
+// member is held OUTSIDE its reserved scope).
+export function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits): ConstraintViolation[] {
+  const violations: ConstraintViolation[] = [];
+  const title = (names: string[]): string => names.map(m => StringUtil.toTitleCase(m)).join(", ");
+  for (const g of groups) {
+    const held = g.members.filter(m => ownedForDomain(owned, g.domain).includes(m));
+    if (held.length === 0) continue;
+    const scoped = inScope(g, owned);
+    if (g.relation === "exclusive") {
+      const max = g.max ?? 1;
+      if (scoped && held.length > max) violations.push({ group: g.name, relation: g.relation, detail: `holds ${held.length} of "${g.name}" (max ${max}): ${title(held)}` });
+    } else if (g.relation === "forbidden") {
+      if (scoped) violations.push({ group: g.name, relation: g.relation, detail: `holds forbidden ${title(held)}` });
+    } else { // restricted
+      if (!scoped) violations.push({ group: g.name, relation: g.relation, detail: `holds ${title(held)} restricted to ${(g.scope ?? []).join(", ")}` });
+    }
+  }
+  return violations;
+}
+
 // A lorebook data entry is a human-readable header, then a marker line of '='
 // (>= 3), then the data. On read, everything above the marker is ignored - so
 // the instructions live right in the entry card the player edits, no separate

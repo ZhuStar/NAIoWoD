@@ -19,6 +19,9 @@ import {
   compareRolls, applyContestRound, describeContest,
   ExtendedContestStore, loadSuccessTablesFromLorebook, SUCCESS_TABLES_ENTRY,
   type SuccessTable, type ExtendedContest, type RollExecution,
+  makeConstraintGroup, describeConstraint, checkConstraints, ConstraintRegistry, CONSTRAINTS_ENTRY,
+  type ConstraintGroup, type ConstraintRelation, type ConstraintDomain, type OwnedTraits,
+  openConstraintWindow, api, __resetUiMock, __uiWindows, __uiClickButton,
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, RESOURCE_CONFIG_CATEGORY,
@@ -2207,5 +2210,144 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
     await loadSuccessTablesFromLorebook();
     expect(readSuccessTable(SuccessTableRegistry.get("luck")!, "success", 3).value).toBe(6);
     expect(SuccessTableRegistry.get("damage")).toBeDefined(); // built-ins survive the overlay
+  });
+});
+
+// =============================================================================
+// CONSTRAINT GROUPS + the first api.v1.ui window
+// =============================================================================
+describe("constraint groups (checkConstraints, pure)", () => {
+  const owned = (o: Partial<OwnedTraits>): OwnedTraits => ({ backgrounds: [], merits: [], flaws: [], templates: [], ...o });
+
+  test("exclusive: holding more than max members is a violation", () => {
+    const g = makeConstraintGroup({ name: "s", relation: "exclusive", domain: "background", members: ["status", "anonymity"], max: 1 });
+    expect(checkConstraints([g], owned({ backgrounds: ["status", "anonymity"] })).length).toBe(1);
+    expect(checkConstraints([g], owned({ backgrounds: ["status"] })).length).toBe(0);
+  });
+
+  test("forbidden: holding a member while in scope is a violation (out of scope is fine)", () => {
+    const g = makeConstraintGroup({ name: "f", relation: "forbidden", domain: "flaw", members: ["dark-secret"], scope: ["vampire"] });
+    expect(checkConstraints([g], owned({ flaws: ["dark-secret"], templates: ["vampire"] })).length).toBe(1);
+    expect(checkConstraints([g], owned({ flaws: ["dark-secret"], templates: ["mortal"] })).length).toBe(0);
+  });
+
+  test("restricted: holding a member OUTSIDE its reserved scope is a violation", () => {
+    const g = makeConstraintGroup({ name: "r", relation: "restricted", domain: "merit", members: ["true-faith"], scope: ["mortal"] });
+    expect(checkConstraints([g], owned({ merits: ["true-faith"], templates: ["vampire"] })).length).toBe(1);
+    expect(checkConstraints([g], owned({ merits: ["true-faith"], templates: ["mortal"] })).length).toBe(0);
+  });
+
+  test("domain 'any' checks every bucket; no membership = no violation", () => {
+    const g = makeConstraintGroup({ name: "a", relation: "forbidden", domain: "any", members: ["haunted"] });
+    expect(checkConstraints([g], owned({ flaws: ["haunted"] })).length).toBe(1);
+    expect(checkConstraints([g], owned({ backgrounds: ["haunted"] })).length).toBe(1);
+    expect(checkConstraints([g], owned({ merits: ["iron-will"] })).length).toBe(0);
+  });
+
+  test("makeConstraintGroup normalizes names/members and defaults relation/domain/max", () => {
+    const g = makeConstraintGroup({ name: "  My Group ", members: ["Status", " Anonymity ", ""] });
+    expect(g.name).toBe("my-group");
+    expect(g.members).toEqual(["status", "anonymity"]);
+    expect(g.relation).toBe("exclusive");
+    expect(g.domain).toBe("any");
+    expect(g.max).toBe(1);
+  });
+
+  test("an unknown relation/domain falls back rather than being lost", () => {
+    const g = makeConstraintGroup({ name: "x", relation: "bogus" as unknown as ConstraintRelation, domain: "weird" as unknown as ConstraintDomain, members: ["a"] });
+    expect(g.relation).toBe("exclusive");
+    expect(g.domain).toBe("any");
+    expect(describeConstraint(g)).toContain("exclusive");
+  });
+});
+
+describe("constraint commands", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); ConstraintRegistry.reset(); MeritFlawRegistry.reset();
+    await LorebookManager.bootstrap();
+  });
+
+  test("define-constraint persists and round-trips through the lorebook", async () => {
+    const r = await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1 note="pick one"');
+    expect(r).toContain("Defined constraint");
+    expect(ConstraintRegistry.get("statuses")!.members).toEqual(["status", "anonymity"]);
+    // The registry rebuilds itself purely from the lorebook entry.
+    ConstraintRegistry.reset();
+    expect(ConstraintRegistry.all().length).toBe(0);
+    expect(await ConstraintRegistry.loadFromLorebook()).toBe(1);
+    const g = ConstraintRegistry.get("statuses")!;
+    expect(g.relation).toBe("exclusive");
+    expect(g.note).toBe("pick one");
+  });
+
+  test("defining the same name replaces it; list, show, forget", async () => {
+    await CommandRouter.route('define-constraint name="foo" domain=merit members="iron-will"');
+    await CommandRouter.route('define-constraint name="foo" relation=forbidden domain=flaw members="haunted, hunted"');
+    expect(ConstraintRegistry.all().length).toBe(1);                 // replaced, not duplicated
+    expect(ConstraintRegistry.get("foo")!.relation).toBe("forbidden");
+    expect(await CommandRouter.route("constraints")).toContain("foo");
+    expect(await CommandRouter.route("constraint foo")).toContain("Haunted"); // toTitleCase display
+    expect(await CommandRouter.route("forget-constraint foo")).toContain("Forgot");
+    expect(ConstraintRegistry.get("foo")).toBeUndefined();
+    expect(await CommandRouter.route("constraints")).toContain("No constraint groups");
+  });
+
+  test("check-constraints flags the current character's conflicts", async () => {
+    await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1');
+    await CommandRouter.route('define-constraint name="no-secrets" relation=forbidden domain=flaw members="dark-secret" scope="vampire"');
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const c = (await CharacterStore.getCurrent())!;
+    c.backgrounds = { status: 2, anonymity: 1 };   // 2 of an exclusive group
+    c.meritsFlaws = { "dark-secret": 1 };           // a forbidden flaw for vampires
+    await CharacterStore.save(c);
+    const report = await CommandRouter.route("check-constraints");
+    expect(report).toContain("2 constraint issues");
+    expect(report).toContain("statuses");
+    expect(report).toContain("forbidden");
+  });
+
+  test("check-constraints is clean when nothing conflicts", async () => {
+    await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1');
+    await CommandRouter.route('create-playable name="Ok" templates=mortal');
+    expect(await CommandRouter.route("check-constraints")).toContain("satisfies all");
+  });
+});
+
+describe("constraint window ([[win-constraint]] emits define-constraint)", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); ConstraintRegistry.reset();
+    await LorebookManager.bootstrap();
+  });
+
+  test("the window opens; filling it and clicking Create routes define-constraint", async () => {
+    const opened = await CommandRouter.route("win-constraint");
+    expect(opened).toContain("Opened the constraint-group window");
+    expect(__uiWindows().length).toBe(1);
+    expect(__uiWindows()[0].options.title).toContain("constraint");
+
+    // The real host binds storageKey <-> tempStorage; off-host we set the temp
+    // fields directly, then fire the Create button the window rendered.
+    await api.v1.tempStorage.set("win:constraint:name", "vip-backgrounds");
+    await api.v1.tempStorage.set("win:constraint:relation", "exclusive");
+    await api.v1.tempStorage.set("win:constraint:domain", "background");
+    await api.v1.tempStorage.set("win:constraint:members", "status, anonymity");
+    await api.v1.tempStorage.set("win:constraint:max", "1");
+
+    expect(await __uiClickButton("Create")).toBe(true);
+    // The emitted command ran through the same CommandRouter -> the group exists.
+    expect(ConstraintRegistry.get("vip-backgrounds")!.members).toEqual(["status", "anonymity"]);
+    expect(await CommandRouter.route("constraints")).toContain("vip-backgrounds");
+  });
+
+  test("Create with no name reports back in-window without defining anything", async () => {
+    await CommandRouter.route("win-constraint");
+    expect(await __uiClickButton("Create")).toBe(true);
+    expect(ConstraintRegistry.all().length).toBe(0);
+  });
+
+  test("openConstraintWindow can be called directly and seeds selector defaults", async () => {
+    await openConstraintWindow();
+    expect(await api.v1.tempStorage.get("win:constraint:relation")).toBe("exclusive");
+    expect(await api.v1.tempStorage.get("win:constraint:domain")).toBe("background");
   });
 });

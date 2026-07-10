@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `76bbb82`** ("Resisted &
-> contested rolls, extended contests, and success tables").
+> **Last synced with the code as of commit `5ebaea0`** ("Constraint groups
+> + the first api.v1.ui window (a command-emitter)").
 
 ---
 
@@ -76,6 +76,7 @@ src/rolls.ts         pure: roll specs, modifiers, extended-roll state machine
 src/rules.ts         DATA: templates, resources, effect grammar, roads, SRD seeds
 src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry, LorebookParser
 src/game.ts          everything live: characters, stores, interpreter, commands
+src/window.ts        api.v1.ui wizard-windows that EMIT commands (win-constraint)
 src/index.ts         re-exports * + init()  (importing = zero side effects)
 src/main.ts          runtime entry: init().catch(...)
 ```
@@ -127,12 +128,21 @@ were created).
 
 ## 5. Fine-grained module map
 
-### src/host.ts (156 lines)
+### src/host.ts (266 lines)
 - Types: `OnTextAdventureInputReturnValue`, `OnTextAdventureInput`,
   `LorebookEntryData`, `LorebookCategoryData`, `LorebookCondition`; internal
   `StorageApi`, `WodApi`.
+- **UI contract**: the `UIPart` union + the parts our windows use (text,
+  textInput, numberInput, button, row, column, box, collapsibleSection),
+  `WindowOptions`/`ModalOptions`, `UIHandle {update,close,isClosed,closed}`,
+  `UiPartHelpers`, `UiApi` (`window.open`/`modal.open`/`part.*`/`toast`) - now a
+  field on `WodApi.v1.ui`. Shapes from `docs/ui-api-reference.md`.
 - `api` (the guarded mock/real switch), `log()`, `__resetLorebookMock()`,
   `__resetStorageMock()`.
+- **UI mock**: `window.open`/`modal.open` record `{options,handle}`; the handle's
+  `update` merges + re-records; `part.*` add `type`. Test hooks
+  `__resetUiMock()`, `__uiWindows()`, `__uiClickButton(text)` (fires a button's
+  callback - drives the whole window→command path off-host).
 
 ### src/core/traits.ts (276)
 - `StringUtil.normalize` (lowercase, trim, spaces→hyphens — **every key in the
@@ -266,7 +276,7 @@ were created).
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (626) — all game DATA
+### src/rules.ts (732) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
@@ -348,6 +358,16 @@ were created).
   /`:skills`/`:knowledges` — one name per line, `#`//`//` comments),
   `srd:backgrounds` (`srd:backgrounds:all`), `srd:merits-flaws`
   (`srd:merits-flaws:custom` — JSON array merged over defaults).
+- **Constraint groups (pure)**: `ConstraintGroup {name, relation:
+  exclusive|restricted|forbidden, domain: background|merit|flaw|meritflaw|any,
+  members[], max?, scope?[], note?}`; `ConstraintViolation {group, relation,
+  detail}`; `makeConstraintGroup` (normalize + default: bad relation→exclusive,
+  bad domain→any, exclusive max≥1), `describeConstraint`, and
+  `checkConstraints(groups, owned: OwnedTraits{backgrounds,merits,flaws,templates})`
+  → violations: **exclusive** owns > max; **forbidden** owns a member in scope;
+  **restricted** owns a member OUTSIDE its reserved scope (empty scope =
+  universal). Both senses of "exclusive" covered (mutual-exclusion vs reserved
+  access). Enforced at creation later; surfaced now via `[[check-constraints]]`.
 
 ### src/services.ts (259)
 - `ScopedStorage(prefix = api.v1.script.id)` — story-scoped KV where every key
@@ -367,7 +387,7 @@ were created).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/game.ts (2139) — the live layer
+### src/game.ts (2304) — the live layer
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -423,6 +443,14 @@ registry to defaults, then overlays an optional lorebook entry
 the marker, either an **array** of `SuccessTable` or a **map** `name → table`.
 Re-run at init, and on BOTH creator-mode sync points (alongside
 ResourceOverrides). Same config family as overrides.
+
+**Constraint groups (live)**: `ConstraintRegistry` — same config family; lorebook
+`wod:config` / `wod:config:constraints` (`CONSTRAINTS_ENTRY`), JSON array of
+`ConstraintGroup` (or a `name → group` map) below the marker; module-level cache
+(ResourceOverrides pattern), NO built-in defaults; `loadFromLorebook`/`save(list)`
+/`all`/`get`/`reset`/`put(group)` (add-or-replace by name)/`remove(name)`. Loaded
+at init + both creator-sync points. `ownedTraitsOf(char)` (backgrounds/merit/flaw
+keys, merit-vs-flaw via MeritFlawRegistry, templates) feeds `checkConstraints`.
 
 **Resource overrides (house-rule layer)**: `ResourceOverrides` — lorebook
 `wod:config` / `wod:config:resources`, JSON map `name → Partial<ResourceDef>`
@@ -513,7 +541,12 @@ can't be mistaken for a pool) · `roll-status [id]` · `cancel-roll [id]` ·
 `extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"]
 [label=] [interval=] [on-botch=…] [difficulty=] [vs-difficulty=]` ·
 `continue-contest [id] [difficulty=] [vs-difficulty=] [named overrides]` ·
-`contest-status [id]` · `cancel-contest [id]` · `tables [name]`.
+`contest-status [id]` · `cancel-contest [id]` · `tables [name]` ·
+`define-constraint name=".." relation=exclusive|restricted|forbidden
+domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
+[note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
+`check-constraints` · `win-constraint` (opens the constraint window - registered
+in `src/window.ts`, emits `define-constraint`).
 
 Roll plumbing shared by roll/roll-for: `extractRollArgs(cmd, offset)` returns
 only **supplied** fields (so overrides distinguish keep vs reset; difficulty +
@@ -537,8 +570,22 @@ zero resolver so only literals count; a deleted char degrades to ad-hoc.
 → botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
 `execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
+### src/window.ts (95) — api.v1.ui wizard-windows that EMIT commands
+The window layer, built AFTER game (imports `api`+UI types from host,
+`CommandRouter` from game). **A window is an abstraction over the command layer,
+not a second path**: it renders a UIPart form, binds fields to `tempStorage` via
+`storageKey`, and on submit composes a `[[command]]` string and routes it through
+the SAME `CommandRouter`. `openConstraintWindow()` builds the constraint form
+(name; relation/domain **button-rows** - no native select, each button writes a
+temp key and re-renders via the handle's `update`; members/max/scope/note; a
+Create button that routes `define-constraint …` and shows the reply in-window);
+`selectorRow`/`submitConstraint` helpers; keys under `win:constraint:*`.
+Registers `[[win-constraint]]` at module load (pure registry mutation - purity
+preserved). `index.ts` `export * from "./window"` runs that registration.
+
 ### src/index.ts / src/main.ts
-Re-export everything + `init()`; main calls `init().catch`.
+Re-export everything (incl. `./window`) + `init()` (now also
+`ConstraintRegistry.loadFromLorebook()`); main calls `init().catch`.
 
 ### scripts/build-single.ts (86)
 `MODULES` order (= layering), `stripModule` regexes (whole-line re-exports,
@@ -546,7 +593,7 @@ import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
 (exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
 import/export lines survive).
 
-### test/ (2211 + 20 lines, 218 tests, 60 describes)
+### test/ (2353 + 20 lines, 231 tests, 63 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -567,7 +614,8 @@ pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
 `current-contest` pointer · `res:<char>` resource currents · `hp:<char>`
 health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
 · `wizard:active` wizard session · `char_<name>` (legacy LiveCharacter
-serialization).
+serialization). **tempStorage** (session-scoped, cleared on close): `win:constraint:*`
+(the constraint window's live form fields - the documented home for UI storageKey state).
 
 **Lorebook** (all data entries = instructions above `=====`, data below):
 `srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
@@ -575,7 +623,8 @@ serialization).
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
 (`wod:named-rolls:library` JSON map) · `wod:config`
 (`wod:config:resources` overrides map; `wod:config:success-tables` optional
-success-table overlay — array or `name → table` map).
+success-table overlay — array or `name → table` map; `wod:config:constraints`
+constraint groups — array of `ConstraintGroup` or `name → group` map).
 
 ## 7. Design decisions and their WHY (chronological-ish)
 
@@ -641,6 +690,19 @@ success-table overlay — array or `name → table` map).
     **Extended contests** = both accumulate, first to the goal wins (dead heat
     stays open). `ContestSide.char` keeps rolls.ts character-agnostic while the
     game layer re-resolves each side's live pool every round.
+17. **Wizard-windows EMIT commands - one path, not two** (the user's framing):
+    an `api.v1.ui` window is an abstraction over the command layer, so its submit
+    composes a `[[command]]` string and routes it through the SAME `CommandRouter`
+    a typed command uses. Nothing a window does bypasses commands. Consequence:
+    the command + data model is the real, testable deliverable; the window is a
+    thin emitter, verified off-host by a UI mock that records the part tree and
+    fires callbacks (a real NovelAI window can't render here). **Constraint
+    groups** are the first data atom + the first window: a reusable allow/deny
+    primitive (exclusive/restricted/forbidden over backgrounds & merits/flaws),
+    stored/surfaced/**advisory** (ST-enforced via `[[check-constraints]]` until a
+    creation engine consumes them) - deliberately the SMALLEST piece so the
+    reusable host-UI infrastructure (contract + mock, `src/window.ts`) is the star.
+    No native select part in the UI registry → choices render as button rows.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -671,10 +733,14 @@ Ordered roughly by unlock value:
    merits/flaws taken at creation (`meritsFlaws` bucket exists, empty);
    ALL OPT-IN (play-before-allocating stays sacred); **hybrids need a
    budget-merge rule**; probably delivered as a creation wizard on the
-   existing engine + allocation commands.
+   existing engine + allocation commands. **Constraint groups** (§7.17) already
+   exist as data + `[[check-constraints]]`; creation is where they become
+   enforced (block/allow backgrounds & merits/flaws) instead of advisory.
 6. **Template choices** — clans (vampires), families (revenants), fellowships
-   (mages) as selectable data configuring the character (in-clan disciplines
-   etc.). `DISCIPLINES` already carries clan lists.
+   (mages) as selectable data configuring the character (in-clan disciplines,
+   allowed roads/morality, and **the constraint groups they own via `scope`**).
+   `DISCIPLINES` already carries clan lists; a Choice primitive is the next data
+   atom after constraints, referenced by the template-definer window.
 7. **Sorcerer Paths** (static magic) + the "other powers": dynamic magic,
    blood sorcery, ritual magic, Arcana — all currently just words the effect
    grammar can already reference.
@@ -689,14 +755,14 @@ Ordered roughly by unlock value:
     `char_<name>` path; then stage: "ready".
 11. **historyStorage migration** — move mechanical state (health, resources,
     boosts, extended actions, ledger) so story UNDO rewinds mechanics.
-12. **Modal/window wizard renderer** on `api.v1.ui` (same WizardDefinitions).
-    First target is the `[[win-roll]]` roll-builder **window** (basis for all
-    wizards). UI docs transcribed to `docs/ui-{parts,extensions,api-reference}.md`
-    + `docs/modals-and-windows.md`; the concrete window spec + decisions (window
-    not modal; difficulty-as-expression; **advisory** `self:`/`ally:`/`target:`/
-    `opposition:` prefixes) live in the "Design notes" section of
-    `docs/ui-parts.md`. Needs `api.v1.ui` added to `src/host.ts` (contract+mock)
-    first — it is not there yet.
+12. **More wizard-windows.** The host UI infra now EXISTS: `api.v1.ui` contract +
+    off-host mock in `src/host.ts`, the window layer `src/window.ts`, and the
+    first window `[[win-constraint]]` (§7.17). Remaining: the `[[win-roll]]`
+    roll-builder window (spec + decisions - window not modal;
+    difficulty-as-expression; **advisory** `self:`/`ally:`/`target:`/`opposition:`
+    prefixes - in the "Design notes" section of `docs/ui-parts.md`); migrating the
+    existing TEXT wizards (`RESOURCES_WIZARD`) to render as windows on the same
+    infra; and a template-definer window once the Choice primitive lands.
 13. **Creation-budget wizard** (same engine).
 14. **Aliases + redefinable default character** (`play`/`roll-for` honor
     alias→canonical).

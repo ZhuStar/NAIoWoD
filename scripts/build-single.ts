@@ -24,6 +24,7 @@ const MODULES = [
   "src/rules.ts",
   "src/services.ts",
   "src/game.ts",
+  "src/window.ts",
   "src/index.ts",
   "src/main.ts",
 ] as const;

@@ -309,6 +309,9 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
   control back to the default. **`roll <pool> …`** rolls for the current
   character; **`roll-for "Name" <pool> …`** rolls on another character's behalf
   without changing the selection.
+- **`characters`** lists your playable characters (marking current and default);
+  **`set-default name="…"`** changes which one `play` returns to. **`help`**
+  lists every command, and **`help <verb>`** shows one command's usage.
 
 ### The roll command
 
@@ -318,8 +321,11 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
   (`brawl`), `trait+trait` (`strength+brawl`), or a tracker (`willpower`). Traits
   resolve against the selected character (0 if absent).
 - **difficulty** (default 6) and its **modifier** may be positional *or* named
-  (`difficulty=`, `difficulty-modifier=`; named wins). A final difficulty above
-  10 isn't clamped away — each point over 10 costs one extra required success.
+  (`difficulty=`, `difficulty-modifier=`; named wins). Difficulty can be a plain
+  number **or an expression** — a trait or calculation evaluated against the
+  roller (`difficulty=stamina+3`, `difficulty=6+2`); a bare integer stays a
+  number. A final difficulty above 10 isn't clamped away — each point over 10
+  costs one extra required success.
 - **`requires`** (default 1) is the successes needed; **`dice-modifier`** adds or
   removes dice; **`tags`** are contextual keys matched against the
   `RollModifierRegistry` (e.g. `acute-senses` → −2 difficulty, `willpower` → +1
@@ -338,13 +344,16 @@ the `wod:named-rolls` lorebook entry.
 [[roll-for "Sela" @dodge]]
 ```
 
-- **`name-roll <name> <pool> …`** saves a roll (same grammar as `roll`).
+- **`name-roll <name> <pool> …`** saves a roll (same grammar as `roll`), and can
+  bake in a **`spend=`** (e.g. `[[name-roll gutcheck stamina+courage 8 spend=willpower]]`).
 - **`@name`** in any `roll` / `roll-for` loads that saved spec; supplied args
   **override** its difficulty, modifier, `requires`, `dice-modifier` or `tags`
-  for that one use (the pool itself is fixed). This override-merge is the same
-  primitive extended rolls will reuse for helpers and continuations.
-- **`list-rolls`** shows the library; **`forget-roll <name>`** removes one (or
-  just edit the JSON map in the lorebook directly).
+  for that one use (the pool itself is fixed). A saved `spend=` is **paid
+  automatically** unless the command supplies its own `spend=`. This
+  override-merge is the same primitive extended rolls reuse for helpers and
+  continuations.
+- **`list-rolls`** shows the library (with any saved spend); **`forget-roll
+  <name>`** removes one (or just edit the JSON map in the lorebook directly).
 
 ### Extended rolls
 

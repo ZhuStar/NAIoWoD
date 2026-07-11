@@ -20,7 +20,9 @@ export const DEFAULT_DIFFICULTY = 6;
 // "7", "3+2", "willpower"); the rest are the Storyteller's knobs.
 export interface RollSpec {
   pool: string;
-  difficulty: number;     // base target number (default 6)
+  difficulty: number;     // base target number (default 6); ignored if difficultyExpr is set
+  difficultyExpr?: string; // difficulty as a pool expression (a trait or calculation,
+                          // e.g. "stamina+3"); evaluated against the roller's traits
   difficultyMod: number;  // +/- applied to difficulty (default 0)
   requires: number;       // successes needed to count as a success (default 1)
   diceMod: number;        // +/- dice added to the resolved pool (default 0)
@@ -29,7 +31,7 @@ export interface RollSpec {
 
 // Fill defaults and normalize tags. `requires` is at least 1.
 export function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollSpec {
-  return {
+  const spec: RollSpec = {
     pool: parts.pool,
     difficulty: parts.difficulty ?? DEFAULT_DIFFICULTY,
     difficultyMod: parts.difficultyMod ?? 0,
@@ -37,6 +39,8 @@ export function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollS
     diceMod: parts.diceMod ?? 0,
     tags: (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0),
   };
+  if (parts.difficultyExpr && parts.difficultyExpr.trim()) spec.difficultyExpr = parts.difficultyExpr.trim();
+  return spec;
 }
 
 // --- POOL EXPRESSION ---
@@ -128,7 +132,10 @@ export interface ResolvedRoll {
 
 export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}): ResolvedRoll {
   const breakdown = parsePoolExpression(spec.pool, resolve);
-  let difficulty = spec.difficulty + spec.difficultyMod;
+  // Difficulty may be a plain number or an expression (a trait/calculation)
+  // evaluated against the SAME resolver as the pool - e.g. "stamina+3".
+  const baseDifficulty = spec.difficultyExpr ? parsePoolExpression(spec.difficultyExpr, resolve).total : spec.difficulty;
+  let difficulty = baseDifficulty + spec.difficultyMod;
   let dice = breakdown.total + spec.diceMod;
   let automaticSuccesses = 0;
   let nAgain = 10;
@@ -218,7 +225,10 @@ export function formatExecution(exec: RollExecution): string {
 // (helpers changing the dice modifier, etc.).
 export function overrideSpec(base: RollSpec, overrides: Partial<RollSpec>): RollSpec {
   const merged: RollSpec = { ...base, tags: [...base.tags] };
-  if (overrides.difficulty !== undefined) merged.difficulty = overrides.difficulty;
+  // A numeric difficulty override replaces any expression, and vice versa
+  // (extractRollArgs supplies exactly one of them).
+  if (overrides.difficulty !== undefined) { merged.difficulty = overrides.difficulty; merged.difficultyExpr = undefined; }
+  if (overrides.difficultyExpr !== undefined) merged.difficultyExpr = overrides.difficultyExpr || undefined;
   if (overrides.difficultyMod !== undefined) merged.difficultyMod = overrides.difficultyMod;
   if (overrides.requires !== undefined) merged.requires = Math.max(1, overrides.requires);
   if (overrides.diceMod !== undefined) merged.diceMod = overrides.diceMod;
@@ -229,7 +239,7 @@ export function overrideSpec(base: RollSpec, overrides: Partial<RollSpec>): Roll
 // A short one-line summary of a spec, for save/list confirmations.
 export function describeSpec(spec: RollSpec): string {
   const mod = spec.difficultyMod ? (spec.difficultyMod > 0 ? `+${spec.difficultyMod}` : `${spec.difficultyMod}`) : "";
-  const parts = [spec.pool, `diff ${spec.difficulty}${mod}`];
+  const parts = [spec.pool, `diff ${spec.difficultyExpr ?? spec.difficulty}${mod}`];
   if (spec.requires !== 1) parts.push(`requires ${spec.requires}`);
   if (spec.diceMod) parts.push(`dice ${spec.diceMod > 0 ? "+" : ""}${spec.diceMod}`);
   if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);

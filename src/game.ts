@@ -442,7 +442,7 @@ export class CharacterFactory {
     return m;
   }
 
-  // Validates a chosen starting value against the PoolDef constraints.
+  // Validates a chosen starting value against the ResourceDef constraints.
   private static _resolveStart(def: ResourceDef, chosen: number | undefined): number {
     if (chosen === undefined) return def.start;
     if (def.startOptions && !def.startOptions.includes(chosen)) {
@@ -609,45 +609,51 @@ export class CharacterStore {
 export const NAMED_ROLLS_CATEGORY = "wod:named-rolls";
 const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
 
+// A saved roll is a RollSpec plus an optional `spend` sidecar (the resource/role
+// token to pay when the roll is invoked). `spend` stays OUT of the pure RollSpec -
+// it's a game-layer concern the roll pipeline never sees.
+export type SavedRoll = RollSpec & { spend?: string };
+
 export class NamedRollStore {
-  private static _text(map: Record<string, RollSpec>): string {
+  private static _text(map: Record<string, SavedRoll>): string {
     return [
       "Saved rolls for this chronicle: a JSON object { name: rollspec } below the",
       "marker. Invoke one with [[roll @name]]; edit this map freely by hand.",
-      "Each spec: pool, difficulty, difficultyMod, requires, diceMod, tags[].",
+      "Each spec: pool, difficulty (or difficultyExpr), difficultyMod, requires,",
+      "diceMod, tags[], and an optional spend (paid automatically on [[roll @name]]).",
       SRD_HEADER_MARKER,
       JSON.stringify(map, null, 2),
     ].join("\n");
   }
 
   // The whole library ({} when the entry is missing or unparseable).
-  static async all(): Promise<Record<string, RollSpec>> {
+  static async all(): Promise<Record<string, SavedRoll>> {
     const text = await LorebookManager.entryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY);
     if (!text) return {};
     const body = LorebookManager.contentBelowHeader(text).trim();
     if (!body.startsWith("{")) return {};
     try {
       const o = JSON.parse(body);
-      return (o && typeof o === "object" && !Array.isArray(o)) ? o as Record<string, RollSpec> : {};
+      return (o && typeof o === "object" && !Array.isArray(o)) ? o as Record<string, SavedRoll> : {};
     } catch { return {}; }
   }
 
-  static async get(name: string): Promise<RollSpec | undefined> {
+  static async get(name: string): Promise<SavedRoll | undefined> {
     return (await NamedRollStore.all())[StringUtil.normalize(name)];
   }
   static async names(): Promise<string[]> { return Object.keys(await NamedRollStore.all()); }
 
   // Write the library back (create the category/entry on first use).
-  private static async _write(map: Record<string, RollSpec>): Promise<void> {
+  private static async _write(map: Record<string, SavedRoll>): Promise<void> {
     const { id } = await LorebookManager.ensureCategory(NAMED_ROLLS_CATEGORY);
     const text = NamedRollStore._text(map);
     const created = await LorebookManager.ensureEntry(id, NAMED_ROLLS_ENTRY, text);
     if (!created) await LorebookManager.updateEntryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY, text);
   }
 
-  static async save(name: string, spec: RollSpec): Promise<void> {
+  static async save(name: string, entry: SavedRoll): Promise<void> {
     const map = await NamedRollStore.all();
-    map[StringUtil.normalize(name)] = spec;
+    map[StringUtil.normalize(name)] = entry;
     await NamedRollStore._write(map);
   }
 
@@ -1395,17 +1401,16 @@ export class CommandRouter {
     CommandRouter._registry.set(verb.toLowerCase(), { handler, help });
   }
   static verbs(): string[] { return [...CommandRouter._registry.keys()]; }
+  // Registered verb -> its one-line help string (drives [[help]]).
+  static helpFor(verb: string): string | undefined { return CommandRouter._registry.get(verb.toLowerCase())?.help; }
+  static help(): { verb: string; help: string }[] {
+    return [...CommandRouter._registry.entries()].map(([verb, def]) => ({ verb, help: def.help }));
+  }
 
   static async creatorModeEnabled(): Promise<boolean> {
     return (await CommandRouter._storage.getOrDefault("creator-mode", false)) as boolean;
   }
   static async setCreatorMode(on: boolean): Promise<void> { await CommandRouter._storage.set("creator-mode", on); }
-
-  /**
-   * @deprecated Use CommandParser.parse. Thin delegate kept during the
-   * parser/router split; remove once callers migrate.
-   */
-  static parse(body: string): ParsedCommand { return CommandParser.parse(body); }
 
   // Routes one command body to its handler; returns the OOC replacement text
   // (always a single line - the host strips newlines from inputText).
@@ -1511,8 +1516,14 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   const args: Partial<RollSpec> = {};
   const pool = cmd.positional[offset];
   if (pool !== undefined) args.pool = pool;
-  const difficulty = intOf(cmd.named["difficulty"] ?? cmd.positional[offset + 1]);
-  if (difficulty !== undefined) args.difficulty = difficulty;
+  // Difficulty may be a plain integer OR an expression (a trait / calculation
+  // like "stamina+3"). A strict integer test keeps "3+2" an expression (-> 5),
+  // not the number 3.
+  const diffRaw = (cmd.named["difficulty"] ?? cmd.positional[offset + 1])?.trim();
+  if (diffRaw) {
+    if (/^-?\d+$/.test(diffRaw)) args.difficulty = parseInt(diffRaw, 10);
+    else args.difficultyExpr = diffRaw;
+  }
   const difficultyMod = intOf(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2]);
   if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
   const requires = intOf(cmd.named["requires"]);
@@ -1651,8 +1662,10 @@ async function applyEffectSpec(
 // "!" makes it MANDATORY: if it can't be paid, `refuse` is set and the caller
 // does NOT roll (Willpower/Resolve as required spell fuel). Only roll-op (or
 // pure-cost) effects belong inside a roll; standalone ops point at [[spend]].
-async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[]): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
-  const raw = cmd.named["spend"];
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[], spendOverride?: string): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
+  // An explicit spend= on the command wins; otherwise a saved roll's own spend
+  // (the `@name` sidecar) applies automatically.
+  const raw = cmd.named["spend"] ?? spendOverride;
   if (!raw) return { note: "" };
   let token = raw.trim();
   const mandatory = token.endsWith("!");
@@ -1710,17 +1723,19 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   const args = extractRollArgs(cmd, offset);
   if (!args.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].))`;
   let spec: RollSpec;
+  let savedSpend: string | undefined;
   if (args.pool.startsWith("@")) {
     // Saved roll: load the base spec, then apply the supplied overrides (pool is
     // never overridden, so passing `args` straight through to overrideSpec is safe).
     const name = StringUtil.normalize(args.pool.slice(1));
     const base = await NamedRollStore.get(name);
     if (!base) return `((OOC-Storyteller: No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].))`;
+    savedSpend = base.spend;   // auto-paid unless the command overrides spend=
     spec = overrideSpec(base, args);
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
-  const spend = await applySpend(char, cmd, ctx, spec.tags);
+  const spend = await applySpend(char, cmd, ctx, spec.tags, savedSpend);
   if (spend.refuse) return `((OOC-Storyteller: ${char.name} can't: ${spend.refuse}.))`;
   // Rolls see live state: boosted Attributes add to the record's dots, and the
   // wound penalty (negative) comes off the dice pool.
@@ -1757,16 +1772,17 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const args = extractRollArgs(cmd, 1);
   if (!args.pool) return `((OOC-Storyteller: name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
   const spec = makeRollSpec({ ...args, pool: args.pool });
-  await NamedRollStore.save(name, spec);
+  const spend = cmd.named["spend"]?.trim();
+  await NamedRollStore.save(name, spend ? { ...spec, spend } : spec);
   const key = StringUtil.normalize(name);
-  return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}. Use it with [[roll @${key}]].))`;
+  return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}${spend ? `, spend=${spend}` : ""}. Use it with [[roll @${key}]].))`;
 }
 
 async function cmdListRolls(): Promise<string> {
   const map = await NamedRollStore.all();
   const names = Object.keys(map);
   if (!names.length) return `((OOC-Storyteller: No saved rolls yet. Save one with [[name-roll <name> <pool> ...]].))`;
-  const items = names.map(n => `${n} (${describeSpec(map[n])})`).join("; ");
+  const items = names.map(n => `${n} (${describeSpec(map[n])}${map[n].spend ? `, spend=${map[n].spend}` : ""})`).join("; ");
   return `((OOC-Storyteller: Saved rolls: ${items}.))`;
 }
 
@@ -1789,8 +1805,11 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
     return Number.isNaN(v) ? undefined : v;
   };
   const o: Partial<RollSpec> = {};
-  const difficulty = intOf(cmd.named["difficulty"]);
-  if (difficulty !== undefined) o.difficulty = difficulty;
+  const diffRaw = cmd.named["difficulty"]?.trim();
+  if (diffRaw) {
+    if (/^-?\d+$/.test(diffRaw)) o.difficulty = parseInt(diffRaw, 10);
+    else o.difficultyExpr = diffRaw;
+  }
   const difficultyMod = intOf(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"]);
   if (difficultyMod !== undefined) o.difficultyMod = difficultyMod;
   const diceMod = intOf(cmd.named["dice-modifier"]);
@@ -2237,12 +2256,56 @@ async function cmdCheckConstraints(): Promise<string> {
   return `((OOC-Storyteller: ${char.name} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
 }
 
+// --- DISCOVERABILITY -------------------------------------------------------
+// [[help]] surfaces the command registry; [[characters]] and [[set-default]]
+// round out character selection (creation sets the first default; this changes it).
+async function cmdHelp(cmd: ParsedCommand): Promise<string> {
+  const verb = cmd.positional[0]?.trim().toLowerCase();
+  if (verb) {
+    const help = CommandRouter.helpFor(verb);
+    return help
+      ? `((OOC-Storyteller: ${verb} - ${help}))`
+      : `((OOC-Storyteller: No command "${verb}". [[help]] lists them all.))`;
+  }
+  const verbs = CommandRouter.verbs();
+  return `((OOC-Storyteller: ${verbs.length} commands: ${verbs.join(", ")}. [[help <verb>]] for one's usage.))`;
+}
+
+async function cmdCharacters(): Promise<string> {
+  const names = await CharacterStore.listNames();
+  if (!names.length) return `((OOC-Storyteller: No characters yet. Make one with [[create-playable name="..." templates="..."]].))`;
+  const currentName = (await CharacterStore.getCurrent())?.name;
+  const currentKey = currentName ? StringUtil.normalize(currentName) : undefined;
+  const defKey = await CharacterStore.getDefaultName();
+  const items: string[] = [];
+  for (const key of names) {
+    const c = await CharacterStore.load(key);
+    const marks: string[] = [];
+    if (key === currentKey) marks.push("current");
+    if (key === defKey) marks.push("default");
+    items.push(marks.length ? `${c?.name ?? key} (${marks.join(", ")})` : (c?.name ?? key));
+  }
+  return `((OOC-Storyteller: Characters: ${items.join("; ")}. [[play name="..."]] to switch.))`;
+}
+
+async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) return `((OOC-Storyteller: set-default needs a name, e.g. [[set-default name="Rok"]].))`;
+  const c = await CharacterStore.load(name);
+  if (!c) return `((OOC-Storyteller: No character named "${name}". [[characters]] lists them.))`;
+  await CharacterStore.setDefault(c.name);
+  return `((OOC-Storyteller: ${c.name} is now the default character ([[play]] with no name selects it).))`;
+}
+
+CommandRouter.register("help", cmdHelp, "help [verb]  (list commands, or show one's usage)");
 CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
 CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
+CommandRouter.register("characters", cmdCharacters, "characters  (list playable characters; marks current/default)");
+CommandRouter.register("set-default", cmdSetDefault, 'set-default name="..."  (change the default character)');
 CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]");
 CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]');
-CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty] [diff-mod] requires= dice-modifier= tags=');
+CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]');
 CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
 CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
 CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=] [on-botch=fail|lose-successes|ignore] + roll knobs");

@@ -216,9 +216,6 @@ export interface ResourceDef {
   effect?: EffectSpec;      // the default (unnamed) spend effect
   effects?: Record<string, EffectSpec>; // named context effects (cast, heal, fuel, …)
 }
-/** @deprecated Renamed to ResourceDef. */
-export type PoolDef = ResourceDef;
-
 // A resource's spend effect: a named context effect if `name` is given, else the
 // default. Named effects let one resource behave differently by situation (a
 // Mage's Resolve "cast" bundle vs. its plain difficulty drop).

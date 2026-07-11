@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `5ebaea0`** ("Constraint groups
-> + the first api.v1.ui window (a command-emitter)").
+> **Last synced with the code as of commit `4008ae8`** ("Low-hanging fruit:
+> help/characters/set-default, difficulty-as-expression, named-roll spend, cleanup").
 
 ---
 
@@ -58,8 +58,8 @@ commits; ignore). **Do not create PRs** unless asked; do not rewrite history.
 
 **Deprecation convention** (user rule): anything kept only for backwards
 compatibility is tagged `@deprecated` with a pointer to its replacement, so a
-later pass can delete it. Current deprecated surface: `PoolDef` (=
-`ResourceDef`, rules.ts) and `CommandRouter.parse` (= `CommandParser.parse`).
+later pass can delete it. Current deprecated surface: **none** (`PoolDef` and
+`CommandRouter.parse` were removed in the low-hanging-fruit pass).
 
 ## 3. Architecture & deployment
 
@@ -212,12 +212,17 @@ were created).
 - **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
   later, same wizard logic.
 
-### src/rolls.ts (540) — pure roll machinery
-- `RollSpec {pool, difficulty(6), difficultyMod, requires(≥1), diceMod,
-  tags[]}` — serializable (that's what enables named rolls); `makeRollSpec`.
+### src/rolls.ts (550) — pure roll machinery
+- `RollSpec {pool, difficulty(6), difficultyExpr?, difficultyMod, requires(≥1),
+  diceMod, tags[]}` — serializable (that's what enables named rolls);
+  `makeRollSpec`. **`difficultyExpr`** (optional) is the difficulty as a pool
+  expression — a trait/calculation like `"stamina+3"`; `resolveSpec` evaluates it
+  via `parsePoolExpression` against the SAME resolver as the pool, in place of the
+  numeric `difficulty`. `describeSpec` shows the expression; `overrideSpec` swaps
+  numeric ↔ expression (a numeric override clears any expression).
 - `parsePoolExpression(expr, resolve)` — `+`-separated integer literals or
   trait names via a `TraitResolver`; also reused for **expression caps**
-  (`"stamina+3"`). Pool source is one token (no spaces).
+  (`"stamina+3"`) and now **difficulty expressions**. Pool source is one token.
 - `RollModifier {tag, difficultyMod?, diceMod?, autoSuccesses?, nAgain?}` +
   `RollModifierRegistry` — **tag-driven contextual modifiers**: a roll's
   `tags=` are matched against registered modifiers. Defaults: `acute-senses`
@@ -276,7 +281,7 @@ were created).
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (732) — all game DATA
+### src/rules.ts (729) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
@@ -316,7 +321,6 @@ were created).
   "use Quintessence as Resolve" is pure data) + `replaces?: string[]` (this
   resource HIDES the named ones and answers to their names) + `effect?`
   (default) / `effects?` (named contexts: cast/heal/boost/fuel…).
-  `PoolDef` is the `@deprecated` alias.
 - `resourceEffect(def, name?)`, `describeEffect(spec)`.
 - Resource factories: `willpowerResource(start)` (+1 auto success; named
   `fuel` = pure cost — Sorcerers/Thaumaturgy pay Willpower as spell fuel),
@@ -387,7 +391,7 @@ were created).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/game.ts (2304) — the live layer
+### src/game.ts (2367) — the live layer
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -401,7 +405,7 @@ and the future "ready character" path):
   `DamageReport`; `SaveToStory()` (serializes to `char_<name>` via
   ScopedStorage — legacy path, marked for unification).
 - `CharacterFactory.create(template, name, opts: CharacterCreationOptions)` —
-  builds a LiveCharacter honoring `PoolDef` start constraints
+  builds a LiveCharacter honoring `ResourceDef` start constraints
   (`_resolveStart`), virtues (default 1), Willpower=Courage derivation when
   virtues were engaged, generation-sized blood, morality (derived from the
   road's two rating virtues when `deriveFromVirtues`), tags→merits ordering.
@@ -427,8 +431,11 @@ and the future "ready character" path):
 
 **Named rolls**: `NamedRollStore` — ONE lorebook entry
 (`wod:named-rolls` / `wod:named-rolls:library`) holding a JSON map
-`{name: RollSpec}`; **read fresh every call** (no cache) so hand edits are
-always live; `all/get/names/save/remove`.
+`{name: SavedRoll}` where **`SavedRoll = RollSpec & { spend? }`** (the optional
+resource/role token, a game-layer sidecar kept OUT of the pure RollSpec); **read
+fresh every call** (no cache) so hand edits are always live;
+`all/get/names/save/remove`. A saved `spend` is auto-paid on `[[roll @name]]`
+unless the command supplies its own `spend=` (via `applySpend`'s `spendOverride`).
 
 **Extended rolls**: `ExtendedRollStore` — storage keys `xroll:<id>` + pointer
 `current-extended`; `resolve(id?)` = explicit id → current-if-open →
@@ -512,10 +519,10 @@ interpreter yet)"**; non-instant durations noted "(ST-enforced)".
   quoted tokens positional in order. **Why split from routing**: user wants
   parser and router to be different things (future lorebook-defined commands).
 - `CommandRouter` — verb → `{handler(cmd, ctx), help}` registry
-  (`register/verbs/route`); `CommandContext {rng?}` (tests inject `seqRng`);
-  creator-mode pre-sync (characters + overrides reload) before every command
-  while creator mode is on; unknown verb lists all verbs.
-  `CommandRouter.parse` is `@deprecated`.
+  (`register/verbs/helpFor/help/route`; `help()`/`helpFor()` back `[[help]]`);
+  `CommandContext {rng?}` (tests inject `seqRng`); creator-mode pre-sync
+  (characters + overrides reload) before every command while creator mode is on;
+  unknown verb lists all verbs.
 - `processAdventureInput(rawInputText)` — extracts every `[[...]]`, routes
   each, replaces with single-line OOC notes; prose-free input →
   `stopGeneration: true`; non-command input → wizard reply (if active) else
@@ -523,11 +530,15 @@ interpreter yet)"**; non-instant durations noted "(ST-enforced)".
 
 **The command surface** (registered verbs, exact grammars in the register
 calls at the bottom of game.ts):
+`help [verb]` (list commands, or one's usage) ·
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
-`play [name="…"]` (no name → default) · `roll <pool|@name> [difficulty]
-[diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]` ·
+`play [name="…"]` (no name → default) · `characters` (list; marks
+current/default) · `set-default name="…"` · `roll <pool|@name>
+[difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]`
+(difficulty may be a number OR a trait/calculation like `stamina+3`) ·
 `roll-for "Name" <pool|@name> …` (doesn't change selection) ·
-`name-roll <name> <pool> …` · `list-rolls` · `forget-roll <name>` ·
+`name-roll <name> <pool> … [spend=…]` (bakes in a spend) · `list-rolls` ·
+`forget-roll <name>` ·
 `extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=]
 [on-botch=…] + roll knobs` (rolls interval 1; `requires` is repurposed as the
 ACCUMULATED target) · `continue-roll [id] [named overrides]` (whoever is
@@ -550,9 +561,13 @@ in `src/window.ts`, emits `define-constraint`).
 
 Roll plumbing shared by roll/roll-for: `extractRollArgs(cmd, offset)` returns
 only **supplied** fields (so overrides distinguish keep vs reset; difficulty +
-diff-mod positional OR named, named wins); `@name` loads a saved spec +
-`overrideSpec`; `applySpend` handles `spend=` (mandatory `!`, named `:effect`,
-roll-ops-only rule — standalone effects refuse with a pointer to `[[spend]]`);
+diff-mod positional OR named, named wins). A difficulty token that is a strict
+integer sets `difficulty`; anything else (a trait/calculation, incl. `3+2`) sets
+`difficultyExpr` (same in `rollOverridesFromNamed`). `@name` loads a saved spec +
+`overrideSpec`; `applySpend(char, cmd, ctx, tags, spendOverride?)` handles
+`spend=` (the `@name` sidecar spend passes in as `spendOverride`; mandatory `!`,
+named `:effect`, roll-ops-only rule — standalone effects refuse with a
+`[[spend]]` pointer);
 `characterRollEnv(char)` = `{resolver (traits+boosts), penalty}` shared by rolls
 AND contests; `rollAndReport` folds the **wound penalty into extra.diceMod**
 (noted) and reads `table=` via `tableNote(cmd, outcome, successes)`.
@@ -593,7 +608,7 @@ import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
 (exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
 import/export lines survive).
 
-### test/ (2353 + 20 lines, 231 tests, 63 describes)
+### test/ (2421 + 20 lines, 236 tests, 65 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -759,13 +774,15 @@ Ordered roughly by unlock value:
     off-host mock in `src/host.ts`, the window layer `src/window.ts`, and the
     first window `[[win-constraint]]` (§7.17). Remaining: the `[[win-roll]]`
     roll-builder window (spec + decisions - window not modal;
-    difficulty-as-expression; **advisory** `self:`/`ally:`/`target:`/`opposition:`
-    prefixes - in the "Design notes" section of `docs/ui-parts.md`); migrating the
+    **difficulty-as-expression now DONE** in `RollSpec.difficultyExpr`; still to do
+    the **advisory** `self:`/`ally:`/`target:`/`opposition:` prefixes - in the
+    "Design notes" section of `docs/ui-parts.md`); migrating the
     existing TEXT wizards (`RESOURCES_WIZARD`) to render as windows on the same
     infra; and a template-definer window once the Choice primitive lands.
 13. **Creation-budget wizard** (same engine).
-14. **Aliases + redefinable default character** (`play`/`roll-for` honor
-    alias→canonical).
+14. **Aliases + redefinable default character** — `[[set-default name="…"]]`
+    now changes the default (done); still open: name **aliases** so
+    `play`/`roll-for` honor alias→canonical.
 15. **The Storyteller loop itself** — `api.v1.generate` narration, UI panels
     (`ui-extensions`/`ui-parts`/`modals` docs already mirrored), token budget
     handling. The reason the project exists; everything above serves it.

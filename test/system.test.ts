@@ -13,7 +13,7 @@ import {
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
-  overrideSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
+  overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
   readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry,
   compareRolls, applyContestRound, describeContest,
@@ -824,10 +824,6 @@ describe("CommandParser", () => {
     expect(e.name).toBe("roll-for");
     expect(e.positional).toEqual(["Erik the Red", "willpower"]);
   });
-
-  test("CommandRouter.parse still delegates (deprecated)", () => {
-    expect(CommandRouter.parse("play name=x").named.name).toBe("x");
-  });
 });
 
 describe("[[create-playable]] and creator mode", () => {
@@ -1193,6 +1189,22 @@ describe("rolls engine (rolls.ts)", () => {
     const b = executeRoll(makeRollSpec({ pool: "strength", requires: 1 }), resolve, { rng: seqRng([1, 2, 3]) });
     expect(b.outcome).toBe("botch");
     expect(b.met).toBe(false);
+  });
+
+  test("difficulty can be an expression evaluated against the resolver", () => {
+    expect(resolveSpec(makeRollSpec({ pool: "brawl", difficultyExpr: "strength+1" }), resolve).dieDifficulty).toBe(4); // 3+1
+    expect(resolveSpec(makeRollSpec({ pool: "brawl", difficultyExpr: "strength+1", difficultyMod: 2 }), resolve).dieDifficulty).toBe(6); // 4+2
+    expect(resolveSpec(makeRollSpec({ pool: "brawl", difficultyExpr: "2+3" }), resolve).dieDifficulty).toBe(5); // a calculation, not "2"
+    expect(resolveSpec(makeRollSpec({ pool: "3", difficulty: 8 }), resolve).dieDifficulty).toBe(8); // numeric unchanged
+  });
+
+  test("difficultyExpr round-trips through describeSpec and overrideSpec", () => {
+    const spec = makeRollSpec({ pool: "dexterity+dodge", difficultyExpr: "stamina+3" });
+    expect(describeSpec(spec)).toContain("diff stamina+3");
+    const numeric = overrideSpec(spec, { difficulty: 7 });   // numeric override replaces the expression
+    expect(numeric.difficultyExpr).toBeUndefined();
+    expect(numeric.difficulty).toBe(7);
+    expect(numeric.pool).toBe("dexterity+dodge");            // pool never overridden
   });
 
   test("difficulty above 10 costs an extra success per point (not clamped away)", () => {
@@ -2349,5 +2361,61 @@ describe("constraint window ([[win-constraint]] emits define-constraint)", () =>
     await openConstraintWindow();
     expect(await api.v1.tempStorage.get("win:constraint:relation")).toBe("exclusive");
     expect(await api.v1.tempStorage.get("win:constraint:domain")).toBe("background");
+  });
+});
+
+// =============================================================================
+// LOW-HANGING FRUIT: discoverability, expression difficulty, named-roll spend
+// =============================================================================
+describe("discoverability commands (help / characters / set-default)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("[[help]] lists commands; [[help roll]] shows one; unknown verb is reported", async () => {
+    const all = await CommandRouter.route("help");
+    expect(all).toContain("commands:");
+    expect(all).toContain("roll");
+    expect(all).toContain("help");
+    expect(await CommandRouter.route("help roll")).toContain("roll -");
+    expect(await CommandRouter.route("help nope")).toContain('No command "nope"');
+  });
+
+  test("[[characters]] marks current/default; [[set-default]] changes it and [[play]] returns to it", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    const list = await CommandRouter.route("characters");
+    expect(list).toContain("Rok");
+    expect(list).toContain("Sela");
+    expect(list).toContain("current");
+    expect(list).toContain("default");
+
+    expect(await CommandRouter.route('set-default name="Sela"')).toContain("Sela is now the default");
+    expect(await CharacterStore.getDefaultName()).toBe("sela");
+    await CommandRouter.route("play");   // no name -> the (new) default
+    expect((await CharacterStore.getCurrent())!.name).toBe("Sela");
+    expect(await CommandRouter.route("set-default name=Ghost")).toContain('No character named');
+  });
+});
+
+describe("expression difficulty & named-roll spend (commands)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("[[roll]] difficulty can be a trait calculation", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal'); // stamina = 1
+    // difficulty=stamina+5 -> 1+5 = 6; pool "4" -> 4 dice.
+    const r = await CommandRouter.route("roll 4 difficulty=stamina+5", { rng: seqRng([6, 6, 2, 2]) });
+    expect(r).toContain("vs diff 6");
+    expect(r).toContain("2 successes");
+  });
+
+  test("a named roll carries its spend and auto-pays on [[roll @name]]", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("gain willpower 2");   // give Rok willpower to spend
+    const saved = await CommandRouter.route("name-roll brace 2 spend=willpower");
+    expect(saved).toContain("spend=willpower");
+    expect(await CommandRouter.route("list-rolls")).toContain("spend=willpower");
+    // 2 dice both fail (2,2), but the saved willpower spend grants +1 automatic
+    // success -> proves the spend auto-applied without an explicit spend=.
+    const r = await CommandRouter.route("roll @brace", { rng: seqRng([2, 2]) });
+    expect(r).toContain("1 success");
   });
 });

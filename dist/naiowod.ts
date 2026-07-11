@@ -290,6 +290,30 @@ class StringUtil {
     return str.toLowerCase().trim().replace(/\s+/g, '-');
   }
 
+  // The BOUNDARY normalizer: every string entering the engine (command tokens,
+  // lorebook list items) passes through this once, so "Alice and Bob",
+  // "alice and bob" and "ALIcE and BoB" are all the same internal string:
+  // "alice-and-bob". Rules, in order:
+  //   1. lowercase + trim;
+  //   2. spaces immediately after `@` are removed ("@ sire" -> "@sire");
+  //   3. spaces around `::` are removed and `::` collapses to `:` - the path
+  //      separator you can type with spaces ("blood :: heal" -> "blood:heal");
+  //      a single `:` passes through untouched;
+  //   4. spaces adjacent to `,` and `+` are removed (list/pool separators -
+  //      "a, b" -> "a,b", "str + brawl" -> "str+brawl");
+  //   5. any remaining whitespace run becomes a single `-`.
+  // Idempotent: normalizing a normalized string is a no-op. Backtick literals
+  // are the escape hatch - the parser skips this for them.
+  static normalizeInput(str: string): string {
+    return str
+      .toLowerCase()
+      .trim()
+      .replace(/@\s+/g, '@')
+      .replace(/\s*::\s*/g, ':')
+      .replace(/\s*([,+])\s*/g, '$1')
+      .replace(/\s+/g, '-');
+  }
+
   // "blood-potency" / "self_control" -> "Blood Potency" / "Self Control"
   static toTitleCase(str: string): string {
     return str
@@ -1667,11 +1691,14 @@ function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExec: Roll
   const bNet = bBotch ? 0 : Math.max(0, bExec.result?.net ?? 0);
   let note: string;
 
+  // Side names are stored normalized; notes show them in Title Case.
+  const aLabel = StringUtil.toTitleCase(c.a.name);
+  const bLabel = StringUtil.toTitleCase(c.b.name);
   if (aBotch || bBotch) {
     if (c.onBotch === "fail") {
       if (aBotch && bBotch) { next.status = "draw"; note = "both sides botch - the contest collapses"; }
-      else if (aBotch) { next.status = "b"; note = `${c.a.name} botches - ${c.b.name} wins outright`; }
-      else { next.status = "a"; note = `${c.b.name} botches - ${c.a.name} wins outright`; }
+      else if (aBotch) { next.status = "b"; note = `${aLabel} botches - ${bLabel} wins outright`; }
+      else { next.status = "a"; note = `${bLabel} botches - ${aLabel} wins outright`; }
       next.log.push({ round: next.rounds, aNet, bNet, note });
       return { contest: next, note };
     }
@@ -1694,17 +1721,19 @@ function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExec: Roll
     } else next.status = aDone ? "a" : "b";
   }
   if (next.status === "open" && next.rounds >= c.maxRounds) next.status = "draw";
-  const progress = `${c.a.name} ${next.a.accumulated}/${c.target} vs ${c.b.name} ${next.b.accumulated}/${c.target}`;
+  const progress = `${aLabel} ${next.a.accumulated}/${c.target} vs ${bLabel} ${next.b.accumulated}/${c.target}`;
   note = note ? `${note}; ${progress}` : progress;
   next.log.push({ round: next.rounds, aNet, bNet, note });
   return { contest: next, note };
 }
 
 function describeContest(c: ExtendedContest): string {
+  const aLabel = StringUtil.toTitleCase(c.a.name);
+  const bLabel = StringUtil.toTitleCase(c.b.name);
   const head = c.label ? `"${c.label}" ` : "";
-  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? c.a.name : c.b.name} WINS`;
+  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? aLabel : bLabel} WINS`;
   const bits = [
-    `${c.a.name} ${c.a.accumulated}/${c.target} vs ${c.b.name} ${c.b.accumulated}/${c.target}`,
+    `${aLabel} ${c.a.accumulated}/${c.target} vs ${bLabel} ${c.b.accumulated}/${c.target}`,
     `round ${c.rounds}/${c.maxRounds}`,
   ];
   if (c.interval) bits.push(`interval ${c.interval}`);
@@ -2549,12 +2578,14 @@ class LorebookManager {
   }
 
   // An entry's data as a list: one item per non-empty line, with '#'/'//' line
-  // comments and /* */ block comments stripped.
+  // comments and /* */ block comments stripped. Items pass through the boundary
+  // normalizer ("  Animal   Ken" -> "animal-ken") - lorebook data enters the
+  // engine normalized, exactly like command arguments.
   static parseList(text: string): string[] {
     return LorebookManager.contentBelowHeader(text)
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .split("\n")
-      .map(l => l.replace(/(^|\s)(#|\/\/).*$/, "$1").trim())
+      .map(l => StringUtil.normalizeInput(l.replace(/(^|\s)(#|\/\/).*$/, "$1")))
       .filter(l => l.length > 0);
   }
 
@@ -3222,7 +3253,7 @@ class CharacterStore {
 
   private static _entryText(char: PlayableCharacter): string {
     return [
-      `Player character sheet for ${char.name}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
+      `Player character sheet for ${disp(char.name)}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
       "character's data. Edit it only while creator mode is on ([[creator-mode set=true]]);",
       "your edits are synced into the game when you issue any command or turn creator mode off.",
       SRD_HEADER_MARKER,
@@ -3410,6 +3441,123 @@ class ExtendedContestStore {
       if (c && c.status === "open") open.push(c);
     }
     return open.length === 1 ? open[0] : undefined;
+  }
+}
+
+// =============================================================================
+// PLAYERS - the engine's first identity concept
+// -----------------------------------------------------------------------------
+// A player is just a normalized id string (no record): "storyteller" always
+// exists; a single-player story has one more. `current-player` is whoever is
+// issuing commands right now; `default-player` is what the "default" owner in
+// alias scopes resolves to (the human, in a single-player story). Both default
+// to "storyteller" until set.
+// =============================================================================
+class PlayerStore {
+  static readonly STORYTELLER = "storyteller";
+  private static _storage = new ScopedStorage();
+  private static readonly CURRENT_KEY = "current-player";
+  private static readonly DEFAULT_KEY = "default-player";
+
+  static async current(): Promise<string> {
+    return (await PlayerStore._storage.getOrDefault(PlayerStore.CURRENT_KEY, PlayerStore.STORYTELLER)) as string;
+  }
+  static async setCurrent(name: string): Promise<void> { await PlayerStore._storage.set(PlayerStore.CURRENT_KEY, StringUtil.normalize(name)); }
+  static async getDefault(): Promise<string> {
+    return (await PlayerStore._storage.getOrDefault(PlayerStore.DEFAULT_KEY, PlayerStore.STORYTELLER)) as string;
+  }
+  static async setDefault(name: string): Promise<void> { await PlayerStore._storage.set(PlayerStore.DEFAULT_KEY, StringUtil.normalize(name)); }
+}
+
+// =============================================================================
+// ALIASES - names for characters, in three scopes (storyStorage)
+// -----------------------------------------------------------------------------
+// An alias is an @-prefixed name for a character ("@kat" -> katarina); real
+// character names never start with @, so there is no shadowing. Scopes, most
+// specific first: per-character (in-character knowledge - "@sire" means someone
+// different to each childe; keys may be NPCs with no record), per-player, and
+// global. A bare "@alias" walks the chain for the CURRENT character and player;
+// explicit-scope tokens pin one level (post-normalization forms - users may
+// type `::` for each `:`):
+//   @global:alias
+//   @player:<id|storyteller|default>:alias   ("default" -> the default player)
+//   @char:<name|default>:alias                (also @character:...)
+// Targets are normalized names and may name NPCs; resolving to an actual
+// PlayableCharacter happens wherever the target is used.
+// =============================================================================
+type AliasScope = "global" | "player" | "character";
+interface AliasMap {
+  global: Record<string, string>;
+  players: Record<string, Record<string, string>>;
+  characters: Record<string, Record<string, string>>;
+}
+interface AliasRef { scope?: AliasScope; owner?: string; alias: string }
+
+// "@..." token -> its parts, or undefined when malformed. Assumes the token is
+// already normalized (the parser guarantees it).
+function parseAliasToken(token: string): AliasRef | undefined {
+  if (!token.startsWith("@") || token.length < 2) return undefined;
+  const parts = token.slice(1).split(":").map(p => p.trim()).filter(p => p.length > 0);
+  const RESERVED = ["global", "player", "char", "character"];
+  // A scope keyword with the wrong number of parts is malformed, not an alias.
+  if (parts.length === 1) return RESERVED.includes(parts[0]) ? undefined : { alias: parts[0] };
+  if (parts.length === 2 && parts[0] === "global") return { scope: "global", alias: parts[1] };
+  if (parts.length === 3 && parts[0] === "player") return { scope: "player", owner: parts[1], alias: parts[2] };
+  if (parts.length === 3 && (parts[0] === "char" || parts[0] === "character")) return { scope: "character", owner: parts[1], alias: parts[2] };
+  return undefined;
+}
+
+class AliasRegistry {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "aliases";
+
+  private static _empty(): AliasMap { return { global: {}, players: {}, characters: {} }; }
+  static async all(): Promise<AliasMap> {
+    const m = (await AliasRegistry._storage.get(AliasRegistry.KEY)) as AliasMap | undefined;
+    return m ? { global: m.global ?? {}, players: m.players ?? {}, characters: m.characters ?? {} } : AliasRegistry._empty();
+  }
+  private static async _save(m: AliasMap): Promise<void> { await AliasRegistry._storage.set(AliasRegistry.KEY, m); }
+
+  // Define (or overwrite) one alias. `owner` is required for player/character
+  // scope and ignored for global. Everything is normalized on the way in.
+  static async set(scope: AliasScope, owner: string | undefined, alias: string, target: string): Promise<void> {
+    const a = StringUtil.normalize(alias);
+    const t = StringUtil.normalize(target);
+    const m = await AliasRegistry.all();
+    if (scope === "global") m.global[a] = t;
+    else if (scope === "player") { const o = StringUtil.normalize(owner ?? ""); (m.players[o] ??= {})[a] = t; }
+    else { const o = StringUtil.normalize(owner ?? ""); (m.characters[o] ??= {})[a] = t; }
+    await AliasRegistry._save(m);
+  }
+
+  // Remove one alias; returns whether it existed.
+  static async remove(scope: AliasScope, owner: string | undefined, alias: string): Promise<boolean> {
+    const a = StringUtil.normalize(alias);
+    const m = await AliasRegistry.all();
+    let existed = false;
+    if (scope === "global") { existed = a in m.global; delete m.global[a]; }
+    else if (scope === "player") { const o = m.players[StringUtil.normalize(owner ?? "")]; if (o) { existed = a in o; delete o[a]; } }
+    else { const o = m.characters[StringUtil.normalize(owner ?? "")]; if (o) { existed = a in o; delete o[a]; } }
+    if (existed) await AliasRegistry._save(m);
+    return existed;
+  }
+
+  // Exact lookup in one scope (no chain).
+  static async lookup(scope: AliasScope, owner: string | undefined, alias: string): Promise<string | undefined> {
+    const a = StringUtil.normalize(alias);
+    const m = await AliasRegistry.all();
+    if (scope === "global") return m.global[a];
+    if (scope === "player") return m.players[StringUtil.normalize(owner ?? "")]?.[a];
+    return m.characters[StringUtil.normalize(owner ?? "")]?.[a];
+  }
+
+  // The chain: acting character -> current player -> global.
+  static async resolve(alias: string, ctx: { charKey?: string; playerKey?: string }): Promise<string | undefined> {
+    const a = StringUtil.normalize(alias);
+    const m = await AliasRegistry.all();
+    if (ctx.charKey) { const hit = m.characters[ctx.charKey]?.[a]; if (hit) return hit; }
+    if (ctx.playerKey) { const hit = m.players[ctx.playerKey]?.[a]; if (hit) return hit; }
+    return m.global[a];
   }
 }
 
@@ -4042,14 +4190,30 @@ class CommandParser {
   static parse(body: string): ParsedCommand {
     const raw = body.trim();
     const name = (raw.match(/^[A-Za-z][\w-]*/)?.[0] ?? "").toLowerCase();
-    const rest = raw.slice(name.length);
+    // BODY-LEVEL gluing, before tokenization (backtick literals excluded):
+    // spaces after `@` and around `::` vanish, so "@char :: default :: sire"
+    // is ONE token. Tokenization would otherwise split them apart.
+    const rest = raw.slice(name.length)
+      .split(/(`[^`]*`)/g)
+      .map((seg, i) => i % 2 === 1 ? seg : seg.replace(/@\s+/g, "@").replace(/\s*::\s*/g, "::"))
+      .join("");
     const positional: string[] = [];
     const named: Record<string, string> = {};
-    // key=value | key="v" | key='v' | "quoted" | 'quoted' | bareword
-    const tokenRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|\S+)|"([^"]*)"|'([^']*)'|(\S+)/g;
+    // key=value | key="v" | key='v' | key=`literal` | "quoted" | 'quoted' |
+    // `literal` | bareword. Every value passes through the BOUNDARY normalizer
+    // (lowercase, @-space stripping, ::->:, list/pool space stripping,
+    // whitespace->hyphen) EXCEPT backtick literals, which stay verbatim -
+    // that's the escape hatch for display text (labels, notes, echoes).
+    const tokenRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|`([^`]*)`|\S+)|"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g;
     for (const m of rest.matchAll(tokenRe)) {
-      if (m[1] !== undefined) named[m[1].toLowerCase()] = m[3] ?? m[4] ?? m[2];
-      else positional.push(m[5] ?? m[6] ?? m[7]);
+      if (m[1] !== undefined) {
+        const key = m[1].toLowerCase();
+        named[key] = m[5] !== undefined ? m[5] : StringUtil.normalizeInput(m[3] ?? m[4] ?? m[2]);
+      } else if (m[8] !== undefined) {
+        positional.push(m[8]);   // backtick literal: verbatim
+      } else {
+        positional.push(StringUtil.normalizeInput(m[6] ?? m[7] ?? m[9]));
+      }
     }
     return { name, positional, named, raw };
   }
@@ -4107,6 +4271,11 @@ class CommandRouter {
 // --- COMMAND HANDLERS -------------------------------------------------------
 // Each returns a single OOC line. Registered into CommandRouter at the bottom.
 
+// Names are stored normalized ("erik-the-red"); replies show them in Title Case
+// ("Erik The Red"). Backtick literals are the verbatim escape hatch for text
+// that must not be normalized at all.
+const disp = (name: string): string => StringUtil.toTitleCase(name);
+
 async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   const set = (cmd.named["set"] ?? cmd.positional[0] ?? "").toLowerCase();
   if (set !== "true" && set !== "false") {
@@ -4137,6 +4306,9 @@ async function cmdCreatePlayable(cmd: ParsedCommand): Promise<string> {
   if (unknown.length) {
     return `((OOC-Storyteller: Unknown template(s): ${unknown.join(", ")}. Valid: ${Object.keys(TEMPLATES).join(", ")}.))`;
   }
+  if (name.startsWith("@")) {
+    return `((OOC-Storyteller: Character names cannot start with "@" - that sigil is reserved for aliases.))`;
+  }
   if (await CharacterStore.load(name)) {
     return `((OOC-Storyteller: A character named "${name}" already exists. Edit it in creator mode, or pick another name.))`;
   }
@@ -4160,12 +4332,14 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
     const dc = def ? await CharacterStore.load(def) : undefined;
     if (!dc) return `((OOC-Storyteller: No default character to return to. Name one with [[play name="..."]].))`;
     await CharacterStore.setCurrent(dc.name);
-    return `((OOC-Storyteller: Playing your default character, "${dc.name}".))`;
+    return `((OOC-Storyteller: Playing your default character, "${disp(dc.name)}".))`;
   }
-  const char = await CharacterStore.load(name);
-  if (!char) return `((OOC-Storyteller: No character named "${name}". Create it with [[create-playable ...]].))`;
+  const ref = await resolveCharacterRef(name);
+  if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+  const char = await CharacterStore.load(ref.name!);
+  if (!char) return `((OOC-Storyteller: No character named "${ref.name}". Create it with [[create-playable ...]].))`;
   await CharacterStore.setCurrent(char.name);
-  return `((OOC-Storyteller: Now playing "${char.name}".))`;
+  return `((OOC-Storyteller: Now playing "${disp(char.name)}".))`;
 }
 
 // Resolve a trait name to its value from a character record's numeric buckets.
@@ -4363,7 +4537,7 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
   if (standalone) {
     const kind = standalone.op.toLowerCase() === "heal" ? "healing"
       : standalone.op.toLowerCase() === "increase" ? "boost" : `"${standalone.op}"`;
-    return { note: "", refuse: `${def.name}:${effectName} is a ${kind} effect - use [[spend ${def.name}:${effectName} ...]] outside a roll` };
+    return { note: "", refuse: `${def.name}::${effectName} is a ${kind} effect - use [[spend ${def.name}::${effectName} ...]] outside a roll` };
   }
 
   const r = await applyEffectSpec(char, def, effectName ?? "", e, { applications, rng: ctx.rng, rollTags });
@@ -4410,7 +4584,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
   const spend = await applySpend(char, cmd, ctx, spec.tags, savedSpend);
-  if (spend.refuse) return `((OOC-Storyteller: ${char.name} can't: ${spend.refuse}.))`;
+  if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
   // Rolls see live state: boosted Attributes add to the record's dots, and the
   // wound penalty (negative) comes off the dice pool.
   const env = await characterRollEnv(char);
@@ -4422,7 +4596,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
     tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
-  return `((OOC-Storyteller: ${char.name} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
+  return `((OOC-Storyteller: ${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -4434,8 +4608,10 @@ async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
 async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const target = cmd.positional[0]?.trim();
   if (!target) return `((OOC-Storyteller: roll-for needs a character name, e.g. [[roll-for "Erik" strength+brawl]].))`;
-  const char = await CharacterStore.load(target);
-  if (!char) return `((OOC-Storyteller: No character named "${target}".))`;
+  const ref = await resolveCharacterRef(target);
+  if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+  const char = await CharacterStore.load(ref.name!);
+  if (!char) return `((OOC-Storyteller: No character named "${ref.name}".))`;
   return rollAndReport(char, cmd, ctx, 1);
 }
 
@@ -4517,7 +4693,7 @@ async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise
   await ExtendedRollStore.save(after);
   if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
   const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
-  return `((OOC-Storyteller: ${char.name} starts extended ${describeExtended(after)}. Interval 1: ${note}.${tail}))`;
+  return `((OOC-Storyteller: ${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}.${tail}))`;
 }
 
 async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -4531,13 +4707,13 @@ async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise
   const { action: after, note } = applyInterval(action, exec, char.name);
   await ExtendedRollStore.save(after);
   if (after.status !== "open" && (await ExtendedRollStore.currentId()) === after.id) await ExtendedRollStore.clearCurrent();
-  return `((OOC-Storyteller: ${char.name} continues ${describeExtended(after)}. This interval: ${note}.))`;
+  return `((OOC-Storyteller: ${disp(char.name)} continues ${describeExtended(after)}. This interval: ${note}.))`;
 }
 
 async function cmdRollStatus(cmd: ParsedCommand): Promise<string> {
   const action = await ExtendedRollStore.resolve(cmd.positional[0]);
   if (!action) return `((OOC-Storyteller: No extended action found. Start one with [[extended-roll ...]].))`;
-  const recent = action.log.slice(-3).map(l => `${l.by}: ${l.outcome === "botch" ? "botch" : `+${l.net}`}`).join(", ");
+  const recent = action.log.slice(-3).map(l => `${disp(l.by)}: ${l.outcome === "botch" ? "botch" : `+${l.net}`}`).join(", ");
   return `((OOC-Storyteller: ${describeExtended(action)}${recent ? ` | recent: ${recent}` : ""}.))`;
 }
 
@@ -4553,7 +4729,7 @@ async function cmdResources(): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
   const views = await CharacterResources.all(char);
-  if (!views.length) return `((OOC-Storyteller: ${char.name} has no resources.))`;
+  if (!views.length) return `((OOC-Storyteller: ${disp(char.name)} has no resources.))`;
   const uses = await EffectUses.counts(char);
   const items = views.map(v => {
     const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
@@ -4569,7 +4745,7 @@ async function cmdResources(): Promise<string> {
     ].filter(Boolean).join("; ");
     return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
   }).join("; ");
-  return `((OOC-Storyteller: ${char.name} resources - ${items}.))`;
+  return `((OOC-Storyteller: ${disp(char.name)} resources - ${items}.))`;
 }
 
 // One line of health state for OOC replies.
@@ -4579,7 +4755,7 @@ function healthLine(s: HealthSummary): string {
   return `${s.level} (penalty ${s.penalty}): ${s.bashing}B/${s.lethal}L/${s.aggravated}A, ${s.filled}/${s.capacity}${overkill}${state}`;
 }
 
-// spend <resource[:effect]> [target] [applications] - a plain deduction, or any
+// spend <resource[::effect]> [target] [applications] - a plain deduction, or any
 // configured effect run through the interpreter (heal, increase, pure cost,
 // advisory ops...). The target argument is only consumed when an "increase" op
 // has a group/bucket constraint to pick within.
@@ -4590,7 +4766,7 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
   if (!raw) return `((OOC-Storyteller: spend needs a resource, e.g. [[spend willpower]], [[spend blood:heal 2]] or [[spend blood:boost strength 2]].))`;
   const [which, effectName] = raw.split(":").map(s => s.trim());
   const def = CharacterResources.resolveDef(char, which);
-  if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  if (!def) return `((OOC-Storyteller: ${disp(char.name)} has no resource "${which}".))`;
   const e = resourceEffect(def, effectName || undefined);
   if (effectName && !e) return `((OOC-Storyteller: ${def.name} has no "${effectName}" effect.))`;
 
@@ -4598,10 +4774,10 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
     // No effect configured: plain deduction (with optional reason).
     const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
     const { spent } = await CharacterResources.spend(char, which, amount);
-    if (spent === 0) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend.))`;
+    if (spent === 0) return `((OOC-Storyteller: ${disp(char.name)} has no ${def.name} to spend.))`;
     const now = await CharacterResources.current(char, def);
     const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
-    return `((OOC-Storyteller: ${char.name} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
+    return `((OOC-Storyteller: ${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.))`;
   }
 
   // Does any increase op need the player to pick a trait within a constraint?
@@ -4614,19 +4790,19 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
   const applications = Math.max(1, parseInt(cmd.positional[needsTarget ? 2 : 1] ?? "1", 10) || 1);
 
   const r = await applyEffectSpec(char, def, effectName ?? "", e, { targetArg, applications, rng: ctx.rng });
-  if (r.insufficient) return `((OOC-Storyteller: ${char.name} has no ${def.name} to spend - ${r.insufficient}.))`;
+  if (r.insufficient) return `((OOC-Storyteller: ${disp(char.name)} has no ${def.name} to spend - ${r.insufficient}.))`;
   if (r.refuse) return `((OOC-Storyteller: ${r.refuse}.))`;
   const now = await CharacterResources.current(char, def);
   const rollOnly = r.extra !== undefined && e.apply.every(isRollOp) && e.apply.length > 0;
   const tail = rollOnly ? " (roll modifiers apply only inside a roll - use [[roll ... spend=...]])" : "";
-  return `((OOC-Storyteller: ${char.name} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}))`;
+  return `((OOC-Storyteller: ${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}))`;
 }
 
 async function cmdResetUses(): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
   await EffectUses.resetAll(char);
-  return `((OOC-Storyteller: ${char.name}'s effect-use counters reset (new scene/turn).))`;
+  return `((OOC-Storyteller: ${disp(char.name)}'s effect-use counters reset (new scene/turn).))`;
 }
 
 async function cmdDamage(cmd: ParsedCommand): Promise<string> {
@@ -4638,7 +4814,7 @@ async function cmdDamage(cmd: ParsedCommand): Promise<string> {
   }
   const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
   const summary = await CharacterHealth.damage(char, severity, amount);
-  return `((OOC-Storyteller: ${char.name} takes ${amount} ${severity}. Health: ${healthLine(summary)}.))`;
+  return `((OOC-Storyteller: ${disp(char.name)} takes ${amount} ${severity}. Health: ${healthLine(summary)}.))`;
 }
 
 async function cmdHealth(): Promise<string> {
@@ -4647,14 +4823,14 @@ async function cmdHealth(): Promise<string> {
   const summary = await CharacterHealth.summary(char);
   const boosts = await CharacterBoosts.all(char);
   const boostBits = Object.entries(boosts).map(([k, v]) => `${StringUtil.toTitleCase(k)} +${v}`).join(", ");
-  return `((OOC-Storyteller: ${char.name} - ${healthLine(summary)}${boostBits ? `. Boosts: ${boostBits}` : ""}.))`;
+  return `((OOC-Storyteller: ${disp(char.name)} - ${healthLine(summary)}${boostBits ? `. Boosts: ${boostBits}` : ""}.))`;
 }
 
 async function cmdClearBoosts(): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
   await CharacterBoosts.clear(char);
-  return `((OOC-Storyteller: ${char.name}'s attribute boosts fade.))`;
+  return `((OOC-Storyteller: ${disp(char.name)}'s attribute boosts fade.))`;
 }
 
 async function cmdConfigureResources(): Promise<string> {
@@ -4681,9 +4857,9 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
   if (!which) return `((OOC-Storyteller: gain needs a resource, e.g. [[gain willpower]].))`;
   const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
   const def = CharacterResources.resolveDef(char, which);
-  if (!def) return `((OOC-Storyteller: ${char.name} has no resource "${which}".))`;
+  if (!def) return `((OOC-Storyteller: ${disp(char.name)} has no resource "${which}".))`;
   const { value } = await CharacterResources.gain(char, which, amount);
-  return `((OOC-Storyteller: ${char.name} regains ${def.name}. Now ${value}/${def.max}.))`;
+  return `((OOC-Storyteller: ${disp(char.name)} regains ${def.name}. Now ${value}/${def.max}.))`;
 }
 
 // =============================================================================
@@ -4735,9 +4911,14 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   if (!myPool || !theirPool) {
     return `((OOC-Storyteller: ${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].))`;
   }
-  const oppArg = cmd.named["vs"]?.trim();
+  let oppArg = cmd.named["vs"]?.trim();
+  if (oppArg?.startsWith("@")) {
+    const ref = await resolveCharacterRef(oppArg);
+    if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+    oppArg = ref.name!;
+  }
   const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
-  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the resistance" : "the opposition"));
+  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
 
   const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
   const mySpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags });
@@ -4746,7 +4927,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   // The actor may spend on their own roll (fuel / roll-op effects only), exactly
   // like [[roll spend=...]]; standalone effects refuse with the [[spend]] pointer.
   const spend = await applySpend(me, cmd, ctx, mySpec.tags);
-  if (spend.refuse) return `((OOC-Storyteller: ${me.name} can't: ${spend.refuse}.))`;
+  if (spend.refuse) return `((OOC-Storyteller: ${disp(me.name)} can't: ${spend.refuse}.))`;
 
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
   const myEnv = await characterRollEnv(me);
@@ -4757,7 +4938,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
   const notes = [outcome.note, tableNote(cmd, t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
-  return `((OOC-Storyteller: ${mode} - ${me.name}: ${formatExecution(myExec)} vs ${oppName}: ${formatExecution(theirExec)} - ${notes}))`;
+  return `((OOC-Storyteller: ${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}))`;
 }
 
 const cmdResist: CommandHandler = (cmd, ctx) => cmdVersus("resisted", cmd, ctx);
@@ -4774,9 +4955,14 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   if (!myPool || !theirPool) {
     return `((OOC-Storyteller: extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].))`;
   }
-  const oppArg = cmd.named["vs"]?.trim();
+  let oppArg = cmd.named["vs"]?.trim();
+  if (oppArg?.startsWith("@")) {
+    const ref = await resolveCharacterRef(oppArg);
+    if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+    oppArg = ref.name!;
+  }
   const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
-  const oppName = oppChar ? oppChar.name : (oppArg || "the opposition");
+  const oppName = oppChar ? oppChar.name : (oppArg || "the-opposition");
 
   const target = intOrUndef(cmd.named["target"] ?? cmd.named["requires"]) ?? 0;
   if (target < 1) return `((OOC-Storyteller: extended-contest needs target=<successes> (the goal both race to).))`;
@@ -4801,7 +4987,7 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   await ExtendedContestStore.save(after);
   if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
   const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
-  return `((OOC-Storyteller: ${me.name} opens ${describeContest(after)}. Round 1: ${note}.${tail}))`;
+  return `((OOC-Storyteller: ${disp(me.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}))`;
 }
 
 async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -4825,7 +5011,7 @@ async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Prom
 async function cmdContestStatus(cmd: ParsedCommand): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
   if (!contest) return `((OOC-Storyteller: No extended contest found. Start one with [[extended-contest ...]].))`;
-  const recent = contest.log.slice(-3).map(l => `r${l.round}: ${contest.a.name} +${l.aNet}/${contest.b.name} +${l.bNet}`).join(", ");
+  const recent = contest.log.slice(-3).map(l => `r${l.round}: ${disp(contest.a.name)} +${l.aNet}/${disp(contest.b.name)} +${l.bNet}`).join(", ");
   return `((OOC-Storyteller: ${describeContest(contest)}${recent ? ` | recent: ${recent}` : ""}.))`;
 }
 
@@ -4834,7 +5020,7 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   if (!contest) return `((OOC-Storyteller: No extended contest to cancel.))`;
   await ExtendedContestStore.remove(contest.id);
   if ((await ExtendedContestStore.currentId()) === contest.id) await ExtendedContestStore.clearCurrent();
-  const progress = `${contest.a.name} ${contest.a.accumulated}/${contest.target} vs ${contest.b.name} ${contest.b.accumulated}/${contest.target}`;
+  const progress = `${disp(contest.a.name)} ${contest.a.accumulated}/${contest.target} vs ${disp(contest.b.name)} ${contest.b.accumulated}/${contest.target}`;
   return `((OOC-Storyteller: Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).))`;
 }
 
@@ -4925,9 +5111,100 @@ async function cmdCheckConstraints(): Promise<string> {
   const groups = ConstraintRegistry.all();
   if (!groups.length) return `((OOC-Storyteller: No constraint groups defined - nothing to check.))`;
   const violations = checkConstraints(groups, ownedTraitsOf(char));
-  if (!violations.length) return `((OOC-Storyteller: ${char.name} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.))`;
+  if (!violations.length) return `((OOC-Storyteller: ${disp(char.name)} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.))`;
   const lines = violations.map(v => v.detail).join("; ");
-  return `((OOC-Storyteller: ${char.name} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
+  return `((OOC-Storyteller: ${disp(char.name)} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
+}
+
+// --- ALIASES & PLAYERS ------------------------------------------------------
+// A character argument may be a real name or an @alias; this is the ONE place
+// that turns either into a concrete (normalized) character name. Pool-position
+// @ is different machinery (saved rolls) and never comes through here.
+
+// Resolve an explicit-scope owner ("default" -> the default player/character).
+async function resolveAliasOwner(ref: AliasRef): Promise<string | undefined> {
+  if (!ref.owner) return undefined;
+  if (ref.scope === "player") return ref.owner === "default" ? PlayerStore.getDefault() : ref.owner;
+  if (ref.owner === "default") return CharacterStore.getDefaultName();
+  return ref.owner;
+}
+
+async function resolveCharacterRef(token: string): Promise<{ name?: string; error?: string }> {
+  const t = StringUtil.normalize(token);
+  if (!t.startsWith("@")) return { name: t };
+  const ref = parseAliasToken(t);
+  if (!ref) return { error: `Malformed alias "${t}" - use @alias, @global::a, @player::<id>::a or @char::<name>::a.` };
+  let target: string | undefined;
+  if (ref.scope) {
+    const owner = await resolveAliasOwner(ref);
+    if (ref.scope !== "global" && !owner) return { error: `Alias "${t}" names no ${ref.scope} to look in.` };
+    target = await AliasRegistry.lookup(ref.scope, owner, ref.alias);
+  } else {
+    const cur = await CharacterStore.getCurrent();
+    target = await AliasRegistry.resolve(ref.alias, {
+      charKey: cur ? StringUtil.normalize(cur.name) : undefined,
+      playerKey: await PlayerStore.current(),
+    });
+  }
+  return target ? { name: target } : { error: `Unknown alias "@${ref.alias}". [[aliases]] lists them; [[alias @${ref.alias} "Name"]] defines it.` };
+}
+
+// Define (or overwrite) an alias. Bare @alias defines GLOBAL; the explicit
+// prefixes pin a scope ("@char::default::sire" = the default character's).
+async function cmdAlias(cmd: ParsedCommand): Promise<string> {
+  const token = cmd.positional[0]?.trim();
+  const target = (cmd.named["to"] ?? cmd.positional[1])?.trim();
+  if (!token || !token.startsWith("@") || !target) {
+    return `((OOC-Storyteller: alias needs an @token and a target, e.g. [[alias @kat "Katarina"]] or [[alias @char::erik::sire "Katarina"]].))`;
+  }
+  if (target.startsWith("@")) return `((OOC-Storyteller: An alias must point at a character name, not another alias.))`;
+  const ref = parseAliasToken(StringUtil.normalize(token));
+  if (!ref) return `((OOC-Storyteller: Malformed alias "${token}" - use @alias, @global::a, @player::<id>::a or @char::<name>::a.))`;
+  const scope: AliasScope = ref.scope ?? "global";
+  const owner = ref.scope ? await resolveAliasOwner(ref) : undefined;
+  if (scope !== "global" && !owner) return `((OOC-Storyteller: Alias "${token}" names no ${scope} to define it for.))`;
+  await AliasRegistry.set(scope, owner, ref.alias, target);
+  const where = scope === "global" ? "globally" : `for ${scope} ${disp(owner!)}`;
+  return `((OOC-Storyteller: @${ref.alias} now means ${disp(StringUtil.normalize(target))} ${where}.))`;
+}
+
+async function cmdAliases(): Promise<string> {
+  const m = await AliasRegistry.all();
+  const bits: string[] = [];
+  const fmt = (map: Record<string, string>): string => Object.entries(map).map(([a, t]) => `@${a}->${disp(t)}`).join(", ");
+  if (Object.keys(m.global).length) bits.push(`global: ${fmt(m.global)}`);
+  for (const [p, map] of Object.entries(m.players)) if (Object.keys(map).length) bits.push(`player ${disp(p)}: ${fmt(map)}`);
+  for (const [c, map] of Object.entries(m.characters)) if (Object.keys(map).length) bits.push(`character ${disp(c)}: ${fmt(map)}`);
+  if (!bits.length) return `((OOC-Storyteller: No aliases defined. Add one with [[alias @kat "Katarina"]].))`;
+  return `((OOC-Storyteller: Aliases - ${bits.join(" | ")}.))`;
+}
+
+async function cmdForgetAlias(cmd: ParsedCommand): Promise<string> {
+  const token = cmd.positional[0]?.trim();
+  if (!token || !token.startsWith("@")) return `((OOC-Storyteller: forget-alias needs an @token, e.g. [[forget-alias @kat]] or [[forget-alias @char::erik::sire]].))`;
+  const ref = parseAliasToken(StringUtil.normalize(token));
+  if (!ref) return `((OOC-Storyteller: Malformed alias "${token}".))`;
+  const scope: AliasScope = ref.scope ?? "global";
+  const owner = ref.scope ? await resolveAliasOwner(ref) : undefined;
+  if (scope !== "global" && !owner) return `((OOC-Storyteller: Alias "${token}" names no ${scope} to forget it from.))`;
+  return (await AliasRegistry.remove(scope, owner, ref.alias))
+    ? `((OOC-Storyteller: Forgot @${ref.alias}${scope === "global" ? "" : ` (${scope} ${disp(owner!)})`}.))`
+    : `((OOC-Storyteller: No such alias @${ref.alias}${scope === "global" ? "" : ` for ${scope} ${disp(owner!)}`}.))`;
+}
+
+// The current player is whoever is issuing commands; the default player is what
+// "default" resolves to in alias scopes (the human, in a single-player story).
+async function cmdPlayer(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) {
+    const cur = await PlayerStore.current();
+    const def = await PlayerStore.getDefault();
+    return `((OOC-Storyteller: Current player: ${disp(cur)}; default player: ${disp(def)}. [[player name="..."]] switches.))`;
+  }
+  await PlayerStore.setCurrent(name);
+  let note = "";
+  if ((cmd.named["default"] ?? "") === "true") { await PlayerStore.setDefault(name); note = " (also the default player now)"; }
+  return `((OOC-Storyteller: Current player is now ${disp(StringUtil.normalize(name))}${note}.))`;
 }
 
 // --- DISCOVERABILITY -------------------------------------------------------
@@ -4957,7 +5234,7 @@ async function cmdCharacters(): Promise<string> {
     const marks: string[] = [];
     if (key === currentKey) marks.push("current");
     if (key === defKey) marks.push("default");
-    items.push(marks.length ? `${c?.name ?? key} (${marks.join(", ")})` : (c?.name ?? key));
+    items.push(marks.length ? `${disp(c?.name ?? key)} (${marks.join(", ")})` : disp(c?.name ?? key));
   }
   return `((OOC-Storyteller: Characters: ${items.join("; ")}. [[play name="..."]] to switch.))`;
 }
@@ -4965,10 +5242,12 @@ async function cmdCharacters(): Promise<string> {
 async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
   if (!name) return `((OOC-Storyteller: set-default needs a name, e.g. [[set-default name="Rok"]].))`;
-  const c = await CharacterStore.load(name);
-  if (!c) return `((OOC-Storyteller: No character named "${name}". [[characters]] lists them.))`;
+  const ref = await resolveCharacterRef(name);
+  if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+  const c = await CharacterStore.load(ref.name!);
+  if (!c) return `((OOC-Storyteller: No character named "${ref.name}". [[characters]] lists them.))`;
   await CharacterStore.setDefault(c.name);
-  return `((OOC-Storyteller: ${c.name} is now the default character ([[play]] with no name selects it).))`;
+  return `((OOC-Storyteller: ${disp(c.name)} is now the default character ([[play]] with no name selects it).))`;
 }
 
 CommandRouter.register("help", cmdHelp, "help [verb]  (list commands, or show one's usage)");
@@ -4977,9 +5256,9 @@ CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable na
 CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
 CommandRouter.register("characters", cmdCharacters, "characters  (list playable characters; marks current/default)");
 CommandRouter.register("set-default", cmdSetDefault, 'set-default name="..."  (change the default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]');
-CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]');
+CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]");
+CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]');
+CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]');
 CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
 CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
 CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=] [on-botch=fail|lose-successes|ignore] + roll knobs");
@@ -4987,7 +5266,7 @@ CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [di
 CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
 CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
 CommandRouter.register("resources", cmdResources, "resources");
-CommandRouter.register("spend", cmdSpend, 'spend <resource[:effect]> [target] [amount] [reason="..."]');
+CommandRouter.register("spend", cmdSpend, 'spend <resource[::effect]> [target] [amount] [reason="..."]');
 CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
 CommandRouter.register("damage", cmdDamage, "damage <bashing|lethal|aggravated> [n]");
 CommandRouter.register("health", cmdHealth, "health");
@@ -4995,8 +5274,8 @@ CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
 CommandRouter.register("reset-uses", cmdResetUses, "reset-uses (scene/turn change: clears effect-use counters)");
 CommandRouter.register("configure-resources", cmdConfigureResources, "configure-resources (guided setup; plain replies answer it)");
 CommandRouter.register("cancel-wizard", cmdCancelWizard, "cancel-wizard");
-CommandRouter.register("resist", cmdResist, 'resist <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[:effect][!]]');
-CommandRouter.register("contest", cmdContest, 'contest <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[:effect][!]]');
+CommandRouter.register("resist", cmdResist, 'resist <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[::effect][!]]');
+CommandRouter.register("contest", cmdContest, 'contest <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[::effect][!]]');
 CommandRouter.register("extended-contest", cmdExtendedContest, 'extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=] [interval=] [on-botch=fail|lose-successes|ignore] [difficulty=] [vs-difficulty=]');
 CommandRouter.register("continue-contest", cmdContinueContest, "continue-contest [id] [difficulty=] [vs-difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
 CommandRouter.register("contest-status", cmdContestStatus, "contest-status [id]");
@@ -5007,6 +5286,10 @@ CommandRouter.register("constraints", cmdConstraints, "constraints (list the sto
 CommandRouter.register("constraint", cmdConstraint, "constraint <name> (show one group in full)");
 CommandRouter.register("forget-constraint", cmdForgetConstraint, "forget-constraint <name>");
 CommandRouter.register("check-constraints", cmdCheckConstraints, "check-constraints (flag the current character's constraint conflicts)");
+CommandRouter.register("alias", cmdAlias, 'alias <@token> "Target Name"  (@a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)');
+CommandRouter.register("aliases", cmdAliases, "aliases  (list every alias, grouped by scope)");
+CommandRouter.register("forget-alias", cmdForgetAlias, "forget-alias <@token>  (bare @a = global; scoped tokens as in alias)");
+CommandRouter.register("player", cmdPlayer, 'player [name="..."] [default=true]  (show or switch the current player; storyteller is always valid)');
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

@@ -110,12 +110,14 @@ export class LorebookManager {
   }
 
   // An entry's data as a list: one item per non-empty line, with '#'/'//' line
-  // comments and /* */ block comments stripped.
+  // comments and /* */ block comments stripped. Items pass through the boundary
+  // normalizer ("  Animal   Ken" -> "animal-ken") - lorebook data enters the
+  // engine normalized, exactly like command arguments.
   static parseList(text: string): string[] {
     return LorebookManager.contentBelowHeader(text)
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .split("\n")
-      .map(l => l.replace(/(^|\s)(#|\/\/).*$/, "$1").trim())
+      .map(l => StringUtil.normalizeInput(l.replace(/(^|\s)(#|\/\/).*$/, "$1")))
       .filter(l => l.length > 0);
   }
 

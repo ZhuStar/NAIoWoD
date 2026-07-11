@@ -313,6 +313,55 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
   **`set-default name="…"`** changes which one `play` returns to. **`help`**
   lists every command, and **`help <verb>`** shows one command's usage.
 
+### Normalization — one internal form for every string
+
+Every string that enters the engine — command arguments and lorebook data alike
+— is normalized at the boundary. `"Alice and Bob"`, `"alice and bob"` and
+`"ALIcE and BoB"` are all the same string to the engine: `alice-and-bob`;
+`"  Animal     Ken"` is `animal-ken`. The rules:
+
+- **lowercase**, trimmed;
+- spaces immediately after **`@`** are removed (`@ sire` → `@sire`);
+- **`::`** is the **path separator** — spaces around it are removed and it
+  normalizes to `:` internally (`blood :: heal` → `blood:heal`). Write paths as
+  `spend=blood::heal`, `@char::erik::sire`; a plain unspaced `:` still works
+  since both forms meet at the same internal `:`;
+- spaces next to **`,`** and **`+`** are removed (`"a, b"` → `a,b`,
+  `"strength + brawl"` → `strength+brawl`);
+- any remaining run of whitespace becomes a single **`-`**.
+
+Strings in **backticks are literals** and skip normalization entirely — use
+them for display text that must keep its case and spacing:
+``label=`Force the Door` ``. Replies render normalized names in Title Case
+(`erik-the-red` shows as "Erik The Red").
+
+### Aliases & players — @names for characters
+
+An **alias** is an `@`-prefixed name for a character (character names can never
+start with `@`, so aliases can't shadow them). Aliases live in **three scopes**,
+resolved most-specific-first: **per-character** (in-character knowledge —
+`@sire` means someone different to each childe; owners may be NPCs with no
+sheet), **per-player** (incl. the storyteller), and **global**. The registry
+persists in story storage.
+
+```
+[[alias @kat "Katarina"]]                      # bare token = global
+[[alias @player::storyteller::boss "Sela"]]    # pin a scope explicitly
+[[alias @char::erik::sire "Katarina"]]         # @char:: or @character::
+[[play @kat]]  [[roll-for @sire 3]]  [[resist 4 3 vs="@boss"]]
+[[aliases]]  [[forget-alias @kat]]
+```
+
+- A bare `@alias` walks the chain: the **current character's** aliases, then the
+  **current player's**, then global. Explicit-scope owners accept `default`
+  (`@char::default::…` = the default character; `@player::default::…` = the
+  default player) and `storyteller` is always a valid player.
+- **`player`** shows the current/default player; **`player name="…"`** switches
+  (add `default=true` to also make it the default). Players are plain ids — the
+  engine's first identity concept, defaulting to `storyteller`.
+- Position decides what `@` means: in a **pool** slot it's a saved roll
+  (`[[roll @dodge]]`); in a **character** slot it's an alias (`[[play @kat]]`).
+
 ### The roll command
 
 `[[roll <pool> [difficulty] [difficulty-mod] requires=N dice-modifier=±N tags="a,b"]]`
@@ -494,7 +543,7 @@ Storyteller-adjudicated until their interpreter lands — nothing is hardcoded.
   The future turn system inherits this data and starts enforcing it.
 - **`spend=<resource|role>[:effect][!]`** on any `roll`/`roll-for` pays and folds
   roll-op effects in; trailing `!` = **mandatory** (can't pay → nothing rolls —
-  spell fuel). `[[spend <resource[:effect]> [target] [n]]]` runs standalone
+  spell fuel). `[[spend <resource[::effect]> [target] [n]]]` runs standalone
   effects (heal, increase, advisory ops); `gain`, `resources`, `damage`,
   `health`, `clear-boosts` as before. The wound penalty still auto-applies to
   rolls, and boosted traits resolve higher until cleared.

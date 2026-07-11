@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `4008ae8`** ("Low-hanging fruit:
-> help/characters/set-default, difficulty-as-expression, named-roll spend, cleanup").
+> **Last synced with the code as of commit `fb19ec1`** ("Character aliases
+> in three scopes + engine-wide boundary normalization").
 
 ---
 
@@ -144,9 +144,15 @@ were created).
   `__resetUiMock()`, `__uiWindows()`, `__uiClickButton(text)` (fires a button's
   callback - drives the whole window→command path off-host).
 
-### src/core/traits.ts (276)
+### src/core/traits.ts (300)
 - `StringUtil.normalize` (lowercase, trim, spaces→hyphens — **every key in the
   system goes through this**) and `toTitleCase`.
+- **`StringUtil.normalizeInput`** — the BOUNDARY normalizer (every string
+  entering via commands or lorebook lists): lowercase; strip spaces after `@`;
+  strip spaces around `::` and collapse `::`→`:` (the space-tolerant path
+  separator — single `:` untouched); strip spaces adjacent to `,`/`+`
+  (list/pool separators); whitespace runs → `-`. Idempotent. Backtick literals
+  bypass it (the parser's escape hatch). `normalize` stays the lookup backstop.
 - `Category` / `PointSource` — frozen value objects (PHYSICAL/…/DISCIPLINE;
   BASE/FREEBIE/EXPERIENCE/DOWNTIME).
 - `LedgerEntry`, `StatModifier` (buffs; may bypass cap), `Stat` (dotted trait
@@ -212,7 +218,7 @@ were created).
 - **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
   later, same wizard logic.
 
-### src/rolls.ts (550) — pure roll machinery
+### src/rolls.ts (555) — pure roll machinery
 - `RollSpec {pool, difficulty(6), difficultyExpr?, difficultyMod, requires(≥1),
   diceMod, tags[]}` — serializable (that's what enables named rolls);
   `makeRollSpec`. **`difficultyExpr`** (optional) is the difficulty as a pool
@@ -373,14 +379,15 @@ were created).
   universal). Both senses of "exclusive" covered (mutual-exclusion vs reserved
   access). Enforced at creation later; surfaced now via `[[check-constraints]]`.
 
-### src/services.ts (259)
+### src/services.ts (261)
 - `ScopedStorage(prefix = api.v1.script.id)` — story-scoped KV where every key
   is `<prefix>_<key>`: `get/getOrDefault/set/setIfAbsent/has/delete/list`
   (list strips the prefix back off) + `temp*` variants on tempStorage.
 - `LorebookManager` — name→id resolution (`categoryIdByName`), reads
   (`entriesInCategory`, `entryText`), the marker convention
   (`contentBelowHeader` — everything above a `={3,}` line is ignored;
-  `parseList` — line list with comment stripping; `listFrom`), writes
+  `parseList` — line list with comment stripping, items **boundary-normalized**
+  via `normalizeInput`; `listFrom`), writes
   (`updateEntryText`, `ensureCategory`, `ensureEntry` — create-if-missing
   keeping `api.v1.uuid()` ids), ability list accessors (`allTalents/allSkills/
   allKnowledges/allBackgrounds`), and `bootstrap(specs=SRD_CATEGORIES)` —
@@ -391,7 +398,7 @@ were created).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/game.ts (2367) — the live layer
+### src/game.ts (2613) — the live layer
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -443,6 +450,29 @@ single-open (else undefined/ambiguous).
 
 **Extended contests**: `ExtendedContestStore` — mirrors ExtendedRollStore;
 storage keys `xcontest:<id>` + pointer `current-contest`; same `resolve(id?)`.
+
+**Players**: `PlayerStore` — the engine's first identity concept. Plain
+normalized id strings (no record); `STORYTELLER = "storyteller"` always valid;
+storage keys `current-player` + `default-player`, both defaulting to
+storyteller. `current()/setCurrent/getDefault/setDefault`. `[[player]]`
+shows/switches (`default=true` also sets the default).
+
+**Aliases**: `AliasRegistry` — ONE storyStorage key `aliases` =
+`{global: {alias→target}, players: {pid→{…}}, characters: {ckey→{…}}}` (all
+normalized; alias keys stored WITHOUT `@`; targets may name NPCs — no record
+required until used). `set/remove/lookup(scope, owner, alias)` +
+`resolve(alias, {charKey?, playerKey?})` walking **character → player →
+global**. `parseAliasToken(token)` (post-normalization single-`:` forms):
+`@global:a` · `@player:<id>:a` · `@char:<name>:a`/`@character:<name>:a` · bare
+`@a` (chain); malformed → undefined. `resolveAliasOwner` maps owner
+`default` → the default player/character. **`resolveCharacterRef(token)`** is
+the ONE seam turning a character argument (real name or @alias) into a
+normalized name — wired into `cmdPlay`, `cmdRollFor`, `cmdSetDefault`, and the
+`vs=` of `cmdVersus`/`cmdExtendedContest`. Pool-position `@` stays the
+named-roll sigil (disambiguated by position). Character names may not start
+with `@` (creation refuses). Display: names store normalized; replies render
+via `disp()` = `StringUtil.toTitleCase` (contest notes in rolls.ts do the same
+for side names).
 
 **Success tables (live)**: `loadSuccessTablesFromLorebook()` — resets the
 registry to defaults, then overlays an optional lorebook entry
@@ -516,8 +546,12 @@ interpreter yet)"**; non-instant durations noted "(ST-enforced)".
 **Command layer**:
 - `CommandParser.parse(body)` → `ParsedCommand {name, positional[], named{},
   raw}` — quote-aware; `key=value`/`key="v"` named (lowercased keys), bare or
-  quoted tokens positional in order. **Why split from routing**: user wants
-  parser and router to be different things (future lorebook-defined commands).
+  quoted tokens positional in order. **Every token/value passes through
+  `StringUtil.normalizeInput` at parse time** — EXCEPT backtick-quoted values
+  (`` key=`Verbatim` `` or a `` `positional` ``), which stay verbatim (the
+  literal escape hatch for display text). `raw` stays raw. **Why split from
+  routing**: user wants parser and router to be different things (future
+  lorebook-defined commands).
 - `CommandRouter` — verb → `{handler(cmd, ctx), help}` registry
   (`register/verbs/helpFor/help/route`; `help()`/`helpFor()` back `[[help]]`);
   `CommandContext {rng?}` (tests inject `seqRng`); creator-mode pre-sync
@@ -557,7 +591,13 @@ can't be mistaken for a pool) · `roll-status [id]` · `cancel-roll [id]` ·
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
 `check-constraints` · `win-constraint` (opens the constraint window - registered
-in `src/window.ts`, emits `define-constraint`).
+in `src/window.ts`, emits `define-constraint`) ·
+`alias <@token> "Target"` (bare @a = global; `@global::a`,
+`@player::<id|storyteller|default>::a`, `@char::<name|default>::a` pin a scope) ·
+`aliases` · `forget-alias <@token>` · `player [name="…"] [default=true]`
+(show/switch the current player; ids are plain strings, storyteller always valid).
+Doc convention: paths in help strings are written with `::`
+(`spend=res[::effect]`) — the boundary normalizer folds `::` to the internal `:`.
 
 Roll plumbing shared by roll/roll-for: `extractRollArgs(cmd, offset)` returns
 only **supplied** fields (so overrides distinguish keep vs reset; difficulty +
@@ -608,7 +648,7 @@ import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
 (exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
 import/export lines survive).
 
-### test/ (2421 + 20 lines, 236 tests, 65 describes)
+### test/ (2571 + 20 lines, 250 tests, 68 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -628,9 +668,11 @@ pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
 `current-extended` pointer · `xcontest:<id>` extended contests ·
 `current-contest` pointer · `res:<char>` resource currents · `hp:<char>`
 health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
-· `wizard:active` wizard session · `char_<name>` (legacy LiveCharacter
-serialization). **tempStorage** (session-scoped, cleared on close): `win:constraint:*`
-(the constraint window's live form fields - the documented home for UI storageKey state).
+· `wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
+**`current-player`** / **`default-player`** pointers (default "storyteller") ·
+`char_<name>` (legacy LiveCharacter serialization). **tempStorage**
+(session-scoped, cleared on close): `win:constraint:*` (the constraint window's
+live form fields - the documented home for UI storageKey state).
 
 **Lorebook** (all data entries = instructions above `=====`, data below):
 `srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
@@ -718,6 +760,24 @@ constraint groups — array of `ConstraintGroup` or `name → group` map).
     creation engine consumes them) - deliberately the SMALLEST piece so the
     reusable host-UI infrastructure (contract + mock, `src/window.ts`) is the star.
     No native select part in the UI registry → choices render as button rows.
+18. **Boundary normalization + @ aliases** (user spec): EVERY string entering
+    the engine — command tokens/values AND lorebook list items — passes through
+    `StringUtil.normalizeInput` once, at the boundary ("Alice and Bob" ≡
+    "ALIcE and BoB" ≡ `alice-and-bob`). `::` is the documented **path
+    separator** (space-tolerant, folds to internal `:` — docs/help write
+    `spend=res[::effect]`; unspaced `:` still works). Spaces after `@` and
+    around `,`/`+` are stripped (the last two are an engineering addition so
+    lists/pools survive hyphenation). **Backtick literals** skip normalization
+    (display text). Names store normalized; replies render Title Case via
+    `disp()` — the display/key split. **Aliases** are `@`-prefixed (names may
+    never start with `@` → no shadowing), live in storyStorage in three scopes
+    resolved most-specific-first (**character → player → global**), with
+    explicit-scope tokens (`@char::erik::sire`, `@player::storyteller::kat`,
+    `@global::backup`; owner `default` → the default character/player). Bare
+    `@a` DEFINES global but RESOLVES down the chain. Position disambiguates the
+    `@` sigil: pool slot = saved roll, character slot = alias. `PlayerStore`
+    (current/default player, default "storyteller") is the engine's first
+    player-identity concept.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -780,9 +840,11 @@ Ordered roughly by unlock value:
     existing TEXT wizards (`RESOURCES_WIZARD`) to render as windows on the same
     infra; and a template-definer window once the Choice primitive lands.
 13. **Creation-budget wizard** (same engine).
-14. **Aliases + redefinable default character** — `[[set-default name="…"]]`
-    now changes the default (done); still open: name **aliases** so
-    `play`/`roll-for` honor alias→canonical.
+14. **Aliases + redefinable default character** — **DONE** (§7.18):
+    `[[set-default]]` changes the default character; `@` aliases in three
+    scopes resolve in `play`/`roll-for`/`set-default`/`vs=`; `[[player]]`
+    switches the current player. Remaining niche: aliases inside pool
+    expressions (pool `@` still means saved rolls).
 15. **The Storyteller loop itself** — `api.v1.generate` narration, UI panels
     (`ui-extensions`/`ui-parts`/`modals` docs already mirrored), token budget
     handling. The reason the project exists; everything above serves it.

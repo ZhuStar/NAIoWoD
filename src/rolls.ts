@@ -504,11 +504,14 @@ export function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExe
   const bNet = bBotch ? 0 : Math.max(0, bExec.result?.net ?? 0);
   let note: string;
 
+  // Side names are stored normalized; notes show them in Title Case.
+  const aLabel = StringUtil.toTitleCase(c.a.name);
+  const bLabel = StringUtil.toTitleCase(c.b.name);
   if (aBotch || bBotch) {
     if (c.onBotch === "fail") {
       if (aBotch && bBotch) { next.status = "draw"; note = "both sides botch - the contest collapses"; }
-      else if (aBotch) { next.status = "b"; note = `${c.a.name} botches - ${c.b.name} wins outright`; }
-      else { next.status = "a"; note = `${c.b.name} botches - ${c.a.name} wins outright`; }
+      else if (aBotch) { next.status = "b"; note = `${aLabel} botches - ${bLabel} wins outright`; }
+      else { next.status = "a"; note = `${bLabel} botches - ${aLabel} wins outright`; }
       next.log.push({ round: next.rounds, aNet, bNet, note });
       return { contest: next, note };
     }
@@ -531,17 +534,19 @@ export function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExe
     } else next.status = aDone ? "a" : "b";
   }
   if (next.status === "open" && next.rounds >= c.maxRounds) next.status = "draw";
-  const progress = `${c.a.name} ${next.a.accumulated}/${c.target} vs ${c.b.name} ${next.b.accumulated}/${c.target}`;
+  const progress = `${aLabel} ${next.a.accumulated}/${c.target} vs ${bLabel} ${next.b.accumulated}/${c.target}`;
   note = note ? `${note}; ${progress}` : progress;
   next.log.push({ round: next.rounds, aNet, bNet, note });
   return { contest: next, note };
 }
 
 export function describeContest(c: ExtendedContest): string {
+  const aLabel = StringUtil.toTitleCase(c.a.name);
+  const bLabel = StringUtil.toTitleCase(c.b.name);
   const head = c.label ? `"${c.label}" ` : "";
-  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? c.a.name : c.b.name} WINS`;
+  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? aLabel : bLabel} WINS`;
   const bits = [
-    `${c.a.name} ${c.a.accumulated}/${c.target} vs ${c.b.name} ${c.b.accumulated}/${c.target}`,
+    `${aLabel} ${c.a.accumulated}/${c.target} vs ${bLabel} ${c.b.accumulated}/${c.target}`,
     `round ${c.rounds}/${c.maxRounds}`,
   ];
   if (c.interval) bits.push(`interval ${c.interval}`);

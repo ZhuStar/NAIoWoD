@@ -19,6 +19,7 @@ import {
   compareRolls, applyContestRound, describeContest,
   ExtendedContestStore, loadSuccessTablesFromLorebook, SUCCESS_TABLES_ENTRY,
   type SuccessTable, type ExtendedContest, type RollExecution,
+  parseAliasToken, AliasRegistry, PlayerStore,
   makeConstraintGroup, describeConstraint, checkConstraints, ConstraintRegistry, CONSTRAINTS_ENTRY,
   type ConstraintGroup, type ConstraintRelation, type ConstraintDomain, type OwnedTraits,
   openConstraintWindow, api, __resetUiMock, __uiWindows, __uiClickButton,
@@ -662,10 +663,10 @@ describe("LorebookManager", () => {
   });
 
   test("reads the ability lists from srd:abilities entries", async () => {
-    expect(await LorebookManager.allTalents()).toContain("Brawl");
-    expect(await LorebookManager.allSkills()).toContain("Ride");
-    expect(await LorebookManager.allKnowledges()).toContain("Occult");
-    expect(await LorebookManager.allBackgrounds()).toContain("Generation");
+    expect(await LorebookManager.allTalents()).toContain("brawl");
+    expect(await LorebookManager.allSkills()).toContain("ride");
+    expect(await LorebookManager.allKnowledges()).toContain("occult");
+    expect(await LorebookManager.allBackgrounds()).toContain("generation");
   });
 
   test("unknown categories and entries come back empty", async () => {
@@ -767,7 +768,7 @@ describe("LorebookManager.bootstrap (self-seeding tutorial)", () => {
 
     // parser strips the in-card instructions header; the marker + prose survive
     // in the entry text for the player to read/edit
-    expect(await LorebookManager.allTalents()).toContain("Brawl");
+    expect(await LorebookManager.allTalents()).toContain("brawl");
     const talentsText = await LorebookManager.entryText("srd:abilities", "srd:abilities:talents");
     expect(talentsText).toContain("one per line");
     expect(talentsText).toContain("=====");
@@ -795,11 +796,11 @@ describe("LorebookManager.parseList (header marker + comments)", () => {
       "",
       "Occult /* inline */",
     ].join("\n");
-    expect(LorebookManager.parseList(text)).toEqual(["Alertness", "Brawl", "Melee", "Occult"]);
+    expect(LorebookManager.parseList(text)).toEqual(["alertness", "brawl", "melee", "occult"]);
   });
 
   test("with no marker, the whole text is data", () => {
-    expect(LorebookManager.parseList("Foo\nBar")).toEqual(["Foo", "Bar"]);
+    expect(LorebookManager.parseList("Foo\nBar")).toEqual(["foo", "bar"]);
   });
 });
 
@@ -809,20 +810,20 @@ describe("CommandParser", () => {
     expect(c.name).toBe("roll");
     expect(c.positional).toEqual(["strength+brawl", "7", "+1"]);
     expect(c.named.requires).toBe("3");
-    expect(c.named.tags).toBe("off-hand, ambush");
+    expect(c.named.tags).toBe("off-hand,ambush");
   });
 
   test("quoted named values, case-insensitive keys, and quoted positionals", () => {
     const c = CommandParser.parse('create-playable name="Erik the Red" templates=vampire,werewolf');
     expect(c.name).toBe("create-playable");
-    expect(c.named.name).toBe("Erik the Red");
+    expect(c.named.name).toBe("erik-the-red");
     expect(c.named.templates).toBe("vampire,werewolf");
 
     expect(CommandParser.parse("creator-mode SET='true'").named.set).toBe("true");
 
     const e = CommandParser.parse('roll-for "Erik the Red" willpower');
     expect(e.name).toBe("roll-for");
-    expect(e.positional).toEqual(["Erik the Red", "willpower"]);
+    expect(e.positional).toEqual(["erik-the-red", "willpower"]);
   });
 });
 
@@ -845,7 +846,7 @@ describe("[[create-playable]] and creator mode", () => {
     const text = await LorebookManager.entryText(PLAYER_CHARACTERS_CATEGORY, "pc:absurd-al");
     expect(text).toContain("=====");
     const parsed = JSON.parse(LorebookManager.contentBelowHeader(text!));
-    expect(parsed.name).toBe("Absurd Al");
+    expect(parsed.name).toBe("absurd-al");
     expect(parsed.templates).toEqual(["vampire", "werewolf", "mage"]);
   });
 
@@ -1245,7 +1246,7 @@ describe("[[play]], [[roll]] and [[roll-for]]", () => {
   test("the first created character becomes default and current", async () => {
     const reply = await CommandRouter.route('create-playable name="Rok" templates=mortal');
     expect(reply).toContain("Selected as your default character");
-    expect((await CharacterStore.getCurrent())!.name).toBe("Rok");
+    expect((await CharacterStore.getCurrent())!.name).toBe("rok");
   });
 
   test("[[roll]] with no active character asks the player to select one", async () => {
@@ -1265,10 +1266,10 @@ describe("[[play]], [[roll]] and [[roll-for]]", () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
     await CommandRouter.route('create-playable name="Sela" templates=mortal');
     await CommandRouter.route('play name="Sela"');
-    expect((await CharacterStore.getCurrent())!.name).toBe("Sela");
+    expect((await CharacterStore.getCurrent())!.name).toBe("sela");
     const back = await CommandRouter.route("play");
     expect(back).toContain("default character");
-    expect((await CharacterStore.getCurrent())!.name).toBe("Rok");
+    expect((await CharacterStore.getCurrent())!.name).toBe("rok");
   });
 
   test('[[roll-for "Name"]] rolls another character without changing selection', async () => {
@@ -1277,7 +1278,7 @@ describe("[[play]], [[roll]] and [[roll-for]]", () => {
     const r = await CommandRouter.route('roll-for "Sela" dexterity', { rng: seqRng([6]) });
     expect(r).toContain("Sela");
     expect(r).toContain("1 success");
-    expect((await CharacterStore.getCurrent())!.name).toBe("Rok"); // unchanged
+    expect((await CharacterStore.getCurrent())!.name).toBe("rok"); // unchanged
   });
 });
 
@@ -1335,7 +1336,7 @@ describe("named rolls (@name library)", () => {
     await CommandRouter.route("name-roll dodge dexterity+dodge 6");
     const r = await CommandRouter.route('roll-for "Sela" @dodge', { rng: seqRng([6]) });
     expect(r).toContain("Sela");
-    expect((await CharacterStore.getCurrent())!.name).toBe("Rok"); // unchanged
+    expect((await CharacterStore.getCurrent())!.name).toBe("rok"); // unchanged
   });
 
   test("list-rolls, forget-roll, and an unknown @name are reported", async () => {
@@ -1453,7 +1454,7 @@ describe("extended-roll commands", () => {
   test("roll-status, cancel-roll, and a second character continuing", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
     await CommandRouter.route('create-playable name="Sela" templates=mortal');
-    await CommandRouter.route('extended-roll strength+stamina requires=20 intervals=5 label="Dig out"', { rng: seqRng([6, 6]) });
+    await CommandRouter.route('extended-roll strength+stamina requires=20 intervals=5 label=`Dig out`', { rng: seqRng([6, 6]) });
     expect(await CommandRouter.route("roll-status")).toContain("Dig out");
 
     await CommandRouter.route('play name="Sela"');
@@ -2141,7 +2142,7 @@ describe("resisted & contested rolls (commands)", () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     const r = await CommandRouter.route("resist 4 3", { rng: seqRng([6, 6, 2, 2, 6, 6, 2]) }); // 2 vs 2
     expect(r).toContain("the action is resisted");
-    expect(r).toContain("the resistance"); // default ad-hoc label
+    expect(r).toContain("The Resistance"); // default ad-hoc label
   });
 
   test("contest: higher total wins; the note is from the actor's view", async () => {
@@ -2170,7 +2171,7 @@ describe("extended contests (commands)", () => {
     await CommandRouter.route('play name="Rok"');
     const open = await CommandRouter.route('extended-contest 3 3 vs="Erik" target=5 rounds=4 label="Arm-wrestle"', { rng: seqRng([6, 6, 6, 6, 2, 2]) });
     expect(open).toContain("Rok opens");
-    expect(open).toContain("Arm-wrestle");
+    expect(open).toContain("arm-wrestle");
     expect(open).toContain("Rok 3/5");
     const cont = await CommandRouter.route("continue-contest", { rng: seqRng([6, 6, 6, 2, 2, 2]) }); // Rok 6/5 wins
     expect(cont).toContain("Rok WINS");
@@ -2178,7 +2179,7 @@ describe("extended contests (commands)", () => {
 
   test("contest-status, then cancel-contest", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
-    await CommandRouter.route('extended-contest 3 2 target=20 rounds=5 label="Long haul"', { rng: seqRng([6, 6, 6, 6, 2]) });
+    await CommandRouter.route('extended-contest 3 2 target=20 rounds=5 label=`Long haul`', { rng: seqRng([6, 6, 6, 6, 2]) });
     const status = await CommandRouter.route("contest-status");
     expect(status).toContain("Long haul");
     expect(status).toContain("recent:");
@@ -2280,7 +2281,7 @@ describe("constraint commands", () => {
   });
 
   test("define-constraint persists and round-trips through the lorebook", async () => {
-    const r = await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1 note="pick one"');
+    const r = await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1 note=`pick one`');
     expect(r).toContain("Defined constraint");
     expect(ConstraintRegistry.get("statuses")!.members).toEqual(["status", "anonymity"]);
     // The registry rebuilds itself purely from the lorebook entry.
@@ -2391,7 +2392,7 @@ describe("discoverability commands (help / characters / set-default)", () => {
     expect(await CommandRouter.route('set-default name="Sela"')).toContain("Sela is now the default");
     expect(await CharacterStore.getDefaultName()).toBe("sela");
     await CommandRouter.route("play");   // no name -> the (new) default
-    expect((await CharacterStore.getCurrent())!.name).toBe("Sela");
+    expect((await CharacterStore.getCurrent())!.name).toBe("sela");
     expect(await CommandRouter.route("set-default name=Ghost")).toContain('No character named');
   });
 });
@@ -2417,5 +2418,154 @@ describe("expression difficulty & named-roll spend (commands)", () => {
     // success -> proves the spend auto-applied without an explicit spend=.
     const r = await CommandRouter.route("roll @brace", { rng: seqRng([2, 2]) });
     expect(r).toContain("1 success");
+  });
+});
+
+// =============================================================================
+// BOUNDARY NORMALIZATION + CHARACTER ALIASES
+// =============================================================================
+describe("StringUtil.normalizeInput (the boundary normalizer)", () => {
+  test("case and whitespace collapse to one internal form", () => {
+    expect(StringUtil.normalizeInput("Alice and Bob")).toBe("alice-and-bob");
+    expect(StringUtil.normalizeInput("ALIcE and BoB")).toBe("alice-and-bob");
+    expect(StringUtil.normalizeInput("  Animal     Ken")).toBe("animal-ken");
+  });
+
+  test("spaces after @ are removed; :: is the space-tolerant path separator", () => {
+    expect(StringUtil.normalizeInput("@ sire")).toBe("@sire");
+    expect(StringUtil.normalizeInput("blood :: heal")).toBe("blood:heal");
+    expect(StringUtil.normalizeInput("@char :: Erik :: sire")).toBe("@char:erik:sire");
+    expect(StringUtil.normalizeInput("a:b")).toBe("a:b");           // single : untouched
+    expect(StringUtil.normalizeInput("a : b")).toBe("a-:-b");       // spaced single : is not a path
+  });
+
+  test("list/pool separators tolerate spaces", () => {
+    expect(StringUtil.normalizeInput("status, anonymity")).toBe("status,anonymity");
+    expect(StringUtil.normalizeInput("strength + brawl")).toBe("strength+brawl");
+  });
+
+  test("idempotent: normalizing a normalized string is a no-op", () => {
+    for (const s of ["alice-and-bob", "@char:erik:sire", "blood:heal", "status,anonymity"]) {
+      expect(StringUtil.normalizeInput(s)).toBe(s);
+    }
+  });
+});
+
+describe("CommandParser: boundary normalization + backtick literals", () => {
+  test("tokens and values normalize; backtick literals stay verbatim", () => {
+    const c = CommandParser.parse('alias "@ KAT" name="Kat A  Rina" note=`Keep My   Case` `Verbatim Positional`');
+    expect(c.positional[0]).toBe("@kat");
+    expect(c.named.name).toBe("kat-a-rina");
+    expect(c.named.note).toBe("Keep My   Case");
+    expect(c.positional[1]).toBe("Verbatim Positional");
+  });
+
+  test(":: and @-space glue at the BODY level, so bare spaced paths are one token", () => {
+    const c = CommandParser.parse("spend blood :: heal");
+    expect(c.positional).toEqual(["blood:heal"]);          // glued before tokenizing
+    const a = CommandParser.parse('alias @char :: default :: sire "Katarina"');
+    expect(a.positional[0]).toBe("@char:default:sire");
+    const d = CommandParser.parse('roll 3 spend="blood :: heal"');
+    expect(d.named.spend).toBe("blood:heal");              // also inside quoted values
+  });
+});
+
+describe("aliases: parseAliasToken + AliasRegistry", () => {
+  beforeEach(() => { __resetStorageMock(); });
+
+  test("parseAliasToken understands every form", () => {
+    expect(parseAliasToken("@kat")).toEqual({ alias: "kat" });
+    expect(parseAliasToken("@global:backup")).toEqual({ scope: "global", alias: "backup" });
+    expect(parseAliasToken("@player:storyteller:kat")).toEqual({ scope: "player", owner: "storyteller", alias: "kat" });
+    expect(parseAliasToken("@char:erik:sire")).toEqual({ scope: "character", owner: "erik", alias: "sire" });
+    expect(parseAliasToken("@character:erik:sire")).toEqual({ scope: "character", owner: "erik", alias: "sire" });
+    expect(parseAliasToken("@global")).toBeUndefined();       // malformed
+    expect(parseAliasToken("@player:kat")).toBeUndefined();   // missing owner or alias
+  });
+
+  test("resolve walks character -> player -> global (most specific wins)", async () => {
+    await AliasRegistry.set("global", undefined, "boss", "katarina");
+    await AliasRegistry.set("player", "bob", "boss", "sela");
+    await AliasRegistry.set("character", "erik", "boss", "rok");
+    expect(await AliasRegistry.resolve("boss", { charKey: "erik", playerKey: "bob" })).toBe("rok");
+    expect(await AliasRegistry.resolve("boss", { playerKey: "bob" })).toBe("sela");
+    expect(await AliasRegistry.resolve("boss", {})).toBe("katarina");
+    expect(await AliasRegistry.resolve("nobody", {})).toBeUndefined();
+  });
+
+  test("set overwrites; remove deletes only its scope", async () => {
+    await AliasRegistry.set("global", undefined, "kat", "katarina");
+    await AliasRegistry.set("global", undefined, "kat", "sela");     // overwrite
+    expect(await AliasRegistry.lookup("global", undefined, "kat")).toBe("sela");
+    expect(await AliasRegistry.remove("player", "bob", "kat")).toBe(false); // other scope untouched
+    expect(await AliasRegistry.remove("global", undefined, "kat")).toBe(true);
+    expect(await AliasRegistry.lookup("global", undefined, "kat")).toBeUndefined();
+  });
+});
+
+describe("alias & player commands (e2e)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
+
+  test("define in three scopes, then [[play @alias]] resolves most-specific-first", async () => {
+    await CommandRouter.route('create-playable name="Katarina" templates=vampire');
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('play name="Rok"');
+
+    expect(await CommandRouter.route('alias @boss "Katarina"')).toContain("@boss now means Katarina globally");
+    await CommandRouter.route('alias @player::storyteller::boss "Sela"');
+    const r = await CommandRouter.route("play @boss");   // player scope beats global
+    expect(r).toContain('Now playing "Sela"');
+
+    await CommandRouter.route('alias @char::rok::boss "Rok"');
+    await CommandRouter.route('play name="Rok"');
+    expect(await CommandRouter.route("play @boss")).toContain('Now playing "Rok"'); // char scope beats both
+  });
+
+  test("[[player]] switches whose per-player aliases apply", async () => {
+    await CommandRouter.route('create-playable name="Katarina" templates=vampire');
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    await CommandRouter.route('alias @player::bob::pal "Sela"');
+    await CommandRouter.route('alias @player::storyteller::pal "Katarina"');
+    expect(await CommandRouter.route("play @pal")).toContain("Katarina"); // storyteller is current by default
+    expect(await CommandRouter.route('player name="Bob"')).toContain("Current player is now Bob");
+    expect(await CommandRouter.route("play @pal")).toContain("Sela");
+    expect(await CommandRouter.route("player")).toContain("Current player: Bob");
+  });
+
+  test("roll-for and vs= accept aliases; unknown alias reports helpfully", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Rok"');
+    await CommandRouter.route('alias @rival "Erik"');
+    const rf = await CommandRouter.route("roll-for @rival dexterity", { rng: seqRng([6]) });
+    expect(rf).toContain("Erik");
+    const rs = await CommandRouter.route('resist 4 3 vs="@rival"', { rng: seqRng([6, 6, 6, 2, 6, 2, 2]) });
+    expect(rs).toContain("Erik:");
+    expect(await CommandRouter.route("play @nobody")).toContain('Unknown alias "@nobody"');
+  });
+
+  test("aliases list + forget-alias + storyStorage persistence; @ names refused", async () => {
+    await CommandRouter.route('create-playable name="Katarina" templates=vampire');
+    await CommandRouter.route('alias @kat "Katarina"');
+    await CommandRouter.route('alias @char::erik::sire "Katarina"');  // NPC-ish owner: no record needed
+    const list = await CommandRouter.route("aliases");
+    expect(list).toContain("global: @kat->Katarina");
+    expect(list).toContain("character Erik: @sire->Katarina");
+    // The map lives in storyStorage - a fresh AliasRegistry read still sees it.
+    expect(await AliasRegistry.lookup("character", "erik", "sire")).toBe("katarina");
+    expect(await CommandRouter.route("forget-alias @kat")).toContain("Forgot @kat");
+    expect(await CommandRouter.route("aliases")).not.toContain("@kat");
+    expect(await CommandRouter.route('create-playable name="@bad" templates=mortal')).toContain('cannot start with "@"');
+  });
+
+  test("normalization end-to-end: mixed-case creation, :: spend paths, backtick labels", async () => {
+    await CommandRouter.route('create-playable name="ERIK   the  Red" templates=vampire');
+    expect((await CharacterStore.load("erik-the-red"))!.name).toBe("erik-the-red");
+    expect(await CommandRouter.route('play name="erik the red"')).toContain('Now playing "Erik The Red"');
+    const spent = await CommandRouter.route("roll strength spend=blood", { rng: seqRng([6]) });
+    expect(spent).toContain("Erik The Red");   // reply shows Title Case
+    const q = await CommandRouter.route('roll 3 spend="blood :: heal"');
+    expect(q).toContain("use [[spend");        // "blood :: heal" -> blood:heal (a standalone heal refuses in-roll)
   });
 });

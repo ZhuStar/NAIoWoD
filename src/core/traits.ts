@@ -9,6 +9,30 @@ export class StringUtil {
     return str.toLowerCase().trim().replace(/\s+/g, '-');
   }
 
+  // The BOUNDARY normalizer: every string entering the engine (command tokens,
+  // lorebook list items) passes through this once, so "Alice and Bob",
+  // "alice and bob" and "ALIcE and BoB" are all the same internal string:
+  // "alice-and-bob". Rules, in order:
+  //   1. lowercase + trim;
+  //   2. spaces immediately after `@` are removed ("@ sire" -> "@sire");
+  //   3. spaces around `::` are removed and `::` collapses to `:` - the path
+  //      separator you can type with spaces ("blood :: heal" -> "blood:heal");
+  //      a single `:` passes through untouched;
+  //   4. spaces adjacent to `,` and `+` are removed (list/pool separators -
+  //      "a, b" -> "a,b", "str + brawl" -> "str+brawl");
+  //   5. any remaining whitespace run becomes a single `-`.
+  // Idempotent: normalizing a normalized string is a no-op. Backtick literals
+  // are the escape hatch - the parser skips this for them.
+  static normalizeInput(str: string): string {
+    return str
+      .toLowerCase()
+      .trim()
+      .replace(/@\s+/g, '@')
+      .replace(/\s*::\s*/g, ':')
+      .replace(/\s*([,+])\s*/g, '$1')
+      .replace(/\s+/g, '-');
+  }
+
   // "blood-potency" / "self_control" -> "Blood Potency" / "Self Control"
   static toTitleCase(str: string): string {
     return str

@@ -6,8 +6,9 @@
 //
 // Paste this TypeScript into NovelAI's script editor as-is - no header needed.
 //
-// Order: host -> core/traits -> core/dice -> core/damage -> rules ->
-//        services -> game -> init (index.ts) -> bootstrap (main.ts)
+// Order: host -> core/traits -> core/dice -> core/damage -> wizard ->
+//        rolls -> rules -> command -> services -> state -> game ->
+//        window -> init (index.ts) -> bootstrap (main.ts)
 
 //#region src/host.ts
 // =============================================================================
@@ -2332,6 +2333,8 @@ interface ConstraintViolation {
   detail: string;
 }
 
+// Exported so consumers (command specs, windows) reference THE vocabulary
+// instead of retyping it - a new relation/domain reaches every surface.
 const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
 const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
 
@@ -2563,6 +2566,180 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
 ];
 //#endregion src/rules.ts
 
+//#region src/command.ts
+// =============================================================================
+// COMMAND LAYER - the engine's one bus: parse, describe, compose, dispatch
+// -----------------------------------------------------------------------------
+// Everything that acts on the game speaks [[commands]]: typed input, windows,
+// and (later) the AI Storyteller itself. This module is that bus and knows
+// NOTHING about stores or rules: registration carries a declarative
+// CommandSpec, so a verb's grammar lives in exactly one place - [[help]] text
+// is DERIVED from it and windows COMPOSE from it (composeCommand is the only
+// place that quotes/sanitizes). Anything the game layer must do before a
+// command runs (creator-mode lorebook sync) registers a beforeRoute hook -
+// the router dispatches, the game decides.
+// =============================================================================
+
+// --- PARSER ------------------------------------------------------------------
+// A command body -> { name, positional[], named{}, raw }. Pure and
+// dispatch-agnostic: it only tokenizes (respecting quotes). A token
+// `key=value` (or key="quoted") is a named argument; any other bare or quoted
+// token is positional, in order.
+interface ParsedCommand {
+  name: string;
+  positional: string[];
+  named: Record<string, string>;
+  raw: string;
+}
+
+class CommandParser {
+  static parse(body: string): ParsedCommand {
+    const raw = body.trim();
+    const name = (raw.match(/^[A-Za-z][\w-]*/)?.[0] ?? "").toLowerCase();
+    // BODY-LEVEL gluing, before tokenization (backtick literals excluded):
+    // spaces after `@` and around `::` vanish, so "@char :: default :: sire"
+    // is ONE token. Tokenization would otherwise split them apart.
+    const rest = raw.slice(name.length)
+      .split(/(`[^`]*`)/g)
+      .map((seg, i) => i % 2 === 1 ? seg : seg.replace(/@\s+/g, "@").replace(/\s*::\s*/g, "::"))
+      .join("");
+    const positional: string[] = [];
+    const named: Record<string, string> = {};
+    // key=value | key="v" | key='v' | key=`literal` | "quoted" | 'quoted' |
+    // `literal` | bareword. Every value passes through the BOUNDARY normalizer
+    // (lowercase, @-space stripping, ::->:, list/pool space stripping,
+    // whitespace->hyphen) EXCEPT backtick literals, which stay verbatim -
+    // that's the escape hatch for display text (labels, notes, echoes).
+    const tokenRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|`([^`]*)`|\S+)|"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g;
+    for (const m of rest.matchAll(tokenRe)) {
+      if (m[1] !== undefined) {
+        const key = m[1].toLowerCase();
+        named[key] = m[5] !== undefined ? m[5] : StringUtil.normalizeInput(m[3] ?? m[4] ?? m[2]);
+      } else if (m[8] !== undefined) {
+        positional.push(m[8]);   // backtick literal: verbatim
+      } else {
+        positional.push(StringUtil.normalizeInput(m[6] ?? m[7] ?? m[9]));
+      }
+    }
+    return { name, positional, named, raw };
+  }
+}
+
+// --- COMMAND SPECS -----------------------------------------------------------
+// The declarative description of a verb's arguments. Handlers remain the
+// validators (a spec never rejects input); the spec is the SHARED knowledge:
+// derived help, window forms, and command composition all read it.
+type ParamType = "string" | "int" | "enum" | "literal";
+
+interface ParamSpec {
+  key: string;                       // named key, or the positional's label
+  kind: "positional" | "named";
+  type?: ParamType;                  // default "string"; "literal" composes with backticks
+  required?: boolean;
+  options?: string[];                // enum vocabulary (reference exported arrays)
+  default?: string;                  // window pre-seed AND compose fallback
+  hint?: string;                     // help display, e.g. res[::effect][!] or "1 turn|until x|instant"
+  desc?: string;                     // window field label / long description
+  example?: string;                  // window placeholder, e.g. "e.g. status, anonymity"
+}
+
+interface CommandSpec {
+  summary: string;                   // the parenthetical in help
+  params?: ParamSpec[];
+  openNamed?: boolean;               // accepts arbitrary extra named args (afflict's slots)
+  note?: string;                     // extra help remark, appended to the summary
+}
+
+// Derive the one-line usage string [[help]] shows for a verb.
+function describeCommandSpec(verb: string, spec: CommandSpec): string {
+  const parts: string[] = [verb];
+  for (const p of spec.params ?? []) {
+    let core: string;
+    if (p.kind === "positional") core = p.hint ?? `<${p.key}>`;
+    else if (p.type === "enum" && p.options?.length) core = `${p.key}=${p.options.join("|")}`;
+    else if (p.type === "int") core = `${p.key}=${p.hint ?? "N"}`;
+    else core = `${p.key}=${p.hint ?? '".."'}`;
+    parts.push(p.required ? core : `[${core}]`);
+  }
+  if (spec.openNamed) parts.push("[<key>=<value> ...]");
+  const tail = spec.note ? `${spec.summary}; ${spec.note}` : spec.summary;
+  return `${parts.join(" ")}  (${tail})`;
+}
+
+// Compose a routable command body from per-param values. THE one place that
+// quotes: the grammar has no escape syntax (players type these), so characters
+// that would break tokenization are stripped - double quotes from quoted
+// values, backticks from literals. Empty values are omitted (the handler's
+// own validation speaks); declared params compose in order, then openNamed
+// extras. `literal` params compose in backticks and stay verbatim at parse.
+function composeCommand(verb: string, values: Record<string, string | undefined>, spec: CommandSpec): string {
+  const parts: string[] = [verb];
+  const emit = (p: ParamSpec, raw: string): string | undefined => {
+    let v = raw.trim();
+    if (!v) return undefined;
+    if (p.type === "literal") {
+      v = v.replace(/`/g, "");
+      return p.kind === "named" ? `${p.key}=\`${v}\`` : `\`${v}\``;
+    }
+    v = v.replace(/"/g, "");
+    const quoted = /\s/.test(v) ? `"${v}"` : v;
+    return p.kind === "named" ? `${p.key}=${quoted}` : quoted;
+  };
+  const declared = new Set<string>();
+  for (const p of spec.params ?? []) {
+    declared.add(p.key);
+    const out = emit(p, values[p.key] ?? p.default ?? "");
+    if (out) parts.push(out);
+  }
+  if (spec.openNamed) {
+    for (const [k, v] of Object.entries(values)) {
+      if (declared.has(k) || v === undefined) continue;
+      const clean = v.trim().replace(/"/g, "");
+      if (clean) parts.push(`${k}="${clean}"`);
+    }
+  }
+  return parts.join(" ");
+}
+
+// --- ROUTER ------------------------------------------------------------------
+// A registry maps a verb to its handler + spec, so a new command is just a
+// register() call (and could one day be defined from a lorebook entry).
+// beforeRoute hooks run before every dispatch - the game layer's seam for
+// creator-mode syncing, and later the turn system's.
+interface CommandContext { rng?: Rng; }
+type CommandHandler = (cmd: ParsedCommand, ctx: CommandContext) => Promise<string>;
+
+class CommandRouter {
+  private static _registry = new Map<string, { handler: CommandHandler; spec: CommandSpec }>();
+  private static _beforeRoute: Array<() => Promise<void>> = [];
+
+  static register(verb: string, handler: CommandHandler, spec: CommandSpec): void {
+    CommandRouter._registry.set(verb.toLowerCase(), { handler, spec });
+  }
+  static beforeRoute(hook: () => Promise<void>): void { CommandRouter._beforeRoute.push(hook); }
+  static verbs(): string[] { return [...CommandRouter._registry.keys()]; }
+  static specFor(verb: string): CommandSpec | undefined { return CommandRouter._registry.get(verb.toLowerCase())?.spec; }
+  // Registered verb -> its one-line usage, derived from the spec (drives [[help]]).
+  static helpFor(verb: string): string | undefined {
+    const def = CommandRouter._registry.get(verb.toLowerCase());
+    return def && describeCommandSpec(verb.toLowerCase(), def.spec);
+  }
+  static help(): { verb: string; help: string }[] {
+    return [...CommandRouter._registry.entries()].map(([verb, def]) => ({ verb, help: describeCommandSpec(verb, def.spec) }));
+  }
+
+  // Routes one command body to its handler; returns the OOC replacement text
+  // (always a single line - the host strips newlines from inputText).
+  static async route(body: string, ctx: CommandContext = {}): Promise<string> {
+    const cmd = CommandParser.parse(body);
+    for (const hook of CommandRouter._beforeRoute) await hook();
+    const def = CommandRouter._registry.get(cmd.name);
+    if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
+    return def.handler(cmd, ctx);
+  }
+}
+//#endregion src/command.ts
+
 //#region src/services.ts
 // =============================================================================
 // STORAGE & LOREBOOK MANAGERS - the script's editable database layer
@@ -2757,6 +2934,167 @@ class LorebookManager {
   }
 }
 
+// =============================================================================
+// CONFIG STORES - the generic shape of "wod:config" registries
+// -----------------------------------------------------------------------------
+// Every story-config registry works the same way: ONE lorebook entry under the
+// wod:config category (tutorial header above the marker, JSON below), parsed as
+// an array OR a name -> def map, cached module-level for synchronous reads,
+// reloaded at init and on the creator-mode sync points. These two classes ARE
+// that pattern; a concrete registry is an instance, not a re-implementation.
+// Instances self-register into ALL_CONFIG_STORES so reload/reset sweep every
+// registry - adding a registry never touches a sync point again.
+// =============================================================================
+const CONFIG_CATEGORY = "wod:config";
+
+interface ConfigStoreLike {
+  readonly entry: string;
+  loadFromLorebook(): Promise<number>;
+  reset(): void;
+}
+
+const ALL_CONFIG_STORES: ConfigStoreLike[] = [];
+
+// Reload every config store from the lorebook; returns per-entry counts
+// (init logs them; the creator-mode hook ignores them).
+async function reloadAllConfigStores(): Promise<{ entry: string; count: number }[]> {
+  const out: { entry: string; count: number }[] = [];
+  for (const store of ALL_CONFIG_STORES) {
+    out.push({ entry: store.entry, count: await store.loadFromLorebook() });
+  }
+  return out;
+}
+
+// Clear every config store back to its shipped defaults (tests).
+function resetAllConfigStores(): void {
+  for (const store of ALL_CONFIG_STORES) store.reset();
+}
+
+// The tutorial-above-the-marker entry text every store writes.
+function configEntryText(header: string[], data: unknown): string {
+  return [...header, SRD_HEADER_MARKER, JSON.stringify(data, null, 2)].join("\n");
+}
+
+// Parse an entry body as JSON; undefined when missing/unparseable (the entry
+// stays for the player to fix - never destroyed by a bad edit).
+function parseConfigBody(text: string | undefined): unknown {
+  if (!text) return undefined;
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  if (!body) return undefined;
+  try { return JSON.parse(body); } catch { return undefined; }
+}
+
+// Write-through: create the category/entry on first use, else update in place.
+async function writeConfigEntry(entry: string, text: string): Promise<void> {
+  const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
+  const created = await LorebookManager.ensureEntry(id, entry, text);
+  if (!created) await LorebookManager.updateEntryText(CONFIG_CATEGORY, entry, text);
+}
+
+// A list of named defs, JSON array (or name -> def map) in the entry, overlaid
+// on optional shipped defaults: the overlay SHADOWS a same-named default;
+// remove() only deletes overlay entries (a shadowed default resurfaces).
+class ListConfigStore<T extends { name: string }> {
+  readonly entry: string;
+  private readonly _header: string[];
+  private readonly _make: (raw: Partial<T> & { name: string }) => T;
+  private readonly _defaults: T[];
+  private readonly _onChanged?: (overlay: T[]) => void;
+  private _overlay: T[] = [];
+
+  constructor(opts: {
+    entry: string;
+    header: string[];
+    make: (raw: Partial<T> & { name: string }) => T;
+    defaults?: T[];
+    // Fires on EVERY cache change (load/save/reset) - the seam for stores
+    // whose consumers read a separate registry (success tables).
+    onChanged?: (overlay: T[]) => void;
+  }) {
+    this.entry = opts.entry;
+    this._header = opts.header;
+    this._make = opts.make;
+    this._defaults = opts.defaults ?? [];
+    this._onChanged = opts.onChanged;
+    ALL_CONFIG_STORES.push(this);
+  }
+
+  private _apply(overlay: T[]): void {
+    this._overlay = overlay;
+    this._onChanged?.(overlay);
+  }
+
+  get(name: string): T | undefined {
+    const n = StringUtil.normalize(name);
+    return this._overlay.find(d => d.name === n) ?? this._defaults.find(d => d.name === n);
+  }
+  all(): T[] {
+    const names = new Set(this._overlay.map(d => d.name));
+    return [...this._overlay, ...this._defaults.filter(d => !names.has(d.name))];
+  }
+  reset(): void { this._apply([]); }
+
+  async loadFromLorebook(): Promise<number> {
+    const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
+    const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
+      ? parsed as Array<Partial<T> & { name: string }>
+      : (parsed && typeof parsed === "object")
+        ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
+        : [];
+    this._apply(list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(d => this._make(d)));
+    return this._overlay.length;
+  }
+
+  async save(defs: T[]): Promise<void> {
+    await writeConfigEntry(this.entry, configEntryText(this._header, defs));
+    this._apply(defs);
+  }
+
+  // Add or replace one def (by normalized name) and persist.
+  async put(def: T): Promise<void> {
+    await this.save([...this._overlay.filter(d => d.name !== def.name), def]);
+  }
+
+  // Remove an OVERLAY def; returns whether one existed (shipped defaults can
+  // only be shadowed, never deleted).
+  async remove(name: string): Promise<boolean> {
+    const n = StringUtil.normalize(name);
+    const rest = this._overlay.filter(d => d.name !== n);
+    if (rest.length === this._overlay.length) return false;
+    await this.save(rest);
+    return true;
+  }
+}
+
+// A name -> value map in the entry (the resource-overrides shape).
+class MapConfigStore<V> {
+  readonly entry: string;
+  private readonly _header: string[];
+  private _cache: Record<string, V> = {};
+
+  constructor(opts: { entry: string; header: string[] }) {
+    this.entry = opts.entry;
+    this._header = opts.header;
+    ALL_CONFIG_STORES.push(this);
+  }
+
+  current(): Record<string, V> { return this._cache; }
+  reset(): void { this._cache = {}; }
+
+  async loadFromLorebook(): Promise<number> {
+    const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
+    this._cache = (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      ? parsed as Record<string, V>
+      : {};
+    return Object.keys(this._cache).length;
+  }
+
+  async save(map: Record<string, V>): Promise<void> {
+    await writeConfigEntry(this.entry, configEntryText(this._header, map));
+    this._cache = map;
+  }
+}
+
 class MeritFlawRegistry {
   private static _defs: Map<string, MeritFlawDef> =
     new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
@@ -2823,7 +3161,19 @@ class LorebookParser {
 }
 //#endregion src/services.ts
 
-//#region src/game.ts
+//#region src/state.ts
+// =============================================================================
+// STATE - the character model and every persistent store
+// -----------------------------------------------------------------------------
+// Everything durable lives here: the legacy LiveCharacter sheet objects, the
+// PlayableCharacter records (lorebook = source of truth, storyStorage = the
+// recoverable copy), the named/extended-roll and contest stores, players and
+// aliases, the wod:config registries (instances of the generic config stores -
+// see services.ts), and the live per-character state (resources, health,
+// boosts, effect uses, conditions). Handlers in game.ts act on this layer;
+// nothing here parses or routes commands.
+// =============================================================================
+
 // --- LIVE CHARACTER SHEET ---
 // One line of "what a reaction did to the packet", for auditability.
 interface ReactionTrace { reaction: string; from: string; to: string; }
@@ -3347,7 +3697,7 @@ class CharacterStore {
 
   private static _entryText(char: PlayableCharacter): string {
     return [
-      `Player character sheet for ${disp(char.name)}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
+      `Player character sheet for ${StringUtil.toTitleCase(char.name)}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
       "character's data. Edit it only while creator mode is on ([[creator-mode set=true]]);",
       "your edits are synced into the game when you issue any command or turn creator mode off.",
       SRD_HEADER_MARKER,
@@ -3396,6 +3746,15 @@ class CharacterStore {
     }
     return { synced, failed };
   }
+}
+
+// Resolve a trait name to its value from a character record's numeric buckets.
+// Shared by the roll plumbing (game.ts) and CharacterBoosts' cap math.
+function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
+  const n = StringUtil.normalize(name);
+  const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
+  for (const b of buckets) if (n in b) return b[n];
+  return 0;
 }
 
 // =============================================================================
@@ -3656,243 +4015,96 @@ class AliasRegistry {
 }
 
 // =============================================================================
-// RESOURCE OVERRIDES - the story's house-rule layer for resources
+// CONFIG REGISTRIES - the story's wod:config entries, as generic store instances
 // -----------------------------------------------------------------------------
-// One lorebook entry (wod:config / wod:config:resources) holds a JSON map
-// { resourceName: partial-def } below the header marker. The configuration
-// wizard WRITES this entry and creator mode can hand-edit it - both are just
-// UIs over the same data. Cached here for synchronous reads (the same pattern
-// as MeritFlawRegistry); reloaded at init, when a wizard finishes, and on the
-// creator-mode sync path.
+// Each is ONE lorebook entry (tutorial header above the marker, JSON below),
+// cached for synchronous reads and reloaded at init + the creator-mode sync
+// points via reloadAllConfigStores() - instances self-register, so a new
+// registry here never touches a sync point. Wizards and [[define-*]] commands
+// WRITE these entries; creator mode hand-edits them - all UIs over the same
+// data.
 // =============================================================================
-const RESOURCE_CONFIG_CATEGORY = "wod:config";
 const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
-
-class ResourceOverrides {
-  private static _cache: Record<string, Partial<ResourceDef>> = {};
-
-  static current(): Record<string, Partial<ResourceDef>> { return ResourceOverrides._cache; }
-  static reset(): void { ResourceOverrides._cache = {}; }
-
-  private static _entryText(map: Record<string, Partial<ResourceDef>>): string {
-    return [
-      "Story overrides for resources (the house-rule layer). The JSON below the",
-      "marker maps a resource name to the fields you want to change (start, max,",
-      "roles, effect, effects, ...). A name that matches no template resource and",
-      "carries kind/start/max adds a custom resource. [[configure-resources]]",
-      "edits this for you; you may also edit it by hand in creator mode.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(map, null, 2),
-    ].join("\n");
-  }
-
-  // Read the entry into the cache ({} when missing or unparseable).
-  static async loadFromLorebook(): Promise<number> {
-    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY);
-    ResourceOverrides._cache = {};
-    if (text) {
-      const body = LorebookManager.contentBelowHeader(text).trim();
-      if (body.startsWith("{")) {
-        try {
-          const o = JSON.parse(body);
-          if (o && typeof o === "object" && !Array.isArray(o)) ResourceOverrides._cache = o as Record<string, Partial<ResourceDef>>;
-        } catch { /* unparseable: keep {} - the entry stays for the player to fix */ }
-      }
-    }
-    return Object.keys(ResourceOverrides._cache).length;
-  }
-
-  // Write the whole map (create the category/entry on first use) + cache it.
-  static async save(map: Record<string, Partial<ResourceDef>>): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
-    const text = ResourceOverrides._entryText(map);
-    const created = await LorebookManager.ensureEntry(id, RESOURCE_CONFIG_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, text);
-    ResourceOverrides._cache = map;
-  }
-}
-
-// Success tables live in the same config family: an optional lorebook entry
-// (JSON array of tables, or a map name -> table, below the marker) overlaid on
-// the built-in defaults (degrees/damage/soak). Reloaded with the overrides.
 const SUCCESS_TABLES_ENTRY = "wod:config:success-tables";
-
-async function loadSuccessTablesFromLorebook(): Promise<number> {
-  SuccessTableRegistry.reset();
-  const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, SUCCESS_TABLES_ENTRY);
-  if (!text) return 0;
-  const body = LorebookManager.contentBelowHeader(text).trim();
-  let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { return 0; }
-  const list: SuccessTable[] = Array.isArray(parsed)
-    ? parsed as SuccessTable[]
-    : (parsed && typeof parsed === "object")
-      ? Object.entries(parsed as Record<string, Omit<SuccessTable, "name">>).map(([name, t]) => ({ ...t, name }))
-      : [];
-  let count = 0;
-  for (const t of list) {
-    if (t && typeof t.name === "string") { SuccessTableRegistry.register(t); count++; }
-  }
-  return count;
-}
-
-// =============================================================================
-// CONSTRAINT GROUPS - the story's allow/deny rules over trait options
-// -----------------------------------------------------------------------------
-// Same config family as resources/tables: one lorebook entry (wod:config /
-// wod:config:constraints) holds a JSON array of ConstraintGroups (or a
-// name -> group map) below the marker. Entirely ST-defined (no built-in
-// defaults); cached for sync reads (the ResourceOverrides pattern); reloaded at
-// init and on both creator-mode sync points. [[define-constraint]] writes it and
-// creator mode can hand-edit it. Enforced at creation later; surfaced now via
-// [[check-constraints]].
-// =============================================================================
 const CONSTRAINTS_ENTRY = "wod:config:constraints";
-
-class ConstraintRegistry {
-  private static _cache: ConstraintGroup[] = [];
-
-  static all(): ConstraintGroup[] { return ConstraintRegistry._cache; }
-  static get(name: string): ConstraintGroup | undefined {
-    const n = StringUtil.normalize(name);
-    return ConstraintRegistry._cache.find(g => g.name === n);
-  }
-  static reset(): void { ConstraintRegistry._cache = []; }
-
-  private static _entryText(groups: ConstraintGroup[]): string {
-    return [
-      "Constraint groups: the story's allow/deny rules over Backgrounds and",
-      "Merits/Flaws. The JSON array below the marker lists groups; each has a name,",
-      "relation (exclusive|restricted|forbidden), domain",
-      "(background|merit|flaw|meritflaw|any), members, optional max (exclusive),",
-      "scope (templates/choices it applies to), and note. [[define-constraint]]",
-      "edits this for you; you may also edit it by hand in creator mode.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(groups, null, 2),
-    ].join("\n");
-  }
-
-  // Read the entry into the cache ([] when missing or unparseable). Accepts a
-  // JSON array of groups OR a name -> group map; each is normalized.
-  static async loadFromLorebook(): Promise<number> {
-    ConstraintRegistry._cache = [];
-    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY);
-    if (!text) return 0;
-    const body = LorebookManager.contentBelowHeader(text).trim();
-    let parsed: unknown;
-    try { parsed = JSON.parse(body); } catch { return 0; }
-    const list: Array<Partial<ConstraintGroup> & { name: string }> = Array.isArray(parsed)
-      ? parsed as Array<Partial<ConstraintGroup> & { name: string }>
-      : (parsed && typeof parsed === "object")
-        ? Object.entries(parsed as Record<string, Partial<ConstraintGroup>>).map(([name, g]) => ({ ...g, name }))
-        : [];
-    ConstraintRegistry._cache = list.filter(g => g && typeof g.name === "string" && g.name.trim().length > 0).map(makeConstraintGroup);
-    return ConstraintRegistry._cache.length;
-  }
-
-  // Replace the whole set (create the category/entry on first use) + cache it.
-  static async save(groups: ConstraintGroup[]): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
-    const text = ConstraintRegistry._entryText(groups);
-    const created = await LorebookManager.ensureEntry(id, CONSTRAINTS_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY, text);
-    ConstraintRegistry._cache = groups;
-  }
-
-  // Add or replace one group (by normalized name) and persist.
-  static async put(group: ConstraintGroup): Promise<void> {
-    const rest = ConstraintRegistry._cache.filter(g => g.name !== group.name);
-    await ConstraintRegistry.save([...rest, group]);
-  }
-
-  // Remove one group by name; returns whether it existed.
-  static async remove(name: string): Promise<boolean> {
-    const n = StringUtil.normalize(name);
-    const rest = ConstraintRegistry._cache.filter(g => g.name !== n);
-    if (rest.length === ConstraintRegistry._cache.length) return false;
-    await ConstraintRegistry.save(rest);
-    return true;
-  }
-}
-
-// =============================================================================
-// CONDITIONS - definitions (config overlay) + live instances on characters
-// -----------------------------------------------------------------------------
-// Definitions follow the config-family pattern: shipped DEFAULT_CONDITIONS
-// (the Feral Speech pair) overlaid by an optional lorebook entry
-// (wod:config:conditions - JSON array or name -> def map). The overlay may
-// SHADOW a shipped default; [[forget-condition]] removes overlay entries only
-// (a shadowed default resurfaces). Live instances live in storyStorage keyed by
-// NORMALIZED NAME - a character record is NOT required, so an NPC (the wolf in
-// a feral-whispers conversation) can carry a mirrored condition.
-// =============================================================================
 const CONDITIONS_ENTRY = "wod:config:conditions";
 
-class ConditionRegistry {
-  private static _overlay: ConditionDef[] = [];
+// The house-rule layer for resources: a map resourceName -> partial def.
+const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
+  entry: RESOURCE_CONFIG_ENTRY,
+  header: [
+    "Story overrides for resources (the house-rule layer). The JSON below the",
+    "marker maps a resource name to the fields you want to change (start, max,",
+    "roles, effect, effects, ...). A name that matches no template resource and",
+    "carries kind/start/max adds a custom resource. [[configure-resources]]",
+    "edits this for you; you may also edit it by hand in creator mode.",
+  ],
+});
 
-  static get(name: string): ConditionDef | undefined {
-    const n = StringUtil.normalize(name);
-    return ConditionRegistry._overlay.find(d => d.name === n)
-      ?? DEFAULT_CONDITIONS.find(d => d.name === n);
-  }
-  static all(): ConditionDef[] {
-    const names = new Set(ConditionRegistry._overlay.map(d => d.name));
-    return [...ConditionRegistry._overlay, ...DEFAULT_CONDITIONS.filter(d => !names.has(d.name))];
-  }
-  static reset(): void { ConditionRegistry._overlay = []; }
+// Success tables overlay the shipped defaults in rolls.ts' SuccessTableRegistry
+// (the pure layer keeps serving reads); onChanged re-projects on every load,
+// save and reset, so resetting the store also restores the registry defaults.
+const SuccessTables = new ListConfigStore<SuccessTable>({
+  entry: SUCCESS_TABLES_ENTRY,
+  header: [
+    "Success tables for this chronicle (overlaid on the built-ins - degrees,",
+    "damage, soak). The JSON below the marker is an array of tables (or a map",
+    "name -> table); each row maps accumulated successes to a reading. Attach",
+    "one to any roll with table=<name>; you may edit this by hand in creator",
+    "mode.",
+  ],
+  make: t => ({ ...t, name: StringUtil.normalize(t.name) }),
+  onChanged: overlay => {
+    SuccessTableRegistry.reset();
+    for (const t of overlay) SuccessTableRegistry.register(t);
+  },
+});
 
-  private static _entryText(defs: ConditionDef[]): string {
-    return [
-      "Condition definitions for this chronicle (overlaid on the built-ins).",
-      "The JSON array below the marker lists definitions; each has a name and",
-      "optional bindings (required slots like \"target\"), duration, then",
-      "(successor), mirror (condition the target gains, bound back), tags",
-      "(join the afflicted character's rolls) and note. [[define-condition]]",
-      "edits this for you; you may also edit it by hand in creator mode.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(defs, null, 2),
-    ].join("\n");
-  }
+// Constraint groups: allow/deny rules over trait options. Entirely ST-defined
+// (no built-in defaults); enforced at creation later, surfaced now via
+// [[check-constraints]].
+const ConstraintRegistry = new ListConfigStore<ConstraintGroup>({
+  entry: CONSTRAINTS_ENTRY,
+  header: [
+    "Constraint groups: the story's allow/deny rules over Backgrounds and",
+    "Merits/Flaws. The JSON array below the marker lists groups; each has a name,",
+    "relation (exclusive|restricted|forbidden), domain",
+    "(background|merit|flaw|meritflaw|any), members, optional max (exclusive),",
+    "scope (templates/choices it applies to), and note. [[define-constraint]]",
+    "edits this for you; you may also edit it by hand in creator mode.",
+  ],
+  make: makeConstraintGroup,
+});
 
-  static async loadFromLorebook(): Promise<number> {
-    ConditionRegistry._overlay = [];
-    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONDITIONS_ENTRY);
-    if (!text) return 0;
-    const body = LorebookManager.contentBelowHeader(text).trim();
-    let parsed: unknown;
-    try { parsed = JSON.parse(body); } catch { return 0; }
-    const list: Array<Partial<ConditionDef> & { name: string }> = Array.isArray(parsed)
-      ? parsed as Array<Partial<ConditionDef> & { name: string }>
-      : (parsed && typeof parsed === "object")
-        ? Object.entries(parsed as Record<string, Partial<ConditionDef>>).map(([name, d]) => ({ ...d, name }))
-        : [];
-    ConditionRegistry._overlay = list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(makeConditionDef);
-    return ConditionRegistry._overlay.length;
-  }
+// Condition definitions: shipped DEFAULT_CONDITIONS (the Feral Speech pair)
+// overlaid by the entry; the overlay may SHADOW a built-in, and
+// [[forget-condition]] removes overlay entries only (the built-in resurfaces).
+const ConditionRegistry = new ListConfigStore<ConditionDef>({
+  entry: CONDITIONS_ENTRY,
+  header: [
+    "Condition definitions for this chronicle (overlaid on the built-ins).",
+    "The JSON array below the marker lists definitions; each has a name and",
+    "optional bindings (required slots like \"target\"), duration, then",
+    "(successor), mirror (condition the target gains, bound back), tags",
+    "(join the afflicted character's rolls) and note. [[define-condition]]",
+    "edits this for you; you may also edit it by hand in creator mode.",
+  ],
+  make: makeConditionDef,
+  defaults: DEFAULT_CONDITIONS,
+});
 
-  static async save(defs: ConditionDef[]): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
-    const text = ConditionRegistry._entryText(defs);
-    const created = await LorebookManager.ensureEntry(id, CONDITIONS_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONDITIONS_ENTRY, text);
-    ConditionRegistry._overlay = defs;
+// =============================================================================
+// CREATOR MODE - the "player is hand-editing the lorebook" flag
+// -----------------------------------------------------------------------------
+// While on, game.ts' beforeRoute hook re-syncs characters and every config
+// store before each command, so lorebook edits are picked up live.
+// =============================================================================
+class CreatorMode {
+  private static _storage = new ScopedStorage();
+  static async enabled(): Promise<boolean> {
+    return (await CreatorMode._storage.getOrDefault("creator-mode", false)) as boolean;
   }
-
-  static async put(def: ConditionDef): Promise<void> {
-    const rest = ConditionRegistry._overlay.filter(d => d.name !== def.name);
-    await ConditionRegistry.save([...rest, def]);
-  }
-
-  // Remove an OVERLAY definition (shipped defaults can't be deleted, only
-  // shadowed). Returns whether an overlay entry existed.
-  static async remove(name: string): Promise<boolean> {
-    const n = StringUtil.normalize(name);
-    const rest = ConditionRegistry._overlay.filter(d => d.name !== n);
-    if (rest.length === ConditionRegistry._overlay.length) return false;
-    await ConditionRegistry.save(rest);
-    return true;
-  }
+  static async set(on: boolean): Promise<void> { await CreatorMode._storage.set("creator-mode", on); }
 }
 
 // One live condition on someone: which definition, and what its slots are bound
@@ -4184,6 +4396,19 @@ class WizardSession {
   static async set(a: ActiveWizard): Promise<void> { await WizardSession._storage.set(WizardSession.KEY, a); }
   static async clear(): Promise<void> { await WizardSession._storage.delete(WizardSession.KEY); }
 }
+//#endregion src/state.ts
+
+//#region src/game.ts
+// =============================================================================
+// GAME - the live layer's surface: effect interpreter, wizards, command handlers
+// -----------------------------------------------------------------------------
+// This module implements the verbs. It reads/writes the stores in state.ts,
+// interprets effect specs against live characters, and registers every command
+// (with its CommandSpec - the one declarative description help text and
+// windows derive from) on the CommandRouter in command.ts. The creator-mode
+// lorebook sync is a beforeRoute hook registered here: the router dispatches,
+// the game decides what must happen first.
+// =============================================================================
 
 // --- The "resources" wizard: a guided editor for ResourceOverrides -----------
 interface RwState {
@@ -4382,105 +4607,6 @@ async function answerActiveWizard(active: ActiveWizard, raw: string): Promise<st
   return `((OOC-Storyteller: ${renderPromptText(r.prompt!)}))`;
 }
 
-// =============================================================================
-// COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
-// -----------------------------------------------------------------------------
-// Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
-// `key=value` (or key="quoted") is a named argument; any other bare or quoted
-// token is positional, in order. Keeping this separate from CommandRouter lets
-// us add commands - and later, lorebook-defined commands - without touching how
-// arguments are parsed.
-// =============================================================================
-interface ParsedCommand {
-  name: string;
-  positional: string[];
-  named: Record<string, string>;
-  raw: string;
-}
-
-class CommandParser {
-  static parse(body: string): ParsedCommand {
-    const raw = body.trim();
-    const name = (raw.match(/^[A-Za-z][\w-]*/)?.[0] ?? "").toLowerCase();
-    // BODY-LEVEL gluing, before tokenization (backtick literals excluded):
-    // spaces after `@` and around `::` vanish, so "@char :: default :: sire"
-    // is ONE token. Tokenization would otherwise split them apart.
-    const rest = raw.slice(name.length)
-      .split(/(`[^`]*`)/g)
-      .map((seg, i) => i % 2 === 1 ? seg : seg.replace(/@\s+/g, "@").replace(/\s*::\s*/g, "::"))
-      .join("");
-    const positional: string[] = [];
-    const named: Record<string, string> = {};
-    // key=value | key="v" | key='v' | key=`literal` | "quoted" | 'quoted' |
-    // `literal` | bareword. Every value passes through the BOUNDARY normalizer
-    // (lowercase, @-space stripping, ::->:, list/pool space stripping,
-    // whitespace->hyphen) EXCEPT backtick literals, which stay verbatim -
-    // that's the escape hatch for display text (labels, notes, echoes).
-    const tokenRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|`([^`]*)`|\S+)|"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g;
-    for (const m of rest.matchAll(tokenRe)) {
-      if (m[1] !== undefined) {
-        const key = m[1].toLowerCase();
-        named[key] = m[5] !== undefined ? m[5] : StringUtil.normalizeInput(m[3] ?? m[4] ?? m[2]);
-      } else if (m[8] !== undefined) {
-        positional.push(m[8]);   // backtick literal: verbatim
-      } else {
-        positional.push(StringUtil.normalizeInput(m[6] ?? m[7] ?? m[9]));
-      }
-    }
-    return { name, positional, named, raw };
-  }
-}
-
-// =============================================================================
-// COMMAND ROUTER - dispatch inline [[...]] player commands to their handlers
-// -----------------------------------------------------------------------------
-// A registry maps a verb to the function that runs it, so a new command is just
-// a register() call (and could one day be defined from a lorebook entry).
-// onTextAdventureInput pulls every [[bracketed]] command out of the input,
-// routes it here, and replaces it with a single-line ((OOC-Storyteller: ...))
-// note (the host forbids newlines in inputText).
-// =============================================================================
-interface CommandContext { rng?: Rng; }
-type CommandHandler = (cmd: ParsedCommand, ctx: CommandContext) => Promise<string>;
-
-class CommandRouter {
-  private static _storage = new ScopedStorage();
-  private static _registry = new Map<string, { handler: CommandHandler; help: string }>();
-
-  static register(verb: string, handler: CommandHandler, help: string): void {
-    CommandRouter._registry.set(verb.toLowerCase(), { handler, help });
-  }
-  static verbs(): string[] { return [...CommandRouter._registry.keys()]; }
-  // Registered verb -> its one-line help string (drives [[help]]).
-  static helpFor(verb: string): string | undefined { return CommandRouter._registry.get(verb.toLowerCase())?.help; }
-  static help(): { verb: string; help: string }[] {
-    return [...CommandRouter._registry.entries()].map(([verb, def]) => ({ verb, help: def.help }));
-  }
-
-  static async creatorModeEnabled(): Promise<boolean> {
-    return (await CommandRouter._storage.getOrDefault("creator-mode", false)) as boolean;
-  }
-  static async setCreatorMode(on: boolean): Promise<void> { await CommandRouter._storage.set("creator-mode", on); }
-
-  // Routes one command body to its handler; returns the OOC replacement text
-  // (always a single line - the host strips newlines from inputText).
-  static async route(body: string, ctx: CommandContext = {}): Promise<string> {
-    const cmd = CommandParser.parse(body);
-    // While creator mode is on, the player may have edited character entries or
-    // the resource-override entry: pick those edits up before any command runs.
-    if (await CommandRouter.creatorModeEnabled()) {
-      await CharacterStore.syncFromLorebook();
-      await ResourceOverrides.loadFromLorebook();
-      await loadSuccessTablesFromLorebook();
-      await ConstraintRegistry.loadFromLorebook();
-      await ConditionRegistry.loadFromLorebook();
-    }
-    const def = CommandRouter._registry.get(cmd.name);
-    if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
-    return def.handler(cmd, ctx);
-  }
-}
-
 // --- COMMAND HANDLERS -------------------------------------------------------
 // Each returns a single OOC line. Registered into CommandRouter at the bottom.
 
@@ -4495,16 +4621,12 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
     return `((OOC-Storyteller: creator-mode needs set=true or set=false.))`;
   }
   if (set === "true") {
-    await CommandRouter.setCreatorMode(true);
+    await CreatorMode.set(true);
     return `((OOC-Storyteller: Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.))`;
   }
   // Leaving creator mode: capture any final lorebook edits, then switch off.
-  const { synced, failed } = await CharacterStore.syncFromLorebook();
-  await ResourceOverrides.loadFromLorebook();
-  await loadSuccessTablesFromLorebook();
-  await ConstraintRegistry.loadFromLorebook();
-  await ConditionRegistry.loadFromLorebook();
-  await CommandRouter.setCreatorMode(false);
+  const { synced, failed } = await syncFromCreatorEdits();
+  await CreatorMode.set(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
   if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
@@ -4556,13 +4678,6 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Now playing "${disp(char.name)}".))`;
 }
 
-// Resolve a trait name to its value from a character record's numeric buckets.
-function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
-  const n = StringUtil.normalize(name);
-  const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
-  for (const b of buckets) if (n in b) return b[n];
-  return 0;
-}
 
 // Extract only the roll fields the player actually supplied (no defaults filled
 // in), so callers can tell "keep the saved value" from "reset to default".
@@ -5671,53 +5786,301 @@ async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: ${disp(c.name)} is now the default character ([[play]] with no name selects it).))`;
 }
 
-CommandRouter.register("help", cmdHelp, "help [verb]  (list commands, or show one's usage)");
-CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
-CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
-CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
-CommandRouter.register("characters", cmdCharacters, "characters  (list playable characters; marks current/default)");
-CommandRouter.register("set-default", cmdSetDefault, 'set-default name="..."  (change the default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]');
-CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]');
-CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
-CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
-CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=] [on-botch=fail|lose-successes|ignore] + roll knobs");
-CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
-CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
-CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
-CommandRouter.register("resources", cmdResources, "resources");
-CommandRouter.register("spend", cmdSpend, 'spend <resource[::effect]> [target] [amount] [reason="..."]');
-CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
-CommandRouter.register("damage", cmdDamage, "damage <bashing|lethal|aggravated> [n]");
-CommandRouter.register("health", cmdHealth, "health");
-CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
-CommandRouter.register("reset-uses", cmdResetUses, "reset-uses (scene/turn change: clears effect-use counters)");
-CommandRouter.register("configure-resources", cmdConfigureResources, "configure-resources (guided setup; plain replies answer it)");
-CommandRouter.register("cancel-wizard", cmdCancelWizard, "cancel-wizard");
-CommandRouter.register("resist", cmdResist, 'resist <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[::effect][!]]');
-CommandRouter.register("contest", cmdContest, 'contest <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[::effect][!]]');
-CommandRouter.register("extended-contest", cmdExtendedContest, 'extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=] [interval=] [on-botch=fail|lose-successes|ignore] [difficulty=] [vs-difficulty=]');
-CommandRouter.register("continue-contest", cmdContinueContest, "continue-contest [id] [difficulty=] [vs-difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
-CommandRouter.register("contest-status", cmdContestStatus, "contest-status [id]");
-CommandRouter.register("cancel-contest", cmdCancelContest, "cancel-contest [id]");
-CommandRouter.register("tables", cmdTables, "tables [name]  (list success tables, or lay one out in full)");
-CommandRouter.register("define-constraint", cmdDefineConstraint, 'define-constraint name="..." relation=exclusive|restricted|forbidden domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope="..."] [note="..."]');
-CommandRouter.register("constraints", cmdConstraints, "constraints (list the story's constraint groups)");
-CommandRouter.register("constraint", cmdConstraint, "constraint <name> (show one group in full)");
-CommandRouter.register("forget-constraint", cmdForgetConstraint, "forget-constraint <name>");
-CommandRouter.register("check-constraints", cmdCheckConstraints, "check-constraints (flag the current character's constraint conflicts)");
-CommandRouter.register("define-condition", cmdDefineCondition, 'define-condition name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."]');
-CommandRouter.register("condition", cmdConditionInfo, "condition [name]  (list defined conditions, or show one in full)");
-CommandRouter.register("forget-condition", cmdForgetCondition, "forget-condition <name>  (removes an overlay definition; built-ins can only be shadowed)");
-CommandRouter.register("afflict", cmdAfflict, 'afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias> ...]  (mirror defs also afflict the bound target)');
-CommandRouter.register("advance", cmdAdvance, "advance <condition> [on=..]  (end it and begin its successor, bindings carried forward)");
-CommandRouter.register("lift", cmdLift, "lift <condition> [on=..] [spend=res[::effect][!]]  (remove it - and its mirror; spend = shrug-off)");
-CommandRouter.register("conditions", cmdConditions, 'conditions [<name|@alias>]  (active conditions; NPCs work too)');
-CommandRouter.register("alias", cmdAlias, 'alias <@token> "Target Name"  (@a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)');
-CommandRouter.register("aliases", cmdAliases, "aliases  (list every alias, grouped by scope)");
-CommandRouter.register("forget-alias", cmdForgetAlias, "forget-alias <@token>  (bare @a = global; scoped tokens as in alias)");
-CommandRouter.register("player", cmdPlayer, 'player [name="..."] [default=true]  (show or switch the current player; storyteller is always valid)');
+
+// --- CREATOR-MODE SYNC (the router's game-side hook) -------------------------
+// While creator mode is on, the player may have hand-edited character entries
+// or any wod:config entry: re-sync characters (player edits win) and reload
+// every config store before a command runs, and again when leaving the mode.
+async function syncFromCreatorEdits(): Promise<{ synced: string[]; failed: string[] }> {
+  const result = await CharacterStore.syncFromLorebook();
+  await reloadAllConfigStores();
+  return result;
+}
+CommandRouter.beforeRoute(async () => {
+  if (await CreatorMode.enabled()) await syncFromCreatorEdits();
+});
+
+// --- REGISTRATIONS ------------------------------------------------------------
+// Every verb registers with its CommandSpec: the ONE declarative description
+// of its arguments. [[help]] derives from it; windows render forms and compose
+// command strings from it. Handlers stay the validators - a spec describes,
+// it never rejects.
+const SPEND_HINT = "res[::effect][!]";
+const ROLL_KNOBS: ParamSpec[] = [
+  { key: "difficulty", kind: "positional", hint: "[difficulty|expr]" },
+  { key: "diff-mod", kind: "positional", hint: "[diff-mod]" },
+  { key: "requires", kind: "named", type: "int", desc: "Successes required" },
+  { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
+  { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
+  { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Resource to spend on the roll" },
+];
+
+CommandRouter.register("help", cmdHelp, {
+  summary: "list commands, or show one's usage",
+  params: [{ key: "verb", kind: "positional", hint: "<verb>" }],
+});
+CommandRouter.register("creator-mode", cmdCreatorMode, {
+  summary: "toggle lorebook hand-editing; edits sync in while on",
+  params: [{ key: "set", kind: "named", type: "enum", options: ["true", "false"], required: true }],
+});
+CommandRouter.register("create-playable", cmdCreatePlayable, {
+  summary: "create a playable character (attributes 1, abilities 0 - allocation is opt-in)",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. Erik the Red" },
+    { key: "templates", kind: "named", required: true, hint: '"a,b"', desc: "Templates (comma-separated; hybrids legal)", example: "e.g. vampire" },
+  ],
+});
+CommandRouter.register("play", cmdPlay, {
+  summary: "switch to a character; no name selects the default",
+  params: [{ key: "name", kind: "named", hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("characters", cmdCharacters, {
+  summary: "list playable characters; marks current/default",
+});
+CommandRouter.register("set-default", cmdSetDefault, {
+  summary: "change the default character",
+  params: [{ key: "name", kind: "named", required: true, hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("roll", cmdRoll, {
+  summary: "roll a dice pool for the current character",
+  params: [{ key: "pool", kind: "positional", required: true, hint: "<pool|@name>" }, ...ROLL_KNOBS,
+    { key: "table", kind: "named", desc: "Success table to read the outcome" }],
+});
+CommandRouter.register("roll-for", cmdRollFor, {
+  summary: "roll for a named character without switching to them",
+  params: [
+    { key: "character", kind: "positional", required: true, hint: '"<name|@alias>"' },
+    { key: "pool", kind: "positional", required: true, hint: "<pool|@name>" }, ...ROLL_KNOBS,
+    { key: "table", kind: "named", desc: "Success table to read the outcome" }],
+});
+CommandRouter.register("name-roll", cmdNameRoll, {
+  summary: "save a roll under a name; @name invokes it and its spend= is baked in",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>" },
+    { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS],
+});
+CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
+CommandRouter.register("forget-roll", cmdForgetRoll, {
+  summary: "delete a saved roll",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("extended-roll", cmdExtendedRoll, {
+  summary: "start an extended action (rolls interval 1 now)",
+  note: "plus the usual roll knobs",
+  params: [
+    { key: "pool", kind: "positional", required: true, hint: "<pool>" },
+    { key: "requires", kind: "named", type: "int", required: true, hint: "<target>", desc: "Accumulated successes to reach" },
+    { key: "intervals", kind: "named", type: "int", required: true, hint: "<max>", desc: "Maximum rolls" },
+    { key: "interval", kind: "named", desc: "In-fiction spacing (ST-enforced)", example: "e.g. 1 night" },
+    { key: "label", kind: "named", type: "literal", desc: "Display label" },
+    { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"] },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "dice-modifier", kind: "named", type: "int" },
+    { key: "tags", kind: "named", hint: '"a,b"' },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("continue-roll", cmdContinueRoll, {
+  summary: "whoever is current rolls the next interval (named-only overrides)",
+  params: [
+    { key: "id", kind: "positional", hint: "[id]" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "diff-mod", kind: "named", type: "int" },
+    { key: "dice-modifier", kind: "named", type: "int" },
+    { key: "tags", kind: "named", hint: '"a,b"' },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("roll-status", cmdRollStatus, {
+  summary: "show an extended action's progress",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("cancel-roll", cmdCancelRoll, {
+  summary: "cancel an extended action",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("resources", cmdResources, { summary: "list the current character's resources" });
+CommandRouter.register("spend", cmdSpend, {
+  summary: "spend a resource / fire a named effect outside a roll",
+  params: [
+    { key: "resource", kind: "positional", required: true, hint: "<resource[::effect]>" },
+    { key: "target", kind: "positional", hint: "[target]" },
+    { key: "amount", kind: "positional", hint: "[amount]" },
+    { key: "reason", kind: "named", type: "literal", desc: "Why (echoed in the note)" },
+  ],
+});
+CommandRouter.register("gain", cmdGain, {
+  summary: "regain a resource",
+  params: [
+    { key: "resource", kind: "positional", required: true, hint: "<resource>" },
+    { key: "amount", kind: "positional", hint: "[amount]" },
+  ],
+});
+CommandRouter.register("damage", cmdDamage, {
+  summary: "mark damage on the current character",
+  params: [
+    { key: "severity", kind: "positional", required: true, type: "enum", options: ["bashing", "lethal", "aggravated"], hint: "<bashing|lethal|aggravated>" },
+    { key: "n", kind: "positional", hint: "[n]" },
+  ],
+});
+CommandRouter.register("health", cmdHealth, { summary: "show the current character's health track" });
+CommandRouter.register("clear-boosts", cmdClearBoosts, { summary: "clear trait boosts (the ST calls the duration)" });
+CommandRouter.register("reset-uses", cmdResetUses, { summary: "scene/turn change: clears effect-use counters" });
+CommandRouter.register("configure-resources", cmdConfigureResources, { summary: "guided resource setup; plain replies answer it" });
+CommandRouter.register("cancel-wizard", cmdCancelWizard, { summary: "abandon the running wizard" });
+CommandRouter.register("resist", cmdResist, {
+  summary: "resisted action: your margin over theirs counts (tie = fail)",
+  params: [
+    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+    { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+    { key: "table", kind: "named", desc: "Success table read with your margin" },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("contest", cmdContest, {
+  summary: "contested action: higher total wins (tie = draw)",
+  params: [
+    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+    { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+    { key: "table", kind: "named", desc: "Success table read with your margin" },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("extended-contest", cmdExtendedContest, {
+  summary: "both sides accumulate; first to the goal wins (dead heat stays open)",
+  params: [
+    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+    { key: "target", kind: "named", type: "int", required: true, hint: "<n>", desc: "Accumulated successes to win" },
+    { key: "rounds", kind: "named", type: "int", required: true, hint: "<max>", desc: "Maximum rounds" },
+    { key: "vs", kind: "named", hint: '"Name"' },
+    { key: "label", kind: "named", type: "literal", desc: "Display label" },
+    { key: "interval", kind: "named", desc: "In-fiction spacing (ST-enforced)" },
+    { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"] },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+  ],
+});
+CommandRouter.register("continue-contest", cmdContinueContest, {
+  summary: "roll the next contest round",
+  params: [
+    { key: "id", kind: "positional", hint: "[id]" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+    { key: "diff-mod", kind: "named", type: "int" },
+    { key: "dice-modifier", kind: "named", type: "int" },
+    { key: "tags", kind: "named", hint: '"a,b"' },
+  ],
+});
+CommandRouter.register("contest-status", cmdContestStatus, {
+  summary: "show an extended contest's progress",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("cancel-contest", cmdCancelContest, {
+  summary: "cancel an extended contest",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("tables", cmdTables, {
+  summary: "list success tables, or lay one out in full",
+  params: [{ key: "name", kind: "positional", hint: "[name]" }],
+});
+CommandRouter.register("define-constraint", cmdDefineConstraint, {
+  summary: "define/replace a constraint group",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. clan-only-backgrounds" },
+    { key: "relation", kind: "named", type: "enum", options: [...CONSTRAINT_RELATIONS], default: "exclusive", desc: "Relation" },
+    { key: "domain", kind: "named", type: "enum", options: [...CONSTRAINT_DOMAINS], default: "background", desc: "Domain" },
+    { key: "members", kind: "named", hint: '"a,b"', desc: "Members (comma-separated Backgrounds or Merits/Flaws)", example: "e.g. status, anonymity" },
+    { key: "max", kind: "named", type: "int", desc: "Max to hold (exclusive only; default 1)" },
+    { key: "scope", kind: "named", desc: "Scope: templates/choices it applies to (comma-separated; empty = everyone)", example: "e.g. tzimisce" },
+    { key: "note", kind: "named", desc: "Note (optional)" },
+  ],
+});
+CommandRouter.register("constraints", cmdConstraints, { summary: "list the story's constraint groups" });
+CommandRouter.register("constraint", cmdConstraint, {
+  summary: "show one constraint group in full",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("forget-constraint", cmdForgetConstraint, {
+  summary: "remove a constraint group",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts" });
+CommandRouter.register("define-condition", cmdDefineCondition, {
+  summary: "define/replace a condition (overlay; may shadow a built-in)",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. dazed" },
+    { key: "bindings", kind: "named", hint: '"target"', desc: "Required slots (comma-separated)", example: "e.g. target" },
+    { key: "duration", kind: "named", hint: '"1 turn|until x|instant"', desc: "Advisory duration" },
+    { key: "then", kind: "named", desc: "Successor condition ([[advance]] applies it)" },
+    { key: "mirror", kind: "named", desc: "Condition the bound target gains, bound back" },
+    { key: "tags", kind: "named", hint: '"a,b"', desc: "Tags joined to the afflicted character's rolls" },
+    { key: "description", kind: "named", type: "literal", desc: "Description" },
+    { key: "note", kind: "named", desc: "Note (optional)" },
+  ],
+});
+CommandRouter.register("condition", cmdConditionInfo, {
+  summary: "list defined conditions, or show one in full",
+  params: [{ key: "name", kind: "positional", hint: "[name]" }],
+});
+CommandRouter.register("forget-condition", cmdForgetCondition, {
+  summary: "remove an overlay definition; built-ins can only be shadowed",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("afflict", cmdAfflict, {
+  summary: "apply a condition; extra <slot>=<name|@alias> args fill its bindings",
+  note: "mirror defs also afflict the bound target",
+  openNamed: true,
+  params: [
+    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
+  ],
+});
+CommandRouter.register("advance", cmdAdvance, {
+  summary: "end a condition and begin its successor, bindings carried forward",
+  params: [
+    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "on", kind: "named", hint: "<name|@alias>" },
+  ],
+});
+CommandRouter.register("lift", cmdLift, {
+  summary: "remove a condition - and its mirror; spend = shrug-off",
+  params: [
+    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "on", kind: "named", hint: "<name|@alias>" },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("conditions", cmdConditions, {
+  summary: "active conditions; NPCs work too",
+  params: [{ key: "who", kind: "positional", hint: "<name|@alias>" }],
+});
+CommandRouter.register("alias", cmdAlias, {
+  summary: "define an alias for a character",
+  note: "bare @a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope",
+  params: [
+    { key: "token", kind: "positional", required: true, hint: "<@token>" },
+    { key: "target", kind: "positional", required: true, hint: '"Target Name"' },
+  ],
+});
+CommandRouter.register("aliases", cmdAliases, { summary: "list every alias, grouped by scope" });
+CommandRouter.register("forget-alias", cmdForgetAlias, {
+  summary: "remove an alias (bare @a = global; scoped tokens as in alias)",
+  params: [{ key: "token", kind: "positional", required: true, hint: "<@token>" }],
+});
+CommandRouter.register("player", cmdPlayer, {
+  summary: "show or switch the current player; storyteller is always valid",
+  params: [
+    { key: "name", kind: "named", hint: '"<id>"' },
+    { key: "default", kind: "named", type: "enum", options: ["true"], desc: "Also make it the default player" },
+  ],
+});
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
@@ -5756,96 +6119,108 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
 // =============================================================================
 // WINDOWS - api.v1.ui forms that EMIT commands (no separate execution path)
 // -----------------------------------------------------------------------------
-// A wizard-window is just a UI over the command layer: it renders a form with
-// UI Parts, binds fields to tempStorage via storageKey, and on submit composes a
+// A wizard-window is a UI over the command layer: it renders a form with UI
+// Parts, binds fields to tempStorage via storageKey, and on submit composes a
 // [[command]] string and routes it through the SAME CommandRouter every other
-// command uses. So there is one path; the window is an abstraction over it.
+// command uses. The form itself is DERIVED from the verb's CommandSpec - the
+// window duplicates no grammar: enum params render as button rows (from the
+// spec's options, which reference the rules vocabularies), ints as number
+// inputs, everything else as text inputs; composeCommand does the one
+// sanitizing composition. Windows that need DOMAIN-driven fields (a condition
+// def's binding slots) will build their part tree by hand and still submit
+// through composeCommand - the spec covers the static shape (next pass).
 //
-// This first window builds a constraint group (it emits [[define-constraint]]).
-// A real NovelAI window can't render off-host, so the host mock records the part
-// tree and lets tests fire button callbacks (see host.ts __ui* helpers) - which
-// exercises the whole window -> command -> store path without a screen.
+// A real NovelAI window can't render off-host, so the host mock records the
+// part tree and lets tests fire button callbacks (see host.ts __ui* helpers) -
+// which exercises the whole window -> command -> store path without a screen.
 // =============================================================================
 
-const CKEY = (k: string): string => `win:constraint:${k}`;
-const RELATIONS = ["exclusive", "restricted", "forbidden"];
-const DOMAINS = ["background", "merit", "flaw", "meritflaw", "any"];
+const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
-// A row of buttons behaving as a single-select: the current value is marked with
-// a bullet; clicking one writes it to tempStorage and re-renders.
-function selectorRow(part: UiPartHelpers, label: string, key: string, options: string[], current: string, rerender: () => Promise<void>): UIPart {
-  const buttons = options.map(o => part.button({
+// A row of buttons behaving as a single-select: the current value is marked
+// with a bullet; clicking one writes it to tempStorage and re-renders.
+function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: string, rerender: () => Promise<void>): UIPart {
+  const buttons = (p.options ?? []).map(o => part.button({
     text: o === current ? `• ${o}` : o,
-    callback: async () => { await api.v1.tempStorage.set(CKEY(key), o); await rerender(); },
+    callback: async () => { await api.v1.tempStorage.set(WKEY(verb, p.key), o); await rerender(); },
   }));
-  return part.row({ content: [part.text({ text: `${label}:` }), ...buttons] });
+  return part.row({ content: [part.text({ text: `${p.desc ?? p.key}:` }), ...buttons] });
 }
 
-// Read the form's tempStorage fields, compose a define-constraint command, route
-// it, and show the OOC reply in-window.
-async function submitConstraint(rerender: (result?: string) => Promise<void>): Promise<void> {
-  const get = async (k: string): Promise<string> => String((await api.v1.tempStorage.get(CKEY(k))) ?? "").trim();
-  const name = await get("name");
-  if (!name) { await rerender("Needs a name."); return; }
-  const parts = [
-    "define-constraint",
-    `name="${name}"`,
-    `relation=${(await get("relation")) || "exclusive"}`,
-    `domain=${(await get("domain")) || "background"}`,
-  ];
-  const members = await get("members"); if (members) parts.push(`members="${members}"`);
-  const max = await get("max"); if (max) parts.push(`max=${max}`);
-  const scope = await get("scope"); if (scope) parts.push(`scope="${scope}"`);
-  const note = await get("note"); if (note) parts.push(`note="${note}"`);
-  const reply = await CommandRouter.route(parts.join(" "));
+// Read the form's tempStorage fields, compose the command, route it, and show
+// the OOC reply in-window.
+async function submitCommand(verb: string, spec: CommandSpec, rerender: (result?: string) => Promise<void>): Promise<void> {
+  const values: Record<string, string> = {};
+  for (const p of spec.params ?? []) {
+    values[p.key] = String((await api.v1.tempStorage.get(WKEY(verb, p.key))) ?? "").trim();
+  }
+  const required = (spec.params ?? []).find(p => p.required && !values[p.key] && !p.default);
+  if (required) { await rerender(`Needs ${required.desc ?? required.key}.`); return; }
+  const reply = await CommandRouter.route(composeCommand(verb, values, spec));
   await rerender(reply);
 }
 
-// Open the constraint-group window and render its form.
-async function openConstraintWindow(): Promise<void> {
+// Open a window whose form is the verb's CommandSpec. Returns whether a spec
+// existed to render.
+async function openCommandWindow(verb: string, opts?: { title?: string; blurb?: string; submitLabel?: string }): Promise<boolean> {
+  const spec = CommandRouter.specFor(verb);
+  if (!spec) return false;
   const part = api.v1.ui.part;
   const temp = api.v1.tempStorage;
-  if ((await temp.get(CKEY("relation"))) == null) await temp.set(CKEY("relation"), "exclusive");
-  if ((await temp.get(CKEY("domain"))) == null) await temp.set(CKEY("domain"), "background");
 
-  const handle = await api.v1.ui.window.open({ title: "Define constraint group", content: [], defaultWidth: 480, defaultHeight: 600 });
+  // Pre-seed enum defaults so the selector rows show a selection immediately.
+  for (const p of spec.params ?? []) {
+    if (p.default !== undefined && (await temp.get(WKEY(verb, p.key))) == null) {
+      await temp.set(WKEY(verb, p.key), p.default);
+    }
+  }
+
+  const handle = await api.v1.ui.window.open({ title: opts?.title ?? `[[${verb}]]`, content: [], defaultWidth: 480, defaultHeight: 600 });
 
   const render = async (result?: string): Promise<void> => {
-    const relation = String((await temp.get(CKEY("relation"))) ?? "exclusive");
-    const domain = String((await temp.get(CKEY("domain"))) ?? "background");
-    const content: UIPart[] = [
-      part.text({ text: "**Define a constraint group** (exclusive / restricted / forbidden)", markdown: true }),
-      part.text({ text: "Name" }),
-      part.textInput({ storageKey: CKEY("name"), placeholder: "e.g. clan-only-backgrounds" }),
-      selectorRow(part, "Relation", "relation", RELATIONS, relation, () => render()),
-      selectorRow(part, "Domain", "domain", DOMAINS, domain, () => render()),
-      part.text({ text: "Members (comma-separated Backgrounds or Merits/Flaws)" }),
-      part.textInput({ storageKey: CKEY("members"), placeholder: "e.g. status, anonymity" }),
-      part.text({ text: "Max to hold (exclusive only; default 1)" }),
-      part.numberInput({ storageKey: CKEY("max") }),
-      part.text({ text: "Scope: templates/choices it applies to (comma-separated; empty = everyone)" }),
-      part.textInput({ storageKey: CKEY("scope"), placeholder: "e.g. tzimisce" }),
-      part.text({ text: "Note (optional)" }),
-      part.textInput({ storageKey: CKEY("note") }),
-      part.row({ content: [
-        part.button({ text: "Create", callback: () => submitConstraint(render) }),
-        part.button({ text: "Close", callback: () => handle.close() }),
-      ] }),
-    ];
+    const content: UIPart[] = [];
+    if (opts?.blurb) content.push(part.text({ text: opts.blurb, markdown: true }));
+    for (const p of spec.params ?? []) {
+      if (p.type === "enum" && p.options?.length) {
+        const current = String((await temp.get(WKEY(verb, p.key))) ?? p.default ?? "");
+        content.push(selectorRow(part, verb, p, current, () => render()));
+      } else if (p.type === "int") {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.numberInput({ storageKey: WKEY(verb, p.key) }));
+      } else {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.textInput({ storageKey: WKEY(verb, p.key), placeholder: p.example }));
+      }
+    }
+    content.push(part.row({ content: [
+      part.button({ text: opts?.submitLabel ?? "Create", callback: () => submitCommand(verb, spec, render) }),
+      part.button({ text: "Close", callback: () => handle.close() }),
+    ] }));
     if (result) content.push(part.box({ content: [part.text({ text: result })] }));
     await handle.update({ content });
   };
 
   await render();
+  return true;
 }
 
-// [[win-constraint]] - a UI over [[define-constraint]].
+// The constraint-group window: [[define-constraint]]'s spec rendered as a form.
+async function openConstraintWindow(): Promise<void> {
+  await openCommandWindow("define-constraint", {
+    title: "Define constraint group",
+    blurb: "**Define a constraint group** (exclusive / restricted / forbidden)",
+  });
+}
+
+// [[win-constraint]] - a UI over [[define-constraint]], derived from its spec.
 async function cmdWinConstraint(): Promise<string> {
   await openConstraintWindow();
   return `((OOC-Storyteller: Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).))`;
 }
 
-CommandRouter.register("win-constraint", cmdWinConstraint, "win-constraint (open a window to define a constraint group)");
+CommandRouter.register("win-constraint", cmdWinConstraint, {
+  summary: "open a window to define a constraint group",
+});
 //#endregion src/window.ts
 
 //#region src/index.ts
@@ -5867,11 +6242,8 @@ async function init(): Promise<{ setupMessage: string | null }> {
   });
   const boot = await LorebookManager.bootstrap();
   const merits = await MeritFlawRegistry.loadFromLorebook();
-  const overrides = await ResourceOverrides.loadFromLorebook();
-  const tables = await loadSuccessTablesFromLorebook();
-  const constraints = await ConstraintRegistry.loadFromLorebook();
-  const conditions = await ConditionRegistry.loadFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}; constraint groups: ${constraints}; condition overlays: ${conditions}`);
+  const configs = await reloadAllConfigStores();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "")}=${c.count}`).join(", ")}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

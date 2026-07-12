@@ -592,8 +592,10 @@ export interface ConstraintViolation {
   detail: string;
 }
 
-const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
-const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
+// Exported so consumers (command specs, windows) reference THE vocabulary
+// instead of retyping it - a new relation/domain reaches every surface.
+export const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
+export const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
 
 // Fill defaults and normalize. An unknown relation falls back to "exclusive",
 // an unknown domain to "any" - a misconfigured group is still stored, never lost.

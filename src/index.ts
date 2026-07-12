@@ -12,14 +12,15 @@ export * from "./core/damage";
 export * from "./wizard";
 export * from "./rolls";
 export * from "./rules";
+export * from "./command";
 export * from "./services";
+export * from "./state";
 export * from "./game";
 export * from "./window";
 
 import { api, log, OnTextAdventureInput } from "./host";
-import { LorebookManager } from "./services";
-import { MeritFlawRegistry } from "./services";
-import { processAdventureInput, ResourceOverrides, loadSuccessTablesFromLorebook, ConstraintRegistry, ConditionRegistry } from "./game";
+import { LorebookManager, MeritFlawRegistry, reloadAllConfigStores } from "./services";
+import { processAdventureInput } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
 // Wire the engine to the host: input hook, lorebook seed, custom merits/flaws.
@@ -30,10 +31,7 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   });
   const boot = await LorebookManager.bootstrap();
   const merits = await MeritFlawRegistry.loadFromLorebook();
-  const overrides = await ResourceOverrides.loadFromLorebook();
-  const tables = await loadSuccessTablesFromLorebook();
-  const constraints = await ConstraintRegistry.loadFromLorebook();
-  const conditions = await ConditionRegistry.loadFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}; constraint groups: ${constraints}; condition overlays: ${conditions}`);
+  const configs = await reloadAllConfigStores();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "")}=${c.count}`).join(", ")}`);
   return { setupMessage: boot.message };
 }

@@ -1,1391 +1,48 @@
+// =============================================================================
+// GAME - the live layer's surface: effect interpreter, wizards, command handlers
+// -----------------------------------------------------------------------------
+// This module implements the verbs. It reads/writes the stores in state.ts,
+// interprets effect specs against live characters, and registers every command
+// (with its CommandSpec - the one declarative description help text and
+// windows derive from) on the CommandRouter in command.ts. The creator-mode
+// lorebook sync is a beforeRoute hook registered here: the router dispatches,
+// the game decides what must happen first.
+// =============================================================================
 import { api, OnTextAdventureInputReturnValue } from "./host";
+import { StringUtil } from "./core/traits";
+import { Rng } from "./core/dice";
+import { SeverityName, HealthSummary } from "./core/damage";
 import {
-  StringUtil, Category, PointSource, Stat, Tracker, Pool, MoralityTrait,
-} from "./core/traits";
-import { Dice, Rng, RollTrait, RollResult } from "./core/dice";
-import {
-  Severity, SeverityName, DamagePacket, DamageKind, DamageSource, DamageReaction,
-  HealthTrack, HealthSummary, SoakSpec, SoakTypeRule,
-} from "./core/damage";
-import {
-  RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, ResourceDef,
-  bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
-  resourcesForTemplates, resourceEffect, healthLevelsForTemplates, ATTRIBUTES,
+  TEMPLATES, ResourceDef, resourceEffect,
   EffectSpec, EffectOp, describeEffect,
-  ConstraintGroup, ConstraintRelation, ConstraintDomain, makeConstraintGroup, describeConstraint, checkConstraints, OwnedTraits,
-  ConditionDef, makeConditionDef, describeConditionDef, parseConditionDuration, describeDuration, DEFAULT_CONDITIONS,
+  makeConstraintGroup, describeConstraint, checkConstraints, OwnedTraits,
+  ConstraintRelation, ConstraintDomain, CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS,
+  makeConditionDef, describeConditionDef, parseConditionDuration, describeDuration,
+  ConditionDef,
 } from "./rules";
-import { ScopedStorage, LorebookManager, MeritFlawRegistry } from "./services";
+import { MeritFlawRegistry, reloadAllConfigStores } from "./services";
 import {
   RollSpec, RollModifier, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
   ExtendedRoll, applyInterval, describeExtended, parseBotchPolicy, parsePoolExpression,
-  SuccessTable, SuccessTableRegistry, readSuccessTable, describeTableReading, describeTable, RollOutcomeKind,
+  SuccessTableRegistry, readSuccessTable, describeTableReading, describeTable, RollOutcomeKind,
   ContestMode, ContestOutcome, compareRolls, ExtendedContest, applyContestRound, describeContest, RollExecution,
 } from "./rolls";
 import {
   WizardDefinition, WizardPrompt, WizardStateData, WizardResult, resolveReply, renderPromptText,
 } from "./wizard";
-
-// --- LIVE CHARACTER SHEET ---
-// One line of "what a reaction did to the packet", for auditability.
-export interface ReactionTrace { reaction: string; from: string; to: string; }
-export interface DamageReport {
-  severity: SeverityName;  // the severity finally marked on the track
-  incoming: number;        // packet intensity as it arrived (pre-reaction)
-  intensity: number;       // packet intensity after reactions (what soak faced)
-  soaked: number;
-  applied: number;
-  soakRoll: RollResult | null;
-  original: string;        // packet.describe() before reactions
-  resolved: string;        // packet.describe() after reactions
-  trace: ReactionTrace[];  // every reaction that changed the packet, in order
-  health: HealthSummary;
-}
-export interface SoakReport {
-  soakable: boolean;
-  pool: number;
-  soaked: number;
-  roll: RollResult | null;
-}
-
-export class LiveCharacter {
-  private _xpRemaining: number = 0;
-  private _downtimeRemaining: number = 0;
-
-  // Extended state (populated by CharacterFactory; safe defaults keep the
-  // original 7-argument constructor backwards compatible).
-  public Health: HealthTrack = new HealthTrack();
-  public Pools: Map<string, Pool> = new Map();
-  public Virtues: Map<string, Stat> = new Map();
-  public Traits: Map<string, Stat> = new Map(); // misc rated traits
-  public Disciplines: Map<string, Stat> = new Map(); // rated supernatural powers (0-5)
-  // Free-form prerequisite tags ("toreador", "revenant", "inconnu", ...) and
-  // the Merits/Flaws taken against them.
-  public Tags: Set<string> = new Set();
-  public MeritsFlaws: Map<string, { def: MeritFlawDef; points: number }> = new Map();
-  public Morality?: MoralityTrait;
-  public Soak: SoakSpec = MORTAL_SOAK;
-  // The character's say over incoming damage: reactions are folded over each
-  // packet (in order) before soak, letting it rewrite or ignore parts of the
-  // hit - a vampire turning bullets to bashing, a werewolf who cannot soak
-  // silver, a vest eating the first few levels of a gunshot.
-  public Reactions: DamageReaction[] = [];
-
-  constructor(
-    public readonly Name: string,
-    public readonly Template: string,
-    public readonly Rules: RulesetConfig,
-    public readonly Attributes: Map<string, Stat>,
-    public readonly Abilities: Map<string, Stat>,
-    public readonly Backgrounds: Map<string, Stat>,
-    public readonly Trackers: Map<string, Tracker>
-  ) { }
-
-  AwardXP(amount: number) { this._xpRemaining += amount; }
-  AwardDowntime(amount: number) { this._downtimeRemaining += amount; }
-  get XPRemaining(): number { return this._xpRemaining; }
-  get DowntimeRemaining(): number { return this._downtimeRemaining; }
-
-  SpendXPOnAttribute(statName: string) {
-    const stat = this.Attributes.get(StringUtil.normalize(statName));
-    if (!stat) throw new Error(`Attribute ${statName} not found.`);
-    const cost = stat.Value * this.Rules.AttrXPMultiplier;
-    if (this._xpRemaining < cost) throw new Error("Not enough XP.");
-    stat.Allocate(PointSource.EXPERIENCE, 1, cost);
-    this._xpRemaining -= cost;
-  }
-
-  SpendDowntimeOnAttribute(statName: string) {
-    if (!this.Rules.UsesDowntime) throw new Error(`${this.Template} does not use Downtime points.`);
-    const stat = this.Attributes.get(StringUtil.normalize(statName));
-    if (!stat) throw new Error(`Attribute ${statName} not found.`);
-    const cost = this.Rules.AttrDowntimeCost;
-    if (this._downtimeRemaining < cost) throw new Error("Not enough Downtime.");
-    stat.Allocate(PointSource.DOWNTIME, 1, cost);
-    this._downtimeRemaining -= cost;
-  }
-
-  // --- Trait lookup (used by soak and ad-hoc rolls) -----------------------
-  TraitValue(name: string): number {
-    const n = StringUtil.normalize(name);
-    const s = this.Attributes.get(n) ?? this.Abilities.get(n) ?? this.Backgrounds.get(n)
-      ?? this.Virtues.get(n) ?? this.Disciplines.get(n) ?? this.Traits.get(n);
-    return s ? s.EffectiveValue : 0;
-  }
-
-  // --- Tags & Merits/Flaws --------------------------------------------------
-  AddTag(tag: string): void { this.Tags.add(StringUtil.normalize(tag)); }
-  RemoveTag(tag: string): void { this.Tags.delete(StringUtil.normalize(tag)); }
-  HasTag(tag: string): boolean { return this.Tags.has(StringUtil.normalize(tag)); }
-  HasMeritFlaw(name: string): boolean { return this.MeritsFlaws.has(StringUtil.normalize(name)); }
-
-  // Prerequisite check: a template requirement is met if the character's
-  // template name contains it (or it is present as a tag); listed tags and
-  // merits/flaws must ALL be present. Returns every unmet requirement so the
-  // Storyteller can decide whether to waive.
-  MeetsRequirements(req: MeritFlawRequirements | undefined): { ok: boolean; missing: string[] } {
-    if (!req) return { ok: true, missing: [] };
-    const missing: string[] = [];
-    if (req.templates && req.templates.length > 0) {
-      const template = StringUtil.normalize(this.Template);
-      const hit = req.templates.some(t => template.includes(StringUtil.normalize(t)) || this.HasTag(t));
-      if (!hit) missing.push(`template:${req.templates.join("|")}`);
-    }
-    for (const t of req.tags ?? []) if (!this.HasTag(t)) missing.push(`tag:${StringUtil.normalize(t)}`);
-    for (const m of req.meritsFlaws ?? []) if (!this.HasMeritFlaw(m)) missing.push(`merit-flaw:${StringUtil.normalize(m)}`);
-    return { ok: missing.length === 0, missing };
-  }
-
-  // Take a merit/flaw by registry name or inline definition. The chosen point
-  // value must be one the definition allows; prerequisites throw unless waived.
-  AddMeritFlaw(nameOrDef: string | MeritFlawDef, opts: { points?: number; waivePrerequisites?: boolean } = {}): void {
-    const def = typeof nameOrDef === "string" ? MeritFlawRegistry.get(nameOrDef) : nameOrDef;
-    if (!def) throw new Error(`Unknown merit/flaw: ${nameOrDef}`);
-    const key = StringUtil.normalize(def.name);
-    if (this.MeritsFlaws.has(key)) throw new Error(`${def.name} is already taken.`);
-    if (!opts.waivePrerequisites) {
-      const check = this.MeetsRequirements(def.requires);
-      if (!check.ok) throw new Error(`${def.name} prerequisites not met: ${check.missing.join(", ")}`);
-    }
-    const allowed = Array.isArray(def.points) ? def.points : [def.points];
-    const points = opts.points ?? allowed[0];
-    if (!allowed.includes(points)) {
-      throw new Error(`${def.name} must be taken at one of [${allowed.join(", ")}] points, got ${points}.`);
-    }
-    this.MeritsFlaws.set(key, { def, points });
-  }
-
-  // Bookkeeping for the future freebie engine (merits cost, flaws grant).
-  get MeritPointsSpent(): number {
-    let n = 0;
-    for (const { def, points } of this.MeritsFlaws.values()) if (def.kind === "merit") n += points;
-    return n;
-  }
-  get FlawPointsGained(): number {
-    let n = 0;
-    for (const { def, points } of this.MeritsFlaws.values()) if (def.kind === "flaw") n += points;
-    return n;
-  }
-
-  // --- Disciplines & rolls ------------------------------------------------
-  DisciplineRating(name: string): number {
-    const d = this.Disciplines.get(StringUtil.normalize(name));
-    return d ? d.EffectiveValue : 0;
-  }
-
-  // Roll a pool as this character, folding in Discipline effects: `potence` adds
-  // the character's Potence rating as automatic successes; `bonusDiceFrom` adds
-  // each named trait/Discipline's rating as bonus dice (e.g. Celerity, Auspex).
-  Roll(input: number | RollTrait[], opts: {
-    difficulty?: number; nAgain?: number; rng?: Rng; label?: string;
-    automaticSuccesses?: number; potence?: boolean; bonusDiceFrom?: string[];
-  } = {}): RollResult {
-    let automaticSuccesses = opts.automaticSuccesses ?? 0;
-    if (opts.potence) automaticSuccesses += this.DisciplineRating("potence");
-    let bonusDice = 0;
-    for (const name of opts.bonusDiceFrom ?? []) bonusDice += this.TraitValue(name);
-    let pool: number | RollTrait[];
-    if (typeof input === "number") pool = Math.max(0, input + bonusDice);
-    else pool = bonusDice > 0 ? [...input, { name: "bonus", value: bonusDice }] : input;
-    return Dice.roll(pool, {
-      difficulty: opts.difficulty, nAgain: opts.nAgain, rng: opts.rng,
-      label: opts.label, automaticSuccesses,
-    });
-  }
-
-  // --- Health & soak -------------------------------------------------------
-  get WoundPenalty(): number { return this.Health.Penalty; }
-
-  // Soak rule for a severity; harmless/fatal are not in the SoakSpec and are
-  // treated as not soakable. Fortitude (a Discipline) lets a character soak a
-  // severity their template normally can't - e.g. a ghoul soaking lethal - with
-  // Fortitude dice. (Templates that already soak it, like a vampire, are
-  // unaffected, so Fortitude is never double-counted.)
-  private _soakRule(sev: Severity): SoakTypeRule {
-    const base = sev === Severity.BASHING ? this.Soak.bashing
-      : sev === Severity.LETHAL ? this.Soak.lethal
-      : sev === Severity.AGGRAVATED ? this.Soak.aggravated
-      : { soakable: false, pool: [] };
-    if (!base.soakable && this.TraitValue("fortitude") > 0) {
-      return { soakable: true, pool: ["fortitude"] };
-    }
-    return base;
-  }
-
-  SoakPoolFor(severity: Severity | SeverityName): number {
-    const rule = this._soakRule(Severity.coerce(severity));
-    if (!rule.soakable) return 0;
-    return rule.pool.reduce((sum, t) => sum + this.TraitValue(t), 0);
-  }
-
-  RollSoak(severity: Severity | SeverityName, rng?: Rng): SoakReport {
-    const sev = Severity.coerce(severity);
-    const rule = this._soakRule(sev);
-    if (!rule.soakable) return { soakable: false, pool: 0, soaked: 0, roll: null };
-    const pool = this.SoakPoolFor(sev);
-    if (pool <= 0) return { soakable: true, pool: 0, soaked: 0, roll: null };
-    const roll = Dice.roll(pool, { difficulty: this.Soak.difficulty, rng, label: `${sev.Name} soak` });
-    return { soakable: true, pool, soaked: Math.max(0, roll.net), roll };
-  }
-
-  // Fold this character's reactions over an incoming packet, recording each
-  // change. The returned packet is what actually gets soaked and applied.
-  ResolveIncoming(packet: DamagePacket): { final: DamagePacket; trace: ReactionTrace[] } {
-    let current = packet;
-    const trace: ReactionTrace[] = [];
-    for (const reaction of this.Reactions) {
-      const next = reaction.Apply(current, this);
-      if (next !== current) trace.push({ reaction: reaction.Label, from: current.describe(), to: next.describe() });
-      current = next;
-    }
-    return { final: current, trace };
-  }
-
-  // The full pipeline: let the character reshape the packet, then soak (if the
-  // resolved packet still permits it) and mark the remainder on the track.
-  TakePacket(packet: DamagePacket, opts: { soak?: boolean; rng?: Rng } = {}): DamageReport {
-    const { final, trace } = this.ResolveIncoming(packet);
-    const doSoak = (opts.soak ?? true) && final.Soakable;
-    let soaked = 0;
-    let soakRoll: RollResult | null = null;
-    if (doSoak) {
-      const r = this.RollSoak(final.Severity, opts.rng);
-      soaked = r.soaked;
-      soakRoll = r.roll;
-    }
-    const applied = Math.max(0, final.Intensity - soaked);
-    this.Health.ApplyDamage(final.Severity, applied);
-    return {
-      severity: final.Severity.Name,
-      incoming: packet.Intensity,
-      intensity: final.Intensity,
-      soaked, applied, soakRoll,
-      original: packet.describe(),
-      resolved: final.describe(),
-      trace,
-      health: this.Health.Summary(),
-    };
-  }
-
-  // Convenience wrapper: build a bare packet (optionally tagged with kinds and a
-  // source) and run it through TakePacket.
-  TakeDamage(
-    severity: Severity | SeverityName,
-    intensity: number,
-    opts: { soak?: boolean; rng?: Rng; kinds?: DamageKind[]; source?: DamageSource } = {}
-  ): DamageReport {
-    const packet = new DamagePacket({ intensity, severity, kinds: opts.kinds, source: opts.source });
-    return this.TakePacket(packet, opts);
-  }
-
-  Heal(severity: Severity | SeverityName, amount: number): number { return this.Health.Heal(severity, amount); }
-
-  // --- Resource pools ------------------------------------------------------
-  private _tracker(name: string): Tracker {
-    const t = this.Trackers.get(StringUtil.normalize(name));
-    if (!t) throw new Error(`Tracker ${name} not found.`);
-    return t;
-  }
-
-  GetPool(name: string): Pool {
-    const p = this.Pools.get(StringUtil.normalize(name));
-    if (!p) throw new Error(`Pool ${name} not found.`);
-    return p;
-  }
-
-  SpendWillpower(amount: number = 1): void { this._tracker("willpower").Spend(amount); }
-  RegainWillpower(amount: number = 1): void { this._tracker("willpower").Regain(amount); }
-  SpendPool(name: string, amount: number, reason: string = ""): void { this.GetPool(name).Spend(amount, reason); }
-  GainPool(name: string, amount: number, reason: string = ""): number { return this.GetPool(name).Gain(amount, reason); }
-
-  // --- Storage serialization ----------------------------------------------
-  // Writes the sheet under `char_<name>` via a ScopedStorage (prefixed with
-  // the script id, preserving the historical `<scriptId>_char_<name>` key).
-  async SaveToStory() {
-    const storage = new ScopedStorage();
-
-    // Extracting just the data needed for persistence to avoid circular JSON issues
-    const serializedData = {
-      name: this.Name,
-      template: this.Template,
-      xp: this._xpRemaining,
-      downtime: this._downtimeRemaining,
-      attributes: Array.from(this.Attributes.entries()).map(([k, v]) => ({ name: k, value: v.Value, effective: v.EffectiveValue })),
-      abilities: Array.from(this.Abilities.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
-      backgrounds: Array.from(this.Backgrounds.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
-      trackers: Array.from(this.Trackers.entries()).map(([k, v]) => ({ name: k, perm: v.Value, temp: v.Temporary })),
-      pools: Array.from(this.Pools.entries()).map(([k, v]) => ({ name: k, current: v.Current, max: v.Max })),
-      virtues: Array.from(this.Virtues.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
-      traits: Array.from(this.Traits.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
-      disciplines: Array.from(this.Disciplines.entries()).map(([k, v]) => ({ name: k, value: v.Value })),
-      tags: [...this.Tags],
-      meritsFlaws: Array.from(this.MeritsFlaws.values()).map(({ def, points }) => ({ name: StringUtil.normalize(def.name), kind: def.kind, points })),
-      morality: this.Morality ? { road: this.Morality.RoadName, value: this.Morality.Value, polarity: this.Morality.Polarity, unplayable: this.Morality.IsUnplayable } : null,
-      health: this.Health.Summary(),
-    };
-
-    await storage.set(`char_${StringUtil.normalize(this.Name)}`, serializedData);
-    return serializedData;
-  }
-}
-
-// =============================================================================
-// CHARACTER FACTORY - build a LiveCharacter from a TemplateConfig
-// =============================================================================
-export interface CharacterCreationOptions {
-  generation?: number;                   // Vampire blood-pool sizing
-  road?: RoadDefinition;                 // override the template's default Road
-  attributes?: Record<string, number>;   // optional seed (name -> dots)
-  abilities?: Record<string, number>;
-  backgrounds?: Record<string, number>;
-  virtues?: Record<string, number>;       // Virtue dots (default 1 each)
-  poolStarts?: Record<string, number>;    // chosen starting values for pools/trackers
-  traits?: Record<string, number>;        // misc rated traits
-  disciplines?: Record<string, number>;   // Discipline dots (e.g. { potence: 1, fortitude: 2 })
-  tags?: string[];                        // prerequisite tags ("toreador", "revenant", ...)
-  meritsFlaws?: Array<string | { name: string; points?: number; waive?: boolean }>;
-  reactions?: DamageReaction[];           // extra damage reactions (e.g. worn armour), appended after the template's
-}
-
-export class CharacterFactory {
-  static create(template: TemplateConfig, name: string, opts: CharacterCreationOptions = {}): LiveCharacter {
-    const attributes = CharacterFactory._statMap(opts.attributes, Category.PHYSICAL);
-    const abilities = CharacterFactory._statMap(opts.abilities, Category.SKILL);
-    const backgrounds = CharacterFactory._statMap(opts.backgrounds, Category.BACKGROUND);
-    const traits = CharacterFactory._statMap(opts.traits, Category.VITAL);
-    const disciplines = CharacterFactory._statMap(opts.disciplines, Category.DISCIPLINE);
-    const virtuesProvided = opts.virtues !== undefined;
-    const road = opts.road ?? template.Morality?.road ?? ROAD_OF_HUMANITY;
-
-    // Virtues (1-5) - only for templates that use them.
-    const virtues = new Map<string, Stat>();
-    if (template.HasVirtues) {
-      for (const v of road.virtues) {
-        const key = StringUtil.normalize(v);
-        const dots = opts.virtues?.[v] ?? opts.virtues?.[key] ?? 1;
-        virtues.set(key, new Stat(v, Category.VIRTUE, dots, 5, 5));
-      }
-    }
-
-    // Trackers & pools, honouring per-template starting-value constraints.
-    const trackers = new Map<string, Tracker>();
-    const pools = new Map<string, Pool>();
-    for (const def of template.Pools) {
-      const key = StringUtil.normalize(def.name);
-      const explicit = opts.poolStarts?.[def.name] ?? opts.poolStarts?.[key];
-      const chosen = CharacterFactory._resolveStart(def, explicit);
-      if (def.kind === "tracker") {
-        trackers.set(key, new Tracker(def.name, Category.TRACKER, chosen, def.max, def.max));
-      } else {
-        let max = def.max;
-        let perTurn = def.perTurnLimit ?? Infinity;
-        let start = chosen;
-        if (def.fromGeneration && opts.generation !== undefined) {
-          const bs = bloodForGeneration(opts.generation);
-          max = bs.max;
-          perTurn = bs.perTurn;
-          start = explicit !== undefined ? chosen : max; // default to a full pool
-        }
-        pools.set(key, new Pool(def.name, max, start, perTurn));
-      }
-    }
-
-    // Derived start (Dark Ages): Willpower = Courage when the player set Virtues.
-    if (template.HasVirtues && virtuesProvided && trackers.has("willpower")
-        && opts.poolStarts?.["willpower"] === undefined) {
-      const courage = virtues.get("courage");
-      if (courage) trackers.set("willpower", new Tracker("willpower", Category.TRACKER, courage.Value, 10, 10));
-    }
-
-    const character = new LiveCharacter(
-      name, template.Name, template.Rules, attributes, abilities, backgrounds, trackers
-    );
-    character.Pools = pools;
-    character.Virtues = virtues;
-    character.Traits = traits;
-    character.Disciplines = disciplines;
-    character.Soak = template.Soak;
-    character.Health = new HealthTrack(template.HealthLevels);
-    // Template reactions first (innate physiology), then per-character extras
-    // like armour - so severity/kind rewrites happen before mitigation.
-    character.Reactions = [...template.Reactions, ...(opts.reactions ?? [])];
-
-    // Morality (a Road/Humanity, or an ascending Torment). Derive the start
-    // from the two rating Virtues when the player engaged with Virtues.
-    if (template.Morality) {
-      const mc = template.Morality;
-      let start = mc.start ?? (mc.polarity === "ascending" ? 0 : 5);
-      if (mc.deriveFromVirtues && template.HasVirtues && virtuesProvided) {
-        const r = mc.road ?? road;
-        const [a, b] = r.ratingVirtues;
-        start = (virtues.get(StringUtil.normalize(a))?.Value ?? 0) + (virtues.get(StringUtil.normalize(b))?.Value ?? 0);
-      }
-      character.Morality = new MoralityTrait(mc.name, start, { polarity: mc.polarity });
-    }
-
-    // Tags before merits/flaws, so tag-based prerequisites can be satisfied.
-    for (const tag of opts.tags ?? []) character.AddTag(tag);
-    for (const mf of opts.meritsFlaws ?? []) {
-      if (typeof mf === "string") character.AddMeritFlaw(mf);
-      else character.AddMeritFlaw(mf.name, { points: mf.points, waivePrerequisites: mf.waive });
-    }
-
-    return character;
-  }
-
-  private static _statMap(src: Record<string, number> | undefined, cat: Category): Map<string, Stat> {
-    const m = new Map<string, Stat>();
-    if (src) {
-      for (const [k, v] of Object.entries(src)) {
-        m.set(StringUtil.normalize(k), new Stat(k, cat, v, Math.max(5, v), Math.max(5, v)));
-      }
-    }
-    return m;
-  }
-
-  // Validates a chosen starting value against the ResourceDef constraints.
-  private static _resolveStart(def: ResourceDef, chosen: number | undefined): number {
-    if (chosen === undefined) return def.start;
-    if (def.startOptions && !def.startOptions.includes(chosen)) {
-      throw new Error(`${def.name} must start at one of [${def.startOptions.join(", ")}], got ${chosen}.`);
-    }
-    const min = def.startMin ?? 0;
-    const max = def.startMax ?? def.max;
-    if (chosen < min || chosen > max) {
-      throw new Error(`${def.name} must start between ${min} and ${max}, got ${chosen}.`);
-    }
-    return chosen;
-  }
-}
-
-// =============================================================================
-// PLAYABLE CHARACTERS - potential characters created via [[create-playable]]
-// -----------------------------------------------------------------------------
-// A PlayableCharacter is the persisted record of a (possibly in-progress)
-// player character: a name, one or MORE templates (hybrids are legal; how
-// multiple templates merge is resolved later, at build time), and allocation
-// buckets that start empty ("everything unassigned").
-//
-// Source of truth is the LOREBOOK entry (category wod:player-characters), which
-// the player may edit directly while creator mode is on; storyStorage carries a
-// synced copy for fast access. Sync always flows lorebook -> storage, never the
-// other way, except when the script itself changes a character (save() writes
-// both, lorebook first).
-// =============================================================================
-export const PLAYER_CHARACTERS_CATEGORY = "wod:player-characters";
-
-export interface PlayableCharacter {
-  id: string;
-  name: string;
-  templates: string[];                    // normalized TEMPLATES keys, 1+
-  stage: "potential" | "ready";           // potential = not yet buildable
-  // Seeded at creation: Attributes at 1, Abilities at 0, Willpower at 0; the
-  // remaining buckets are allocation space the player fills in.
-  attributes: Record<string, number>;
-  abilities: Record<string, number>;
-  backgrounds: Record<string, number>;
-  virtues: Record<string, number>;
-  disciplines: Record<string, number>;
-  traits: Record<string, number>;
-  poolStarts: Record<string, number>;
-  meritsFlaws: Record<string, number>;    // name -> points; kind via the registry
-  tags: string[];                         // free-form (clan, ghoul, ...)
-}
-
-export class CharacterStore {
-  private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-character";
-  private static readonly DEFAULT_KEY = "default-character";
-  private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
-  private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
-
-  // A fresh potential character: all nine Attributes at 1 (the free dot), every
-  // ability at 0 (so the sheet lists them all), Willpower at 0 (no oWoD template
-  // lacks it), and empty Merits/Flaws & Backgrounds. Other buckets fill in later.
-  static async newPotential(name: string, templates: string[]): Promise<PlayableCharacter> {
-    const attributes: Record<string, number> = {};
-    for (const attr of ALL_ATTRIBUTES) attributes[StringUtil.normalize(attr)] = 1;
-    const abilities: Record<string, number> = {};
-    const abilityNames = [
-      ...await LorebookManager.allTalents(),
-      ...await LorebookManager.allSkills(),
-      ...await LorebookManager.allKnowledges(),
-    ];
-    for (const ab of abilityNames) abilities[StringUtil.normalize(ab)] = 0;
-    return {
-      id: api.v1.uuid(),
-      name,
-      templates: templates.map(t => StringUtil.normalize(t)),
-      stage: "potential",
-      attributes, abilities,
-      backgrounds: {}, virtues: {}, disciplines: {}, traits: {},
-      poolStarts: { willpower: 0 },
-      meritsFlaws: {},
-      tags: [],
-    };
-  }
-
-  // --- Active / default character selection ---------------------------------
-  static async setCurrent(name: string): Promise<void> { await CharacterStore._storage.set(CharacterStore.CURRENT_KEY, StringUtil.normalize(name)); }
-  static async setDefault(name: string): Promise<void> { await CharacterStore._storage.set(CharacterStore.DEFAULT_KEY, StringUtil.normalize(name)); }
-  static async getDefaultName(): Promise<string | undefined> { return (await CharacterStore._storage.get(CharacterStore.DEFAULT_KEY)) as string | undefined; }
-
-  // Names of every saved character (from the `pc:`-prefixed storage keys).
-  static async listNames(): Promise<string[]> {
-    return (await CharacterStore._storage.list()).filter(k => k.startsWith("pc:")).map(k => k.slice(3));
-  }
-
-  // The character to act as: the explicit current, else the default, else - when
-  // exactly one character exists - that one. Undefined if nothing resolves.
-  static async getCurrent(): Promise<PlayableCharacter | undefined> {
-    const cur = (await CharacterStore._storage.get(CharacterStore.CURRENT_KEY)) as string | undefined;
-    if (cur) { const c = await CharacterStore.load(cur); if (c) return c; }
-    const def = await CharacterStore.getDefaultName();
-    if (def) { const c = await CharacterStore.load(def); if (c) return c; }
-    const names = await CharacterStore.listNames();
-    if (names.length === 1) return CharacterStore.load(names[0]);
-    return undefined;
-  }
-
-  private static _entryText(char: PlayableCharacter): string {
-    return [
-      `Player character sheet for ${disp(char.name)}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
-      "character's data. Edit it only while creator mode is on ([[creator-mode set=true]]);",
-      "your edits are synced into the game when you issue any command or turn creator mode off.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(char, null, 2),
-    ].join("\n");
-  }
-
-  // Write-through save: lorebook entry (create or update) first, then storage.
-  static async save(char: PlayableCharacter): Promise<void> {
-    const { id: categoryId } = await LorebookManager.ensureCategory(PLAYER_CHARACTERS_CATEGORY);
-    const want = CharacterStore._entryName(char.name);
-    const entries = await api.v1.lorebook.entries(categoryId);
-    const existing = entries.find(e => (e.displayName ?? "").trim().toLowerCase() === want);
-    if (existing) {
-      await api.v1.lorebook.updateEntry(existing.id, { text: CharacterStore._entryText(char) });
-    } else {
-      await api.v1.lorebook.createEntry({
-        id: api.v1.uuid(), displayName: want, category: categoryId,
-        text: CharacterStore._entryText(char),
-      });
-    }
-    await CharacterStore._storage.set(CharacterStore._key(char.name), char);
-  }
-
-  static async load(name: string): Promise<PlayableCharacter | undefined> {
-    return await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
-  }
-
-  // Lorebook -> storage. The player's lorebook edits win; unparseable entries
-  // are reported, not synced. Returns what happened for the OOC reply.
-  static async syncFromLorebook(): Promise<{ synced: string[]; failed: string[] }> {
-    const synced: string[] = [];
-    const failed: string[] = [];
-    for (const entry of await LorebookManager.entriesInCategory(PLAYER_CHARACTERS_CATEGORY)) {
-      const label = (entry.displayName ?? "").trim();
-      const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
-      if (!body.startsWith("{")) { if (label) failed.push(label); continue; }
-      try {
-        const char = JSON.parse(body) as PlayableCharacter;
-        if (!char || typeof char.name !== "string" || !Array.isArray(char.templates)) { failed.push(label); continue; }
-        await CharacterStore._storage.set(CharacterStore._key(char.name), char);
-        synced.push(char.name);
-      } catch {
-        failed.push(label);
-      }
-    }
-    return { synced, failed };
-  }
-}
-
-// =============================================================================
-// NAMED ROLLS - a global, player-editable library of saved RollSpecs
-// -----------------------------------------------------------------------------
-// One lorebook entry IS the library: a JSON map { name: RollSpec } below the
-// header marker in wod:named-rolls. Read fresh on every call (no storage mirror)
-// so a player's hand edits are always live. Names normalize to single tokens.
-// =============================================================================
-export const NAMED_ROLLS_CATEGORY = "wod:named-rolls";
-const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
-
-// A saved roll is a RollSpec plus an optional `spend` sidecar (the resource/role
-// token to pay when the roll is invoked). `spend` stays OUT of the pure RollSpec -
-// it's a game-layer concern the roll pipeline never sees.
-export type SavedRoll = RollSpec & { spend?: string };
-
-export class NamedRollStore {
-  private static _text(map: Record<string, SavedRoll>): string {
-    return [
-      "Saved rolls for this chronicle: a JSON object { name: rollspec } below the",
-      "marker. Invoke one with [[roll @name]]; edit this map freely by hand.",
-      "Each spec: pool, difficulty (or difficultyExpr), difficultyMod, requires,",
-      "diceMod, tags[], and an optional spend (paid automatically on [[roll @name]]).",
-      SRD_HEADER_MARKER,
-      JSON.stringify(map, null, 2),
-    ].join("\n");
-  }
-
-  // The whole library ({} when the entry is missing or unparseable).
-  static async all(): Promise<Record<string, SavedRoll>> {
-    const text = await LorebookManager.entryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY);
-    if (!text) return {};
-    const body = LorebookManager.contentBelowHeader(text).trim();
-    if (!body.startsWith("{")) return {};
-    try {
-      const o = JSON.parse(body);
-      return (o && typeof o === "object" && !Array.isArray(o)) ? o as Record<string, SavedRoll> : {};
-    } catch { return {}; }
-  }
-
-  static async get(name: string): Promise<SavedRoll | undefined> {
-    return (await NamedRollStore.all())[StringUtil.normalize(name)];
-  }
-  static async names(): Promise<string[]> { return Object.keys(await NamedRollStore.all()); }
-
-  // Write the library back (create the category/entry on first use).
-  private static async _write(map: Record<string, SavedRoll>): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(NAMED_ROLLS_CATEGORY);
-    const text = NamedRollStore._text(map);
-    const created = await LorebookManager.ensureEntry(id, NAMED_ROLLS_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY, text);
-  }
-
-  static async save(name: string, entry: SavedRoll): Promise<void> {
-    const map = await NamedRollStore.all();
-    map[StringUtil.normalize(name)] = entry;
-    await NamedRollStore._write(map);
-  }
-
-  static async remove(name: string): Promise<boolean> {
-    const map = await NamedRollStore.all();
-    const key = StringUtil.normalize(name);
-    if (!(key in map)) return false;
-    delete map[key];
-    await NamedRollStore._write(map);
-    return true;
-  }
-}
-
-// =============================================================================
-// EXTENDED ROLLS - persistence for accumulating, interval-aware actions
-// -----------------------------------------------------------------------------
-// Story-scoped state (survives across turns and characters), keyed xroll:<id>,
-// with a current-extended pointer so continue/status/cancel default to the
-// action in progress. history-aware historyStorage is the eventual home.
-// =============================================================================
-export class ExtendedRollStore {
-  private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-extended";
-  private static _key(id: string): string { return `xroll:${id}`; }
-
-  static async save(a: ExtendedRoll): Promise<void> { await ExtendedRollStore._storage.set(ExtendedRollStore._key(a.id), a); }
-  static async load(id: string): Promise<ExtendedRoll | undefined> {
-    return (await ExtendedRollStore._storage.get(ExtendedRollStore._key(id))) as ExtendedRoll | undefined;
-  }
-  static async remove(id: string): Promise<void> { await ExtendedRollStore._storage.delete(ExtendedRollStore._key(id)); }
-  static async setCurrent(id: string): Promise<void> { await ExtendedRollStore._storage.set(ExtendedRollStore.CURRENT_KEY, id); }
-  static async currentId(): Promise<string | undefined> { return (await ExtendedRollStore._storage.get(ExtendedRollStore.CURRENT_KEY)) as string | undefined; }
-  static async clearCurrent(): Promise<void> { await ExtendedRollStore._storage.delete(ExtendedRollStore.CURRENT_KEY); }
-
-  static async ids(): Promise<string[]> {
-    return (await ExtendedRollStore._storage.list()).filter(k => k.startsWith("xroll:")).map(k => k.slice(6));
-  }
-
-  // The action to act on: explicit id, else the current pointer (if still open),
-  // else the single open action. Undefined if nothing resolves.
-  static async resolve(id?: string): Promise<ExtendedRoll | undefined> {
-    if (id) return ExtendedRollStore.load(id);
-    const cur = await ExtendedRollStore.currentId();
-    if (cur) { const a = await ExtendedRollStore.load(cur); if (a && a.status === "open") return a; }
-    const open: ExtendedRoll[] = [];
-    for (const xid of await ExtendedRollStore.ids()) {
-      const a = await ExtendedRollStore.load(xid);
-      if (a && a.status === "open") open.push(a);
-    }
-    return open.length === 1 ? open[0] : undefined;
-  }
-}
-
-// =============================================================================
-// EXTENDED CONTESTS - persistence (mirrors ExtendedRollStore)
-// =============================================================================
-export class ExtendedContestStore {
-  private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-contest";
-  private static _key(id: string): string { return `xcontest:${id}`; }
-
-  static async save(c: ExtendedContest): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore._key(c.id), c); }
-  static async load(id: string): Promise<ExtendedContest | undefined> {
-    return (await ExtendedContestStore._storage.get(ExtendedContestStore._key(id))) as ExtendedContest | undefined;
-  }
-  static async remove(id: string): Promise<void> { await ExtendedContestStore._storage.delete(ExtendedContestStore._key(id)); }
-  static async setCurrent(id: string): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore.CURRENT_KEY, id); }
-  static async currentId(): Promise<string | undefined> { return (await ExtendedContestStore._storage.get(ExtendedContestStore.CURRENT_KEY)) as string | undefined; }
-  static async clearCurrent(): Promise<void> { await ExtendedContestStore._storage.delete(ExtendedContestStore.CURRENT_KEY); }
-  static async ids(): Promise<string[]> {
-    return (await ExtendedContestStore._storage.list()).filter(k => k.startsWith("xcontest:")).map(k => k.slice(9));
-  }
-  static async resolve(id?: string): Promise<ExtendedContest | undefined> {
-    if (id) return ExtendedContestStore.load(id);
-    const cur = await ExtendedContestStore.currentId();
-    if (cur) { const c = await ExtendedContestStore.load(cur); if (c && c.status === "open") return c; }
-    const open: ExtendedContest[] = [];
-    for (const cid of await ExtendedContestStore.ids()) {
-      const c = await ExtendedContestStore.load(cid);
-      if (c && c.status === "open") open.push(c);
-    }
-    return open.length === 1 ? open[0] : undefined;
-  }
-}
-
-// =============================================================================
-// PLAYERS - the engine's first identity concept
-// -----------------------------------------------------------------------------
-// A player is just a normalized id string (no record): "storyteller" always
-// exists; a single-player story has one more. `current-player` is whoever is
-// issuing commands right now; `default-player` is what the "default" owner in
-// alias scopes resolves to (the human, in a single-player story). Both default
-// to "storyteller" until set.
-// =============================================================================
-export class PlayerStore {
-  static readonly STORYTELLER = "storyteller";
-  private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-player";
-  private static readonly DEFAULT_KEY = "default-player";
-
-  static async current(): Promise<string> {
-    return (await PlayerStore._storage.getOrDefault(PlayerStore.CURRENT_KEY, PlayerStore.STORYTELLER)) as string;
-  }
-  static async setCurrent(name: string): Promise<void> { await PlayerStore._storage.set(PlayerStore.CURRENT_KEY, StringUtil.normalize(name)); }
-  static async getDefault(): Promise<string> {
-    return (await PlayerStore._storage.getOrDefault(PlayerStore.DEFAULT_KEY, PlayerStore.STORYTELLER)) as string;
-  }
-  static async setDefault(name: string): Promise<void> { await PlayerStore._storage.set(PlayerStore.DEFAULT_KEY, StringUtil.normalize(name)); }
-}
-
-// =============================================================================
-// ALIASES - names for characters, in three scopes (storyStorage)
-// -----------------------------------------------------------------------------
-// An alias is an @-prefixed name for a character ("@kat" -> katarina); real
-// character names never start with @, so there is no shadowing. Scopes, most
-// specific first: per-character (in-character knowledge - "@sire" means someone
-// different to each childe; keys may be NPCs with no record), per-player, and
-// global. A bare "@alias" walks the chain for the CURRENT character and player;
-// explicit-scope tokens pin one level (post-normalization forms - users may
-// type `::` for each `:`):
-//   @global:alias
-//   @player:<id|storyteller|default>:alias   ("default" -> the default player)
-//   @char:<name|default>:alias                (also @character:...)
-// Targets are normalized names and may name NPCs; resolving to an actual
-// PlayableCharacter happens wherever the target is used.
-// =============================================================================
-export type AliasScope = "global" | "player" | "character";
-export interface AliasMap {
-  global: Record<string, string>;
-  players: Record<string, Record<string, string>>;
-  characters: Record<string, Record<string, string>>;
-}
-export interface AliasRef { scope?: AliasScope; owner?: string; alias: string }
-
-// "@..." token -> its parts, or undefined when malformed. Assumes the token is
-// already normalized (the parser guarantees it).
-export function parseAliasToken(token: string): AliasRef | undefined {
-  if (!token.startsWith("@") || token.length < 2) return undefined;
-  const parts = token.slice(1).split(":").map(p => p.trim()).filter(p => p.length > 0);
-  const RESERVED = ["global", "player", "char", "character"];
-  // A scope keyword with the wrong number of parts is malformed, not an alias.
-  if (parts.length === 1) return RESERVED.includes(parts[0]) ? undefined : { alias: parts[0] };
-  if (parts.length === 2 && parts[0] === "global") return { scope: "global", alias: parts[1] };
-  if (parts.length === 3 && parts[0] === "player") return { scope: "player", owner: parts[1], alias: parts[2] };
-  if (parts.length === 3 && (parts[0] === "char" || parts[0] === "character")) return { scope: "character", owner: parts[1], alias: parts[2] };
-  return undefined;
-}
-
-export class AliasRegistry {
-  private static _storage = new ScopedStorage();
-  private static readonly KEY = "aliases";
-
-  private static _empty(): AliasMap { return { global: {}, players: {}, characters: {} }; }
-  static async all(): Promise<AliasMap> {
-    const m = (await AliasRegistry._storage.get(AliasRegistry.KEY)) as AliasMap | undefined;
-    return m ? { global: m.global ?? {}, players: m.players ?? {}, characters: m.characters ?? {} } : AliasRegistry._empty();
-  }
-  private static async _save(m: AliasMap): Promise<void> { await AliasRegistry._storage.set(AliasRegistry.KEY, m); }
-
-  // Define (or overwrite) one alias. `owner` is required for player/character
-  // scope and ignored for global. Everything is normalized on the way in.
-  static async set(scope: AliasScope, owner: string | undefined, alias: string, target: string): Promise<void> {
-    const a = StringUtil.normalize(alias);
-    const t = StringUtil.normalize(target);
-    const m = await AliasRegistry.all();
-    if (scope === "global") m.global[a] = t;
-    else if (scope === "player") { const o = StringUtil.normalize(owner ?? ""); (m.players[o] ??= {})[a] = t; }
-    else { const o = StringUtil.normalize(owner ?? ""); (m.characters[o] ??= {})[a] = t; }
-    await AliasRegistry._save(m);
-  }
-
-  // Remove one alias; returns whether it existed.
-  static async remove(scope: AliasScope, owner: string | undefined, alias: string): Promise<boolean> {
-    const a = StringUtil.normalize(alias);
-    const m = await AliasRegistry.all();
-    let existed = false;
-    if (scope === "global") { existed = a in m.global; delete m.global[a]; }
-    else if (scope === "player") { const o = m.players[StringUtil.normalize(owner ?? "")]; if (o) { existed = a in o; delete o[a]; } }
-    else { const o = m.characters[StringUtil.normalize(owner ?? "")]; if (o) { existed = a in o; delete o[a]; } }
-    if (existed) await AliasRegistry._save(m);
-    return existed;
-  }
-
-  // Exact lookup in one scope (no chain).
-  static async lookup(scope: AliasScope, owner: string | undefined, alias: string): Promise<string | undefined> {
-    const a = StringUtil.normalize(alias);
-    const m = await AliasRegistry.all();
-    if (scope === "global") return m.global[a];
-    if (scope === "player") return m.players[StringUtil.normalize(owner ?? "")]?.[a];
-    return m.characters[StringUtil.normalize(owner ?? "")]?.[a];
-  }
-
-  // The chain: acting character -> current player -> global.
-  static async resolve(alias: string, ctx: { charKey?: string; playerKey?: string }): Promise<string | undefined> {
-    const a = StringUtil.normalize(alias);
-    const m = await AliasRegistry.all();
-    if (ctx.charKey) { const hit = m.characters[ctx.charKey]?.[a]; if (hit) return hit; }
-    if (ctx.playerKey) { const hit = m.players[ctx.playerKey]?.[a]; if (hit) return hit; }
-    return m.global[a];
-  }
-}
-
-// =============================================================================
-// RESOURCE OVERRIDES - the story's house-rule layer for resources
-// -----------------------------------------------------------------------------
-// One lorebook entry (wod:config / wod:config:resources) holds a JSON map
-// { resourceName: partial-def } below the header marker. The configuration
-// wizard WRITES this entry and creator mode can hand-edit it - both are just
-// UIs over the same data. Cached here for synchronous reads (the same pattern
-// as MeritFlawRegistry); reloaded at init, when a wizard finishes, and on the
-// creator-mode sync path.
-// =============================================================================
-export const RESOURCE_CONFIG_CATEGORY = "wod:config";
-export const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
-
-export class ResourceOverrides {
-  private static _cache: Record<string, Partial<ResourceDef>> = {};
-
-  static current(): Record<string, Partial<ResourceDef>> { return ResourceOverrides._cache; }
-  static reset(): void { ResourceOverrides._cache = {}; }
-
-  private static _entryText(map: Record<string, Partial<ResourceDef>>): string {
-    return [
-      "Story overrides for resources (the house-rule layer). The JSON below the",
-      "marker maps a resource name to the fields you want to change (start, max,",
-      "roles, effect, effects, ...). A name that matches no template resource and",
-      "carries kind/start/max adds a custom resource. [[configure-resources]]",
-      "edits this for you; you may also edit it by hand in creator mode.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(map, null, 2),
-    ].join("\n");
-  }
-
-  // Read the entry into the cache ({} when missing or unparseable).
-  static async loadFromLorebook(): Promise<number> {
-    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY);
-    ResourceOverrides._cache = {};
-    if (text) {
-      const body = LorebookManager.contentBelowHeader(text).trim();
-      if (body.startsWith("{")) {
-        try {
-          const o = JSON.parse(body);
-          if (o && typeof o === "object" && !Array.isArray(o)) ResourceOverrides._cache = o as Record<string, Partial<ResourceDef>>;
-        } catch { /* unparseable: keep {} - the entry stays for the player to fix */ }
-      }
-    }
-    return Object.keys(ResourceOverrides._cache).length;
-  }
-
-  // Write the whole map (create the category/entry on first use) + cache it.
-  static async save(map: Record<string, Partial<ResourceDef>>): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
-    const text = ResourceOverrides._entryText(map);
-    const created = await LorebookManager.ensureEntry(id, RESOURCE_CONFIG_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, text);
-    ResourceOverrides._cache = map;
-  }
-}
-
-// Success tables live in the same config family: an optional lorebook entry
-// (JSON array of tables, or a map name -> table, below the marker) overlaid on
-// the built-in defaults (degrees/damage/soak). Reloaded with the overrides.
-export const SUCCESS_TABLES_ENTRY = "wod:config:success-tables";
-
-export async function loadSuccessTablesFromLorebook(): Promise<number> {
-  SuccessTableRegistry.reset();
-  const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, SUCCESS_TABLES_ENTRY);
-  if (!text) return 0;
-  const body = LorebookManager.contentBelowHeader(text).trim();
-  let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { return 0; }
-  const list: SuccessTable[] = Array.isArray(parsed)
-    ? parsed as SuccessTable[]
-    : (parsed && typeof parsed === "object")
-      ? Object.entries(parsed as Record<string, Omit<SuccessTable, "name">>).map(([name, t]) => ({ ...t, name }))
-      : [];
-  let count = 0;
-  for (const t of list) {
-    if (t && typeof t.name === "string") { SuccessTableRegistry.register(t); count++; }
-  }
-  return count;
-}
-
-// =============================================================================
-// CONSTRAINT GROUPS - the story's allow/deny rules over trait options
-// -----------------------------------------------------------------------------
-// Same config family as resources/tables: one lorebook entry (wod:config /
-// wod:config:constraints) holds a JSON array of ConstraintGroups (or a
-// name -> group map) below the marker. Entirely ST-defined (no built-in
-// defaults); cached for sync reads (the ResourceOverrides pattern); reloaded at
-// init and on both creator-mode sync points. [[define-constraint]] writes it and
-// creator mode can hand-edit it. Enforced at creation later; surfaced now via
-// [[check-constraints]].
-// =============================================================================
-export const CONSTRAINTS_ENTRY = "wod:config:constraints";
-
-export class ConstraintRegistry {
-  private static _cache: ConstraintGroup[] = [];
-
-  static all(): ConstraintGroup[] { return ConstraintRegistry._cache; }
-  static get(name: string): ConstraintGroup | undefined {
-    const n = StringUtil.normalize(name);
-    return ConstraintRegistry._cache.find(g => g.name === n);
-  }
-  static reset(): void { ConstraintRegistry._cache = []; }
-
-  private static _entryText(groups: ConstraintGroup[]): string {
-    return [
-      "Constraint groups: the story's allow/deny rules over Backgrounds and",
-      "Merits/Flaws. The JSON array below the marker lists groups; each has a name,",
-      "relation (exclusive|restricted|forbidden), domain",
-      "(background|merit|flaw|meritflaw|any), members, optional max (exclusive),",
-      "scope (templates/choices it applies to), and note. [[define-constraint]]",
-      "edits this for you; you may also edit it by hand in creator mode.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(groups, null, 2),
-    ].join("\n");
-  }
-
-  // Read the entry into the cache ([] when missing or unparseable). Accepts a
-  // JSON array of groups OR a name -> group map; each is normalized.
-  static async loadFromLorebook(): Promise<number> {
-    ConstraintRegistry._cache = [];
-    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY);
-    if (!text) return 0;
-    const body = LorebookManager.contentBelowHeader(text).trim();
-    let parsed: unknown;
-    try { parsed = JSON.parse(body); } catch { return 0; }
-    const list: Array<Partial<ConstraintGroup> & { name: string }> = Array.isArray(parsed)
-      ? parsed as Array<Partial<ConstraintGroup> & { name: string }>
-      : (parsed && typeof parsed === "object")
-        ? Object.entries(parsed as Record<string, Partial<ConstraintGroup>>).map(([name, g]) => ({ ...g, name }))
-        : [];
-    ConstraintRegistry._cache = list.filter(g => g && typeof g.name === "string" && g.name.trim().length > 0).map(makeConstraintGroup);
-    return ConstraintRegistry._cache.length;
-  }
-
-  // Replace the whole set (create the category/entry on first use) + cache it.
-  static async save(groups: ConstraintGroup[]): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
-    const text = ConstraintRegistry._entryText(groups);
-    const created = await LorebookManager.ensureEntry(id, CONSTRAINTS_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONSTRAINTS_ENTRY, text);
-    ConstraintRegistry._cache = groups;
-  }
-
-  // Add or replace one group (by normalized name) and persist.
-  static async put(group: ConstraintGroup): Promise<void> {
-    const rest = ConstraintRegistry._cache.filter(g => g.name !== group.name);
-    await ConstraintRegistry.save([...rest, group]);
-  }
-
-  // Remove one group by name; returns whether it existed.
-  static async remove(name: string): Promise<boolean> {
-    const n = StringUtil.normalize(name);
-    const rest = ConstraintRegistry._cache.filter(g => g.name !== n);
-    if (rest.length === ConstraintRegistry._cache.length) return false;
-    await ConstraintRegistry.save(rest);
-    return true;
-  }
-}
-
-// =============================================================================
-// CONDITIONS - definitions (config overlay) + live instances on characters
-// -----------------------------------------------------------------------------
-// Definitions follow the config-family pattern: shipped DEFAULT_CONDITIONS
-// (the Feral Speech pair) overlaid by an optional lorebook entry
-// (wod:config:conditions - JSON array or name -> def map). The overlay may
-// SHADOW a shipped default; [[forget-condition]] removes overlay entries only
-// (a shadowed default resurfaces). Live instances live in storyStorage keyed by
-// NORMALIZED NAME - a character record is NOT required, so an NPC (the wolf in
-// a feral-whispers conversation) can carry a mirrored condition.
-// =============================================================================
-export const CONDITIONS_ENTRY = "wod:config:conditions";
-
-export class ConditionRegistry {
-  private static _overlay: ConditionDef[] = [];
-
-  static get(name: string): ConditionDef | undefined {
-    const n = StringUtil.normalize(name);
-    return ConditionRegistry._overlay.find(d => d.name === n)
-      ?? DEFAULT_CONDITIONS.find(d => d.name === n);
-  }
-  static all(): ConditionDef[] {
-    const names = new Set(ConditionRegistry._overlay.map(d => d.name));
-    return [...ConditionRegistry._overlay, ...DEFAULT_CONDITIONS.filter(d => !names.has(d.name))];
-  }
-  static reset(): void { ConditionRegistry._overlay = []; }
-
-  private static _entryText(defs: ConditionDef[]): string {
-    return [
-      "Condition definitions for this chronicle (overlaid on the built-ins).",
-      "The JSON array below the marker lists definitions; each has a name and",
-      "optional bindings (required slots like \"target\"), duration, then",
-      "(successor), mirror (condition the target gains, bound back), tags",
-      "(join the afflicted character's rolls) and note. [[define-condition]]",
-      "edits this for you; you may also edit it by hand in creator mode.",
-      SRD_HEADER_MARKER,
-      JSON.stringify(defs, null, 2),
-    ].join("\n");
-  }
-
-  static async loadFromLorebook(): Promise<number> {
-    ConditionRegistry._overlay = [];
-    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONDITIONS_ENTRY);
-    if (!text) return 0;
-    const body = LorebookManager.contentBelowHeader(text).trim();
-    let parsed: unknown;
-    try { parsed = JSON.parse(body); } catch { return 0; }
-    const list: Array<Partial<ConditionDef> & { name: string }> = Array.isArray(parsed)
-      ? parsed as Array<Partial<ConditionDef> & { name: string }>
-      : (parsed && typeof parsed === "object")
-        ? Object.entries(parsed as Record<string, Partial<ConditionDef>>).map(([name, d]) => ({ ...d, name }))
-        : [];
-    ConditionRegistry._overlay = list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(makeConditionDef);
-    return ConditionRegistry._overlay.length;
-  }
-
-  static async save(defs: ConditionDef[]): Promise<void> {
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
-    const text = ConditionRegistry._entryText(defs);
-    const created = await LorebookManager.ensureEntry(id, CONDITIONS_ENTRY, text);
-    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONDITIONS_ENTRY, text);
-    ConditionRegistry._overlay = defs;
-  }
-
-  static async put(def: ConditionDef): Promise<void> {
-    const rest = ConditionRegistry._overlay.filter(d => d.name !== def.name);
-    await ConditionRegistry.save([...rest, def]);
-  }
-
-  // Remove an OVERLAY definition (shipped defaults can't be deleted, only
-  // shadowed). Returns whether an overlay entry existed.
-  static async remove(name: string): Promise<boolean> {
-    const n = StringUtil.normalize(name);
-    const rest = ConditionRegistry._overlay.filter(d => d.name !== n);
-    if (rest.length === ConditionRegistry._overlay.length) return false;
-    await ConditionRegistry.save(rest);
-    return true;
-  }
-}
-
-// One live condition on someone: which definition, and what its slots are bound
-// to (normalized names - possibly NPCs).
-export interface ActiveCondition { def: string; bindings: Record<string, string>; note?: string }
-
-export class CharacterConditions {
-  private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cond:${StringUtil.normalize(name)}`; }
-
-  static async list(name: string): Promise<ActiveCondition[]> {
-    return ((await CharacterConditions._storage.get(CharacterConditions._key(name))) as ActiveCondition[] | undefined) ?? [];
-  }
-  // Add or replace (same def) one condition.
-  static async afflict(name: string, cond: ActiveCondition): Promise<void> {
-    const rest = (await CharacterConditions.list(name)).filter(c => c.def !== cond.def);
-    await CharacterConditions._storage.set(CharacterConditions._key(name), [...rest, cond]);
-  }
-  // Remove one condition; returns the removed instance (bindings drive mirror-lifting).
-  static async lift(name: string, defName: string): Promise<ActiveCondition | undefined> {
-    const n = StringUtil.normalize(defName);
-    const all = await CharacterConditions.list(name);
-    const hit = all.find(c => c.def === n);
-    if (!hit) return undefined;
-    await CharacterConditions._storage.set(CharacterConditions._key(name), all.filter(c => c.def !== n));
-    return hit;
-  }
-  static async clear(name: string): Promise<void> { await CharacterConditions._storage.delete(CharacterConditions._key(name)); }
-
-  // The tags every active condition grants - merged into the character's rolls.
-  static async tags(name: string): Promise<string[]> {
-    const out: string[] = [];
-    for (const c of await CharacterConditions.list(name)) {
-      const def = ConditionRegistry.get(c.def);
-      if (def?.tags) out.push(...def.tags);
-    }
-    return out;
-  }
-}
-
-// =============================================================================
-// CHARACTER RESOURCES - live current values for a character's resources
-// -----------------------------------------------------------------------------
-// A character's resources are the union of its templates' ResourceDefs; current
-// values live in story storage (res:<char>), defaulting to the record's chosen
-// start (poolStarts), else the template default. Resolving by name OR role is how
-// one resource fills another's job (Quintessence carrying role "resolve").
-// history-aware historyStorage is the eventual home.
-// =============================================================================
-export interface ResourceView { def: ResourceDef; current: number; max: number; }
-
-export class CharacterResources {
-  private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
-
-  // The character's resources, with replacement applied: a resource whose
-  // `replaces` names others HIDES them (their names then resolve to it).
-  static defsFor(char: PlayableCharacter): ResourceDef[] {
-    const defs = resourcesForTemplates(char.templates, ResourceOverrides.current());
-    const replaced = new Set(defs.flatMap(d => (d.replaces ?? []).map(r => StringUtil.normalize(r))));
-    return defs.filter(d => !replaced.has(StringUtil.normalize(d.name)));
-  }
-
-  // A resource by exact name, else by a role it fills ("use X as Y"), else as
-  // the replacement for the requested resource.
-  static resolveDef(char: PlayableCharacter, nameOrRole: string): ResourceDef | undefined {
-    const key = StringUtil.normalize(nameOrRole);
-    const defs = CharacterResources.defsFor(char);
-    return defs.find(d => StringUtil.normalize(d.name) === key)
-      ?? defs.find(d => (d.roles ?? []).some(r => StringUtil.normalize(r) === key))
-      ?? defs.find(d => (d.replaces ?? []).some(r => StringUtil.normalize(r) === key));
-  }
-
-  private static _startOf(char: PlayableCharacter, def: ResourceDef): number {
-    const chosen = char.poolStarts?.[StringUtil.normalize(def.name)];
-    return Math.max(0, Math.min(chosen ?? def.start, def.max));
-  }
-
-  private static async _values(char: PlayableCharacter): Promise<Record<string, number>> {
-    return ((await CharacterResources._storage.get(CharacterResources._key(char.name))) as Record<string, number> | undefined) ?? {};
-  }
-
-  static async current(char: PlayableCharacter, def: ResourceDef): Promise<number> {
-    const values = await CharacterResources._values(char);
-    const k = StringUtil.normalize(def.name);
-    return k in values ? values[k] : CharacterResources._startOf(char, def);
-  }
-
-  static async all(char: PlayableCharacter): Promise<ResourceView[]> {
-    const values = await CharacterResources._values(char);
-    return CharacterResources.defsFor(char).map(def => {
-      const k = StringUtil.normalize(def.name);
-      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: def.max };
-    });
-  }
-
-  // Spend up to `amount` (never below 0); returns how much actually left the pool.
-  static async spend(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ spent: number; def?: ResourceDef }> {
-    const def = CharacterResources.resolveDef(char, nameOrRole);
-    if (!def) return { spent: 0 };
-    const values = await CharacterResources._values(char);
-    const k = StringUtil.normalize(def.name);
-    const have = k in values ? values[k] : CharacterResources._startOf(char, def);
-    const spent = Math.max(0, Math.min(amount, have));
-    values[k] = have - spent;
-    await CharacterResources._storage.set(CharacterResources._key(char.name), values);
-    return { spent, def };
-  }
-
-  // Restore up to max; returns the new value.
-  static async gain(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ value: number; def?: ResourceDef }> {
-    const def = CharacterResources.resolveDef(char, nameOrRole);
-    if (!def) return { value: 0 };
-    const values = await CharacterResources._values(char);
-    const k = StringUtil.normalize(def.name);
-    const have = k in values ? values[k] : CharacterResources._startOf(char, def);
-    const value = Math.max(0, Math.min(have + amount, def.max));
-    values[k] = value;
-    await CharacterResources._storage.set(CharacterResources._key(char.name), values);
-    return { value, def };
-  }
-}
-
-// =============================================================================
-// CHARACTER HEALTH - live damage for playable characters
-// -----------------------------------------------------------------------------
-// Stored as severity counts (hp:<char>) and rebuilt into a HealthTrack on
-// demand (aggravated marks first, then lethal, then bashing) - so penalties,
-// wrap-around and incapacitation all come from the real track. Custom squares/
-// conditions stay a LiveCharacter concern for now.
-// =============================================================================
-export interface HealthCounts { bashing: number; lethal: number; aggravated: number; }
-const HEAL_ORDER: (keyof HealthCounts)[] = ["aggravated", "lethal", "bashing"];
-
-export class CharacterHealth {
-  private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `hp:${StringUtil.normalize(name)}`; }
-
-  static async counts(char: PlayableCharacter): Promise<HealthCounts> {
-    return ((await CharacterHealth._storage.get(CharacterHealth._key(char.name))) as HealthCounts | undefined)
-      ?? { bashing: 0, lethal: 0, aggravated: 0 };
-  }
-
-  static async track(char: PlayableCharacter): Promise<HealthTrack> {
-    const c = await CharacterHealth.counts(char);
-    const t = new HealthTrack(healthLevelsForTemplates(char.templates));
-    if (c.aggravated > 0) t.ApplyDamage("aggravated", c.aggravated);
-    if (c.lethal > 0) t.ApplyDamage("lethal", c.lethal);
-    if (c.bashing > 0) t.ApplyDamage("bashing", c.bashing);
-    return t;
-  }
-
-  static async summary(char: PlayableCharacter): Promise<HealthSummary> {
-    return (await CharacterHealth.track(char)).Summary();
-  }
-
-  static async damage(char: PlayableCharacter, severity: keyof HealthCounts, amount: number): Promise<HealthSummary> {
-    const c = await CharacterHealth.counts(char);
-    c[severity] += Math.max(0, amount);
-    await CharacterHealth._storage.set(CharacterHealth._key(char.name), c);
-    return CharacterHealth.summary(char);
-  }
-
-  // Heal `amount` boxes among the allowed severities, worst first. Returns how
-  // many were actually healed (you can't heal what isn't there).
-  static async heal(char: PlayableCharacter, severities: string[], amount: number): Promise<{ healed: number; summary: HealthSummary }> {
-    const allowed = new Set(severities.map(s => StringUtil.normalize(s)));
-    const c = await CharacterHealth.counts(char);
-    let left = Math.max(0, amount);
-    let healed = 0;
-    for (const sev of HEAL_ORDER) {
-      if (left <= 0 || !allowed.has(sev)) continue;
-      const take = Math.min(c[sev], left);
-      c[sev] -= take; left -= take; healed += take;
-    }
-    await CharacterHealth._storage.set(CharacterHealth._key(char.name), c);
-    return { healed, summary: await CharacterHealth.summary(char) };
-  }
-}
-
-// =============================================================================
-// CHARACTER BOOSTS - temporary attribute increases (e.g. blood-surged Strength)
-// -----------------------------------------------------------------------------
-// boost:<char> -> { attribute: bonus }. Rolls read these on top of the record's
-// dots. Duration is Storyteller-adjudicated until a turn system exists;
-// [[clear-boosts]] ends them.
-// =============================================================================
-export class CharacterBoosts {
-  private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `boost:${StringUtil.normalize(name)}`; }
-
-  static async all(char: PlayableCharacter): Promise<Record<string, number>> {
-    return ((await CharacterBoosts._storage.get(CharacterBoosts._key(char.name))) as Record<string, number> | undefined) ?? {};
-  }
-
-  // Resolve which trait an "increase" op raises. The op's `target` is a
-  // CONSTRAINT: an attribute group ("physical"), a whole record bucket
-  // ("attributes", "abilities", "disciplines", ...), or a specific trait. A
-  // group/bucket constraint needs the command's target argument to pick within
-  // it; a specific trait needs none.
-  static resolveIncreaseTarget(char: PlayableCharacter, constraint: string | undefined, targetArg: string | undefined):
-    { trait: string } | { need: string } | { error: string } {
-    const c = StringUtil.normalize(constraint ?? "attributes");
-    const groups: Record<string, readonly string[]> = {
-      physical: ATTRIBUTES.physical, social: ATTRIBUTES.social, mental: ATTRIBUTES.mental,
-      attributes: ALL_ATTRIBUTES,
-    };
-    let allowed: string[] | undefined;
-    if (c in groups) allowed = groups[c].map(a => StringUtil.normalize(a));
-    else {
-      const bucket = c === "abilities" ? char.abilities : c === "backgrounds" ? char.backgrounds
-        : c === "disciplines" ? char.disciplines : c === "traits" ? char.traits : undefined;
-      if (bucket) allowed = Object.keys(bucket);
-    }
-    if (!allowed) return { trait: c };   // the constraint IS the trait
-    if (!targetArg) return { need: `pick one (${c})` };
-    const t = StringUtil.normalize(targetArg);
-    return allowed.includes(t) ? { trait: t } : { error: `${targetArg} is not a boostable trait here (allowed: ${c})` };
-  }
-
-  // Raise a trait's boost so the character's TOTAL (record dots + boost) never
-  // exceeds `cap`; returns how much was actually added.
-  static async add(char: PlayableCharacter, trait: string, amount: number, cap = Infinity): Promise<{ added: number; total: number }> {
-    const key = StringUtil.normalize(trait);
-    const map = await CharacterBoosts.all(char);
-    const cur = map[key] ?? 0;
-    const base = resolveTraitFromRecord(char, key);
-    const added = Math.max(0, Math.min(amount, cap - (base + cur)));
-    if (added > 0) {
-      map[key] = cur + added;
-      await CharacterBoosts._storage.set(CharacterBoosts._key(char.name), map);
-    }
-    return { added, total: cur + added };
-  }
-
-  static async clear(char: PlayableCharacter): Promise<void> {
-    await CharacterBoosts._storage.delete(CharacterBoosts._key(char.name));
-  }
-}
-
-// =============================================================================
-// EFFECT USES - the usage ledger for limited effects
-// -----------------------------------------------------------------------------
-// Counts every application of a limited effect (uses:<char> -> count per
-// resource:effect). Limits like "3/scene" are Storyteller-enforced until the
-// turn system lands, but the counting is real - [[reset-uses]] clears it at a
-// scene/turn change, and the future turn system inherits this data.
-// =============================================================================
-export class EffectUses {
-  private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `uses:${StringUtil.normalize(name)}`; }
-  private static _slot(resource: string, effectName: string): string {
-    return effectName ? `${StringUtil.normalize(resource)}:${StringUtil.normalize(effectName)}` : StringUtil.normalize(resource);
-  }
-
-  static async counts(char: PlayableCharacter): Promise<Record<string, number>> {
-    return ((await EffectUses._storage.get(EffectUses._key(char.name))) as Record<string, number> | undefined) ?? {};
-  }
-  static async record(char: PlayableCharacter, resource: string, effectName: string, n = 1): Promise<number> {
-    const map = await EffectUses.counts(char);
-    const slot = EffectUses._slot(resource, effectName);
-    map[slot] = (map[slot] ?? 0) + n;
-    await EffectUses._storage.set(EffectUses._key(char.name), map);
-    return map[slot];
-  }
-  static async count(char: PlayableCharacter, resource: string, effectName: string): Promise<number> {
-    return (await EffectUses.counts(char))[EffectUses._slot(resource, effectName)] ?? 0;
-  }
-  static async resetAll(char: PlayableCharacter): Promise<void> {
-    await EffectUses._storage.delete(EffectUses._key(char.name));
-  }
-}
-
-// =============================================================================
-// WIZARD SESSION - persistence + the text medium for wizard.ts definitions
-// -----------------------------------------------------------------------------
-// One wizard may run at a time; its {definition, state, prompt} live in story
-// storage so a session survives across turns. While active, plain (command-less)
-// player input is treated as the reply - see processAdventureInput.
-// =============================================================================
-export interface ActiveWizard { def: string; state: WizardStateData; prompt: WizardPrompt; }
-
-export class WizardSession {
-  private static _storage = new ScopedStorage();
-  private static readonly KEY = "wizard:active";
-  static async get(): Promise<ActiveWizard | undefined> {
-    return (await WizardSession._storage.get(WizardSession.KEY)) as ActiveWizard | undefined;
-  }
-  static async set(a: ActiveWizard): Promise<void> { await WizardSession._storage.set(WizardSession.KEY, a); }
-  static async clear(): Promise<void> { await WizardSession._storage.delete(WizardSession.KEY); }
-}
+import {
+  ParsedCommand, CommandContext, CommandHandler, CommandRouter, ParamSpec,
+} from "./command";
+import {
+  PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
+  NamedRollStore, ExtendedRollStore, ExtendedContestStore,
+  PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
+  resolveTraitFromRecord,
+  ResourceOverrides, RESOURCE_CONFIG_ENTRY, ConstraintRegistry, ConditionRegistry,
+  ActiveCondition, CharacterConditions,
+  CharacterResources, CharacterHealth, CharacterBoosts, EffectUses,
+  ActiveWizard, WizardSession, CreatorMode,
+} from "./state";
 
 // --- The "resources" wizard: a guided editor for ResourceOverrides -----------
 interface RwState {
@@ -1584,105 +241,6 @@ async function answerActiveWizard(active: ActiveWizard, raw: string): Promise<st
   return `((OOC-Storyteller: ${renderPromptText(r.prompt!)}))`;
 }
 
-// =============================================================================
-// COMMAND PARSER - a command body -> { name, positional[], named{}, raw }
-// -----------------------------------------------------------------------------
-// Pure and dispatch-agnostic: it only tokenizes (respecting quotes). A token
-// `key=value` (or key="quoted") is a named argument; any other bare or quoted
-// token is positional, in order. Keeping this separate from CommandRouter lets
-// us add commands - and later, lorebook-defined commands - without touching how
-// arguments are parsed.
-// =============================================================================
-export interface ParsedCommand {
-  name: string;
-  positional: string[];
-  named: Record<string, string>;
-  raw: string;
-}
-
-export class CommandParser {
-  static parse(body: string): ParsedCommand {
-    const raw = body.trim();
-    const name = (raw.match(/^[A-Za-z][\w-]*/)?.[0] ?? "").toLowerCase();
-    // BODY-LEVEL gluing, before tokenization (backtick literals excluded):
-    // spaces after `@` and around `::` vanish, so "@char :: default :: sire"
-    // is ONE token. Tokenization would otherwise split them apart.
-    const rest = raw.slice(name.length)
-      .split(/(`[^`]*`)/g)
-      .map((seg, i) => i % 2 === 1 ? seg : seg.replace(/@\s+/g, "@").replace(/\s*::\s*/g, "::"))
-      .join("");
-    const positional: string[] = [];
-    const named: Record<string, string> = {};
-    // key=value | key="v" | key='v' | key=`literal` | "quoted" | 'quoted' |
-    // `literal` | bareword. Every value passes through the BOUNDARY normalizer
-    // (lowercase, @-space stripping, ::->:, list/pool space stripping,
-    // whitespace->hyphen) EXCEPT backtick literals, which stay verbatim -
-    // that's the escape hatch for display text (labels, notes, echoes).
-    const tokenRe = /([A-Za-z][\w-]*)\s*=\s*("([^"]*)"|'([^']*)'|`([^`]*)`|\S+)|"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g;
-    for (const m of rest.matchAll(tokenRe)) {
-      if (m[1] !== undefined) {
-        const key = m[1].toLowerCase();
-        named[key] = m[5] !== undefined ? m[5] : StringUtil.normalizeInput(m[3] ?? m[4] ?? m[2]);
-      } else if (m[8] !== undefined) {
-        positional.push(m[8]);   // backtick literal: verbatim
-      } else {
-        positional.push(StringUtil.normalizeInput(m[6] ?? m[7] ?? m[9]));
-      }
-    }
-    return { name, positional, named, raw };
-  }
-}
-
-// =============================================================================
-// COMMAND ROUTER - dispatch inline [[...]] player commands to their handlers
-// -----------------------------------------------------------------------------
-// A registry maps a verb to the function that runs it, so a new command is just
-// a register() call (and could one day be defined from a lorebook entry).
-// onTextAdventureInput pulls every [[bracketed]] command out of the input,
-// routes it here, and replaces it with a single-line ((OOC-Storyteller: ...))
-// note (the host forbids newlines in inputText).
-// =============================================================================
-export interface CommandContext { rng?: Rng; }
-export type CommandHandler = (cmd: ParsedCommand, ctx: CommandContext) => Promise<string>;
-
-export class CommandRouter {
-  private static _storage = new ScopedStorage();
-  private static _registry = new Map<string, { handler: CommandHandler; help: string }>();
-
-  static register(verb: string, handler: CommandHandler, help: string): void {
-    CommandRouter._registry.set(verb.toLowerCase(), { handler, help });
-  }
-  static verbs(): string[] { return [...CommandRouter._registry.keys()]; }
-  // Registered verb -> its one-line help string (drives [[help]]).
-  static helpFor(verb: string): string | undefined { return CommandRouter._registry.get(verb.toLowerCase())?.help; }
-  static help(): { verb: string; help: string }[] {
-    return [...CommandRouter._registry.entries()].map(([verb, def]) => ({ verb, help: def.help }));
-  }
-
-  static async creatorModeEnabled(): Promise<boolean> {
-    return (await CommandRouter._storage.getOrDefault("creator-mode", false)) as boolean;
-  }
-  static async setCreatorMode(on: boolean): Promise<void> { await CommandRouter._storage.set("creator-mode", on); }
-
-  // Routes one command body to its handler; returns the OOC replacement text
-  // (always a single line - the host strips newlines from inputText).
-  static async route(body: string, ctx: CommandContext = {}): Promise<string> {
-    const cmd = CommandParser.parse(body);
-    // While creator mode is on, the player may have edited character entries or
-    // the resource-override entry: pick those edits up before any command runs.
-    if (await CommandRouter.creatorModeEnabled()) {
-      await CharacterStore.syncFromLorebook();
-      await ResourceOverrides.loadFromLorebook();
-      await loadSuccessTablesFromLorebook();
-      await ConstraintRegistry.loadFromLorebook();
-      await ConditionRegistry.loadFromLorebook();
-    }
-    const def = CommandRouter._registry.get(cmd.name);
-    if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
-    return def.handler(cmd, ctx);
-  }
-}
-
 // --- COMMAND HANDLERS -------------------------------------------------------
 // Each returns a single OOC line. Registered into CommandRouter at the bottom.
 
@@ -1697,16 +255,12 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
     return `((OOC-Storyteller: creator-mode needs set=true or set=false.))`;
   }
   if (set === "true") {
-    await CommandRouter.setCreatorMode(true);
+    await CreatorMode.set(true);
     return `((OOC-Storyteller: Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.))`;
   }
   // Leaving creator mode: capture any final lorebook edits, then switch off.
-  const { synced, failed } = await CharacterStore.syncFromLorebook();
-  await ResourceOverrides.loadFromLorebook();
-  await loadSuccessTablesFromLorebook();
-  await ConstraintRegistry.loadFromLorebook();
-  await ConditionRegistry.loadFromLorebook();
-  await CommandRouter.setCreatorMode(false);
+  const { synced, failed } = await syncFromCreatorEdits();
+  await CreatorMode.set(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
   if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
@@ -1758,13 +312,6 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Now playing "${disp(char.name)}".))`;
 }
 
-// Resolve a trait name to its value from a character record's numeric buckets.
-function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
-  const n = StringUtil.normalize(name);
-  const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
-  for (const b of buckets) if (n in b) return b[n];
-  return 0;
-}
 
 // Extract only the roll fields the player actually supplied (no defaults filled
 // in), so callers can tell "keep the saved value" from "reset to default".
@@ -2873,53 +1420,301 @@ async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: ${disp(c.name)} is now the default character ([[play]] with no name selects it).))`;
 }
 
-CommandRouter.register("help", cmdHelp, "help [verb]  (list commands, or show one's usage)");
-CommandRouter.register("creator-mode", cmdCreatorMode, "creator-mode set=true|false");
-CommandRouter.register("create-playable", cmdCreatePlayable, 'create-playable name="..." templates="a,b"');
-CommandRouter.register("play", cmdPlay, 'play [name="..."]  (no name -> default character)');
-CommandRouter.register("characters", cmdCharacters, "characters  (list playable characters; marks current/default)");
-CommandRouter.register("set-default", cmdSetDefault, 'set-default name="..."  (change the default character)');
-CommandRouter.register("roll", cmdRoll, "roll <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]");
-CommandRouter.register("roll-for", cmdRollFor, 'roll-for "Name" <pool|@name> [difficulty] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]');
-CommandRouter.register("name-roll", cmdNameRoll, 'name-roll <name> <pool> [difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[::effect][!]');
-CommandRouter.register("list-rolls", cmdListRolls, "list-rolls");
-CommandRouter.register("forget-roll", cmdForgetRoll, "forget-roll <name>");
-CommandRouter.register("extended-roll", cmdExtendedRoll, "extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=] [on-botch=fail|lose-successes|ignore] + roll knobs");
-CommandRouter.register("continue-roll", cmdContinueRoll, "continue-roll [id] [difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
-CommandRouter.register("roll-status", cmdRollStatus, "roll-status [id]");
-CommandRouter.register("cancel-roll", cmdCancelRoll, "cancel-roll [id]");
-CommandRouter.register("resources", cmdResources, "resources");
-CommandRouter.register("spend", cmdSpend, 'spend <resource[::effect]> [target] [amount] [reason="..."]');
-CommandRouter.register("gain", cmdGain, "gain <resource> [amount]");
-CommandRouter.register("damage", cmdDamage, "damage <bashing|lethal|aggravated> [n]");
-CommandRouter.register("health", cmdHealth, "health");
-CommandRouter.register("clear-boosts", cmdClearBoosts, "clear-boosts");
-CommandRouter.register("reset-uses", cmdResetUses, "reset-uses (scene/turn change: clears effect-use counters)");
-CommandRouter.register("configure-resources", cmdConfigureResources, "configure-resources (guided setup; plain replies answer it)");
-CommandRouter.register("cancel-wizard", cmdCancelWizard, "cancel-wizard");
-CommandRouter.register("resist", cmdResist, 'resist <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[::effect][!]]');
-CommandRouter.register("contest", cmdContest, 'contest <your-pool> <their-pool> [vs="Name"] [difficulty=] [vs-difficulty=] [table=] [spend=res[::effect][!]]');
-CommandRouter.register("extended-contest", cmdExtendedContest, 'extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=] [interval=] [on-botch=fail|lose-successes|ignore] [difficulty=] [vs-difficulty=]');
-CommandRouter.register("continue-contest", cmdContinueContest, "continue-contest [id] [difficulty=] [vs-difficulty=] [diff-mod=] [dice-modifier=] [tags=]");
-CommandRouter.register("contest-status", cmdContestStatus, "contest-status [id]");
-CommandRouter.register("cancel-contest", cmdCancelContest, "cancel-contest [id]");
-CommandRouter.register("tables", cmdTables, "tables [name]  (list success tables, or lay one out in full)");
-CommandRouter.register("define-constraint", cmdDefineConstraint, 'define-constraint name="..." relation=exclusive|restricted|forbidden domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope="..."] [note="..."]');
-CommandRouter.register("constraints", cmdConstraints, "constraints (list the story's constraint groups)");
-CommandRouter.register("constraint", cmdConstraint, "constraint <name> (show one group in full)");
-CommandRouter.register("forget-constraint", cmdForgetConstraint, "forget-constraint <name>");
-CommandRouter.register("check-constraints", cmdCheckConstraints, "check-constraints (flag the current character's constraint conflicts)");
-CommandRouter.register("define-condition", cmdDefineCondition, 'define-condition name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."]');
-CommandRouter.register("condition", cmdConditionInfo, "condition [name]  (list defined conditions, or show one in full)");
-CommandRouter.register("forget-condition", cmdForgetCondition, "forget-condition <name>  (removes an overlay definition; built-ins can only be shadowed)");
-CommandRouter.register("afflict", cmdAfflict, 'afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias> ...]  (mirror defs also afflict the bound target)');
-CommandRouter.register("advance", cmdAdvance, "advance <condition> [on=..]  (end it and begin its successor, bindings carried forward)");
-CommandRouter.register("lift", cmdLift, "lift <condition> [on=..] [spend=res[::effect][!]]  (remove it - and its mirror; spend = shrug-off)");
-CommandRouter.register("conditions", cmdConditions, 'conditions [<name|@alias>]  (active conditions; NPCs work too)');
-CommandRouter.register("alias", cmdAlias, 'alias <@token> "Target Name"  (@a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)');
-CommandRouter.register("aliases", cmdAliases, "aliases  (list every alias, grouped by scope)");
-CommandRouter.register("forget-alias", cmdForgetAlias, "forget-alias <@token>  (bare @a = global; scoped tokens as in alias)");
-CommandRouter.register("player", cmdPlayer, 'player [name="..."] [default=true]  (show or switch the current player; storyteller is always valid)');
+
+// --- CREATOR-MODE SYNC (the router's game-side hook) -------------------------
+// While creator mode is on, the player may have hand-edited character entries
+// or any wod:config entry: re-sync characters (player edits win) and reload
+// every config store before a command runs, and again when leaving the mode.
+async function syncFromCreatorEdits(): Promise<{ synced: string[]; failed: string[] }> {
+  const result = await CharacterStore.syncFromLorebook();
+  await reloadAllConfigStores();
+  return result;
+}
+CommandRouter.beforeRoute(async () => {
+  if (await CreatorMode.enabled()) await syncFromCreatorEdits();
+});
+
+// --- REGISTRATIONS ------------------------------------------------------------
+// Every verb registers with its CommandSpec: the ONE declarative description
+// of its arguments. [[help]] derives from it; windows render forms and compose
+// command strings from it. Handlers stay the validators - a spec describes,
+// it never rejects.
+const SPEND_HINT = "res[::effect][!]";
+const ROLL_KNOBS: ParamSpec[] = [
+  { key: "difficulty", kind: "positional", hint: "[difficulty|expr]" },
+  { key: "diff-mod", kind: "positional", hint: "[diff-mod]" },
+  { key: "requires", kind: "named", type: "int", desc: "Successes required" },
+  { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
+  { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
+  { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Resource to spend on the roll" },
+];
+
+CommandRouter.register("help", cmdHelp, {
+  summary: "list commands, or show one's usage",
+  params: [{ key: "verb", kind: "positional", hint: "<verb>" }],
+});
+CommandRouter.register("creator-mode", cmdCreatorMode, {
+  summary: "toggle lorebook hand-editing; edits sync in while on",
+  params: [{ key: "set", kind: "named", type: "enum", options: ["true", "false"], required: true }],
+});
+CommandRouter.register("create-playable", cmdCreatePlayable, {
+  summary: "create a playable character (attributes 1, abilities 0 - allocation is opt-in)",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. Erik the Red" },
+    { key: "templates", kind: "named", required: true, hint: '"a,b"', desc: "Templates (comma-separated; hybrids legal)", example: "e.g. vampire" },
+  ],
+});
+CommandRouter.register("play", cmdPlay, {
+  summary: "switch to a character; no name selects the default",
+  params: [{ key: "name", kind: "named", hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("characters", cmdCharacters, {
+  summary: "list playable characters; marks current/default",
+});
+CommandRouter.register("set-default", cmdSetDefault, {
+  summary: "change the default character",
+  params: [{ key: "name", kind: "named", required: true, hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("roll", cmdRoll, {
+  summary: "roll a dice pool for the current character",
+  params: [{ key: "pool", kind: "positional", required: true, hint: "<pool|@name>" }, ...ROLL_KNOBS,
+    { key: "table", kind: "named", desc: "Success table to read the outcome" }],
+});
+CommandRouter.register("roll-for", cmdRollFor, {
+  summary: "roll for a named character without switching to them",
+  params: [
+    { key: "character", kind: "positional", required: true, hint: '"<name|@alias>"' },
+    { key: "pool", kind: "positional", required: true, hint: "<pool|@name>" }, ...ROLL_KNOBS,
+    { key: "table", kind: "named", desc: "Success table to read the outcome" }],
+});
+CommandRouter.register("name-roll", cmdNameRoll, {
+  summary: "save a roll under a name; @name invokes it and its spend= is baked in",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>" },
+    { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS],
+});
+CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
+CommandRouter.register("forget-roll", cmdForgetRoll, {
+  summary: "delete a saved roll",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("extended-roll", cmdExtendedRoll, {
+  summary: "start an extended action (rolls interval 1 now)",
+  note: "plus the usual roll knobs",
+  params: [
+    { key: "pool", kind: "positional", required: true, hint: "<pool>" },
+    { key: "requires", kind: "named", type: "int", required: true, hint: "<target>", desc: "Accumulated successes to reach" },
+    { key: "intervals", kind: "named", type: "int", required: true, hint: "<max>", desc: "Maximum rolls" },
+    { key: "interval", kind: "named", desc: "In-fiction spacing (ST-enforced)", example: "e.g. 1 night" },
+    { key: "label", kind: "named", type: "literal", desc: "Display label" },
+    { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"] },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "dice-modifier", kind: "named", type: "int" },
+    { key: "tags", kind: "named", hint: '"a,b"' },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("continue-roll", cmdContinueRoll, {
+  summary: "whoever is current rolls the next interval (named-only overrides)",
+  params: [
+    { key: "id", kind: "positional", hint: "[id]" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "diff-mod", kind: "named", type: "int" },
+    { key: "dice-modifier", kind: "named", type: "int" },
+    { key: "tags", kind: "named", hint: '"a,b"' },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("roll-status", cmdRollStatus, {
+  summary: "show an extended action's progress",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("cancel-roll", cmdCancelRoll, {
+  summary: "cancel an extended action",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("resources", cmdResources, { summary: "list the current character's resources" });
+CommandRouter.register("spend", cmdSpend, {
+  summary: "spend a resource / fire a named effect outside a roll",
+  params: [
+    { key: "resource", kind: "positional", required: true, hint: "<resource[::effect]>" },
+    { key: "target", kind: "positional", hint: "[target]" },
+    { key: "amount", kind: "positional", hint: "[amount]" },
+    { key: "reason", kind: "named", type: "literal", desc: "Why (echoed in the note)" },
+  ],
+});
+CommandRouter.register("gain", cmdGain, {
+  summary: "regain a resource",
+  params: [
+    { key: "resource", kind: "positional", required: true, hint: "<resource>" },
+    { key: "amount", kind: "positional", hint: "[amount]" },
+  ],
+});
+CommandRouter.register("damage", cmdDamage, {
+  summary: "mark damage on the current character",
+  params: [
+    { key: "severity", kind: "positional", required: true, type: "enum", options: ["bashing", "lethal", "aggravated"], hint: "<bashing|lethal|aggravated>" },
+    { key: "n", kind: "positional", hint: "[n]" },
+  ],
+});
+CommandRouter.register("health", cmdHealth, { summary: "show the current character's health track" });
+CommandRouter.register("clear-boosts", cmdClearBoosts, { summary: "clear trait boosts (the ST calls the duration)" });
+CommandRouter.register("reset-uses", cmdResetUses, { summary: "scene/turn change: clears effect-use counters" });
+CommandRouter.register("configure-resources", cmdConfigureResources, { summary: "guided resource setup; plain replies answer it" });
+CommandRouter.register("cancel-wizard", cmdCancelWizard, { summary: "abandon the running wizard" });
+CommandRouter.register("resist", cmdResist, {
+  summary: "resisted action: your margin over theirs counts (tie = fail)",
+  params: [
+    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+    { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+    { key: "table", kind: "named", desc: "Success table read with your margin" },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("contest", cmdContest, {
+  summary: "contested action: higher total wins (tie = draw)",
+  params: [
+    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+    { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+    { key: "table", kind: "named", desc: "Success table read with your margin" },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("extended-contest", cmdExtendedContest, {
+  summary: "both sides accumulate; first to the goal wins (dead heat stays open)",
+  params: [
+    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+    { key: "target", kind: "named", type: "int", required: true, hint: "<n>", desc: "Accumulated successes to win" },
+    { key: "rounds", kind: "named", type: "int", required: true, hint: "<max>", desc: "Maximum rounds" },
+    { key: "vs", kind: "named", hint: '"Name"' },
+    { key: "label", kind: "named", type: "literal", desc: "Display label" },
+    { key: "interval", kind: "named", desc: "In-fiction spacing (ST-enforced)" },
+    { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"] },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+  ],
+});
+CommandRouter.register("continue-contest", cmdContinueContest, {
+  summary: "roll the next contest round",
+  params: [
+    { key: "id", kind: "positional", hint: "[id]" },
+    { key: "difficulty", kind: "named", type: "int" },
+    { key: "vs-difficulty", kind: "named", type: "int" },
+    { key: "diff-mod", kind: "named", type: "int" },
+    { key: "dice-modifier", kind: "named", type: "int" },
+    { key: "tags", kind: "named", hint: '"a,b"' },
+  ],
+});
+CommandRouter.register("contest-status", cmdContestStatus, {
+  summary: "show an extended contest's progress",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("cancel-contest", cmdCancelContest, {
+  summary: "cancel an extended contest",
+  params: [{ key: "id", kind: "positional", hint: "[id]" }],
+});
+CommandRouter.register("tables", cmdTables, {
+  summary: "list success tables, or lay one out in full",
+  params: [{ key: "name", kind: "positional", hint: "[name]" }],
+});
+CommandRouter.register("define-constraint", cmdDefineConstraint, {
+  summary: "define/replace a constraint group",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. clan-only-backgrounds" },
+    { key: "relation", kind: "named", type: "enum", options: [...CONSTRAINT_RELATIONS], default: "exclusive", desc: "Relation" },
+    { key: "domain", kind: "named", type: "enum", options: [...CONSTRAINT_DOMAINS], default: "background", desc: "Domain" },
+    { key: "members", kind: "named", hint: '"a,b"', desc: "Members (comma-separated Backgrounds or Merits/Flaws)", example: "e.g. status, anonymity" },
+    { key: "max", kind: "named", type: "int", desc: "Max to hold (exclusive only; default 1)" },
+    { key: "scope", kind: "named", desc: "Scope: templates/choices it applies to (comma-separated; empty = everyone)", example: "e.g. tzimisce" },
+    { key: "note", kind: "named", desc: "Note (optional)" },
+  ],
+});
+CommandRouter.register("constraints", cmdConstraints, { summary: "list the story's constraint groups" });
+CommandRouter.register("constraint", cmdConstraint, {
+  summary: "show one constraint group in full",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("forget-constraint", cmdForgetConstraint, {
+  summary: "remove a constraint group",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts" });
+CommandRouter.register("define-condition", cmdDefineCondition, {
+  summary: "define/replace a condition (overlay; may shadow a built-in)",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. dazed" },
+    { key: "bindings", kind: "named", hint: '"target"', desc: "Required slots (comma-separated)", example: "e.g. target" },
+    { key: "duration", kind: "named", hint: '"1 turn|until x|instant"', desc: "Advisory duration" },
+    { key: "then", kind: "named", desc: "Successor condition ([[advance]] applies it)" },
+    { key: "mirror", kind: "named", desc: "Condition the bound target gains, bound back" },
+    { key: "tags", kind: "named", hint: '"a,b"', desc: "Tags joined to the afflicted character's rolls" },
+    { key: "description", kind: "named", type: "literal", desc: "Description" },
+    { key: "note", kind: "named", desc: "Note (optional)" },
+  ],
+});
+CommandRouter.register("condition", cmdConditionInfo, {
+  summary: "list defined conditions, or show one in full",
+  params: [{ key: "name", kind: "positional", hint: "[name]" }],
+});
+CommandRouter.register("forget-condition", cmdForgetCondition, {
+  summary: "remove an overlay definition; built-ins can only be shadowed",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("afflict", cmdAfflict, {
+  summary: "apply a condition; extra <slot>=<name|@alias> args fill its bindings",
+  note: "mirror defs also afflict the bound target",
+  openNamed: true,
+  params: [
+    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
+  ],
+});
+CommandRouter.register("advance", cmdAdvance, {
+  summary: "end a condition and begin its successor, bindings carried forward",
+  params: [
+    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "on", kind: "named", hint: "<name|@alias>" },
+  ],
+});
+CommandRouter.register("lift", cmdLift, {
+  summary: "remove a condition - and its mirror; spend = shrug-off",
+  params: [
+    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "on", kind: "named", hint: "<name|@alias>" },
+    { key: "spend", kind: "named", hint: SPEND_HINT },
+  ],
+});
+CommandRouter.register("conditions", cmdConditions, {
+  summary: "active conditions; NPCs work too",
+  params: [{ key: "who", kind: "positional", hint: "<name|@alias>" }],
+});
+CommandRouter.register("alias", cmdAlias, {
+  summary: "define an alias for a character",
+  note: "bare @a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope",
+  params: [
+    { key: "token", kind: "positional", required: true, hint: "<@token>" },
+    { key: "target", kind: "positional", required: true, hint: '"Target Name"' },
+  ],
+});
+CommandRouter.register("aliases", cmdAliases, { summary: "list every alias, grouped by scope" });
+CommandRouter.register("forget-alias", cmdForgetAlias, {
+  summary: "remove an alias (bare @a = global; scoped tokens as in alias)",
+  params: [{ key: "token", kind: "positional", required: true, hint: "<@token>" }],
+});
+CommandRouter.register("player", cmdPlayer, {
+  summary: "show or switch the current player; storyteller is always valid",
+  params: [
+    { key: "name", kind: "named", hint: '"<id>"' },
+    { key: "default", kind: "named", type: "enum", options: ["true"], desc: "Also make it the default player" },
+  ],
+});
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 

@@ -195,6 +195,167 @@ export class LorebookManager {
   }
 }
 
+// =============================================================================
+// CONFIG STORES - the generic shape of "wod:config" registries
+// -----------------------------------------------------------------------------
+// Every story-config registry works the same way: ONE lorebook entry under the
+// wod:config category (tutorial header above the marker, JSON below), parsed as
+// an array OR a name -> def map, cached module-level for synchronous reads,
+// reloaded at init and on the creator-mode sync points. These two classes ARE
+// that pattern; a concrete registry is an instance, not a re-implementation.
+// Instances self-register into ALL_CONFIG_STORES so reload/reset sweep every
+// registry - adding a registry never touches a sync point again.
+// =============================================================================
+export const CONFIG_CATEGORY = "wod:config";
+
+export interface ConfigStoreLike {
+  readonly entry: string;
+  loadFromLorebook(): Promise<number>;
+  reset(): void;
+}
+
+export const ALL_CONFIG_STORES: ConfigStoreLike[] = [];
+
+// Reload every config store from the lorebook; returns per-entry counts
+// (init logs them; the creator-mode hook ignores them).
+export async function reloadAllConfigStores(): Promise<{ entry: string; count: number }[]> {
+  const out: { entry: string; count: number }[] = [];
+  for (const store of ALL_CONFIG_STORES) {
+    out.push({ entry: store.entry, count: await store.loadFromLorebook() });
+  }
+  return out;
+}
+
+// Clear every config store back to its shipped defaults (tests).
+export function resetAllConfigStores(): void {
+  for (const store of ALL_CONFIG_STORES) store.reset();
+}
+
+// The tutorial-above-the-marker entry text every store writes.
+function configEntryText(header: string[], data: unknown): string {
+  return [...header, SRD_HEADER_MARKER, JSON.stringify(data, null, 2)].join("\n");
+}
+
+// Parse an entry body as JSON; undefined when missing/unparseable (the entry
+// stays for the player to fix - never destroyed by a bad edit).
+function parseConfigBody(text: string | undefined): unknown {
+  if (!text) return undefined;
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  if (!body) return undefined;
+  try { return JSON.parse(body); } catch { return undefined; }
+}
+
+// Write-through: create the category/entry on first use, else update in place.
+async function writeConfigEntry(entry: string, text: string): Promise<void> {
+  const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
+  const created = await LorebookManager.ensureEntry(id, entry, text);
+  if (!created) await LorebookManager.updateEntryText(CONFIG_CATEGORY, entry, text);
+}
+
+// A list of named defs, JSON array (or name -> def map) in the entry, overlaid
+// on optional shipped defaults: the overlay SHADOWS a same-named default;
+// remove() only deletes overlay entries (a shadowed default resurfaces).
+export class ListConfigStore<T extends { name: string }> {
+  readonly entry: string;
+  private readonly _header: string[];
+  private readonly _make: (raw: Partial<T> & { name: string }) => T;
+  private readonly _defaults: T[];
+  private readonly _onChanged?: (overlay: T[]) => void;
+  private _overlay: T[] = [];
+
+  constructor(opts: {
+    entry: string;
+    header: string[];
+    make: (raw: Partial<T> & { name: string }) => T;
+    defaults?: T[];
+    // Fires on EVERY cache change (load/save/reset) - the seam for stores
+    // whose consumers read a separate registry (success tables).
+    onChanged?: (overlay: T[]) => void;
+  }) {
+    this.entry = opts.entry;
+    this._header = opts.header;
+    this._make = opts.make;
+    this._defaults = opts.defaults ?? [];
+    this._onChanged = opts.onChanged;
+    ALL_CONFIG_STORES.push(this);
+  }
+
+  private _apply(overlay: T[]): void {
+    this._overlay = overlay;
+    this._onChanged?.(overlay);
+  }
+
+  get(name: string): T | undefined {
+    const n = StringUtil.normalize(name);
+    return this._overlay.find(d => d.name === n) ?? this._defaults.find(d => d.name === n);
+  }
+  all(): T[] {
+    const names = new Set(this._overlay.map(d => d.name));
+    return [...this._overlay, ...this._defaults.filter(d => !names.has(d.name))];
+  }
+  reset(): void { this._apply([]); }
+
+  async loadFromLorebook(): Promise<number> {
+    const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
+    const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
+      ? parsed as Array<Partial<T> & { name: string }>
+      : (parsed && typeof parsed === "object")
+        ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
+        : [];
+    this._apply(list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(d => this._make(d)));
+    return this._overlay.length;
+  }
+
+  async save(defs: T[]): Promise<void> {
+    await writeConfigEntry(this.entry, configEntryText(this._header, defs));
+    this._apply(defs);
+  }
+
+  // Add or replace one def (by normalized name) and persist.
+  async put(def: T): Promise<void> {
+    await this.save([...this._overlay.filter(d => d.name !== def.name), def]);
+  }
+
+  // Remove an OVERLAY def; returns whether one existed (shipped defaults can
+  // only be shadowed, never deleted).
+  async remove(name: string): Promise<boolean> {
+    const n = StringUtil.normalize(name);
+    const rest = this._overlay.filter(d => d.name !== n);
+    if (rest.length === this._overlay.length) return false;
+    await this.save(rest);
+    return true;
+  }
+}
+
+// A name -> value map in the entry (the resource-overrides shape).
+export class MapConfigStore<V> {
+  readonly entry: string;
+  private readonly _header: string[];
+  private _cache: Record<string, V> = {};
+
+  constructor(opts: { entry: string; header: string[] }) {
+    this.entry = opts.entry;
+    this._header = opts.header;
+    ALL_CONFIG_STORES.push(this);
+  }
+
+  current(): Record<string, V> { return this._cache; }
+  reset(): void { this._cache = {}; }
+
+  async loadFromLorebook(): Promise<number> {
+    const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
+    this._cache = (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      ? parsed as Record<string, V>
+      : {};
+    return Object.keys(this._cache).length;
+  }
+
+  async save(map: Record<string, V>): Promise<void> {
+    await writeConfigEntry(this.entry, configEntryText(this._header, map));
+    this._cache = map;
+  }
+}
+
 export class MeritFlawRegistry {
   private static _defs: Map<string, MeritFlawDef> =
     new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));

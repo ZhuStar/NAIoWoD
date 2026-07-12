@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `bbe2ac7`** ("Conditions:
-> parameterized character states — bindings, chains, mirrors, live tags").
+> **Last synced with the code as of commit `27ff433`** ("Architecture
+> pass: command specs, generic config stores, command/state/game split").
 
 ---
 
@@ -33,7 +33,7 @@ directly in the **Lorebook**, which the engine treats as its editable database.
 ## 2. How to work on it
 
 ```bash
-bun test            # 190 tests across test/system.test.ts + test/build.test.ts
+bun test            # 271 tests across test/system.test.ts + test/build.test.ts
 bun run typecheck   # tsc --noEmit (strict; no npm install needed, Bun runs TS)
 bun run build       # regenerate dist/naiowod.ts (scripts/build-single.ts)
 ```
@@ -50,9 +50,9 @@ bun run build       # regenerate dist/naiowod.ts (scripts/build-single.ts)
    (side effects live only in `init()`).
 5. A live e2e: `init()` then drive `processAdventureInput("[[...]]")`.
 
-**Commit conventions**: descriptive body; end with the
-`Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` and `Claude-Session:`
-trailers (see git log for the exact format). Push with retries/backoff.
+**Commit conventions**: descriptive body; end with the `Co-Authored-By:
+Claude <model> <noreply@anthropic.com>` and `Claude-Session:` trailers exactly
+as in the recent git log. Push with retries/backoff.
 Stop-hook warnings about "Unverified commits" are non-actionable (unsigned
 commits; ignore). **Do not create PRs** unless asked; do not rewrite history.
 
@@ -74,9 +74,11 @@ src/core/damage.ts   pure: Severity/Kind, packets, reactions, HealthTrack, soak
 src/wizard.ts        pure: medium-agnostic wizard engine
 src/rolls.ts         pure: roll specs, modifiers, extended-roll state machine
 src/rules.ts         DATA: templates, resources, effect grammar, roads, SRD seeds
-src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry, LorebookParser
-src/game.ts          everything live: characters, stores, interpreter, commands
-src/window.ts        api.v1.ui wizard-windows that EMIT commands (win-constraint)
+src/command.ts       the command bus: parser, CommandSpec/describe/compose, router+hooks
+src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry, generic config stores
+src/state.ts         the character model + EVERY persistent store (config registries, live state)
+src/game.ts          the verbs: effect interpreter, wizards, handlers + spec registrations
+src/window.ts        api.v1.ui windows that EMIT commands - forms DERIVED from CommandSpecs
 src/index.ts         re-exports * + init()  (importing = zero side effects)
 src/main.ts          runtime entry: init().catch(...)
 ```
@@ -105,9 +107,9 @@ just logs). Test helpers: `__resetLorebookMock()`, `__resetStorageMock()`.
 
 **`init()`** (`src/index.ts`): registers the `onTextAdventureInput` hook →
 `processAdventureInput(rawInputText)`, then `LorebookManager.bootstrap()`,
-`MeritFlawRegistry.loadFromLorebook()`, `ResourceOverrides.loadFromLorebook()`,
-logs a summary, returns `{ setupMessage }` (the OOC note when SRD categories
-were created).
+`MeritFlawRegistry.loadFromLorebook()`, `reloadAllConfigStores()` (every
+config registry in one sweep), logs a summary with per-entry counts, returns
+`{ setupMessage }` (the OOC note when SRD categories were created).
 
 ## 4. NovelAI host facts (details in `docs/novelai-api.md` + `docs/*.html` mirror)
 
@@ -287,7 +289,7 @@ were created).
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (823) — all game DATA
+### src/rules.ts (825) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
@@ -391,7 +393,35 @@ were created).
   RENAMED from ConditionDef to free the name; single-scope build forbids
   duplicates.)
 
-### src/services.ts (261)
+### src/command.ts (173) — the command bus (pure; depends on core/traits only)
+- `ParsedCommand {name, positional[], named{}, raw}` + `CommandParser.parse` —
+  quote-aware tokenizer; body-level gluing BEFORE tokenization (`@`-space and
+  `::`-space stripped, backtick spans protected), then **every token/value
+  passes `StringUtil.normalizeInput`** EXCEPT backtick literals (verbatim —
+  the display-text escape hatch). `raw` stays raw.
+- **`CommandSpec`** — the ONE declarative description of a verb's grammar:
+  `{summary, params?: ParamSpec[], openNamed? (arbitrary extra named args -
+  afflict's slots), note?}`; `ParamSpec {key, kind: positional|named,
+  type?: string|int|enum|literal, required?, options? (enum vocabulary -
+  reference the exported rules arrays), default? (window pre-seed AND compose
+  fallback), hint? (help display), desc? (window label), example? (window
+  placeholder)}`. Specs DESCRIBE, handlers VALIDATE - a spec never rejects.
+- `describeCommandSpec(verb, spec)` — derives the one-line usage `[[help]]`
+  shows (`<pos>`, `[optional]`, `key=a|b|c` enums, `key=N` ints, hint wins,
+  `(summary; note)` tail, `[<key>=<value> ...]` when openNamed).
+- `composeCommand(verb, values, spec)` — THE one quoting/sanitizing composer
+  (windows submit through it): declared params in order then openNamed extras;
+  empty values omitted; values with whitespace quoted; embedded `"` stripped
+  (the grammar deliberately has NO escape syntax — players type these);
+  `literal` params composed in backticks (embedded backticks stripped).
+- `CommandRouter` — verb → `{handler, spec}` registry:
+  `register(verb, handler, spec)`, `verbs`, `specFor`, `helpFor`/`help`
+  (DERIVED via describeCommandSpec), `route(body, ctx)`; `CommandContext
+  {rng?}`. **`beforeRoute(hook)`**: game-registered async hooks run before
+  every dispatch (dependency inversion — the router knows NOTHING about
+  stores; game.ts registers the creator-mode sync). Unknown verb lists all.
+
+### src/services.ts (422)
 - `ScopedStorage(prefix = api.v1.script.id)` — story-scoped KV where every key
   is `<prefix>_<key>`: `get/getOrDefault/set/setIfAbsent/has/delete/list`
   (list strips the prefix back off) + `temp*` variants on tempStorage.
@@ -405,12 +435,26 @@ were created).
   allKnowledges/allBackgrounds`), and `bootstrap(specs=SRD_CATEGORIES)` —
   creates missing categories + seeds tutorial entries, returns the OOC setup
   message. **Existing player categories are never touched.**
+- **Generic config stores** — THE `wod:config` pattern as two classes (a
+  concrete registry is an instance, not a re-implementation):
+  `ListConfigStore<T extends {name}>` (JSON array or name→def map; overlay
+  SHADOWS optional shipped `defaults`; `get/all/reset/loadFromLorebook/save/
+  put/remove` — remove is overlay-only so defaults resurface; `onChanged`
+  hook fires on EVERY cache change, the seam for stores projecting into a
+  separate registry) and `MapConfigStore<V>` (name→value map;
+  `current/reset/loadFromLorebook/save`). Shared internals: tutorial-header
+  entry text, array-or-map parse, ensureCategory/ensureEntry/update write.
+  `CONFIG_CATEGORY = "wod:config"`. **Instances self-register into
+  `ALL_CONFIG_STORES`** → `reloadAllConfigStores()` (returns per-entry counts;
+  used by init + the creator-mode hook) and `resetAllConfigStores()` (tests).
+  Adding a registry never touches a sync point again.
 - `MeritFlawRegistry` — in-code defaults + `loadFromLorebook()` merging any
-  JSON arrays found in `srd:merits-flaws`; `get/all/register/reset`.
+  JSON arrays found in `srd:merits-flaws`; `get/all/register/reset` (kept
+  OUT of the config-store family: different shape — multi-entry category merge).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/game.ts (2954) — the live layer
+### src/state.ts (1257) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -476,64 +520,46 @@ required until used). `set/remove/lookup(scope, owner, alias)` +
 `resolve(alias, {charKey?, playerKey?})` walking **character → player →
 global**. `parseAliasToken(token)` (post-normalization single-`:` forms):
 `@global:a` · `@player:<id>:a` · `@char:<name>:a`/`@character:<name>:a` · bare
-`@a` (chain); malformed → undefined. `resolveAliasOwner` maps owner
-`default` → the default player/character. **`resolveCharacterRef(token)`** is
-the ONE seam turning a character argument (real name or @alias) into a
-normalized name — wired into `cmdPlay`, `cmdRollFor`, `cmdSetDefault`, and the
-`vs=` of `cmdVersus`/`cmdExtendedContest`. Pool-position `@` stays the
+`@a` (chain); malformed → undefined. Pool-position `@` stays the
 named-roll sigil (disambiguated by position). Character names may not start
 with `@` (creation refuses). Display: names store normalized; replies render
-via `disp()` = `StringUtil.toTitleCase` (contest notes in rolls.ts do the same
-for side names).
+Title Case (`disp()` in game.ts = `StringUtil.toTitleCase`; contest notes in
+rolls.ts do the same for side names).
 
-**Success tables (live)**: `loadSuccessTablesFromLorebook()` — resets the
-registry to defaults, then overlays an optional lorebook entry
-`wod:config` / `wod:config:success-tables` (`SUCCESS_TABLES_ENTRY`): JSON below
-the marker, either an **array** of `SuccessTable` or a **map** `name → table`.
-Re-run at init, and on BOTH creator-mode sync points (alongside
-ResourceOverrides). Same config family as overrides.
+**Config registries** — four INSTANCES of the services.ts generic stores
+(surfaces unchanged from their hand-rolled predecessors; each self-registers
+into `ALL_CONFIG_STORES`, so init + the creator-mode hook reload them all
+without naming them):
+- `ResourceOverrides` = `MapConfigStore<Partial<ResourceDef>>` on
+  `wod:config:resources` (`RESOURCE_CONFIG_ENTRY`) — the house-rule layer;
+  `current()` feeds `CharacterResources.defsFor`; the wizard `save()`s it.
+- `SuccessTables` = `ListConfigStore<SuccessTable>` on
+  `wod:config:success-tables` (`SUCCESS_TABLES_ENTRY`); no reads of its own —
+  `onChanged` re-projects into rolls.ts' pure `SuccessTableRegistry`
+  (reset-then-register), so loading, saving AND resetting the store keep the
+  registry true (store reset = shipped tables back). The old free function
+  `loadSuccessTablesFromLorebook` is GONE.
+- `ConstraintRegistry` = `ListConfigStore<ConstraintGroup>` on
+  `wod:config:constraints` (`CONSTRAINTS_ENTRY`), no defaults,
+  make=`makeConstraintGroup`.
+- `ConditionRegistry` = `ListConfigStore<ConditionDef>` on
+  `wod:config:conditions` (`CONDITIONS_ENTRY`), defaults=`DEFAULT_CONDITIONS`
+  (the overlay SHADOWS built-ins; `remove` is overlay-only so
+  `forget-condition` resurfaces them), make=`makeConditionDef`.
 
-**Constraint groups (live)**: `ConstraintRegistry` — same config family; lorebook
-`wod:config` / `wod:config:constraints` (`CONSTRAINTS_ENTRY`), JSON array of
-`ConstraintGroup` (or a `name → group` map) below the marker; module-level cache
-(ResourceOverrides pattern), NO built-in defaults; `loadFromLorebook`/`save(list)`
-/`all`/`get`/`reset`/`put(group)` (add-or-replace by name)/`remove(name)`. Loaded
-at init + both creator-sync points. `ownedTraitsOf(char)` (backgrounds/merit/flaw
-keys, merit-vs-flaw via MeritFlawRegistry, templates) feeds `checkConstraints`.
+**`CreatorMode`** — the hand-editing flag (storage key `creator-mode`,
+unchanged); `enabled()/set(on)`. The router's game-registered hook consults it.
 
-**Conditions (live)**: `ConditionRegistry` — config family with SHIPPED
-defaults (`DEFAULT_CONDITIONS`); lorebook `wod:config` /
-`wod:config:conditions` (`CONDITIONS_ENTRY`), JSON array of `ConditionDef` (or
-`name → def` map); overlay cache SHADOWS same-named defaults;
-`loadFromLorebook` (init + both creator-sync points + creator-mode-off)
-/`get`/`all` (overlay first, unshadowed defaults after)/`save`/`put`/
-`remove` (overlay only — shipped defs resurface, `forget-condition` says so)
-/`reset`. **`CharacterConditions`** — storyStorage `cond:<name>` →
-`ActiveCondition[]` where `ActiveCondition {def, bindings: {slot→normalized
-name}, note?}`; keyed by NORMALIZED NAME, character record NOT required (an
-NPC animal can carry a mirror); `list/afflict (replaces an instance of the
-same def)/lift (returns the removed instance)/clear/tags` (union of active
-defs' tags). **Tags bite** via `withConditionTags(name, spec)` — merges
-condition tags into the RollSpec (deduped) in `rollAndReport`, `cmdVersus`
-(my side), and `execContestSide` (named sides), so registered RollModifiers
-fire on every roll the afflicted character makes. Helpers:
-`resolveBindingValue` (binding values resolve `@aliases` via
-`resolveCharacterRef`, else normalize — NPC strings fine), `conditionSubject`
-(`on=` else current character), `conditionLine`, `applyCondition` (validates
-required bindings BEFORE any write; fires `def.mirror` onto
-`bindings.target` bound back `{target: subject}` + note "(mirror)"),
-`removeCondition` (lift + lift the mirror from the bound target).
-`cmdAdvance` = the manual chain trigger (turn system will automate): removes
-the instance, applies `def.then` CARRYING BINDINGS FORWARD (successor's
-mirror fires). `cmdLift` `spend=` = the Willpower shrug-off via `applySpend`
-(requires a sheet; NPCs can be lifted but not spend). Durations render via
-`describeDuration` + "(ST-enforced)".
+**Live per-character conditions**: `ActiveCondition {def, bindings:
+{slot→normalized name}, note?}`; **`CharacterConditions`** — storyStorage
+`cond:<name>`, keyed by NORMALIZED NAME, character record NOT required (an NPC
+animal can carry a mirror); `list/afflict (replaces an instance of the same
+def)/lift (returns the removed instance)/clear/tags` (union of active defs'
+tags).
 
-**Resource overrides (house-rule layer)**: `ResourceOverrides` — lorebook
-`wod:config` / `wod:config:resources`, JSON map `name → Partial<ResourceDef>`
-below the marker; **cached module-level for sync reads** (MeritFlawRegistry
-pattern); `loadFromLorebook()` (re-run at init, on wizard save, and on BOTH
-creator-mode sync points), `save(map)`, `current()`, `reset()` (tests).
+**`resolveTraitFromRecord(char, name)`** — a record's numeric buckets
+(attributes → abilities → backgrounds → virtues → disciplines → traits →
+poolStarts → 0); shared by game.ts roll plumbing and `CharacterBoosts` caps.
 
 **Live per-character state** (all story-scoped via ScopedStorage, keyed by
 normalized character name; all default lazily from the record/template):
@@ -555,6 +581,43 @@ normalized character name; all default lazily from the record/template):
   counts/resetAll`. The advisory usage ledger; the turn system will enforce
   from this data.
 
+**`WizardSession`** — storage `wizard:active` = `{def, state, prompt}`
+(`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
+game.ts.
+
+### src/game.ts (1749) — the verbs (interpreter, wizards, handlers, registrations)
+
+**Creator-mode sync (the router's game-side hook)**: `syncFromCreatorEdits()` =
+`CharacterStore.syncFromLorebook()` + `reloadAllConfigStores()`; registered
+once as `CommandRouter.beforeRoute(async () => { if (await
+CreatorMode.enabled()) await syncFromCreatorEdits(); })` and reused by
+`cmdCreatorMode`'s off-path. THE former triplicated 5-store reload list is
+gone — a new registry reaches every sync point by existing.
+
+**Character-argument seam**: **`resolveCharacterRef(token)`** turns a
+character argument (real name or @alias, via `parseAliasToken` +
+`resolveAliasOwner` + the registry chain) into a normalized name — wired into
+`cmdPlay`, `cmdRollFor`, `cmdSetDefault`, condition binding values
+(`resolveBindingValue`), and the `vs=` of `cmdVersus`/`cmdExtendedContest`.
+`disp()` = `StringUtil.toTitleCase` for replies.
+
+**Conditions in play**: **tags bite** via `withConditionTags(name, spec)` —
+merges active condition tags into the RollSpec (deduped) in `rollAndReport`,
+`cmdVersus` (my side), and `execContestSide` (named sides), so registered
+RollModifiers fire on every roll the afflicted character makes. Helpers:
+`resolveBindingValue` (@aliases else normalize — NPC strings fine),
+`conditionSubject` (`on=` else current character), `conditionLine`,
+`applyCondition` (validates required bindings BEFORE any write; fires
+`def.mirror` onto `bindings.target` bound back `{target: subject}` + note
+"(mirror)"), `removeCondition` (lift + lift the mirror from the bound
+target). `cmdAdvance` = the manual chain trigger (turn system will automate):
+removes the instance, applies `def.then` CARRYING BINDINGS FORWARD
+(successor's mirror fires). `cmdLift` `spend=` = the Willpower shrug-off via
+`applySpend` (requires a sheet; NPCs can be lifted but not spend). Durations
+render via `describeDuration` + "(ST-enforced)". `ownedTraitsOf(char)`
+(backgrounds/merit/flaw keys, merit-vs-flaw via MeritFlawRegistry, templates)
+feeds `checkConstraints`.
+
 **The effect interpreter**: `applyEffectSpec(char, def, effectName, spec,
 {targetArg?, applications?, rng?, rollTags?})` →
 `{extra?, notes[], refuse?, insufficient?}`:
@@ -568,8 +631,7 @@ boosts (expression caps via `parsePoolExpression`, `fillToCap`), `heal` via
 CharacterHealth, **anything else → "recorded — Storyteller adjudicates (no
 interpreter yet)"**; non-instant durations noted "(ST-enforced)".
 
-**Wizards (session + the resources wizard)**:
-- `WizardSession` — storage `wizard:active` = `{def, state, prompt}`.
+**Wizards (the resources wizard; session storage is in state.ts)**:
 - `RESOURCES_WIZARD` (`WIZARD_DEFS.resources`) — per-resource
   keep/customize → start → max → effect knob (first `difficulty|dice|
   successes` op's amount, via `knobIndex`) → roles step (text: `"resource:
@@ -583,27 +645,22 @@ interpreter yet)"**; non-instant durations noted "(ST-enforced)".
   (prompt→reply conversation, `stopGeneration: true`); `[[commands]]` still
   route normally mid-wizard.
 
-**Command layer**:
-- `CommandParser.parse(body)` → `ParsedCommand {name, positional[], named{},
-  raw}` — quote-aware; `key=value`/`key="v"` named (lowercased keys), bare or
-  quoted tokens positional in order. **Every token/value passes through
-  `StringUtil.normalizeInput` at parse time** — EXCEPT backtick-quoted values
-  (`` key=`Verbatim` `` or a `` `positional` ``), which stay verbatim (the
-  literal escape hatch for display text). `raw` stays raw. **Why split from
-  routing**: user wants parser and router to be different things (future
-  lorebook-defined commands).
-- `CommandRouter` — verb → `{handler(cmd, ctx), help}` registry
-  (`register/verbs/helpFor/help/route`; `help()`/`helpFor()` back `[[help]]`);
-  `CommandContext {rng?}` (tests inject `seqRng`); creator-mode pre-sync
-  (characters + overrides reload) before every command while creator mode is on;
-  unknown verb lists all verbs.
-- `processAdventureInput(rawInputText)` — extracts every `[[...]]`, routes
-  each, replaces with single-line OOC notes; prose-free input →
-  `stopGeneration: true`; non-command input → wizard reply (if active) else
-  untouched (`undefined`).
+**Registrations**: every verb registers `(name, handler, CommandSpec)` at the
+bottom of game.ts (`ROLL_KNOBS` is the shared difficulty/diff-mod/requires/
+dice-modifier/tags/spend param slice; `SPEND_HINT = "res[::effect][!]"`). Enum
+params reference the EXPORTED rules vocabularies (`CONSTRAINT_RELATIONS`,
+`CONSTRAINT_DOMAINS`) — a new relation reaches help AND the window by being
+added to the array. Parser/router/spec machinery itself lives in
+`src/command.ts` (see its section). `afflict` is the one `openNamed` spec
+(its slots depend on the condition def).
 
-**The command surface** (registered verbs, exact grammars in the register
-calls at the bottom of game.ts):
+**`processAdventureInput(rawInputText)`** — extracts every `[[...]]`, routes
+each, replaces with single-line OOC notes; prose-free input →
+`stopGeneration: true`; non-command input → wizard reply (if active) else
+untouched (`undefined`).
+
+**The command surface** (registered verbs; [[help]] DERIVES each line from the
+verb's CommandSpec at the bottom of game.ts — the grammars below match it):
 `help [verb]` (list commands, or one's usage) ·
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
 `play [name="…"]` (no name → default) · `characters` (list; marks
@@ -660,9 +717,8 @@ named `:effect`, roll-ops-only rule — standalone effects refuse with a
 `characterRollEnv(char)` = `{resolver (traits+boosts), penalty}` shared by rolls
 AND contests; `rollAndReport` folds the **wound penalty into extra.diceMod**
 (noted) and reads `table=` via `tableNote(cmd, outcome, successes)`.
-`rollOverridesFromNamed` for continue-roll. `resolveTraitFromRecord(char, name)`
-checks attributes → abilities → backgrounds → virtues → disciplines → traits →
-poolStarts → 0.
+`rollOverridesFromNamed` for continue-roll. Trait values come from state.ts'
+`resolveTraitFromRecord`.
 
 Contest plumbing (`cmdVersus(mode, cmd, ctx)` behind `resist`/`contest`): side A
 is the current character (may `spend=` on its own roll); side B is `vs="Name"`
@@ -674,38 +730,46 @@ zero resolver so only literals count; a deleted char degrades to ad-hoc.
 → botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
 `execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
-### src/window.ts (95) — api.v1.ui wizard-windows that EMIT commands
-The window layer, built AFTER game (imports `api`+UI types from host,
-`CommandRouter` from game). **A window is an abstraction over the command layer,
-not a second path**: it renders a UIPart form, binds fields to `tempStorage` via
-`storageKey`, and on submit composes a `[[command]]` string and routes it through
-the SAME `CommandRouter`. `openConstraintWindow()` builds the constraint form
-(name; relation/domain **button-rows** - no native select, each button writes a
-temp key and re-renders via the handle's `update`; members/max/scope/note; a
-Create button that routes `define-constraint …` and shows the reply in-window);
-`selectorRow`/`submitConstraint` helpers; keys under `win:constraint:*`.
-Registers `[[win-constraint]]` at module load (pure registry mutation - purity
-preserved). `index.ts` `export * from "./window"` runs that registration.
+### src/window.ts (107) — api.v1.ui windows that EMIT commands, DERIVED from specs
+Imports host + **command** only (NOT game — the split's dependency win).
+**A window is an abstraction over the command layer, not a second path**, and
+since the architecture pass its form is **derived from the verb's
+CommandSpec**: `openCommandWindow(verb, {title?, blurb?, submitLabel?})` looks
+up `CommandRouter.specFor(verb)` and renders per param — enum →
+`selectorRow` (button-row single-select, bullet marks current, `default`
+pre-seeded into tempStorage; no native select part exists), int →
+`numberInput`, else `textInput` (label = `desc ?? key`, placeholder =
+`example`); temp keys **`win:<verb>:<param>`**; the submit button collects the
+temp values, refuses on a missing required param, then routes
+`composeCommand(verb, values, spec)` through the SAME `CommandRouter` and
+shows the OOC reply in-window. `openConstraintWindow()` =
+`openCommandWindow("define-constraint", …)`; `[[win-constraint]]` registers at
+module load (pure registry mutation). Windows needing DOMAIN-driven fields
+(condition binding slots) will hand-build their part tree and still submit
+through `composeCommand`.
 
 ### src/index.ts / src/main.ts
-Re-export everything (incl. `./window`) + `init()` (now also
-`ConstraintRegistry.loadFromLorebook()` + `ConditionRegistry.loadFromLorebook()`);
+Re-export everything (incl. `./command`, `./state`, `./window`) + `init()`
+(bootstrap, merits, `reloadAllConfigStores()` with per-entry count logging);
 main calls `init().catch`.
 
-### scripts/build-single.ts (86)
-`MODULES` order (= layering), `stripModule` regexes (whole-line re-exports,
-import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
-(exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
-import/export lines survive).
+### scripts/build-single.ts (91)
+`MODULES` order (= layering, now 14 files incl. command + state),
+`stripModule` regexes (whole-line re-exports, import statements, leading
+`export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
+guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (2701 + 20 lines, 262 tests, 73 describes)
+### test/ (2836 + 20 lines, 271 tests, 76 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
 `allTens`; `beforeAll` bootstraps the lorebook once; suites that touch
-storage/lorebook/overrides do `__resetStorageMock(); __resetLorebookMock();
-ResourceOverrides.reset(); await LorebookManager.bootstrap();` in
-`beforeEach`; command e2e via `CommandRouter.route(body, {rng})`; wizard e2e
+storage/lorebook/config registries do `__resetStorageMock();
+__resetLorebookMock(); resetAllConfigStores(); await
+LorebookManager.bootstrap();` in `beforeEach` (ONE call resets every config
+store AND restores the success-table defaults — the per-registry reset list
+that leaked a stale ResourceOverrides cache into the conditions suite is
+gone); command e2e via `CommandRouter.route(body, {rng})`; wizard e2e
 replies via `processAdventureInput` (plain text). `types/bun-test.d.ts` +
 `types/bun.d.ts` are minimal ambient shims so tsc runs without bun-types
 (note: `expect.objectContaining` is NOT in the shim — assert fields directly).
@@ -722,8 +786,9 @@ health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
 without records carry them too) · `wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
 **`current-player`** / **`default-player`** pointers (default "storyteller") ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
-(session-scoped, cleared on close): `win:constraint:*` (the constraint window's
-live form fields - the documented home for UI storageKey state).
+(session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
+live form fields, e.g. `win:define-constraint:relation` - the documented home
+for UI storageKey state).
 
 **Lorebook** (all data entries = instructions above `=====`, data below):
 `srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
@@ -849,6 +914,36 @@ constraint groups — array of `ConstraintGroup` or `name → group` map;
     Naming: damage.ts's health-box states were RENAMED
     `HealthConditionDef`/`HealthConditionState` to free `ConditionDef` for the
     central concept (single-scope dist build forbids duplicate globals).
+20. **The architecture pass (pre-windows): specs, generic stores, the split**
+    — a dedicated coupling/cohesion/connascence review before the
+    command-emitting-windows work. Three defects found and fixed:
+    (a) *window↔command↔help triple duplication* — window.ts hand-copied the
+    relation/domain vocabularies (connascence of VALUE across modules), the
+    define-constraint arg names (connascence of NAME, uncheckable), and its
+    own quoting (a typed `"` broke tokenization; notes were silently
+    lowercased). Fix: **every verb registers a `CommandSpec`**; `[[help]]` is
+    DERIVED from it; windows RENDER it; `composeCommand` is the one sanitizing
+    composer (the grammar deliberately has no escape syntax, so compose strips
+    breakers; `literal` params ride in backticks). Cross-module value/meaning
+    connascence collapsed to single-locus name/type, compiler-visible.
+    (b) *config-family algorithm connascence, degree 4 (+3 sync sites)* — four
+    hand-rolled registries and a thrice-copied reload list (whose per-registry
+    test-reset convention caused a real leak bug the same day). Fix: generic
+    `ListConfigStore`/`MapConfigStore` + self-registering `ALL_CONFIG_STORES`
+    + `reloadAllConfigStores`/`resetAllConfigStores`.
+    (c) *game.ts god module (2954 lines)* — split into `command.ts` (the bus)
+    / `state.ts` (character model + every store) / `game.ts` (the verbs), with
+    `CommandRouter.beforeRoute(hook)` inverting the router→stores dependency
+    (the router dispatches; game decides what runs first). window.ts now
+    depends on command.ts only. **Null-findings recorded deliberately**:
+    data-only interfaces + free make*/describe* functions are CORRECT here
+    (everything round-trips as player-editable JSON; methods would force
+    hydration everywhere); live state stays keyed by normalized NAME not uuid
+    (NPCs have no record; revisit with renames/#10/#11); static-class
+    namespaces are fine in the single-scope build (instances only where
+    genericity pays); and the layered command-bus architecture STAYS — ECS and
+    event pub/sub were weighed and rejected (no perf need, single dispatcher,
+    host.ts already is the hexagonal port+adapter+mock).
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -904,15 +999,18 @@ Ordered roughly by unlock value:
     `char_<name>` path; then stage: "ready".
 11. **historyStorage migration** — move mechanical state (health, resources,
     boosts, extended actions, ledger) so story UNDO rewinds mechanics.
-12. **More wizard-windows.** The host UI infra now EXISTS: `api.v1.ui` contract +
-    off-host mock in `src/host.ts`, the window layer `src/window.ts`, and the
-    first window `[[win-constraint]]` (§7.17). Remaining: the `[[win-roll]]`
-    roll-builder window (spec + decisions - window not modal;
-    **difficulty-as-expression now DONE** in `RollSpec.difficultyExpr`; still to do
-    the **advisory** `self:`/`ally:`/`target:`/`opposition:` prefixes - in the
-    "Design notes" section of `docs/ui-parts.md`); migrating the
-    existing TEXT wizards (`RESOURCES_WIZARD`) to render as windows on the same
-    infra; and a template-definer window once the Choice primitive lands.
+12. **More wizard-windows.** The infra is now SPEC-DRIVEN (§7.20):
+    `openCommandWindow(verb)` renders any registered CommandSpec as a form and
+    submits through `composeCommand` — a static-shaped window costs a spec
+    that already exists. Remaining: the **condition-builder window** (specs +
+    DOMAIN-driven fields from `ConditionDef.bindings` — hand-built part tree,
+    same composeCommand submit); the `[[win-roll]]` roll-builder window
+    (window not modal; **difficulty-as-expression DONE** in
+    `RollSpec.difficultyExpr`; still to do the **advisory**
+    `self:`/`ally:`/`target:`/`opposition:` prefixes - in the "Design notes"
+    section of `docs/ui-parts.md`); migrating the TEXT wizards
+    (`RESOURCES_WIZARD`) to render as windows; and a template-definer window
+    once the Choice primitive lands.
 13. **Creation-budget wizard** (same engine).
 14. **Aliases + redefinable default character** — **DONE** (§7.18):
     `[[set-default]]` changes the default character; `@` aliases in three

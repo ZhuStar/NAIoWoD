@@ -13,7 +13,8 @@
 // script id; pasting plain TypeScript does not need it.)
 
 // Modules in dependency order: each references only names declared above it.
-// (host -> core -> rules -> services -> game -> index/init -> main/bootstrap.)
+// (host -> core -> rules -> command -> services -> state -> game ->
+//  window -> index/init -> main/bootstrap.)
 const MODULES = [
   "src/host.ts",
   "src/core/traits.ts",
@@ -22,7 +23,9 @@ const MODULES = [
   "src/wizard.ts",
   "src/rolls.ts",
   "src/rules.ts",
+  "src/command.ts",
   "src/services.ts",
+  "src/state.ts",
   "src/game.ts",
   "src/window.ts",
   "src/index.ts",
@@ -58,8 +61,9 @@ export async function buildSingleFile(): Promise<string> {
     "//",
     "// Paste this TypeScript into NovelAI's script editor as-is - no header needed.",
     "//",
-    "// Order: host -> core/traits -> core/dice -> core/damage -> rules ->",
-    "//        services -> game -> init (index.ts) -> bootstrap (main.ts)",
+    "// Order: host -> core/traits -> core/dice -> core/damage -> wizard ->",
+    "//        rolls -> rules -> command -> services -> state -> game ->",
+    "//        window -> init (index.ts) -> bootstrap (main.ts)",
   ].join("\n");
 
   const sections = [header];

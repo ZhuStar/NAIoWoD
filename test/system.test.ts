@@ -17,7 +17,10 @@ import {
   ExtendedRoll, applyInterval, ExtendedRollStore,
   readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry,
   compareRolls, applyContestRound, describeContest,
-  ExtendedContestStore, loadSuccessTablesFromLorebook, SUCCESS_TABLES_ENTRY,
+  ExtendedContestStore, SuccessTables, SUCCESS_TABLES_ENTRY,
+  reloadAllConfigStores, resetAllConfigStores, ALL_CONFIG_STORES,
+  describeCommandSpec, composeCommand, type CommandSpec,
+  CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS, CreatorMode,
   type SuccessTable, type ExtendedContest, type RollExecution,
   parseAliasToken, AliasRegistry, PlayerStore,
   ConditionRegistry, CharacterConditions, CONDITIONS_ENTRY,
@@ -28,7 +31,7 @@ import {
   openConstraintWindow, api, __resetUiMock, __uiWindows, __uiClickButton,
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
-  resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, RESOURCE_CONFIG_CATEGORY,
+  resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, CONFIG_CATEGORY,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -1755,7 +1758,7 @@ describe("wizard engine (wizard.ts)", () => {
 
 describe("resource overrides (the house-rule layer)", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset();
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
     await LorebookManager.bootstrap();
   });
 
@@ -1778,7 +1781,7 @@ describe("resource overrides (the house-rule layer)", () => {
 
     // The player hand-edits the entry (what creator mode allows).
     const edited = `notes\n=====\n${JSON.stringify({ willpower: { max: 6 } })}`;
-    await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, edited);
+    await LorebookManager.updateEntryText(CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, edited);
     await ResourceOverrides.loadFromLorebook();
     expect(ResourceOverrides.current().willpower.max).toBe(6);
   });
@@ -1786,7 +1789,7 @@ describe("resource overrides (the house-rule layer)", () => {
 
 describe("[[configure-resources]] wizard (text medium)", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset();
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
     await LorebookManager.bootstrap();
   });
   // Plain input goes through the adventure hook - that's the reply channel.
@@ -1857,7 +1860,7 @@ describe("[[configure-resources]] wizard (text medium)", () => {
 
 describe("effect grammar v3 (open ops, costs, limits, ledger)", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset();
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
     await LorebookManager.bootstrap();
     await CommandRouter.route('create-playable name="Odo" templates=mortal'); // Wits 1, Stamina 1, Brawl 0
     // A custom house-ruled resource exercising one grammar dimension per effect.
@@ -2101,7 +2104,7 @@ describe("extended contests (applyContestRound)", () => {
 });
 
 describe("table= reading on rolls", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); SuccessTableRegistry.reset(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("a roll hands its successes to a named table", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
@@ -2127,7 +2130,7 @@ describe("table= reading on rolls", () => {
 });
 
 describe("resisted & contested rolls (commands)", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); SuccessTableRegistry.reset(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("resist: the actor's margin over a named resister decides it", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
@@ -2192,7 +2195,7 @@ describe("extended contests (commands)", () => {
 });
 
 describe("success tables: lorebook overlay & [[tables]]", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); SuccessTableRegistry.reset(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("[[tables]] lists the built-ins; [[tables name]] lays one out", async () => {
     const list = await CommandRouter.route("tables");
@@ -2207,9 +2210,9 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
   test("a lorebook entry overlays new tables (array form), usable via table=", async () => {
     const tables = [{ name: "intimidate", rows: [{ at: 1, label: "Cowed" }, { at: 3, label: "Terrified" }] }];
     const text = `Success tables (JSON below the marker).\n=====\n${JSON.stringify(tables)}`;
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
     await LorebookManager.ensureEntry(id, SUCCESS_TABLES_ENTRY, text);
-    expect(await loadSuccessTablesFromLorebook()).toBe(1);
+    expect(await SuccessTables.loadFromLorebook()).toBe(1);
     expect(SuccessTableRegistry.get("intimidate")!.rows!.length).toBe(2);
 
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
@@ -2221,9 +2224,9 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
   test("the map form (name -> table) also registers, defaults are re-seeded", async () => {
     const map = { luck: { valuePerSuccess: 2, failure: "no luck" } };
     const text = `notes\n=====\n${JSON.stringify(map)}`;
-    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
     await LorebookManager.ensureEntry(id, SUCCESS_TABLES_ENTRY, text);
-    await loadSuccessTablesFromLorebook();
+    await SuccessTables.loadFromLorebook();
     expect(readSuccessTable(SuccessTableRegistry.get("luck")!, "success", 3).value).toBe(6);
     expect(SuccessTableRegistry.get("damage")).toBeDefined(); // built-ins survive the overlay
   });
@@ -2279,7 +2282,7 @@ describe("constraint groups (checkConstraints, pure)", () => {
 
 describe("constraint commands", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); ConstraintRegistry.reset(); MeritFlawRegistry.reset();
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); MeritFlawRegistry.reset();
     await LorebookManager.bootstrap();
   });
 
@@ -2331,7 +2334,7 @@ describe("constraint commands", () => {
 
 describe("constraint window ([[win-constraint]] emits define-constraint)", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); ConstraintRegistry.reset();
+    __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores();
     await LorebookManager.bootstrap();
   });
 
@@ -2343,11 +2346,11 @@ describe("constraint window ([[win-constraint]] emits define-constraint)", () =>
 
     // The real host binds storageKey <-> tempStorage; off-host we set the temp
     // fields directly, then fire the Create button the window rendered.
-    await api.v1.tempStorage.set("win:constraint:name", "vip-backgrounds");
-    await api.v1.tempStorage.set("win:constraint:relation", "exclusive");
-    await api.v1.tempStorage.set("win:constraint:domain", "background");
-    await api.v1.tempStorage.set("win:constraint:members", "status, anonymity");
-    await api.v1.tempStorage.set("win:constraint:max", "1");
+    await api.v1.tempStorage.set("win:define-constraint:name", "vip-backgrounds");
+    await api.v1.tempStorage.set("win:define-constraint:relation", "exclusive");
+    await api.v1.tempStorage.set("win:define-constraint:domain", "background");
+    await api.v1.tempStorage.set("win:define-constraint:members", "status, anonymity");
+    await api.v1.tempStorage.set("win:define-constraint:max", "1");
 
     expect(await __uiClickButton("Create")).toBe(true);
     // The emitted command ran through the same CommandRouter -> the group exists.
@@ -2363,8 +2366,22 @@ describe("constraint window ([[win-constraint]] emits define-constraint)", () =>
 
   test("openConstraintWindow can be called directly and seeds selector defaults", async () => {
     await openConstraintWindow();
-    expect(await api.v1.tempStorage.get("win:constraint:relation")).toBe("exclusive");
-    expect(await api.v1.tempStorage.get("win:constraint:domain")).toBe("background");
+    expect(await api.v1.tempStorage.get("win:define-constraint:relation")).toBe("exclusive");
+    expect(await api.v1.tempStorage.get("win:define-constraint:domain")).toBe("background");
+  });
+
+  test("the form is DERIVED from the spec: selector rows render the rules vocabularies", async () => {
+    await CommandRouter.route("win-constraint");
+    const texts: string[] = [];
+    const walk = (parts: Array<Record<string, unknown>>): void => {
+      for (const p of parts ?? []) {
+        if (p["type"] === "button" && typeof p["text"] === "string") texts.push(p["text"] as string);
+        if (Array.isArray(p["content"])) walk(p["content"] as Array<Record<string, unknown>>);
+      }
+    };
+    walk(__uiWindows()[0].options.content as unknown as Array<Record<string, unknown>>);
+    for (const r of CONSTRAINT_RELATIONS) expect(texts.some(t => t === r || t === `• ${r}`)).toBe(true);
+    for (const d of CONSTRAINT_DOMAINS) expect(texts.some(t => t === d || t === `• ${d}`)).toBe(true);
   });
 });
 
@@ -2602,7 +2619,7 @@ describe("conditions: defs + duration grammar (pure)", () => {
 });
 
 describe("conditions: registry overlay + define/forget commands", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset(); ConditionRegistry.reset(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("define-condition writes the overlay and round-trips the lorebook", async () => {
     const r = await CommandRouter.route('define-condition name="dazed" tags="off-hand" duration="1 scene" description=`Head ringing`');
@@ -2628,7 +2645,7 @@ describe("conditions: registry overlay + define/forget commands", () => {
 });
 
 describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs)", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset(); ConditionRegistry.reset(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("afflict validates bindings; @alias values resolve; conditions lists", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
@@ -2671,7 +2688,7 @@ describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs
 });
 
 describe("conditions: tags bite in rolls and contests", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset(); ConditionRegistry.reset(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("an active condition's registered tag changes the roll TODAY", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
@@ -2697,5 +2714,123 @@ describe("conditions: tags bite in rolls and contests", () => {
     const r = await CommandRouter.route('resist 3 3 vs="Erik"', { rng: seqRng([6, 6, 6, 6, 6, 6]) });
     expect(r).toContain("vs diff 6");
     expect(r).toContain("vs diff 7");
+  });
+});
+
+// =============================================================================
+// COMMAND SPECS - derived help + the one sanitizing composer
+// =============================================================================
+describe("command specs: derived help + composeCommand", () => {
+  test("describeCommandSpec renders required/optional/enum/int/hint forms + openNamed + note", () => {
+    const spec: CommandSpec = {
+      summary: "does the thing",
+      note: "a remark",
+      params: [
+        { key: "who", kind: "positional", required: true, hint: "<who>" },
+        { key: "extra", kind: "positional" },
+        { key: "mode", kind: "named", type: "enum", options: ["a", "b"], required: true },
+        { key: "count", kind: "named", type: "int" },
+        { key: "spend", kind: "named", hint: "res[::effect][!]" },
+        { key: "note", kind: "named" },
+      ],
+      openNamed: true,
+    };
+    expect(describeCommandSpec("do-thing", spec)).toBe(
+      'do-thing <who> [<extra>] mode=a|b [count=N] [spend=res[::effect][!]] [note=".."] [<key>=<value> ...]  (does the thing; a remark)');
+  });
+
+  test("[[help]] is DERIVED from the registered specs (one source of truth)", async () => {
+    expect(await CommandRouter.route("help define-condition")).toContain('duration="1 turn|until x|instant"');
+    expect(await CommandRouter.route("help define-constraint")).toContain("relation=exclusive|restricted|forbidden");
+    expect(await CommandRouter.route("help creator-mode")).toContain("set=true|false");
+    expect(await CommandRouter.route("help lift")).toContain("spend=res[::effect][!]");
+    expect(await CommandRouter.route("help afflict")).toContain("[<key>=<value> ...]");
+  });
+
+  test("composeCommand quotes, strips breakers, honors literals/defaults, omits empties, passes openNamed extras", () => {
+    const spec: CommandSpec = {
+      summary: "x",
+      openNamed: true,
+      params: [
+        { key: "cond", kind: "positional", required: true },
+        { key: "relation", kind: "named", default: "exclusive" },
+        { key: "members", kind: "named" },
+        { key: "label", kind: "named", type: "literal" },
+        { key: "empty", kind: "named" },
+      ],
+    };
+    const body = composeCommand("afflict-ish", {
+      cond: "feral whispers",
+      members: 'status, "anonymity"',
+      label: "Dig `out`",
+      empty: "   ",
+      target: "Grey Wolf",
+    }, spec);
+    expect(body).toBe('afflict-ish "feral whispers" relation=exclusive members="status, anonymity" label=`Dig out` target="Grey Wolf"');
+  });
+
+  test("compose -> parse round-trips through the real parser (values normalize; literals stay verbatim)", () => {
+    const spec: CommandSpec = { summary: "x", params: [
+      { key: "who", kind: "positional", required: true },
+      { key: "name", kind: "named", required: true },
+      { key: "note", kind: "named", type: "literal" },
+    ] };
+    const cmd = CommandParser.parse(composeCommand("afflict", { who: "Grey Wolf", name: "Feral Whispers", note: "Keep Verbatim" }, spec));
+    expect(cmd.name).toBe("afflict");
+    expect(cmd.positional[0]).toBe("grey-wolf");
+    expect(cmd.named["name"]).toBe("feral-whispers");
+    expect(cmd.named["note"]).toBe("Keep Verbatim");
+  });
+});
+
+// =============================================================================
+// CONFIG STORES - one self-registered list drives every sync point
+// =============================================================================
+describe("config stores: reload/reset-all", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("every store self-registered into ALL_CONFIG_STORES", () => {
+    expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
+      CONDITIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, SUCCESS_TABLES_ENTRY,
+    ].sort());
+  });
+
+  test("reloadAllConfigStores reloads every registry and reports per-entry counts", async () => {
+    await CommandRouter.route('define-condition name="dazed" tags="off-hand"');
+    await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status"');
+    resetAllConfigStores();
+    expect(ConditionRegistry.get("dazed")).toBeUndefined();
+    const counts = Object.fromEntries((await reloadAllConfigStores()).map(c => [c.entry, c.count]));
+    expect(counts[CONDITIONS_ENTRY]).toBe(1);
+    expect(counts[CONSTRAINTS_ENTRY]).toBe(1);
+    expect(counts[RESOURCE_CONFIG_ENTRY]).toBe(0);
+    expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);
+  });
+
+  test("resetAllConfigStores clears overlays AND restores the success-table defaults", async () => {
+    SuccessTableRegistry.register({ name: "degrees", failure: "X", rows: [] });   // shadow a shipped table
+    await CommandRouter.route('define-condition name="dazed"');
+    resetAllConfigStores();
+    expect(SuccessTableRegistry.get("degrees")!.rows!.length).toBe(5);            // shipped default resurfaces
+    expect(ConditionRegistry.get("dazed")).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// ROUTER HOOKS - the game-registered creator-mode sync runs before dispatch
+// =============================================================================
+describe("command router: beforeRoute hooks (creator-mode live sync)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("while creator mode is on, a hand-edited config entry is live for the very NEXT command", async () => {
+    await CommandRouter.route('define-condition name="dazed" description=`Old words`');
+    await CommandRouter.route("creator-mode set=true");
+    const entry = ["hand edit", "=====",
+      JSON.stringify([{ name: "dazed", description: "New words", tags: ["off-hand"] }])].join("\n");
+    await LorebookManager.updateEntryText(CONFIG_CATEGORY, CONDITIONS_ENTRY, entry);
+    expect(await CommandRouter.route("condition dazed")).toContain("New words");   // the hook re-loaded it
+    await CommandRouter.route("creator-mode set=false");
+    expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);            // off-path synced too
+    expect(await CreatorMode.enabled()).toBe(false);
   });
 });

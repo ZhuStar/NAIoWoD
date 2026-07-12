@@ -15,9 +15,11 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | `src/wizard.ts` | Medium-agnostic wizard engine (structured prompts; text renderer now, modals later). |
 | `src/rolls.ts` | Pure roll machinery: specs, pool expressions, tag modifiers, extended-roll state machine. |
 | `src/rules.ts` | The Dark Ages **data**: templates, resources + the effect grammar, roads, disciplines, merits, SRD seeds. |
-| `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser. |
-| `src/game.ts` | The live layer: characters & stores, effect interpreter, wizards, `[[…]]` commands. |
-| `src/window.ts` | `api.v1.ui` wizard-windows that **emit commands** (no second path); the first is `[[win-constraint]]`. |
+| `src/command.ts` | The command bus: parser, **CommandSpec** (each verb's declarative grammar — help text is derived from it, windows compose from it), `composeCommand`, and the hook-extensible router. |
+| `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser, and the **generic config stores** every `wod:config` registry instantiates. |
+| `src/state.ts` | The character model and every persistent store: playable characters, named/extended rolls, contests, players & aliases, config registries, live per-character state (resources, health, boosts, uses, conditions). |
+| `src/game.ts` | The verbs: effect interpreter, wizards, every `[[…]]` command handler + its spec registration. |
+| `src/window.ts` | `api.v1.ui` windows that **emit commands** (no second path) — forms are rendered *from the CommandSpec*; the first is `[[win-constraint]]`. |
 | `src/index.ts` | Re-exports everything + `init()` — the one entry point with side effects. |
 | `src/main.ts` | Runtime entry — boots the engine by calling `init()` (runs last in the built artifact). |
 | `scripts/build-single.ts` → `dist/naiowod.ts` | Concatenates `src/*` into one readable, editable TS file — **the deployment artifact** (see below). |
@@ -29,8 +31,8 @@ damage, soak, resource pools and morality. UI and game loop come later.
 
 NovelAI's runtime is a single, import-free context that injects a global
 `api`. That's a **deployment** constraint, not a source one: the code is
-ordinary ES modules with a strict layering (`core` → `rules` → `services` →
-`game` → `window`), and `bun run build` concatenates them **in dependency order** into one
+ordinary ES modules with a strict layering (`core` → `rules` → `command` →
+`services` → `state` → `game` → `window`), and `bun run build` concatenates them **in dependency order** into one
 readable, editable TypeScript file — `dist/naiowod.ts` — stripping the
 inter-module `import`/`export` wiring. It is **not** minified or bundled: every
 declaration keeps its original source, so the single file reads like the modules
@@ -643,9 +645,20 @@ domain button-rows; members, max, scope, note) with a **Create** button. Create
 does nothing special: it composes a `define-constraint …` string and routes it
 through the **same `CommandRouter`** every command uses. **A window is an
 abstraction over the command layer, not a second execution path** — anything a
-window can do, a typed command can do, and vice-versa. The host UI contract +
-off-host mock added here (`src/host.ts`, `src/window.ts`) are the shared
-foundation every future wizard-window renders on; the full UI reference lives in
+window can do, a typed command can do, and vice-versa.
+
+Since the architecture pass, the form itself is **derived, not hand-built**:
+every verb registers a `CommandSpec` (its parameters — kind, type, enum
+options, defaults, labels), and `openCommandWindow(verb)` renders that spec as
+a window (enums become button-rows, ints number inputs, the rest text inputs)
+and submits through `composeCommand` — the one place that quotes and sanitizes
+values (backtick literals for display text; characters that would break
+tokenization are stripped, since the command grammar deliberately has no escape
+syntax). `[[help]]` derives from the same specs, so a verb's grammar lives in
+exactly one place. Windows that need *domain*-driven fields (a condition def's
+binding slots) will build their part tree by hand and still submit through
+`composeCommand`. The host UI contract + off-host mock (`src/host.ts`,
+`src/window.ts`) are the shared foundation; the full UI reference lives in
 `docs/ui-*.md`.
 
 🚧 Next: allocation commands (attributes/abilities/…), multi-template

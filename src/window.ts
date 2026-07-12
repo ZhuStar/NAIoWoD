@@ -1,95 +1,107 @@
 // =============================================================================
 // WINDOWS - api.v1.ui forms that EMIT commands (no separate execution path)
 // -----------------------------------------------------------------------------
-// A wizard-window is just a UI over the command layer: it renders a form with
-// UI Parts, binds fields to tempStorage via storageKey, and on submit composes a
+// A wizard-window is a UI over the command layer: it renders a form with UI
+// Parts, binds fields to tempStorage via storageKey, and on submit composes a
 // [[command]] string and routes it through the SAME CommandRouter every other
-// command uses. So there is one path; the window is an abstraction over it.
+// command uses. The form itself is DERIVED from the verb's CommandSpec - the
+// window duplicates no grammar: enum params render as button rows (from the
+// spec's options, which reference the rules vocabularies), ints as number
+// inputs, everything else as text inputs; composeCommand does the one
+// sanitizing composition. Windows that need DOMAIN-driven fields (a condition
+// def's binding slots) will build their part tree by hand and still submit
+// through composeCommand - the spec covers the static shape (next pass).
 //
-// This first window builds a constraint group (it emits [[define-constraint]]).
-// A real NovelAI window can't render off-host, so the host mock records the part
-// tree and lets tests fire button callbacks (see host.ts __ui* helpers) - which
-// exercises the whole window -> command -> store path without a screen.
+// A real NovelAI window can't render off-host, so the host mock records the
+// part tree and lets tests fire button callbacks (see host.ts __ui* helpers) -
+// which exercises the whole window -> command -> store path without a screen.
 // =============================================================================
 import { api, UIPart, UiPartHelpers } from "./host";
-import { CommandRouter } from "./game";
+import { CommandRouter, CommandSpec, ParamSpec, composeCommand } from "./command";
 
-const CKEY = (k: string): string => `win:constraint:${k}`;
-const RELATIONS = ["exclusive", "restricted", "forbidden"];
-const DOMAINS = ["background", "merit", "flaw", "meritflaw", "any"];
+const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
-// A row of buttons behaving as a single-select: the current value is marked with
-// a bullet; clicking one writes it to tempStorage and re-renders.
-function selectorRow(part: UiPartHelpers, label: string, key: string, options: string[], current: string, rerender: () => Promise<void>): UIPart {
-  const buttons = options.map(o => part.button({
+// A row of buttons behaving as a single-select: the current value is marked
+// with a bullet; clicking one writes it to tempStorage and re-renders.
+function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: string, rerender: () => Promise<void>): UIPart {
+  const buttons = (p.options ?? []).map(o => part.button({
     text: o === current ? `• ${o}` : o,
-    callback: async () => { await api.v1.tempStorage.set(CKEY(key), o); await rerender(); },
+    callback: async () => { await api.v1.tempStorage.set(WKEY(verb, p.key), o); await rerender(); },
   }));
-  return part.row({ content: [part.text({ text: `${label}:` }), ...buttons] });
+  return part.row({ content: [part.text({ text: `${p.desc ?? p.key}:` }), ...buttons] });
 }
 
-// Read the form's tempStorage fields, compose a define-constraint command, route
-// it, and show the OOC reply in-window.
-async function submitConstraint(rerender: (result?: string) => Promise<void>): Promise<void> {
-  const get = async (k: string): Promise<string> => String((await api.v1.tempStorage.get(CKEY(k))) ?? "").trim();
-  const name = await get("name");
-  if (!name) { await rerender("Needs a name."); return; }
-  const parts = [
-    "define-constraint",
-    `name="${name}"`,
-    `relation=${(await get("relation")) || "exclusive"}`,
-    `domain=${(await get("domain")) || "background"}`,
-  ];
-  const members = await get("members"); if (members) parts.push(`members="${members}"`);
-  const max = await get("max"); if (max) parts.push(`max=${max}`);
-  const scope = await get("scope"); if (scope) parts.push(`scope="${scope}"`);
-  const note = await get("note"); if (note) parts.push(`note="${note}"`);
-  const reply = await CommandRouter.route(parts.join(" "));
+// Read the form's tempStorage fields, compose the command, route it, and show
+// the OOC reply in-window.
+async function submitCommand(verb: string, spec: CommandSpec, rerender: (result?: string) => Promise<void>): Promise<void> {
+  const values: Record<string, string> = {};
+  for (const p of spec.params ?? []) {
+    values[p.key] = String((await api.v1.tempStorage.get(WKEY(verb, p.key))) ?? "").trim();
+  }
+  const required = (spec.params ?? []).find(p => p.required && !values[p.key] && !p.default);
+  if (required) { await rerender(`Needs ${required.desc ?? required.key}.`); return; }
+  const reply = await CommandRouter.route(composeCommand(verb, values, spec));
   await rerender(reply);
 }
 
-// Open the constraint-group window and render its form.
-export async function openConstraintWindow(): Promise<void> {
+// Open a window whose form is the verb's CommandSpec. Returns whether a spec
+// existed to render.
+export async function openCommandWindow(verb: string, opts?: { title?: string; blurb?: string; submitLabel?: string }): Promise<boolean> {
+  const spec = CommandRouter.specFor(verb);
+  if (!spec) return false;
   const part = api.v1.ui.part;
   const temp = api.v1.tempStorage;
-  if ((await temp.get(CKEY("relation"))) == null) await temp.set(CKEY("relation"), "exclusive");
-  if ((await temp.get(CKEY("domain"))) == null) await temp.set(CKEY("domain"), "background");
 
-  const handle = await api.v1.ui.window.open({ title: "Define constraint group", content: [], defaultWidth: 480, defaultHeight: 600 });
+  // Pre-seed enum defaults so the selector rows show a selection immediately.
+  for (const p of spec.params ?? []) {
+    if (p.default !== undefined && (await temp.get(WKEY(verb, p.key))) == null) {
+      await temp.set(WKEY(verb, p.key), p.default);
+    }
+  }
+
+  const handle = await api.v1.ui.window.open({ title: opts?.title ?? `[[${verb}]]`, content: [], defaultWidth: 480, defaultHeight: 600 });
 
   const render = async (result?: string): Promise<void> => {
-    const relation = String((await temp.get(CKEY("relation"))) ?? "exclusive");
-    const domain = String((await temp.get(CKEY("domain"))) ?? "background");
-    const content: UIPart[] = [
-      part.text({ text: "**Define a constraint group** (exclusive / restricted / forbidden)", markdown: true }),
-      part.text({ text: "Name" }),
-      part.textInput({ storageKey: CKEY("name"), placeholder: "e.g. clan-only-backgrounds" }),
-      selectorRow(part, "Relation", "relation", RELATIONS, relation, () => render()),
-      selectorRow(part, "Domain", "domain", DOMAINS, domain, () => render()),
-      part.text({ text: "Members (comma-separated Backgrounds or Merits/Flaws)" }),
-      part.textInput({ storageKey: CKEY("members"), placeholder: "e.g. status, anonymity" }),
-      part.text({ text: "Max to hold (exclusive only; default 1)" }),
-      part.numberInput({ storageKey: CKEY("max") }),
-      part.text({ text: "Scope: templates/choices it applies to (comma-separated; empty = everyone)" }),
-      part.textInput({ storageKey: CKEY("scope"), placeholder: "e.g. tzimisce" }),
-      part.text({ text: "Note (optional)" }),
-      part.textInput({ storageKey: CKEY("note") }),
-      part.row({ content: [
-        part.button({ text: "Create", callback: () => submitConstraint(render) }),
-        part.button({ text: "Close", callback: () => handle.close() }),
-      ] }),
-    ];
+    const content: UIPart[] = [];
+    if (opts?.blurb) content.push(part.text({ text: opts.blurb, markdown: true }));
+    for (const p of spec.params ?? []) {
+      if (p.type === "enum" && p.options?.length) {
+        const current = String((await temp.get(WKEY(verb, p.key))) ?? p.default ?? "");
+        content.push(selectorRow(part, verb, p, current, () => render()));
+      } else if (p.type === "int") {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.numberInput({ storageKey: WKEY(verb, p.key) }));
+      } else {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.textInput({ storageKey: WKEY(verb, p.key), placeholder: p.example }));
+      }
+    }
+    content.push(part.row({ content: [
+      part.button({ text: opts?.submitLabel ?? "Create", callback: () => submitCommand(verb, spec, render) }),
+      part.button({ text: "Close", callback: () => handle.close() }),
+    ] }));
     if (result) content.push(part.box({ content: [part.text({ text: result })] }));
     await handle.update({ content });
   };
 
   await render();
+  return true;
 }
 
-// [[win-constraint]] - a UI over [[define-constraint]].
+// The constraint-group window: [[define-constraint]]'s spec rendered as a form.
+export async function openConstraintWindow(): Promise<void> {
+  await openCommandWindow("define-constraint", {
+    title: "Define constraint group",
+    blurb: "**Define a constraint group** (exclusive / restricted / forbidden)",
+  });
+}
+
+// [[win-constraint]] - a UI over [[define-constraint]], derived from its spec.
 async function cmdWinConstraint(): Promise<string> {
   await openConstraintWindow();
   return `((OOC-Storyteller: Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).))`;
 }
 
-CommandRouter.register("win-constraint", cmdWinConstraint, "win-constraint (open a window to define a constraint group)");
+CommandRouter.register("win-constraint", cmdWinConstraint, {
+  summary: "open a window to define a constraint group",
+});

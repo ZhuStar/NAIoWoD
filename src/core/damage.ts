@@ -233,14 +233,14 @@ export type HealPolicy = "normal" | "never" | "special";
 export interface HealthSquareDef {
   penalty: number;
   name?: string;
-  condition?: string;   // key linking this box to a ConditionDef
+  condition?: string;   // key linking this box to a HealthConditionDef
   heal?: HealPolicy;    // default "normal"
   healCost?: number;    // healing points to clear this box (default 1)
 }
 
 // A condition wired to one or more boxes; its state depends on how many of its
 // linked boxes are currently damaged.
-export interface ConditionDef {
+export interface HealthConditionDef {
   key: string;
   name?: string;
   // Given how many linked boxes are damaged (and how many exist), return the
@@ -250,17 +250,17 @@ export interface ConditionDef {
 
 export interface HealthTrackConfig {
   squares: HealthSquareDef[];
-  conditions?: ConditionDef[];
+  conditions?: HealthConditionDef[];
 }
 
-export interface ConditionState { key: string; name: string; state: string; damaged: number; total: number; }
+export interface HealthConditionState { key: string; name: string; state: string; damaged: number; total: number; }
 
 export interface HealthSummary {
   bashing: number; lethal: number; aggravated: number;
   filled: number; capacity: number; overkill: number;
   penalty: number; level: string;
   isIncapacitated: boolean; isDead: boolean;
-  conditions: ConditionState[];
+  conditions: HealthConditionState[];
 }
 
 // Damage is stored PER BOX, so boxes can carry conditions, heal costs, or be
@@ -269,7 +269,7 @@ export interface HealthSummary {
 export class HealthTrack {
   private readonly _defs: HealthSquareDef[];
   private readonly _damage: (Severity | null)[];
-  private readonly _conditions: ConditionDef[];
+  private readonly _conditions: HealthConditionDef[];
   private _overkill = 0; // damage that spills past a fully-aggravated track
   private readonly _log: Array<{ severity: SeverityName; intensity: number }> = [];
 
@@ -365,8 +365,8 @@ export class HealthTrack {
   Reset(): void { for (let i = 0; i < this._damage.length; i++) this._damage[i] = null; this._overkill = 0; }
 
   // Current state of every active condition wired to the track.
-  Conditions(): ConditionState[] {
-    const out: ConditionState[] = [];
+  Conditions(): HealthConditionState[] {
+    const out: HealthConditionState[] = [];
     for (const c of this._conditions) {
       let damaged = 0, total = 0;
       for (let i = 0; i < this._defs.length; i++) {

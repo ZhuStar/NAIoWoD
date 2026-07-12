@@ -20,6 +20,9 @@ import {
   ExtendedContestStore, loadSuccessTablesFromLorebook, SUCCESS_TABLES_ENTRY,
   type SuccessTable, type ExtendedContest, type RollExecution,
   parseAliasToken, AliasRegistry, PlayerStore,
+  ConditionRegistry, CharacterConditions, CONDITIONS_ENTRY,
+  makeConditionDef, describeConditionDef, parseConditionDuration, describeDuration,
+  type ConditionDef, type ActiveCondition,
   makeConstraintGroup, describeConstraint, checkConstraints, ConstraintRegistry, CONSTRAINTS_ENTRY,
   type ConstraintGroup, type ConstraintRelation, type ConstraintDomain, type OwnedTraits,
   openConstraintWindow, api, __resetUiMock, __uiWindows, __uiClickButton,
@@ -2567,5 +2570,132 @@ describe("alias & player commands (e2e)", () => {
     expect(spent).toContain("Erik The Red");   // reply shows Title Case
     const q = await CommandRouter.route('roll 3 spend="blood :: heal"');
     expect(q).toContain("use [[spend");        // "blood :: heal" -> blood:heal (a standalone heal refuses in-roll)
+  });
+});
+
+// =============================================================================
+// CONDITIONS - parameterized states (bindings, chains, mirrors, live tags)
+// =============================================================================
+describe("conditions: defs + duration grammar (pure)", () => {
+  test("parseConditionDuration reads the mini-grammar", () => {
+    expect(parseConditionDuration("1 turn")).toEqual({ kind: "st", n: 1, unit: "turn" });
+    expect(parseConditionDuration("2 scenes")).toEqual({ kind: "st", n: 2, unit: "scene" });
+    expect(parseConditionDuration("until eye-contact-breaks")).toEqual({ kind: "until", until: "eye-contact-breaks" });
+    expect(parseConditionDuration("instant")).toEqual({ kind: "instant" });
+    expect(parseConditionDuration("whenever")).toBeUndefined();
+    expect(describeDuration({ kind: "st", n: 1, unit: "turn" })).toBe("1 turn");
+  });
+
+  test("makeConditionDef normalizes; describeConditionDef lays it out", () => {
+    const d = makeConditionDef({ name: " Feral  Whispers ", bindings: ["Target"], then: "Next Thing", tags: ["Off Hand"] });
+    expect(d.name).toBe("feral-whispers");
+    expect(d.bindings).toEqual(["target"]);
+    expect(d.then).toBe("next-thing");
+    expect(d.tags).toEqual(["off-hand"]);
+    expect(describeConditionDef(d)).toContain("needs target");
+  });
+
+  test("the Feral Speech pair ships as defaults", () => {
+    expect(ConditionRegistry.get("concentrating-on")!.then).toBe("feral-whispers");
+    expect(ConditionRegistry.get("feral-whispers")!.mirror).toBe("feral-whispers");
+  });
+});
+
+describe("conditions: registry overlay + define/forget commands", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset(); ConditionRegistry.reset(); await LorebookManager.bootstrap(); });
+
+  test("define-condition writes the overlay and round-trips the lorebook", async () => {
+    const r = await CommandRouter.route('define-condition name="dazed" tags="off-hand" duration="1 scene" description=`Head ringing`');
+    expect(r).toContain("Defined condition dazed");
+    ConditionRegistry.reset();
+    expect(ConditionRegistry.get("dazed")).toBeUndefined();
+    expect(await ConditionRegistry.loadFromLorebook()).toBe(1);
+    expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);
+    expect(ConditionRegistry.get("dazed")!.description).toBe("Head ringing");
+  });
+
+  test("an overlay def can shadow a built-in; forgetting resurfaces it", async () => {
+    await CommandRouter.route('define-condition name="feral-whispers" duration="2 scenes"');
+    expect(describeDuration(ConditionRegistry.get("feral-whispers")!.duration)).toBe("2 scenes");
+    expect(await CommandRouter.route("forget-condition feral-whispers")).toContain("resurfaces");
+    expect(ConditionRegistry.get("feral-whispers")!.mirror).toBe("feral-whispers"); // the shipped def again
+    expect(await CommandRouter.route("forget-condition feral-whispers")).toContain("built-in");
+  });
+
+  test("bad duration is refused with the grammar", async () => {
+    expect(await CommandRouter.route('define-condition name="x" duration="sometimes"')).toContain("Can't read duration");
+  });
+});
+
+describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset(); ConditionRegistry.reset(); await LorebookManager.bootstrap(); });
+
+  test("afflict validates bindings; @alias values resolve; conditions lists", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    expect(await CommandRouter.route("afflict concentrating-on")).toContain("needs target=");
+    await CommandRouter.route('alias @prey "Grey Wolf"');            // the wolf is an NPC - no sheet
+    const r = await CommandRouter.route("afflict concentrating-on target=@prey");
+    expect(r).toContain("Kvar is now concentrating-on (target: Grey Wolf)");
+    expect(r).toContain("1 turn (ST-enforced)");
+    expect(await CommandRouter.route("conditions")).toContain("concentrating-on (target: Grey Wolf)");
+  });
+
+  test("advance carries bindings into the successor and fires its mirror on the NPC", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('afflict concentrating-on target="Grey Wolf"');
+    const adv = await CommandRouter.route("advance concentrating-on");
+    expect(adv).toContain("concentrating-on ends");
+    expect(adv).toContain("Kvar is now feral-whispers (target: Grey Wolf)");
+    expect(adv).toContain("Grey Wolf is now feral-whispers (target: Kvar)"); // the mirror, on a sheetless NPC
+    expect(await CommandRouter.route('conditions "Grey Wolf"')).toContain("feral-whispers (target: Kvar)");
+  });
+
+  test("lift removes both sides of a mirrored condition; spend= is the shrug-off", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('afflict feral-whispers target="Grey Wolf"');
+    await CommandRouter.route("gain willpower 2");
+    const lifted = await CommandRouter.route("lift feral-whispers spend=willpower");
+    expect(lifted).toContain("shakes off feral-whispers");
+    expect(lifted).toContain("spent 1 willpower");
+    expect(lifted).toContain("feral-whispers lifted from Grey Wolf");
+    expect(await CommandRouter.route("conditions")).toContain("no conditions");
+    expect(await CommandRouter.route('conditions "Grey Wolf"')).toContain("no conditions");
+  });
+
+  test("advance with no successor and lifting an absent condition report cleanly", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('afflict feral-whispers target="Grey Wolf"');
+    expect(await CommandRouter.route("advance feral-whispers")).toContain("no successor");
+    expect(await CommandRouter.route("lift concentrating-on")).toContain("does not have");
+  });
+});
+
+describe("conditions: tags bite in rolls and contests", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); ResourceOverrides.reset(); ConditionRegistry.reset(); await LorebookManager.bootstrap(); });
+
+  test("an active condition's registered tag changes the roll TODAY", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    // off-hand is a shipped RollModifier: +1 difficulty.
+    await CommandRouter.route('define-condition name="dazed" tags="off-hand"');
+    const before = await CommandRouter.route("roll 3", { rng: seqRng([6, 6, 6]) });
+    expect(before).toContain("vs diff 6");
+    await CommandRouter.route("afflict dazed");
+    const after = await CommandRouter.route("roll 3", { rng: seqRng([6, 6, 6]) });
+    expect(after).toContain("vs diff 7");
+    await CommandRouter.route("lift dazed");
+    const healed = await CommandRouter.route("roll 3", { rng: seqRng([6, 6, 6]) });
+    expect(healed).toContain("vs diff 6");
+  });
+
+  test("contest sides carry their conditions too", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Rok"');
+    await CommandRouter.route('define-condition name="dazed" tags="off-hand"');
+    await CommandRouter.route('afflict dazed on="Erik"');
+    // Erik's side (named opponent) rolls at +1 difficulty; Rok's stays at 6.
+    const r = await CommandRouter.route('resist 3 3 vs="Erik"', { rng: seqRng([6, 6, 6, 6, 6, 6]) });
+    expect(r).toContain("vs diff 6");
+    expect(r).toContain("vs diff 7");
   });
 });

@@ -598,6 +598,44 @@ entry), stored and surfaced now, enforced at creation later.
   the creation engine consumes them). **`[[forget-constraint <name>]]`** removes
   one; defining an existing name replaces it.
 
+### Conditions — parameterized states, not flat flags
+
+A **condition** can need **bindings** (a target), can **chain** into a successor,
+can **mirror** onto the bound target, and can grant **tags** that join the
+afflicted character's rolls — so registered `RollModifier`s fire *today*.
+Durations are advisory (ST-enforced) until the turn system; `[[advance]]` is the
+manual chain trigger. Definitions are data: shipped defaults overlaid by a
+`wod:config:conditions` lorebook entry (`[[define-condition]]` writes it).
+
+The shipped exemplar is Animalism's **Feral Speech**: lock eyes for a turn, then
+converse in the animal's tongue — and the animal (an NPC with no sheet) is in
+the conversation too:
+
+```
+[[alias @prey "Grey Wolf"]]
+[[afflict concentrating-on target=@prey]]   # Kvar: concentrating-on (target: Grey Wolf) - 1 turn
+[[advance concentrating-on]]                # -> Kvar: feral-whispers (target: Grey Wolf)
+                                            #    Grey Wolf: feral-whispers (target: Kvar)   (the mirror)
+[[conditions "Grey Wolf"]]                  # NPCs carry conditions - no sheet needed
+[[lift feral-whispers spend=willpower]]     # the shrug-off; the mirror lifts too
+```
+
+- **`define-condition name=".." [bindings="target"] [duration="1 turn|until x|instant"]
+  [then=".."] [mirror=".."] [tags="a,b"]`** — an overlay definition may *shadow*
+  a built-in (forgetting it resurfaces the built-in).
+- **`afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias>]`** — validates
+  the def's binding slots (values resolve `@aliases`); `mirror` defs also afflict
+  the bound target, bound back the other way.
+- **`advance <condition>`** — ends it and begins `then`, carrying bindings
+  forward (the successor's mirror fires — that's how the wolf joins the
+  conversation). **`lift <condition> [spend=…]`** removes it *and its mirror*;
+  the spend is the classic pay-Willpower-to-shake-it-off.
+- **`conditions [<name|@alias>]`** lists anyone's active conditions;
+  **`condition [name]`** lists/inspects definitions.
+- A def's **tags** merge into every roll (and contest side) the afflicted
+  character makes — e.g. a house-ruled `dazed` condition with tag `off-hand`
+  is a real +1 difficulty right now.
+
 ### Windows are just command emitters
 
 `[[win-constraint]]` opens an **`api.v1.ui` window** — a form (name; relation and

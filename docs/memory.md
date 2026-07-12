@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `fb19ec1`** ("Character aliases
-> in three scopes + engine-wide boundary normalization").
+> **Last synced with the code as of commit `bbe2ac7`** ("Conditions:
+> parameterized character states — bindings, chains, mirrors, live tags").
 
 ---
 
@@ -192,7 +192,7 @@ were created).
   `SilverVulnerability` (silver/fire → aggravated AND unsoakable),
   `ArmorReaction` (rating eats intensity for covered kinds).
 - **Square-based `HealthTrack`**: per-square `HealthSquareDef {name, penalty,
-  heal: "normal"|"never"|"special", healCost, condition?}`, `ConditionDef`
+  heal: "normal"|"never"|"special", healCost, condition?}`, `HealthConditionDef`
   (state label from damaged/total linked boxes — e.g. poison), wrap-around
   upgrade (bashing past capacity upgrades existing), `Overkill`, `Penalty`
   (deepest filled square, values are NEGATIVE: -1, -2, -5), `Level`,
@@ -287,7 +287,7 @@ were created).
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (729) — all game DATA
+### src/rules.ts (823) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
@@ -378,6 +378,18 @@ were created).
   **restricted** owns a member OUTSIDE its reserved scope (empty scope =
   universal). Both senses of "exclusive" covered (mutual-exclusion vs reserved
   access). Enforced at creation later; surfaced now via `[[check-constraints]]`.
+- **Conditions (pure data)**: `ConditionDef {name, description?, bindings?[]
+  (required slots like "target"), duration?: EffectDuration (advisory), then?
+  (successor for [[advance]]), mirror? (condition the bound target gains, bound
+  back), tags? (join the afflicted character's rolls), note?}` +
+  `makeConditionDef` (normalize), `describeConditionDef`,
+  `parseConditionDuration("1 turn"|"2 scenes"|"until x"|"instant")` →
+  EffectDuration, `describeDuration`. `DEFAULT_CONDITIONS` = the **Feral
+  Speech** exemplar: `concentrating-on {target, 1 turn, then feral-whispers}`
+  and `feral-whispers {target, 1 scene, mirror feral-whispers}`. (Health-box
+  conditions are the separate `HealthConditionDef` in core/damage.ts —
+  RENAMED from ConditionDef to free the name; single-scope build forbids
+  duplicates.)
 
 ### src/services.ts (261)
 - `ScopedStorage(prefix = api.v1.script.id)` — story-scoped KV where every key
@@ -398,7 +410,7 @@ were created).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/game.ts (2613) — the live layer
+### src/game.ts (2954) — the live layer
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -488,6 +500,34 @@ ResourceOverrides). Same config family as overrides.
 /`all`/`get`/`reset`/`put(group)` (add-or-replace by name)/`remove(name)`. Loaded
 at init + both creator-sync points. `ownedTraitsOf(char)` (backgrounds/merit/flaw
 keys, merit-vs-flaw via MeritFlawRegistry, templates) feeds `checkConstraints`.
+
+**Conditions (live)**: `ConditionRegistry` — config family with SHIPPED
+defaults (`DEFAULT_CONDITIONS`); lorebook `wod:config` /
+`wod:config:conditions` (`CONDITIONS_ENTRY`), JSON array of `ConditionDef` (or
+`name → def` map); overlay cache SHADOWS same-named defaults;
+`loadFromLorebook` (init + both creator-sync points + creator-mode-off)
+/`get`/`all` (overlay first, unshadowed defaults after)/`save`/`put`/
+`remove` (overlay only — shipped defs resurface, `forget-condition` says so)
+/`reset`. **`CharacterConditions`** — storyStorage `cond:<name>` →
+`ActiveCondition[]` where `ActiveCondition {def, bindings: {slot→normalized
+name}, note?}`; keyed by NORMALIZED NAME, character record NOT required (an
+NPC animal can carry a mirror); `list/afflict (replaces an instance of the
+same def)/lift (returns the removed instance)/clear/tags` (union of active
+defs' tags). **Tags bite** via `withConditionTags(name, spec)` — merges
+condition tags into the RollSpec (deduped) in `rollAndReport`, `cmdVersus`
+(my side), and `execContestSide` (named sides), so registered RollModifiers
+fire on every roll the afflicted character makes. Helpers:
+`resolveBindingValue` (binding values resolve `@aliases` via
+`resolveCharacterRef`, else normalize — NPC strings fine), `conditionSubject`
+(`on=` else current character), `conditionLine`, `applyCondition` (validates
+required bindings BEFORE any write; fires `def.mirror` onto
+`bindings.target` bound back `{target: subject}` + note "(mirror)"),
+`removeCondition` (lift + lift the mirror from the bound target).
+`cmdAdvance` = the manual chain trigger (turn system will automate): removes
+the instance, applies `def.then` CARRYING BINDINGS FORWARD (successor's
+mirror fires). `cmdLift` `spend=` = the Willpower shrug-off via `applySpend`
+(requires a sheet; NPCs can be lifted but not spend). Durations render via
+`describeDuration` + "(ST-enforced)".
 
 **Resource overrides (house-rule layer)**: `ResourceOverrides` — lorebook
 `wod:config` / `wod:config:resources`, JSON map `name → Partial<ResourceDef>`
@@ -592,6 +632,15 @@ domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
 `check-constraints` · `win-constraint` (opens the constraint window - registered
 in `src/window.ts`, emits `define-constraint`) ·
+`define-condition name=".." [bindings="target"] [duration="1 turn|until x|
+instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."]
+[note=".."]` · `condition [name]` (list defs, or one in full) ·
+`forget-condition <name>` (overlay only; built-ins resurface) ·
+`afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias> …]` (mirror defs
+also afflict the bound target) · `advance <condition> [on=..]` (end it, begin
+its `then` successor, bindings carried forward) · `lift <condition> [on=..]
+[spend=res[::effect][!]]` (removes it AND its mirror; spend = shrug-off) ·
+`conditions [<name|@alias>]` (active list; NPCs work too) ·
 `alias <@token> "Target"` (bare @a = global; `@global::a`,
 `@player::<id|storyteller|default>::a`, `@char::<name|default>::a` pin a scope) ·
 `aliases` · `forget-alias <@token>` · `player [name="…"] [default=true]`
@@ -640,7 +689,8 @@ preserved). `index.ts` `export * from "./window"` runs that registration.
 
 ### src/index.ts / src/main.ts
 Re-export everything (incl. `./window`) + `init()` (now also
-`ConstraintRegistry.loadFromLorebook()`); main calls `init().catch`.
+`ConstraintRegistry.loadFromLorebook()` + `ConditionRegistry.loadFromLorebook()`);
+main calls `init().catch`.
 
 ### scripts/build-single.ts (86)
 `MODULES` order (= layering), `stripModule` regexes (whole-line re-exports,
@@ -648,7 +698,7 @@ import statements, leading `export `), `buildSingleFile()` + `OUTPUT_PATH`
 (exported for the sync test), guardrails (starts with `//`, NOT `/*---`, no
 import/export lines survive).
 
-### test/ (2571 + 20 lines, 250 tests, 68 describes)
+### test/ (2701 + 20 lines, 262 tests, 73 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -668,7 +718,8 @@ pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
 `current-extended` pointer · `xcontest:<id>` extended contests ·
 `current-contest` pointer · `res:<char>` resource currents · `hp:<char>`
 health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
-· `wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
+· **`cond:<name>`** active conditions (keyed by normalized name — NPCs
+without records carry them too) · `wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
 **`current-player`** / **`default-player`** pointers (default "storyteller") ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
 (session-scoped, cleared on close): `win:constraint:*` (the constraint window's
@@ -681,7 +732,9 @@ live form fields - the documented home for UI storageKey state).
 (`wod:named-rolls:library` JSON map) · `wod:config`
 (`wod:config:resources` overrides map; `wod:config:success-tables` optional
 success-table overlay — array or `name → table` map; `wod:config:constraints`
-constraint groups — array of `ConstraintGroup` or `name → group` map).
+constraint groups — array of `ConstraintGroup` or `name → group` map;
+`wod:config:conditions` condition-def overlay — array of `ConditionDef` or
+`name → def` map, shadows shipped defaults by name).
 
 ## 7. Design decisions and their WHY (chronological-ish)
 
@@ -778,6 +831,24 @@ constraint groups — array of `ConstraintGroup` or `name → group` map).
     `@` sigil: pool slot = saved roll, character slot = alias. `PlayerStore`
     (current/default player, default "storyteller") is the engine's first
     player-identity concept.
+19. **Conditions are parameterized states, not flat flags** (the user's Feral
+    Speech analysis): a condition can need a **target** ("concentrating-on
+    *the squirrel*"), can **chain** into a successor (`then` — concentrating-on
+    lasts 1 turn, then feral-whispers begins; `[[advance]]` is the manual
+    trigger until the turn system), and involves the OTHER party too. Two
+    decisions via questions: **mirror automatically** (a def may declare
+    `mirror="<condition>"`; afflicting the subject also afflicts
+    `bindings.target` — sheet or not — with the mirror bound back; lifting
+    lifts both) and **tags bite now** (a def's `tags[]` auto-join every roll
+    the afflicted character makes, firing existing `RollModifierRegistry`
+    modifiers — ZERO new modifier machinery; unregistered tags surface as the
+    usual unknown-tag note). Durations reuse `EffectDuration`, advisory
+    "(ST-enforced)" per §7.12. Binding values resolve `@aliases`; instances
+    live under normalized names so sheetless NPCs participate. `lift spend=`
+    is the Willpower shrug-off (roadmap #3's wish, via `applySpend`).
+    Naming: damage.ts's health-box states were RENAMED
+    `HealthConditionDef`/`HealthConditionState` to free `ConditionDef` for the
+    central concept (single-scope dist build forbids duplicate globals).
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -794,11 +865,14 @@ Ordered roughly by unlock value:
    number directly); **per-round spends** inside contests (single `resist`/
    `contest` already allow the actor to `spend=`); and folding table readings
    into the LiveCharacter soak/damage pipeline once records go "ready".
-3. **Conditions on live characters** — attach ConditionDef-style states to
-   PlayableCharacters; then the `suspend` op executes (broad "all mental
-   disciplines" AND narrow "effect of Majesty" — granular configuration), and
-   **Willpower-to-shrug-off** (spend to cancel or suspend a condition,
-   typically for one turn).
+3. **Conditions on live characters** — largely **SHIPPED** (§7.19):
+   `ConditionDef` + registry + `afflict`/`advance`/`lift`/`conditions`,
+   bindings, `then` chains, mirrors, tags-bite-in-rolls, and the
+   Willpower shrug-off (`lift spend=willpower`). Left: the `suspend` op
+   executing against active conditions (broad "all mental disciplines" AND
+   narrow "effect of Majesty" — granular configuration), duration
+   enforcement + auto-`advance` (turn system, #1), and the
+   condition-builder window (#12 — this command set is its substrate).
 4. **Targeting others** — healing others (with "others must be X" —
    `targetMustBe` field already stored), enemy-resistance effects (`resist`
    op); `roll-for` and now the `resist`/`contest` two-side machinery are the

@@ -932,14 +932,14 @@ type HealPolicy = "normal" | "never" | "special";
 interface HealthSquareDef {
   penalty: number;
   name?: string;
-  condition?: string;   // key linking this box to a ConditionDef
+  condition?: string;   // key linking this box to a HealthConditionDef
   heal?: HealPolicy;    // default "normal"
   healCost?: number;    // healing points to clear this box (default 1)
 }
 
 // A condition wired to one or more boxes; its state depends on how many of its
 // linked boxes are currently damaged.
-interface ConditionDef {
+interface HealthConditionDef {
   key: string;
   name?: string;
   // Given how many linked boxes are damaged (and how many exist), return the
@@ -949,17 +949,17 @@ interface ConditionDef {
 
 interface HealthTrackConfig {
   squares: HealthSquareDef[];
-  conditions?: ConditionDef[];
+  conditions?: HealthConditionDef[];
 }
 
-interface ConditionState { key: string; name: string; state: string; damaged: number; total: number; }
+interface HealthConditionState { key: string; name: string; state: string; damaged: number; total: number; }
 
 interface HealthSummary {
   bashing: number; lethal: number; aggravated: number;
   filled: number; capacity: number; overkill: number;
   penalty: number; level: string;
   isIncapacitated: boolean; isDead: boolean;
-  conditions: ConditionState[];
+  conditions: HealthConditionState[];
 }
 
 // Damage is stored PER BOX, so boxes can carry conditions, heal costs, or be
@@ -968,7 +968,7 @@ interface HealthSummary {
 class HealthTrack {
   private readonly _defs: HealthSquareDef[];
   private readonly _damage: (Severity | null)[];
-  private readonly _conditions: ConditionDef[];
+  private readonly _conditions: HealthConditionDef[];
   private _overkill = 0; // damage that spills past a fully-aggravated track
   private readonly _log: Array<{ severity: SeverityName; intensity: number }> = [];
 
@@ -1064,8 +1064,8 @@ class HealthTrack {
   Reset(): void { for (let i = 0; i < this._damage.length; i++) this._damage[i] = null; this._overkill = 0; }
 
   // Current state of every active condition wired to the track.
-  Conditions(): ConditionState[] {
-    const out: ConditionState[] = [];
+  Conditions(): HealthConditionState[] {
+    const out: HealthConditionState[] = [];
     for (const c of this._conditions) {
       let damaged = 0, total = 0;
       for (let i = 0; i < this._defs.length; i++) {
@@ -2408,6 +2408,100 @@ function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits): Constr
   return violations;
 }
 
+// =============================================================================
+// CONDITIONS - parameterized character states (bindings, chains, mirrors, tags)
+// -----------------------------------------------------------------------------
+// A condition is not a flat video-game flag: it may need BINDINGS (Feral
+// Speech's "concentrating-on" needs the animal: target=wolf), may CHAIN into a
+// successor when it ends (`then` - concentrating-on lasts a turn, then
+// feral-whispers begins, carrying the bindings forward), may MIRROR onto the
+// bound target (the animal is in the conversation too - even an NPC with no
+// sheet), and may grant TAGS that join the afflicted character's rolls (firing
+// registered RollModifiers - conditions bite mechanically today). Durations
+// reuse the effect grammar's EffectDuration and stay advisory (ST-enforced)
+// until the turn system; [[advance]] is the manual chain trigger.
+// (Health-box conditions - Crippled etc. - are the separate HealthConditionDef
+// in core/damage.ts.)
+// =============================================================================
+interface ConditionDef {
+  name: string;                 // normalized id
+  description?: string;
+  bindings?: string[];          // required slot names, e.g. ["target"]
+  duration?: EffectDuration;    // advisory until the turn system
+  then?: string;                // successor condition ([[advance]] applies it)
+  mirror?: string;              // condition auto-afflicted on bindings.target, bound back
+  tags?: string[];              // tags granted while active
+  note?: string;
+}
+
+// Normalize a definition: name/bindings/then/mirror/tags through normalize;
+// empty optionals dropped.
+function makeConditionDef(parts: Partial<ConditionDef> & { name: string }): ConditionDef {
+  const def: ConditionDef = { name: StringUtil.normalize(parts.name) };
+  if (parts.description && parts.description.trim()) def.description = parts.description.trim();
+  const bindings = (parts.bindings ?? []).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
+  if (bindings.length) def.bindings = bindings;
+  if (parts.duration) def.duration = parts.duration;
+  if (parts.then && parts.then.trim()) def.then = StringUtil.normalize(parts.then);
+  if (parts.mirror && parts.mirror.trim()) def.mirror = StringUtil.normalize(parts.mirror);
+  const tags = (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  if (tags.length) def.tags = tags;
+  if (parts.note && parts.note.trim()) def.note = parts.note.trim();
+  return def;
+}
+
+// "1 turn" / "2 scenes" / "until eye-contact-breaks" / "instant" -> the effect
+// grammar's duration. Unparseable -> undefined (the def simply has no duration).
+function parseConditionDuration(raw: string | undefined): EffectDuration | undefined {
+  if (!raw) return undefined;
+  const t = StringUtil.normalize(raw);
+  if (t === "instant") return { kind: "instant" };
+  const until = t.match(/^until-(.+)$/);
+  if (until) return { kind: "until", until: until[1] };
+  const timed = t.match(/^(\d+)-(.+?)s?$/);
+  if (timed) return { kind: "st", n: parseInt(timed[1], 10), unit: timed[2] };
+  return undefined;
+}
+
+function describeDuration(d: EffectDuration | undefined): string {
+  if (!d) return "";
+  if (d.kind === "instant") return "instant";
+  if (d.kind === "until") return `until ${d.until}`;
+  return `${d.n ?? 1} ${d.unit ?? d.kind}${(d.n ?? 1) === 1 ? "" : "s"}`;
+}
+
+function describeConditionDef(d: ConditionDef): string {
+  const bits = [d.name];
+  if (d.bindings?.length) bits.push(`needs ${d.bindings.join(", ")}`);
+  const dur = describeDuration(d.duration);
+  if (dur) bits.push(dur);
+  if (d.then) bits.push(`then ${d.then}`);
+  if (d.mirror) bits.push(`mirrors ${d.mirror}`);
+  if (d.tags?.length) bits.push(`tags ${d.tags.join(",")}`);
+  const head = bits.join(" - ");
+  return d.description ? `${head}: ${d.description}` : head;
+}
+
+// The Feral Speech exemplar (Animalism), faithful to the book: look the animal
+// in the eyes for a moment (concentrating-on, one turn), then converse in its
+// tongue (feral-whispers, mirrored - the animal is in the conversation too).
+const DEFAULT_CONDITIONS: ConditionDef[] = [
+  makeConditionDef({
+    name: "concentrating-on",
+    description: "Locked eyes with the target; nothing else exists this turn",
+    bindings: ["target"],
+    duration: { kind: "st", n: 1, unit: "turn" },
+    then: "feral-whispers",
+  }),
+  makeConditionDef({
+    name: "feral-whispers",
+    description: "Conversing in the target animal's tongue (Feral Speech)",
+    bindings: ["target"],
+    duration: { kind: "st", n: 1, unit: "scene" },
+    mirror: "feral-whispers",
+  }),
+];
+
 // A lorebook data entry is a human-readable header, then a marker line of '='
 // (>= 3), then the data. On read, everything above the marker is ignored - so
 // the instructions live right in the entry card the player edits, no separate
@@ -3722,6 +3816,124 @@ class ConstraintRegistry {
 }
 
 // =============================================================================
+// CONDITIONS - definitions (config overlay) + live instances on characters
+// -----------------------------------------------------------------------------
+// Definitions follow the config-family pattern: shipped DEFAULT_CONDITIONS
+// (the Feral Speech pair) overlaid by an optional lorebook entry
+// (wod:config:conditions - JSON array or name -> def map). The overlay may
+// SHADOW a shipped default; [[forget-condition]] removes overlay entries only
+// (a shadowed default resurfaces). Live instances live in storyStorage keyed by
+// NORMALIZED NAME - a character record is NOT required, so an NPC (the wolf in
+// a feral-whispers conversation) can carry a mirrored condition.
+// =============================================================================
+const CONDITIONS_ENTRY = "wod:config:conditions";
+
+class ConditionRegistry {
+  private static _overlay: ConditionDef[] = [];
+
+  static get(name: string): ConditionDef | undefined {
+    const n = StringUtil.normalize(name);
+    return ConditionRegistry._overlay.find(d => d.name === n)
+      ?? DEFAULT_CONDITIONS.find(d => d.name === n);
+  }
+  static all(): ConditionDef[] {
+    const names = new Set(ConditionRegistry._overlay.map(d => d.name));
+    return [...ConditionRegistry._overlay, ...DEFAULT_CONDITIONS.filter(d => !names.has(d.name))];
+  }
+  static reset(): void { ConditionRegistry._overlay = []; }
+
+  private static _entryText(defs: ConditionDef[]): string {
+    return [
+      "Condition definitions for this chronicle (overlaid on the built-ins).",
+      "The JSON array below the marker lists definitions; each has a name and",
+      "optional bindings (required slots like \"target\"), duration, then",
+      "(successor), mirror (condition the target gains, bound back), tags",
+      "(join the afflicted character's rolls) and note. [[define-condition]]",
+      "edits this for you; you may also edit it by hand in creator mode.",
+      SRD_HEADER_MARKER,
+      JSON.stringify(defs, null, 2),
+    ].join("\n");
+  }
+
+  static async loadFromLorebook(): Promise<number> {
+    ConditionRegistry._overlay = [];
+    const text = await LorebookManager.entryText(RESOURCE_CONFIG_CATEGORY, CONDITIONS_ENTRY);
+    if (!text) return 0;
+    const body = LorebookManager.contentBelowHeader(text).trim();
+    let parsed: unknown;
+    try { parsed = JSON.parse(body); } catch { return 0; }
+    const list: Array<Partial<ConditionDef> & { name: string }> = Array.isArray(parsed)
+      ? parsed as Array<Partial<ConditionDef> & { name: string }>
+      : (parsed && typeof parsed === "object")
+        ? Object.entries(parsed as Record<string, Partial<ConditionDef>>).map(([name, d]) => ({ ...d, name }))
+        : [];
+    ConditionRegistry._overlay = list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(makeConditionDef);
+    return ConditionRegistry._overlay.length;
+  }
+
+  static async save(defs: ConditionDef[]): Promise<void> {
+    const { id } = await LorebookManager.ensureCategory(RESOURCE_CONFIG_CATEGORY);
+    const text = ConditionRegistry._entryText(defs);
+    const created = await LorebookManager.ensureEntry(id, CONDITIONS_ENTRY, text);
+    if (!created) await LorebookManager.updateEntryText(RESOURCE_CONFIG_CATEGORY, CONDITIONS_ENTRY, text);
+    ConditionRegistry._overlay = defs;
+  }
+
+  static async put(def: ConditionDef): Promise<void> {
+    const rest = ConditionRegistry._overlay.filter(d => d.name !== def.name);
+    await ConditionRegistry.save([...rest, def]);
+  }
+
+  // Remove an OVERLAY definition (shipped defaults can't be deleted, only
+  // shadowed). Returns whether an overlay entry existed.
+  static async remove(name: string): Promise<boolean> {
+    const n = StringUtil.normalize(name);
+    const rest = ConditionRegistry._overlay.filter(d => d.name !== n);
+    if (rest.length === ConditionRegistry._overlay.length) return false;
+    await ConditionRegistry.save(rest);
+    return true;
+  }
+}
+
+// One live condition on someone: which definition, and what its slots are bound
+// to (normalized names - possibly NPCs).
+interface ActiveCondition { def: string; bindings: Record<string, string>; note?: string }
+
+class CharacterConditions {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `cond:${StringUtil.normalize(name)}`; }
+
+  static async list(name: string): Promise<ActiveCondition[]> {
+    return ((await CharacterConditions._storage.get(CharacterConditions._key(name))) as ActiveCondition[] | undefined) ?? [];
+  }
+  // Add or replace (same def) one condition.
+  static async afflict(name: string, cond: ActiveCondition): Promise<void> {
+    const rest = (await CharacterConditions.list(name)).filter(c => c.def !== cond.def);
+    await CharacterConditions._storage.set(CharacterConditions._key(name), [...rest, cond]);
+  }
+  // Remove one condition; returns the removed instance (bindings drive mirror-lifting).
+  static async lift(name: string, defName: string): Promise<ActiveCondition | undefined> {
+    const n = StringUtil.normalize(defName);
+    const all = await CharacterConditions.list(name);
+    const hit = all.find(c => c.def === n);
+    if (!hit) return undefined;
+    await CharacterConditions._storage.set(CharacterConditions._key(name), all.filter(c => c.def !== n));
+    return hit;
+  }
+  static async clear(name: string): Promise<void> { await CharacterConditions._storage.delete(CharacterConditions._key(name)); }
+
+  // The tags every active condition grants - merged into the character's rolls.
+  static async tags(name: string): Promise<string[]> {
+    const out: string[] = [];
+    for (const c of await CharacterConditions.list(name)) {
+      const def = ConditionRegistry.get(c.def);
+      if (def?.tags) out.push(...def.tags);
+    }
+    return out;
+  }
+}
+
+// =============================================================================
 // CHARACTER RESOURCES - live current values for a character's resources
 // -----------------------------------------------------------------------------
 // A character's resources are the union of its templates' ResourceDefs; current
@@ -4261,6 +4473,7 @@ class CommandRouter {
       await ResourceOverrides.loadFromLorebook();
       await loadSuccessTablesFromLorebook();
       await ConstraintRegistry.loadFromLorebook();
+      await ConditionRegistry.loadFromLorebook();
     }
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
@@ -4290,6 +4503,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   await ResourceOverrides.loadFromLorebook();
   await loadSuccessTablesFromLorebook();
   await ConstraintRegistry.loadFromLorebook();
+  await ConditionRegistry.loadFromLorebook();
   await CommandRouter.setCreatorMode(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
@@ -4557,6 +4771,15 @@ async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n
   };
 }
 
+// Merge the tags granted by someone's active conditions into a roll spec
+// (deduped). This is how conditions bite mechanically today: a def's tags fire
+// registered RollModifiers on every roll the afflicted character makes.
+async function withConditionTags(name: string, spec: RollSpec): Promise<RollSpec> {
+  const condTags = await CharacterConditions.tags(name);
+  if (!condTags.length) return spec;
+  return { ...spec, tags: [...new Set([...spec.tags, ...condTags])] };
+}
+
 // Read a table=<name> arg against an outcome. The roll itself never interprets
 // its successes - the table does (or the reading is an unknown-table note).
 function tableNote(cmd: ParsedCommand, outcome: RollOutcomeKind, successes: number): string {
@@ -4583,6 +4806,9 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
+  // Active conditions bite: their tags join the roll, firing any registered
+  // RollModifiers (unregistered ones surface as the usual unknown-tag note).
+  spec = await withConditionTags(char.name, spec);
   const spend = await applySpend(char, cmd, ctx, spec.tags, savedSpend);
   if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
   // Rolls see live state: boosted Attributes add to the record's dots, and the
@@ -4887,7 +5113,7 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
       const env = await characterRollEnv(c);
       const merged: Partial<RollModifier> = { ...(extra ?? {}) };
       if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
-      return executeRoll(base, env.resolver, { rng, extra: merged });
+      return executeRoll(await withConditionTags(c.name, base), env.resolver, { rng, extra: merged });
     }
   }
   return executeRoll(base, () => 0, { rng, extra });
@@ -4921,7 +5147,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
 
   const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
-  const mySpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags });
+  const mySpec = await withConditionTags(me.name, makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags }));
   const theirSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) });
 
   // The actor may spend on their own roll (fuel / roll-op effects only), exactly
@@ -5116,6 +5342,201 @@ async function cmdCheckConstraints(): Promise<string> {
   return `((OOC-Storyteller: ${disp(char.name)} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
 }
 
+// --- CONDITIONS --------------------------------------------------------------
+// Parameterized states on characters (and NPCs - no sheet required). afflict
+// validates the def's binding slots (values may be @aliases), mirrors onto the
+// bound target when the def says so, advance walks the chain (concentrating-on
+// -> feral-whispers) carrying bindings forward, and lift removes both sides
+// (optionally paying a spend - the Willpower shrug-off).
+
+// Resolve one binding value: @aliases through the alias registry, everything
+// else normalized as-is (an NPC name needs no record).
+async function resolveBindingValue(raw: string): Promise<{ value?: string; error?: string }> {
+  if (raw.startsWith("@")) {
+    const ref = await resolveCharacterRef(raw);
+    return ref.error ? { error: ref.error } : { value: ref.name };
+  }
+  return { value: StringUtil.normalize(raw) };
+}
+
+// Who a condition command operates on: on=<name|@alias> if given (record NOT
+// required - NPCs carry conditions too), else the current character.
+async function conditionSubject(cmd: ParsedCommand): Promise<{ name?: string; error?: string }> {
+  const on = cmd.named["on"]?.trim();
+  if (on) {
+    const ref = await resolveBindingValue(on);
+    return ref.error ? { error: ref.error } : { name: ref.value };
+  }
+  const cur = await CharacterStore.getCurrent();
+  if (!cur) return { error: `No active character. Select one with [[play name="..."]] or name a subject with on="...".` };
+  return { name: StringUtil.normalize(cur.name) };
+}
+
+function conditionLine(c: ActiveCondition): string {
+  const def = ConditionRegistry.get(c.def);
+  const bits = [c.def];
+  const bound = Object.entries(c.bindings).map(([k, v]) => `${k}: ${disp(v)}`).join(", ");
+  if (bound) bits.push(`(${bound})`);
+  const dur = describeDuration(def?.duration);
+  if (dur && dur !== "instant") bits.push(`- ${dur} (ST-enforced)`);
+  if (def?.then) bits.push(`- then ${def.then}`);
+  if (c.note) bits.push(c.note);
+  return bits.join(" ");
+}
+
+// Apply one definition to a subject: validate + resolve bindings, write the
+// instance, then fire the def's mirror onto the bound target. Shared by
+// afflict and advance. Returns the reply fragments or an error.
+async function applyCondition(subject: string, def: ConditionDef, rawBindings: Record<string, string>, note?: string): Promise<{ lines?: string[]; error?: string }> {
+  const bindings: Record<string, string> = {};
+  for (const slot of def.bindings ?? []) {
+    const raw = rawBindings[slot];
+    if (!raw) return { error: `${def.name} needs ${slot}=<name|@alias>.` };
+    const r = await resolveBindingValue(raw);
+    if (r.error) return { error: r.error };
+    bindings[slot] = r.value!;
+  }
+  const inst: ActiveCondition = { def: def.name, bindings };
+  if (note) inst.note = note;
+  await CharacterConditions.afflict(subject, inst);
+  const lines = [`${disp(subject)} is now ${conditionLine(inst)}`];
+  if (def.mirror && bindings["target"]) {
+    const mirrorDef = ConditionRegistry.get(def.mirror);
+    if (!mirrorDef) lines.push(`mirror "${def.mirror}" is not defined - skipped`);
+    else {
+      const mirrorInst: ActiveCondition = { def: mirrorDef.name, bindings: { target: subject }, note: "(mirror)" };
+      await CharacterConditions.afflict(bindings["target"], mirrorInst);
+      lines.push(`${disp(bindings["target"])} is now ${conditionLine(mirrorInst)}`);
+    }
+  }
+  return { lines };
+}
+
+// Remove one condition from a subject AND its mirror from the bound target.
+async function removeCondition(subject: string, defName: string): Promise<{ removed?: ActiveCondition; alsoLifted?: string; error?: string }> {
+  const removed = await CharacterConditions.lift(subject, defName);
+  if (!removed) return { error: `${disp(subject)} does not have "${StringUtil.normalize(defName)}". [[conditions${subject ? ` ${subject}` : ""}]] lists them.` };
+  const def = ConditionRegistry.get(removed.def);
+  if (def?.mirror && removed.bindings["target"]) {
+    const gone = await CharacterConditions.lift(removed.bindings["target"], def.mirror);
+    if (gone) return { removed, alsoLifted: `${def.mirror} lifted from ${disp(removed.bindings["target"])}` };
+  }
+  return { removed };
+}
+
+async function cmdDefineCondition(cmd: ParsedCommand): Promise<string> {
+  const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!name) return `((OOC-Storyteller: define-condition needs name="...", e.g. [[define-condition name="dazed" tags="off-hand" duration="1 scene"]].))`;
+  const durationRaw = cmd.named["duration"];
+  const duration = parseConditionDuration(durationRaw);
+  if (durationRaw && !duration) return `((OOC-Storyteller: Can't read duration "${durationRaw}" - use "1 turn", "2 scenes", "until <x>" or "instant".))`;
+  const def = makeConditionDef({
+    name,
+    description: cmd.named["description"],
+    bindings: (cmd.named["bindings"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
+    duration,
+    then: cmd.named["then"],
+    mirror: cmd.named["mirror"],
+    tags: (cmd.named["tags"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
+    note: cmd.named["note"],
+  });
+  await ConditionRegistry.put(def);
+  return `((OOC-Storyteller: Defined condition ${describeConditionDef(def)}.))`;
+}
+
+async function cmdConditionInfo(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) {
+    const items = ConditionRegistry.all().map(d => d.name).join(", ");
+    return `((OOC-Storyteller: Defined conditions: ${items}. [[condition <name>]] for detail; [[conditions]] shows who has what.))`;
+  }
+  const def = ConditionRegistry.get(name);
+  if (!def) return `((OOC-Storyteller: No condition "${StringUtil.normalize(name)}". [[condition]] lists them.))`;
+  return `((OOC-Storyteller: ${describeConditionDef(def)}.))`;
+}
+
+async function cmdForgetCondition(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: forget-condition needs a name.))`;
+  const key = StringUtil.normalize(name);
+  const removed = await ConditionRegistry.remove(key);
+  if (!removed) {
+    return ConditionRegistry.get(key)
+      ? `((OOC-Storyteller: "${key}" is a built-in condition - it can be shadowed with [[define-condition]] but not deleted.))`
+      : `((OOC-Storyteller: No condition "${key}".))`;
+  }
+  const shipped = ConditionRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
+  return `((OOC-Storyteller: Forgot condition "${key}".${shipped}))`;
+}
+
+async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: afflict needs a condition, e.g. [[afflict concentrating-on target="Wolf"]]. [[condition]] lists them.))`;
+  const def = ConditionRegistry.get(name);
+  if (!def) return `((OOC-Storyteller: No condition "${StringUtil.normalize(name)}". Define it with [[define-condition]].))`;
+  const subject = await conditionSubject(cmd);
+  if (subject.error) return `((OOC-Storyteller: ${subject.error}))`;
+  const r = await applyCondition(subject.name!, def, cmd.named);
+  if (r.error) return `((OOC-Storyteller: ${r.error}))`;
+  return `((OOC-Storyteller: ${r.lines!.join("; ")}.))`;
+}
+
+// The manual chain trigger (the turn system will automate it): end the
+// condition now and apply its `then` successor, carrying the bindings forward.
+async function cmdAdvance(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: advance needs a condition, e.g. [[advance concentrating-on]].))`;
+  const subject = await conditionSubject(cmd);
+  if (subject.error) return `((OOC-Storyteller: ${subject.error}))`;
+  const current = (await CharacterConditions.list(subject.name!)).find(c => c.def === StringUtil.normalize(name));
+  if (!current) return `((OOC-Storyteller: ${disp(subject.name!)} does not have "${StringUtil.normalize(name)}".))`;
+  const def = ConditionRegistry.get(current.def);
+  if (!def?.then) return `((OOC-Storyteller: "${current.def}" has no successor to advance into - [[lift ${current.def}]] to end it.))`;
+  const next = ConditionRegistry.get(def.then);
+  if (!next) return `((OOC-Storyteller: Successor "${def.then}" is not defined.))`;
+  await removeCondition(subject.name!, current.def);
+  const r = await applyCondition(subject.name!, next, current.bindings);
+  if (r.error) return `((OOC-Storyteller: ${current.def} ended, but ${def.then} could not begin: ${r.error}))`;
+  return `((OOC-Storyteller: ${current.def} ends; ${r.lines!.join("; ")}.))`;
+}
+
+async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: lift needs a condition, e.g. [[lift feral-whispers]].))`;
+  const subject = await conditionSubject(cmd);
+  if (subject.error) return `((OOC-Storyteller: ${subject.error}))`;
+  let spendNote = "";
+  if (cmd.named["spend"]) {
+    // The shrug-off: pay to end it. Only someone with a sheet can spend.
+    const char = await CharacterStore.load(subject.name!);
+    if (!char) return `((OOC-Storyteller: ${disp(subject.name!)} has no sheet to spend from.))`;
+    const spend = await applySpend(char, cmd, ctx, []);
+    if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
+    spendNote = spend.note ? ` (${spend.note})` : "";
+  }
+  const r = await removeCondition(subject.name!, name);
+  if (r.error) return `((OOC-Storyteller: ${r.error}))`;
+  const also = r.alsoLifted ? `; ${r.alsoLifted}` : "";
+  return `((OOC-Storyteller: ${disp(subject.name!)} shakes off ${r.removed!.def}${spendNote}${also}.))`;
+}
+
+async function cmdConditions(cmd: ParsedCommand): Promise<string> {
+  let subject: string;
+  const arg = cmd.positional[0]?.trim();
+  if (arg) {
+    const r = await resolveBindingValue(arg);
+    if (r.error) return `((OOC-Storyteller: ${r.error}))`;
+    subject = r.value!;
+  } else {
+    const cur = await CharacterStore.getCurrent();
+    if (!cur) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]] or name someone: [[conditions "Wolf"]].))`;
+    subject = StringUtil.normalize(cur.name);
+  }
+  const list = await CharacterConditions.list(subject);
+  if (!list.length) return `((OOC-Storyteller: ${disp(subject)} has no conditions.))`;
+  return `((OOC-Storyteller: ${disp(subject)} - ${list.map(conditionLine).join("; ")}.))`;
+}
+
 // --- ALIASES & PLAYERS ------------------------------------------------------
 // A character argument may be a real name or an @alias; this is the ONE place
 // that turns either into a concrete (normalized) character name. Pool-position
@@ -5286,6 +5707,13 @@ CommandRouter.register("constraints", cmdConstraints, "constraints (list the sto
 CommandRouter.register("constraint", cmdConstraint, "constraint <name> (show one group in full)");
 CommandRouter.register("forget-constraint", cmdForgetConstraint, "forget-constraint <name>");
 CommandRouter.register("check-constraints", cmdCheckConstraints, "check-constraints (flag the current character's constraint conflicts)");
+CommandRouter.register("define-condition", cmdDefineCondition, 'define-condition name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."]');
+CommandRouter.register("condition", cmdConditionInfo, "condition [name]  (list defined conditions, or show one in full)");
+CommandRouter.register("forget-condition", cmdForgetCondition, "forget-condition <name>  (removes an overlay definition; built-ins can only be shadowed)");
+CommandRouter.register("afflict", cmdAfflict, 'afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias> ...]  (mirror defs also afflict the bound target)');
+CommandRouter.register("advance", cmdAdvance, "advance <condition> [on=..]  (end it and begin its successor, bindings carried forward)");
+CommandRouter.register("lift", cmdLift, "lift <condition> [on=..] [spend=res[::effect][!]]  (remove it - and its mirror; spend = shrug-off)");
+CommandRouter.register("conditions", cmdConditions, 'conditions [<name|@alias>]  (active conditions; NPCs work too)');
 CommandRouter.register("alias", cmdAlias, 'alias <@token> "Target Name"  (@a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)');
 CommandRouter.register("aliases", cmdAliases, "aliases  (list every alias, grouped by scope)");
 CommandRouter.register("forget-alias", cmdForgetAlias, "forget-alias <@token>  (bare @a = global; scoped tokens as in alias)");
@@ -5442,7 +5870,8 @@ async function init(): Promise<{ setupMessage: string | null }> {
   const overrides = await ResourceOverrides.loadFromLorebook();
   const tables = await loadSuccessTablesFromLorebook();
   const constraints = await ConstraintRegistry.loadFromLorebook();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}; constraint groups: ${constraints}`);
+  const conditions = await ConditionRegistry.loadFromLorebook();
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; resource overrides: ${overrides}; success tables: ${tables}; constraint groups: ${constraints}; condition overlays: ${conditions}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

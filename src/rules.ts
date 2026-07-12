@@ -668,6 +668,100 @@ export function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits):
   return violations;
 }
 
+// =============================================================================
+// CONDITIONS - parameterized character states (bindings, chains, mirrors, tags)
+// -----------------------------------------------------------------------------
+// A condition is not a flat video-game flag: it may need BINDINGS (Feral
+// Speech's "concentrating-on" needs the animal: target=wolf), may CHAIN into a
+// successor when it ends (`then` - concentrating-on lasts a turn, then
+// feral-whispers begins, carrying the bindings forward), may MIRROR onto the
+// bound target (the animal is in the conversation too - even an NPC with no
+// sheet), and may grant TAGS that join the afflicted character's rolls (firing
+// registered RollModifiers - conditions bite mechanically today). Durations
+// reuse the effect grammar's EffectDuration and stay advisory (ST-enforced)
+// until the turn system; [[advance]] is the manual chain trigger.
+// (Health-box conditions - Crippled etc. - are the separate HealthConditionDef
+// in core/damage.ts.)
+// =============================================================================
+export interface ConditionDef {
+  name: string;                 // normalized id
+  description?: string;
+  bindings?: string[];          // required slot names, e.g. ["target"]
+  duration?: EffectDuration;    // advisory until the turn system
+  then?: string;                // successor condition ([[advance]] applies it)
+  mirror?: string;              // condition auto-afflicted on bindings.target, bound back
+  tags?: string[];              // tags granted while active
+  note?: string;
+}
+
+// Normalize a definition: name/bindings/then/mirror/tags through normalize;
+// empty optionals dropped.
+export function makeConditionDef(parts: Partial<ConditionDef> & { name: string }): ConditionDef {
+  const def: ConditionDef = { name: StringUtil.normalize(parts.name) };
+  if (parts.description && parts.description.trim()) def.description = parts.description.trim();
+  const bindings = (parts.bindings ?? []).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
+  if (bindings.length) def.bindings = bindings;
+  if (parts.duration) def.duration = parts.duration;
+  if (parts.then && parts.then.trim()) def.then = StringUtil.normalize(parts.then);
+  if (parts.mirror && parts.mirror.trim()) def.mirror = StringUtil.normalize(parts.mirror);
+  const tags = (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  if (tags.length) def.tags = tags;
+  if (parts.note && parts.note.trim()) def.note = parts.note.trim();
+  return def;
+}
+
+// "1 turn" / "2 scenes" / "until eye-contact-breaks" / "instant" -> the effect
+// grammar's duration. Unparseable -> undefined (the def simply has no duration).
+export function parseConditionDuration(raw: string | undefined): EffectDuration | undefined {
+  if (!raw) return undefined;
+  const t = StringUtil.normalize(raw);
+  if (t === "instant") return { kind: "instant" };
+  const until = t.match(/^until-(.+)$/);
+  if (until) return { kind: "until", until: until[1] };
+  const timed = t.match(/^(\d+)-(.+?)s?$/);
+  if (timed) return { kind: "st", n: parseInt(timed[1], 10), unit: timed[2] };
+  return undefined;
+}
+
+export function describeDuration(d: EffectDuration | undefined): string {
+  if (!d) return "";
+  if (d.kind === "instant") return "instant";
+  if (d.kind === "until") return `until ${d.until}`;
+  return `${d.n ?? 1} ${d.unit ?? d.kind}${(d.n ?? 1) === 1 ? "" : "s"}`;
+}
+
+export function describeConditionDef(d: ConditionDef): string {
+  const bits = [d.name];
+  if (d.bindings?.length) bits.push(`needs ${d.bindings.join(", ")}`);
+  const dur = describeDuration(d.duration);
+  if (dur) bits.push(dur);
+  if (d.then) bits.push(`then ${d.then}`);
+  if (d.mirror) bits.push(`mirrors ${d.mirror}`);
+  if (d.tags?.length) bits.push(`tags ${d.tags.join(",")}`);
+  const head = bits.join(" - ");
+  return d.description ? `${head}: ${d.description}` : head;
+}
+
+// The Feral Speech exemplar (Animalism), faithful to the book: look the animal
+// in the eyes for a moment (concentrating-on, one turn), then converse in its
+// tongue (feral-whispers, mirrored - the animal is in the conversation too).
+export const DEFAULT_CONDITIONS: ConditionDef[] = [
+  makeConditionDef({
+    name: "concentrating-on",
+    description: "Locked eyes with the target; nothing else exists this turn",
+    bindings: ["target"],
+    duration: { kind: "st", n: 1, unit: "turn" },
+    then: "feral-whispers",
+  }),
+  makeConditionDef({
+    name: "feral-whispers",
+    description: "Conversing in the target animal's tongue (Feral Speech)",
+    bindings: ["target"],
+    duration: { kind: "st", n: 1, unit: "scene" },
+    mirror: "feral-whispers",
+  }),
+];
+
 // A lorebook data entry is a human-readable header, then a marker line of '='
 // (>= 3), then the data. On read, everything above the marker is ignored - so
 // the instructions live right in the entry card the player edits, no separate

@@ -455,10 +455,19 @@ output is a **number**, one level per success).
   rule-specified bonus per batch of extras past the last row), and **`botch`** /
   **`failure`** lines.
 - Built-ins always present: **`degrees`** (Marginal → Phenomenal), **`damage`** and
-  **`soak`** (1 per success). Add your own in a lorebook entry
-  (`wod:config:success-tables`, a JSON array of tables *or* a `name → table` map
-  below the `=====` marker); it's overlaid on the built-ins at init and whenever
-  creator mode syncs.
+  **`soak`** (1 per success). Add your own three equivalent ways — they all write
+  the same lorebook entry (`wod:config:success-tables`, a JSON array of tables
+  *or* a `name → table` map below the `=====` marker, overlaid on the built-ins
+  at init and whenever creator mode syncs):
+  - **`[[define-table]]`** — rows use a mini-grammar, backtick-quoted so labels
+    keep their case:
+    ``[[define-table name="intimidate" rows=`1:Cowed, 3:Terrified, 5:Broken=2` failure=`They hold their ground` cap=6]]``
+    (also `value-per-success=`, `overflow-per=`/`overflow-value=`/`overflow-label=`,
+    `botch=`, `description=`). Naming a built-in **shadows** it;
+    `[[forget-table <name>]]` removes your overlay and the built-in resurfaces.
+  - **`[[win-table]]`** — the same thing as a window (the form is derived from
+    `define-table`'s spec).
+  - **Hand-edit the entry** in creator mode.
 - **`table=<name>`** on any `roll` / `roll-for` / `resist` / `contest` reads the
   result through that table (an unknown name is reported, never applied).
 

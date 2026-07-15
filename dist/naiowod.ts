@@ -1591,6 +1591,27 @@ function describeTable(t: SuccessTable): string {
   return dims.length ? `${head} [${dims.join("; ")}]` : head;
 }
 
+// The [[define-table]] rows mini-grammar: comma-separated `<at>:<label>[=<value>]`
+// items (e.g. "1:Cowed, 3:Terrified, 5:Broken=2"). Input arrives VERBATIM when
+// backtick-quoted (labels are display text), so items are trimmed here; the
+// normalized form (lowercased, hyphenated labels) parses identically.
+// Missing/empty input is a valid empty ladder; a bad item is an error citing
+// the grammar (a misconfigured table is refused, never half-stored).
+function parseTableRows(raw: string | undefined): SuccessTableRow[] | { error: string } {
+  if (!raw || !raw.trim()) return [];
+  const rows: SuccessTableRow[] = [];
+  for (const item of raw.split(",")) {
+    const m = item.trim().match(/^(\d+)\s*:\s*([^=]+?)\s*(?:=\s*(-?\d+))?$/);
+    if (!m || !m[2].trim()) {
+      return { error: `Can't read row "${item.trim()}" - rows are "<successes>:<label>[=<value>]", comma-separated (e.g. 1:Cowed, 3:Terrified=2).` };
+    }
+    const row: SuccessTableRow = { at: parseInt(m[1], 10), label: m[2].trim() };
+    if (m[3] !== undefined) row.value = parseInt(m[3], 10);
+    rows.push(row);
+  }
+  return rows;
+}
+
 // The classic ladders every chronicle starts with; the lorebook can overlay
 // more (wod:config:success-tables). Damage and soak are the "direct function"
 // generalization: same mechanism, numeric output.
@@ -5379,6 +5400,70 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
   return `((OOC-Storyteller: Success tables: ${items}. [[tables <name>]] for detail; add table=<name> to a roll/resist/contest.))`;
 }
 
+// Author a success table from the command line (or the win-table window): the
+// same wod:config:success-tables entry the player can hand-edit, one table at
+// a time. Labels ride the backtick-literal channel, so their case survives.
+async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.named["name"]?.trim();
+  if (!name) return `((OOC-Storyteller: define-table needs name="..". See [[help define-table]].))`;
+  const rows = parseTableRows(cmd.named["rows"]);
+  if ("error" in rows) return `((OOC-Storyteller: ${rows.error}))`;
+  // Only supplied fields land in the def; a supplied-but-unreadable number is
+  // refused rather than silently dropped.
+  const num = (key: string): number | undefined | { error: string } => {
+    const raw = cmd.named[key];
+    if (raw === undefined) return undefined;
+    const n = intOrUndef(raw);
+    return n === undefined ? { error: `${key}= must be a whole number (got "${raw}").` } : n;
+  };
+  const t: SuccessTable = { name: StringUtil.normalize(name) };
+  if (rows.length) t.rows = rows;
+  const vps = num("value-per-success");
+  if (typeof vps === "object") return `((OOC-Storyteller: ${vps.error}))`;
+  if (vps !== undefined) t.valuePerSuccess = vps;
+  const cap = num("cap");
+  if (typeof cap === "object") return `((OOC-Storyteller: ${cap.error}))`;
+  if (cap !== undefined) t.cap = cap;
+  const per = num("overflow-per");
+  const value = num("overflow-value");
+  if (typeof per === "object") return `((OOC-Storyteller: ${per.error}))`;
+  if (typeof value === "object") return `((OOC-Storyteller: ${value.error}))`;
+  const overflowLabel = cmd.named["overflow-label"]?.trim();
+  if ((value !== undefined || overflowLabel) && per === undefined) {
+    return `((OOC-Storyteller: overflow needs overflow-per=N (the batch size beyond the last row).))`;
+  }
+  if (per !== undefined) {
+    t.overflow = { per };
+    if (value !== undefined) t.overflow.value = value;
+    if (overflowLabel) t.overflow.label = overflowLabel;
+  }
+  for (const key of ["botch", "failure", "description"] as const) {
+    const v = cmd.named[key]?.trim();
+    if (v) t[key] = v;
+  }
+  if (!t.rows && t.valuePerSuccess === undefined && !t.botch && !t.failure) {
+    return `((OOC-Storyteller: A table needs something to read - give it rows=, value-per-success=, botch= or failure=.))`;
+  }
+  const shadows = DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === t.name);
+  await SuccessTables.put(t);
+  const note = shadows ? ` (shadows the built-in - [[forget-table ${t.name}]] restores it)` : "";
+  return `((OOC-Storyteller: Defined table ${describeTable(t)}.${note} Attach with table=${t.name}.))`;
+}
+
+async function cmdForgetTable(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return `((OOC-Storyteller: forget-table needs a name.))`;
+  const key = StringUtil.normalize(name);
+  const removed = await SuccessTables.remove(key);
+  if (!removed) {
+    return SuccessTableRegistry.get(key)
+      ? `((OOC-Storyteller: "${key}" is a built-in table - it can be shadowed with [[define-table]] but not deleted.))`
+      : `((OOC-Storyteller: No table "${key}".))`;
+  }
+  const shipped = SuccessTableRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
+  return `((OOC-Storyteller: Forgot table "${key}".${shipped}))`;
+}
+
 // =============================================================================
 // CONSTRAINT GROUP COMMANDS - define/list/inspect the allow-deny rules, and
 // check the current character against them. [[win-constraint]] (src/window.ts)
@@ -5990,6 +6075,25 @@ CommandRouter.register("tables", cmdTables, {
   summary: "list success tables, or lay one out in full",
   params: [{ key: "name", kind: "positional", hint: "[name]" }],
 });
+CommandRouter.register("define-table", cmdDefineTable, {
+  summary: "define/replace a success table (overlay; may shadow a built-in)",
+  params: [
+    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. intimidate" },
+    { key: "rows", kind: "named", type: "literal", hint: "`1:Cowed, 3:Terrified[=2]`", desc: "Ladder rows: <successes>:<label>[=<value>], comma-separated", example: "e.g. 1:Cowed, 3:Terrified" },
+    { key: "value-per-success", kind: "named", type: "int", desc: "Direct numeric output per success" },
+    { key: "cap", kind: "named", type: "int", desc: "Successes beyond this are wasted" },
+    { key: "overflow-per", kind: "named", type: "int", desc: "Batch size beyond the last row" },
+    { key: "overflow-value", kind: "named", type: "int", desc: "Value added per overflow batch" },
+    { key: "overflow-label", kind: "named", type: "literal", desc: "Overflow annotation" },
+    { key: "botch", kind: "named", type: "literal", desc: "What a botch means here" },
+    { key: "failure", kind: "named", type: "literal", desc: "What failure means here" },
+    { key: "description", kind: "named", type: "literal", desc: "Description" },
+  ],
+});
+CommandRouter.register("forget-table", cmdForgetTable, {
+  summary: "remove an overlay table; built-ins can only be shadowed",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
 CommandRouter.register("define-constraint", cmdDefineConstraint, {
   summary: "define/replace a constraint group",
   params: [
@@ -6220,6 +6324,19 @@ async function cmdWinConstraint(): Promise<string> {
 
 CommandRouter.register("win-constraint", cmdWinConstraint, {
   summary: "open a window to define a constraint group",
+});
+
+// [[win-table]] - a UI over [[define-table]], derived from its spec.
+async function cmdWinTable(): Promise<string> {
+  await openCommandWindow("define-table", {
+    title: "Define success table",
+    blurb: "**Define a success table** (ladder rows, numeric output, or both)",
+  });
+  return `((OOC-Storyteller: Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).))`;
+}
+
+CommandRouter.register("win-table", cmdWinTable, {
+  summary: "open a window to define a success table",
 });
 //#endregion src/window.ts
 

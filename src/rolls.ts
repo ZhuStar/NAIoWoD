@@ -403,6 +403,27 @@ export function describeTable(t: SuccessTable): string {
   return dims.length ? `${head} [${dims.join("; ")}]` : head;
 }
 
+// The [[define-table]] rows mini-grammar: comma-separated `<at>:<label>[=<value>]`
+// items (e.g. "1:Cowed, 3:Terrified, 5:Broken=2"). Input arrives VERBATIM when
+// backtick-quoted (labels are display text), so items are trimmed here; the
+// normalized form (lowercased, hyphenated labels) parses identically.
+// Missing/empty input is a valid empty ladder; a bad item is an error citing
+// the grammar (a misconfigured table is refused, never half-stored).
+export function parseTableRows(raw: string | undefined): SuccessTableRow[] | { error: string } {
+  if (!raw || !raw.trim()) return [];
+  const rows: SuccessTableRow[] = [];
+  for (const item of raw.split(",")) {
+    const m = item.trim().match(/^(\d+)\s*:\s*([^=]+?)\s*(?:=\s*(-?\d+))?$/);
+    if (!m || !m[2].trim()) {
+      return { error: `Can't read row "${item.trim()}" - rows are "<successes>:<label>[=<value>]", comma-separated (e.g. 1:Cowed, 3:Terrified=2).` };
+    }
+    const row: SuccessTableRow = { at: parseInt(m[1], 10), label: m[2].trim() };
+    if (m[3] !== undefined) row.value = parseInt(m[3], 10);
+    rows.push(row);
+  }
+  return rows;
+}
+
 // The classic ladders every chronicle starts with; the lorebook can overlay
 // more (wod:config:success-tables). Damage and soak are the "direct function"
 // generalization: same mechanism, numeric output.

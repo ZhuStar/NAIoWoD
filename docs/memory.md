@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `27ff433`** ("Architecture
-> pass: command specs, generic config stores, command/state/game split").
+> **Last synced with the code as of commit `1412cb6`** ("define-table /
+> forget-table / win-table: command authoring for success tables").
 
 ---
 
@@ -220,7 +220,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 - **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
   later, same wizard logic.
 
-### src/rolls.ts (555) — pure roll machinery
+### src/rolls.ts (576) — pure roll machinery
 - `RollSpec {pool, difficulty(6), difficultyExpr?, difficultyMod, requires(≥1),
   diceMod, tags[]}` — serializable (that's what enables named rolls);
   `makeRollSpec`. **`difficultyExpr`** (optional) is the difficulty as a pool
@@ -268,6 +268,9 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   (damage/soak = 1/success), `rows` pick the highest `at ≤ counted` (below the
   lowest row = failure), `overflow` adds a bonus per batch past the last row.
   `describeTableReading` (compact) + `describeTable` (full layout).
+  `parseTableRows(raw)` — the [[define-table]] rows mini-grammar
+  (comma-separated `<at>:<label>[=<value>]`, verbatim from a backtick literal;
+  bad item → `{error}` citing the grammar).
   `DEFAULT_SUCCESS_TABLES` = **degrees** (Marginal→Phenomenal), **damage**,
   **soak**; `SuccessTableRegistry` (static Map seeded from defaults; normalized
   keys; `register`/`get`/`all`/`reset`). **Why**: the user's key insight — one
@@ -585,7 +588,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (1749) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (1833) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Creator-mode sync (the router's game-side hook)**: `syncFromCreatorEdits()` =
 `CharacterStore.syncFromLorebook()` + `reloadAllConfigStores()`; registered
@@ -684,6 +687,12 @@ can't be mistaken for a pool) · `roll-status [id]` · `cancel-roll [id]` ·
 [label=] [interval=] [on-botch=…] [difficulty=] [vs-difficulty=]` ·
 `continue-contest [id] [difficulty=] [vs-difficulty=] [named overrides]` ·
 `contest-status [id]` · `cancel-contest [id]` · `tables [name]` ·
+`define-table name=".." [rows=<literal: 1:Cowed, 3:Terrified[=2]>]
+[value-per-success=N] [cap=N] [overflow-per=N] [overflow-value=N]
+[overflow-label=..] [botch=..] [failure=..] [description=..]` (rows/labels
+are BACKTICK literals — case survives; naming a built-in SHADOWS it; refuses
+a table with nothing to read) · `forget-table <name>` (overlay only;
+built-ins resurface) · `win-table` (window over define-table) ·
 `define-constraint name=".." relation=exclusive|restricted|forbidden
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
@@ -730,7 +739,7 @@ zero resolver so only literals count; a deleted char degrades to ad-hoc.
 → botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
 `execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
-### src/window.ts (107) — api.v1.ui windows that EMIT commands, DERIVED from specs
+### src/window.ts (120) — api.v1.ui windows that EMIT commands, DERIVED from specs
 Imports host + **command** only (NOT game — the split's dependency win).
 **A window is an abstraction over the command layer, not a second path**, and
 since the architecture pass its form is **derived from the verb's
@@ -743,10 +752,10 @@ pre-seeded into tempStorage; no native select part exists), int →
 temp values, refuses on a missing required param, then routes
 `composeCommand(verb, values, spec)` through the SAME `CommandRouter` and
 shows the OOC reply in-window. `openConstraintWindow()` =
-`openCommandWindow("define-constraint", …)`; `[[win-constraint]]` registers at
-module load (pure registry mutation). Windows needing DOMAIN-driven fields
-(condition binding slots) will hand-build their part tree and still submit
-through `composeCommand`.
+`openCommandWindow("define-constraint", …)`; `[[win-constraint]]` and
+`[[win-table]]` (over define-table) register at module load (pure registry
+mutation). Windows needing DOMAIN-driven fields (condition binding slots)
+will hand-build their part tree and still submit through `composeCommand`.
 
 ### src/index.ts / src/main.ts
 Re-export everything (incl. `./command`, `./state`, `./window`) + `init()`
@@ -759,7 +768,7 @@ main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (2836 + 20 lines, 271 tests, 76 describes)
+### test/ (2901 + 20 lines, 276 tests, 77 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -865,6 +874,10 @@ constraint groups — array of `ConstraintGroup` or `name → group` map;
     **Extended contests** = both accumulate, first to the goal wins (dead heat
     stays open). `ContestSide.char` keeps rolls.ts character-agnostic while the
     game layer re-resolves each side's live pool every round.
+    *Addendum (post-§7.20)*: table AUTHORING closed the config-family gap —
+    `define-table`/`forget-table`/`win-table` write the same
+    `wod:config:success-tables` entry the player can hand-edit; rows/labels
+    ride the backtick-literal channel so their case survives normalization.
 17. **Wizard-windows EMIT commands - one path, not two** (the user's framing):
     an `api.v1.ui` window is an abstraction over the command layer, so its submit
     composes a `[[command]]` string and routes it through the SAME `CommandRouter`

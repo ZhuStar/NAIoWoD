@@ -15,7 +15,7 @@ import {
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
-  readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry,
+  readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry, parseTableRows,
   compareRolls, applyContestRound, describeContest,
   ExtendedContestStore, SuccessTables, SUCCESS_TABLES_ENTRY,
   reloadAllConfigStores, resetAllConfigStores, ALL_CONFIG_STORES,
@@ -2832,5 +2832,70 @@ describe("command router: beforeRoute hooks (creator-mode live sync)", () => {
     await CommandRouter.route("creator-mode set=false");
     expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);            // off-path synced too
     expect(await CreatorMode.enabled()).toBe(false);
+  });
+});
+
+// =============================================================================
+// DEFINE-TABLE - command authoring for success tables (closes the config gap)
+// =============================================================================
+describe("define-table / forget-table (+ win-table): success-table authoring", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("parseTableRows: forms and refusals", () => {
+    expect(parseTableRows(undefined)).toEqual([]);
+    expect(parseTableRows("  ")).toEqual([]);
+    expect(parseTableRows("1:Cowed, 3:Terrified=2")).toEqual([
+      { at: 1, label: "Cowed" }, { at: 3, label: "Terrified", value: 2 },
+    ]);
+    expect(parseTableRows("1:cowed-and-shaking")).toEqual([{ at: 1, label: "cowed-and-shaking" }]);
+    for (const bad of ["x:label", "3:", "3", "1:a=b"]) {
+      expect("error" in parseTableRows(bad)).toBe(true);
+    }
+  });
+
+  test("define-table with literal rows: verbatim labels, readable via table=, persists in the lorebook", async () => {
+    const r = await CommandRouter.route('define-table name="intimidate" rows=`1:Cowed, 3:Terrified` failure=`They hold their ground` cap=6');
+    expect(r).toContain("Defined table intimidate");
+    expect(r).toContain("cap 6");
+    expect(SuccessTableRegistry.get("intimidate")!.rows![1].label).toBe("Terrified"); // the literal channel kept the case
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const roll = await CommandRouter.route("roll 5 table=intimidate", { rng: seqRng([6, 6, 6, 2, 2]) });
+    expect(roll).toContain("Terrified");
+    // The write went to the ONE lorebook entry: reload after reset re-registers it.
+    resetAllConfigStores();
+    expect(SuccessTableRegistry.get("intimidate")).toBeUndefined();
+    await SuccessTables.loadFromLorebook();
+    expect(SuccessTableRegistry.get("intimidate")!.failure).toBe("They hold their ground");
+  });
+
+  test("overflow params; empty tables and bad numbers are refused", async () => {
+    const r = await CommandRouter.route('define-table name="brutality" rows=`1:Hurt` overflow-per=2 overflow-value=1 overflow-label=`extra maiming`');
+    expect(r).toContain("overflow 1/2 (extra maiming)");
+    expect(await CommandRouter.route('define-table name="empty"')).toContain("needs something to read");
+    expect(await CommandRouter.route('define-table name="x" rows=`1:A` cap=lots')).toContain("whole number");
+    expect(await CommandRouter.route('define-table name="x" rows=`1:A` overflow-value=1')).toContain("overflow-per");
+  });
+
+  test("shadowing a built-in and forgetting it: the shipped table resurfaces", async () => {
+    const r = await CommandRouter.route('define-table name="degrees" value-per-success=1');
+    expect(r).toContain("shadows the built-in");
+    expect(SuccessTableRegistry.get("degrees")!.rows).toBeUndefined();        // shadowed
+    const f = await CommandRouter.route("forget-table degrees");
+    expect(f).toContain('The built-in "degrees" resurfaces');
+    expect(SuccessTableRegistry.get("degrees")!.rows!.length).toBe(5);        // shipped ladder is back
+    expect(await CommandRouter.route("forget-table damage")).toContain("can be shadowed");
+    expect(await CommandRouter.route("forget-table nope")).toContain("No table");
+  });
+
+  test("win-table renders define-table's spec; Create defines through composeCommand", async () => {
+    await CommandRouter.route("win-table");
+    expect(__uiWindows().length).toBe(1);
+    await api.v1.tempStorage.set("win:define-table:name", "fear");
+    await api.v1.tempStorage.set("win:define-table:rows", "1:Uneasy, 4:Panicked");
+    await api.v1.tempStorage.set("win:define-table:cap", "5");
+    expect(await __uiClickButton("Create")).toBe(true);
+    const t = SuccessTableRegistry.get("fear")!;
+    expect(t.rows![1]).toEqual({ at: 4, label: "Panicked" });   // literal composition kept the case
+    expect(t.cap).toBe(5);
   });
 });

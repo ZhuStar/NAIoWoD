@@ -105,3 +105,16 @@ async function cmdWinConstraint(): Promise<string> {
 CommandRouter.register("win-constraint", cmdWinConstraint, {
   summary: "open a window to define a constraint group",
 });
+
+// [[win-table]] - a UI over [[define-table]], derived from its spec.
+async function cmdWinTable(): Promise<string> {
+  await openCommandWindow("define-table", {
+    title: "Define success table",
+    blurb: "**Define a success table** (ladder rows, numeric output, or both)",
+  });
+  return `((OOC-Storyteller: Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).))`;
+}
+
+CommandRouter.register("win-table", cmdWinTable, {
+  summary: "open a window to define a success table",
+});

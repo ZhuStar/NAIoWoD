@@ -1099,7 +1099,12 @@ Ordered roughly by unlock value:
 12. **More wizard-windows.** The infra is now SPEC-DRIVEN (§7.20):
     `openCommandWindow(verb)` renders any registered CommandSpec as a form and
     submits through `composeCommand` — a static-shaped window costs a spec
-    that already exists. Remaining: the **condition-builder window** (specs +
+    that already exists. Selection widgets policy (user idea, recorded in
+    docs/ui-parts.md "Design notes — selection widgets"): few options → inline
+    button row (exists); MANY options → the **picker modal** (current value ✅
+    + a Choose… button opening a modal with one button per option — a dropdown
+    substitute, to be a third enum-rendering branch of openCommandWindow);
+    open vocabularies → text input. Remaining: the **condition-builder window** (specs +
     DOMAIN-driven fields from `ConditionDef.bindings` — hand-built part tree,
     same composeCommand submit); the `[[win-roll]]` roll-builder window
     (window not modal; **difficulty-as-expression DONE** in

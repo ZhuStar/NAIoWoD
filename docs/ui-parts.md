@@ -302,8 +302,9 @@ state that should not persist beyond the session (`{{temp:key}}`).
 
 > Not part of the NovelAI docs. These are project decisions for NAIoWoD's planned
 > roll-builder window, recorded here so the build pass has them. The window itself
-> is **not built yet** (there is no `api.v1.ui` in `src/host.ts` yet, and a real
-> NovelAI window cannot be rendered/verified off-host). This section is the spec.
+> is **not built yet**. (The `api.v1.ui` contract + off-host mock DO exist now in
+> `src/host.ts`, and spec-driven windows/modals are live — see `src/window.ts`
+> and the modal helpers in `src/game.ts`.) This section is the spec.
 
 **What it is.** A floating **window** (not a modal), opened by the `[[win-roll]]`
 command via `api.v1.ui.window.open`. It is a **form** — every field visible at
@@ -366,3 +367,27 @@ the resolver as-is.
 (`src/host.ts` — where `api.v1.ui` must be added, contract + mock); the
 medium-agnostic `WizardDefinition` (`src/wizard.ts`), whose header already
 anticipates "a future `api.v1.ui` renderer."
+
+## Design notes — selection widgets (radio / dropdown substitutes)
+
+> Not part of the NovelAI docs. The UI registry has **no native select part**,
+> so choices are simulated. Three modes, all driven by the same `CommandSpec`
+> enum param; pick by option-count:
+>
+> 1. **Few options (≤ ~5): inline button row** (`selectorRow`, live in
+>    `src/window.ts`) — every option is a button, the current one is marked
+>    with a bullet; one click selects and re-renders. This IS a radio group.
+> 2. **Many options: the picker modal** (user idea, 2026-07-16; not built yet)
+>    — the window shows the options (or just the current value) as text with
+>    the selected one marked ✅, next to a **Choose…** button; the button opens
+>    a **modal with one button per option** (modals take an arbitrary part
+>    tree — any number of buttons, stacked in rows/columns); clicking one
+>    writes the selection to the field's tempStorage key, closes the modal,
+>    and re-renders the window. A dropdown substitute for lists too long to
+>    inline (conditions, templates, abilities).
+> 3. **Open vocabularies: a text input** — typing the value stays the escape
+>    hatch when the option set is unbounded or the user knows what they want.
+>
+> When built, mode 2 should be a third rendering branch of
+> `openCommandWindow`'s enum handling (option-count threshold), not a separate
+> system.

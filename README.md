@@ -695,11 +695,23 @@ and submits through `composeCommand` — the one place that quotes and sanitizes
 values (backtick literals for display text; characters that would break
 tokenization are stripped, since the command grammar deliberately has no escape
 syntax). `[[help]]` derives from the same specs, so a verb's grammar lives in
-exactly one place. Windows that need *domain*-driven fields (a condition def's
-binding slots) will build their part tree by hand and still submit through
-`composeCommand`. The host UI contract + off-host mock (`src/host.ts`,
-`src/window.ts`) are the shared foundation; the full UI reference lives in
-`docs/ui-*.md`.
+exactly one place.
+
+For choice fields too long to inline as button rows there's the **picker**:
+each such field is a text input (type the value directly) next to a
+**Choose…** button that opens a modal with one button per option, the current
+value marked ✅ — picking writes the field and re-renders. The condition
+windows use it:
+
+- **`[[win-condition]]`** — `define-condition` as a form; the `then` and
+  `mirror` fields get pickers over the existing conditions.
+- **`[[win-afflict]]`** — the first *domain-driven* window: pick a condition
+  and its def's **binding slots appear as fields** (the def drives the form,
+  not a spec); Afflict composes and routes the real `[[afflict]]`, so mirrors
+  and validation behave exactly as if you'd typed it.
+
+The host UI contract + off-host mock (`src/host.ts`, `src/window.ts`) are the
+shared foundation; the full UI reference lives in `docs/ui-*.md`.
 
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
 resolution, and turning a finished sheet into a `LiveCharacter`.

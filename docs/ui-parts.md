@@ -377,14 +377,16 @@ anticipates "a future `api.v1.ui` renderer."
 > 1. **Few options (≤ ~5): inline button row** (`selectorRow`, live in
 >    `src/window.ts`) — every option is a button, the current one is marked
 >    with a bullet; one click selects and re-renders. This IS a radio group.
-> 2. **Many options: the picker modal** (user idea, 2026-07-16; not built yet)
->    — the window shows the options (or just the current value) as text with
->    the selected one marked ✅, next to a **Choose…** button; the button opens
->    a **modal with one button per option** (modals take an arbitrary part
->    tree — any number of buttons, stacked in rows/columns); clicking one
->    writes the selection to the field's tempStorage key, closes the modal,
->    and re-renders the window. A dropdown substitute for lists too long to
->    inline (conditions, templates, abilities).
+> 2. **Many options: the picker modal** (user idea, 2026-07-16; **BUILT** —
+>    `pickerField` in `src/window.ts`) — a text input (typing stays live) next
+>    to a **Choose <key>…** button; the button opens a **modal with one button
+>    per option** (modals take an arbitrary part tree — any number of buttons),
+>    the current value's button marked ✅, plus "(clear)" and Cancel; clicking
+>    one writes the selection to the field's tempStorage key, closes the
+>    modal, and re-renders the window. Options are a thunk, so dynamic lists
+>    (conditions, tables) are read at open time. Used by `[[win-condition]]`
+>    (then/mirror) and `[[win-afflict]]` (the condition picker); available to
+>    any spec window via `openCommandWindow(verb, { pickers: { key: thunk } })`.
 > 3. **Open vocabularies: a text input** — typing the value stays the escape
 >    hatch when the option set is unbounded or the user knows what they want.
 >

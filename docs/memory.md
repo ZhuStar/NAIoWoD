@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `bd841ad`** ("Virtual lorebook
-> subcategories, tracked cards + reconciliation modals, table aliases").
+> **Last synced with the code as of commit `5ac54a1`** ("Condition
+> windows: win-condition + win-afflict, and the picker-modal widget").
 
 ---
 
@@ -742,6 +742,8 @@ wod:config:success-tables:<name> + its general card) ·
 `table-alias [@a "<[sub::]name>"]` (no args = list; table=@a resolves;
 advisory when the target doesn't exist yet) · `forget-table-alias <@a>` ·
 `win-table` (window over define-table) ·
+`win-condition` (define-condition form; then/mirror pickers) ·
+`win-afflict` (pick a condition → its binding slots appear → routes afflict) ·
 `define-constraint name=".." relation=exclusive|restricted|forbidden
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
@@ -788,8 +790,9 @@ zero resolver so only literals count; a deleted char degrades to ad-hoc.
 → botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
 `execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
-### src/window.ts (120) — api.v1.ui windows that EMIT commands, DERIVED from specs
-Imports host + **command** only (NOT game — the split's dependency win).
+### src/window.ts (256) — api.v1.ui windows that EMIT commands, DERIVED from specs
+Imports host + **command** + **state** (registries feed domain windows and
+picker options; still NOT game — the split's dependency win).
 **A window is an abstraction over the command layer, not a second path**, and
 since the architecture pass its form is **derived from the verb's
 CommandSpec**: `openCommandWindow(verb, {title?, blurb?, submitLabel?})` looks
@@ -803,8 +806,21 @@ temp values, refuses on a missing required param, then routes
 shows the OOC reply in-window. `openConstraintWindow()` =
 `openCommandWindow("define-constraint", …)`; `[[win-constraint]]` and
 `[[win-table]]` (over define-table) register at module load (pure registry
-mutation). Windows needing DOMAIN-driven fields (condition binding slots)
-will hand-build their part tree and still submit through `composeCommand`.
+mutation). **The picker** (selection-widgets mode 2, docs/ui-parts.md;
+user-specced): `pickerField(part, {key, label, storageKey, options: thunk,
+rerender, placeholder?})` = textInput (typing stays live) + a
+`Choose <key>…` button → modal with one button per option (current ✅,
+"(clear)", Cancel); picking writes the temp key, closes, re-renders.
+`openCommandWindow` accepts `opts.pickers: {paramKey → options-thunk}` (same
+temp key — composeCommand untouched). **`[[win-condition]]`** =
+openCommandWindow("define-condition") with pickers on `then`/`mirror`
+(`conditionOptions` = ConditionRegistry.all(), `name - description` labels).
+**`[[win-afflict]]`** (`openAfflictWindow`) — the first DOMAIN-driven window:
+condition pickerField; `on` input; the picked def's `bindings` slots render
+as inputs (temp `win:afflict:bind:<slot>`; the picker's rerender reveals
+them); Afflict composes `[[afflict]]` via specFor("afflict") (openNamed
+carries the slots) and shows the handler's reply (refusals included)
+in-window.
 
 ### src/index.ts / src/main.ts
 Re-export everything (incl. `./command`, `./state`, `./window`) + `init()`:
@@ -819,7 +835,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3068 + 20 lines, 288 tests, 79 describes)
+### test/ (3133 + 20 lines, 292 tests, 80 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1115,9 +1131,10 @@ Ordered roughly by unlock value:
     button row (exists); MANY options → the **picker modal** (current value ✅
     + a Choose… button opening a modal with one button per option — a dropdown
     substitute, to be a third enum-rendering branch of openCommandWindow);
-    open vocabularies → text input. Remaining: the **condition-builder window** (specs +
-    DOMAIN-driven fields from `ConditionDef.bindings` — hand-built part tree,
-    same composeCommand submit); the `[[win-roll]]` roll-builder window
+    open vocabularies → text input. The **condition windows are DONE**
+    (`[[win-condition]]` + `[[win-afflict]]` — the domain-driven pattern
+    proven; the picker is `pickerField`, reusable via
+    `openCommandWindow({pickers})`). Remaining: the `[[win-roll]]` roll-builder window
     (window not modal; **difficulty-as-expression DONE** in
     `RollSpec.difficultyExpr`; still to do the **advisory**
     `self:`/`ally:`/`target:`/`opposition:` prefixes - in the "Design notes"

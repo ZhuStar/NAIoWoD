@@ -3066,3 +3066,68 @@ describe("table subcategories: paths, cards, aliases, modals", () => {
     expect(SuccessTableRegistry.get("dread")).toBeDefined();
   });
 });
+
+// =============================================================================
+// CONDITION WINDOWS - the picker modal + win-condition + win-afflict
+// =============================================================================
+describe("condition windows: picker modal, win-condition, win-afflict", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  const texts = (): string[] => {
+    const out: string[] = [];
+    const walk = (parts: Array<Record<string, unknown>>): void => {
+      for (const p of parts ?? []) {
+        if (typeof p["text"] === "string") out.push(p["text"] as string);
+        if (Array.isArray(p["content"])) walk(p["content"] as Array<Record<string, unknown>>);
+      }
+    };
+    for (const w of __uiWindows()) walk(w.options.content as unknown as Array<Record<string, unknown>>);
+    return out;
+  };
+
+  test("the mirror picker lists conditions, marks the current value, writes the field, and closes", async () => {
+    await CommandRouter.route("win-condition");
+    await api.v1.tempStorage.set("win:define-condition:mirror", "feral-whispers");
+    expect(await __uiClickButton("Choose mirror…")).toBe(true);
+    expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(1);
+    const labels = texts();
+    expect(labels.some(t => t.startsWith("✅ feral-whispers"))).toBe(true);          // current, marked
+    expect(await __uiClickButton("concentrating-on - Locked eyes with the target; nothing else exists this turn")).toBe(true);
+    expect(await api.v1.tempStorage.get("win:define-condition:mirror")).toBe("concentrating-on");
+    expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(0);            // picker closed itself
+  });
+
+  test("win-condition Create defines the condition with the picked mirror", async () => {
+    await CommandRouter.route("win-condition");
+    await api.v1.tempStorage.set("win:define-condition:name", "beast-bond");
+    await api.v1.tempStorage.set("win:define-condition:bindings", "target");
+    expect(await __uiClickButton("Choose mirror…")).toBe(true);
+    expect(await __uiClickButton("feral-whispers - Conversing in the target animal's tongue (Feral Speech)")).toBe(true);
+    expect(await __uiClickButton("Create")).toBe(true);
+    const def = ConditionRegistry.get("beast-bond")!;
+    expect(def.mirror).toBe("feral-whispers");
+    expect(def.bindings).toEqual(["target"]);
+  });
+
+  test("win-afflict: picking a def reveals its binding slots; Afflict routes the real command (mirror fires)", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("win-afflict");
+    expect(texts().some(t => t === "Binding: target")).toBe(false);                  // nothing picked yet
+    expect(await __uiClickButton("Choose condition…")).toBe(true);
+    expect(await __uiClickButton("concentrating-on - Locked eyes with the target; nothing else exists this turn")).toBe(true);
+    expect(texts().some(t => t === "Binding: target")).toBe(true);                   // the def drove the form
+    await api.v1.tempStorage.set("win:afflict:bind:target", "grey wolf");
+    expect(await __uiClickButton("Afflict")).toBe(true);
+    expect(await CommandRouter.route("conditions")).toContain("concentrating-on (target: Grey Wolf)");
+  });
+
+  test("win-afflict refusals surface in-window: no condition picked; missing binding via the handler", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("win-afflict");
+    expect(await __uiClickButton("Afflict")).toBe(true);
+    expect(texts().some(t => t === "Pick a condition first.")).toBe(true);
+    await api.v1.tempStorage.set("win:afflict:condition", "concentrating-on");
+    expect(await __uiClickButton("Afflict")).toBe(true);                             // target left blank
+    expect(texts().some(t => t.includes("needs target="))).toBe(true);               // the handler's refusal, in-window
+  });
+});

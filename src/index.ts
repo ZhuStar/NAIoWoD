@@ -19,19 +19,28 @@ export * from "./game";
 export * from "./window";
 
 import { api, log, OnTextAdventureInput } from "./host";
-import { LorebookManager, MeritFlawRegistry, reloadAllConfigStores } from "./services";
-import { processAdventureInput } from "./game";
+import {
+  LorebookManager, MeritFlawRegistry, reloadAllConfigStores,
+  ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,
+} from "./services";
+import { processAdventureInput, reconcileLorebook } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
-// Wire the engine to the host: input hook, lorebook seed, custom merits/flaws.
+// Wire the engine to the host: input hook, lorebook seed, the base virtual
+// paths (config/general + success-tables/general), tracked-card reconciliation
+// (drift modals may open), custom merits/flaws, and every config store.
 // Returns the bootstrap result so the caller can surface the setup note.
 export async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onTextAdventureInput", async (params: Parameters<OnTextAdventureInput>[0]) => {
     return processAdventureInput(params.rawInputText);
   });
   const boot = await LorebookManager.bootstrap();
+  await ensurePath("config", CONFIG_GENERAL_HEADER);
+  await ensurePath("config:success-tables", TABLE_GENERAL_HEADER);
+  const recon = await reconcileLorebook();
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "")}=${c.count}`).join(", ")}`);
+  const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}${reconBit}`);
   return { setupMessage: boot.message };
 }

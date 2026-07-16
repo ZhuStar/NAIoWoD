@@ -17,8 +17,9 @@ import {
   ExtendedRoll, applyInterval, ExtendedRollStore,
   readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry, parseTableRows,
   compareRolls, applyContestRound, describeContest,
-  ExtendedContestStore, SuccessTables, SUCCESS_TABLES_ENTRY,
+  ExtendedContestStore, TableLibrary, TableAliases, TABLES_CATEGORY, GENERAL_ENTRY,
   reloadAllConfigStores, resetAllConfigStores, ALL_CONFIG_STORES,
+  structuralHash, ensurePath, TrackedLorebook, combineConfigTexts, reconcileLorebook,
   describeCommandSpec, composeCommand, type CommandSpec,
   CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS, CreatorMode,
   type SuccessTable, type ExtendedContest, type RollExecution,
@@ -2210,9 +2211,9 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
   test("a lorebook entry overlays new tables (array form), usable via table=", async () => {
     const tables = [{ name: "intimidate", rows: [{ at: 1, label: "Cowed" }, { at: 3, label: "Terrified" }] }];
     const text = `Success tables (JSON below the marker).\n=====\n${JSON.stringify(tables)}`;
-    const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
-    await LorebookManager.ensureEntry(id, SUCCESS_TABLES_ENTRY, text);
-    expect(await SuccessTables.loadFromLorebook()).toBe(1);
+    const { id } = await LorebookManager.ensureCategory(TABLES_CATEGORY);
+    await LorebookManager.ensureEntry(id, GENERAL_ENTRY, text);
+    expect(await TableLibrary.loadFromLorebook()).toBe(1);
     expect(SuccessTableRegistry.get("intimidate")!.rows!.length).toBe(2);
 
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
@@ -2224,9 +2225,9 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
   test("the map form (name -> table) also registers, defaults are re-seeded", async () => {
     const map = { luck: { valuePerSuccess: 2, failure: "no luck" } };
     const text = `notes\n=====\n${JSON.stringify(map)}`;
-    const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
-    await LorebookManager.ensureEntry(id, SUCCESS_TABLES_ENTRY, text);
-    await SuccessTables.loadFromLorebook();
+    const { id } = await LorebookManager.ensureCategory(TABLES_CATEGORY);
+    await LorebookManager.ensureEntry(id, GENERAL_ENTRY, text);
+    await TableLibrary.loadFromLorebook();
     expect(readSuccessTable(SuccessTableRegistry.get("luck")!, "success", 3).value).toBe(6);
     expect(SuccessTableRegistry.get("damage")).toBeDefined(); // built-ins survive the overlay
   });
@@ -2791,7 +2792,7 @@ describe("config stores: reload/reset-all", () => {
 
   test("every store self-registered into ALL_CONFIG_STORES", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
-      CONDITIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, SUCCESS_TABLES_ENTRY,
+      CONDITIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY,
     ].sort());
   });
 
@@ -2864,7 +2865,7 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
     // The write went to the ONE lorebook entry: reload after reset re-registers it.
     resetAllConfigStores();
     expect(SuccessTableRegistry.get("intimidate")).toBeUndefined();
-    await SuccessTables.loadFromLorebook();
+    await TableLibrary.loadFromLorebook();
     expect(SuccessTableRegistry.get("intimidate")!.failure).toBe("They hold their ground");
   });
 
@@ -2897,5 +2898,171 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
     const t = SuccessTableRegistry.get("fear")!;
     expect(t.rows![1]).toEqual({ at: 4, label: "Panicked" });   // literal composition kept the case
     expect(t.cap).toBe(5);
+  });
+});
+
+// =============================================================================
+// TRACKED LOREBOOK - id map, backups, structural hash, reconciliation
+// =============================================================================
+describe("tracked lorebook: hash, ensurePath, reconcile findings", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("structuralHash: key order and header text are irrelevant; text fallback collapses whitespace", () => {
+    const a = "instructions A\n=====\n" + JSON.stringify([{ name: "x", cap: 3 }]);
+    const b = "TOTALLY different header\n=====\n" + JSON.stringify([{ cap: 3, name: "x" }]);
+    expect(structuralHash(a)).toBe(structuralHash(b));
+    expect(structuralHash("h\n=====\nplain   text")).toBe(structuralHash("h2\n=====\nplain text"));
+    expect(structuralHash(a)).not.toBe(structuralHash("h\n=====\n" + JSON.stringify([{ name: "x", cap: 4 }])));
+  });
+
+  test("ensurePath creates the real category + tracked general card; idempotent", async () => {
+    const { category, createdEntry } = await ensurePath("config:success-tables:combat");
+    expect(category).toBe(`${TABLES_CATEGORY}:combat`);
+    expect(createdEntry).toBe(true);
+    expect(await LorebookManager.entryText(category, GENERAL_ENTRY)).toContain("=====");
+    expect(await TrackedLorebook.idFor(category, GENERAL_ENTRY)).toBeDefined();
+    expect(await TrackedLorebook.backupOf(category, GENERAL_ENTRY)).toBeDefined();
+    expect((await ensurePath("config:success-tables:combat")).createdEntry).toBe(false);
+  });
+
+  test("reconcile: healthy is silent; an identical recreation is ADOPTED (uuid re-pointed, no modal)", async () => {
+    await ensurePath("config:success-tables:combat");
+    const category = `${TABLES_CATEGORY}:combat`;
+    expect(await TrackedLorebook.reconcile()).toEqual([]);
+    const oldId = (await TrackedLorebook.idFor(category, GENERAL_ENTRY))!;
+    await api.v1.lorebook.removeEntry(oldId);
+    const catId = (await LorebookManager.ensureCategory(category)).id;
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId, text: "my own header words\n=====\n[]" });
+    const findings = await TrackedLorebook.reconcile();
+    expect(findings.length).toBe(1);
+    expect(findings[0].kind).toBe("adopted");
+    expect(await TrackedLorebook.idFor(category, GENERAL_ENTRY)).not.toBe(oldId);
+    expect(await TrackedLorebook.reconcile()).toEqual([]);   // now healthy again
+  });
+
+  test("reconcile: a structurally different recreation is a conflict; a plain deletion is missing", async () => {
+    await ensurePath("config:success-tables:combat");
+    const category = `${TABLES_CATEGORY}:combat`;
+    const oldId = (await TrackedLorebook.idFor(category, GENERAL_ENTRY))!;
+    await api.v1.lorebook.removeEntry(oldId);
+    const catId = (await LorebookManager.ensureCategory(category)).id;
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId, text: "h\n=====\n" + JSON.stringify([{ name: "dread", valuePerSuccess: 1 }]) });
+    const conflict = (await TrackedLorebook.reconcile())[0];
+    expect(conflict.kind).toBe("conflict");
+    expect(conflict.foundText).toContain("dread");
+    expect(conflict.backupText).toBeDefined();
+    await api.v1.lorebook.removeEntry(conflict.foundId!);
+    const missing = (await TrackedLorebook.reconcile())[0];
+    expect(missing.kind).toBe("missing");
+    expect(missing.backupText).toBeDefined();
+  });
+
+  test("combineConfigTexts: array union (found wins), header from found; unparseable is not combinable", () => {
+    const backup = "old header\n=====\n" + JSON.stringify([{ name: "a", cap: 1 }, { name: "b", cap: 2 }]);
+    const found = "new header\n=====\n" + JSON.stringify([{ name: "b", cap: 9 }, { name: "c", cap: 3 }]);
+    const combined = combineConfigTexts(backup, found)!;
+    const list = JSON.parse(LorebookManager.contentBelowHeader(combined)) as { name: string; cap: number }[];
+    expect(list.map(d => `${d.name}:${d.cap}`).sort()).toEqual(["a:1", "b:9", "c:3"]);
+    expect(combined.startsWith("new header")).toBe(true);
+    expect(combineConfigTexts("h\n=====\nnot json", found)).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// TABLE SUBCATEGORIES - categories, paths, aliases, and the two modal flows
+// =============================================================================
+describe("table subcategories: paths, cards, aliases, modals", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("define-table-category creates the category; define-table sub::name defines into it; roll reads the path", async () => {
+    expect(await CommandRouter.route('define-table-category name="combat"')).toContain('Created table category "combat"');
+    const d = await CommandRouter.route('define-table name="combat::quick-kill" rows=`1:Wounded, 3:Dead`');
+    expect(d).toContain("Defined table combat:quick-kill");
+    expect(d).toContain("table=combat::quick-kill");
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("roll 5 table=combat::quick-kill", { rng: seqRng([6, 6, 6, 2, 2]) });
+    expect(r).toContain("Dead");
+    expect(await CommandRouter.route('define-table-category name="combat"')).toContain("already exists");
+  });
+
+  test("a missing subcategory prompts a modal; confirming creates it and defines the table", async () => {
+    const reply = await CommandRouter.route('define-table name="social::charm" rows=`1:Amused`');
+    expect(reply).toContain("answer the modal");
+    expect(SuccessTableRegistry.get("social:charm")).toBeUndefined();
+    expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(1);
+    expect(await __uiClickButton("Create & define")).toBe(true);
+    expect(SuccessTableRegistry.get("social:charm")!.rows![0].label).toBe("Amused");
+    expect(await LorebookManager.entryText(`${TABLES_CATEGORY}:social`, GENERAL_ENTRY)).toContain("Amused");
+  });
+
+  test("every card in a category is read; a later card shadows general and define-table says so", async () => {
+    await CommandRouter.route('define-table name="fear" rows=`1:Uneasy`');
+    const catId = (await LorebookManager.ensureCategory(TABLES_CATEGORY)).id;
+    await api.v1.lorebook.createEntry({
+      id: api.v1.uuid(), displayName: "more-tables", category: catId,
+      text: "extra card\n=====\n" + JSON.stringify([{ name: "fear", rows: [{ at: 1, label: "Shaken" }] }, { name: "joy", valuePerSuccess: 1 }]),
+    });
+    await TableLibrary.loadFromLorebook();
+    expect(SuccessTableRegistry.get("fear")!.rows![0].label).toBe("Shaken");
+    expect(SuccessTableRegistry.get("joy")).toBeDefined();
+    expect(await CommandRouter.route('define-table name="fear" rows=`1:Uneasy`')).toContain("shadows this name");
+  });
+
+  test("[[tables]] groups by category; a subcategory can be listed and its tables detailed", async () => {
+    await CommandRouter.route('define-table-category name="combat"');
+    await CommandRouter.route('define-table name="combat::quick-kill" value-per-success=1');
+    const all = await CommandRouter.route("tables");
+    expect(all).toContain("general:");
+    expect(all).toContain("combat: quick-kill");
+    expect(await CommandRouter.route("tables combat")).toContain('Tables in "combat": quick-kill');
+    expect(await CommandRouter.route("tables combat::quick-kill")).toContain("1/success");
+    expect(await CommandRouter.route('define-table name="a::b::c"')).toContain("one level deep");
+  });
+
+  test("table aliases: define, resolve at table=, list, forget; advisory when the target is undefined", async () => {
+    await CommandRouter.route('define-table-category name="combat"');
+    await CommandRouter.route('define-table name="combat::quick-kill" rows=`1:Dead`');
+    expect(await CommandRouter.route('table-alias @qk "combat::quick-kill"')).toContain("@qk now means table combat:quick-kill");
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const r = await CommandRouter.route("roll 5 table=@qk", { rng: seqRng([6, 2, 2, 2, 2]) });
+    expect(r).toContain("Dead");
+    expect(await CommandRouter.route("table-alias")).toContain("@qk -> combat:quick-kill");
+    expect(await CommandRouter.route("tables")).toContain("@qk -> combat:quick-kill");
+    expect(await CommandRouter.route('forget-table combat::quick-kill')).toContain("Forgot table");
+    expect(await CommandRouter.route("forget-table-alias @qk")).toContain("Forgot table alias @qk");
+    const gone = await CommandRouter.route("roll 5 table=@qk", { rng: seqRng([6, 2, 2, 2, 2]) });
+    expect(gone).toContain('Unknown table alias "@qk"');
+    expect(await CommandRouter.route('table-alias @x "nope"')).toContain("the alias waits for it");
+  });
+
+  test("reconcile e2e: deleted tracked card -> modal once (guard) -> Restore brings it back", async () => {
+    await CommandRouter.route('define-table name="fear" rows=`1:Uneasy`');
+    const id = (await TrackedLorebook.idFor(TABLES_CATEGORY, GENERAL_ENTRY))!;
+    await api.v1.lorebook.removeEntry(id);
+    __resetUiMock();
+    const notes = await reconcileLorebook();
+    expect(notes.join(" ")).toContain("gone");
+    await reconcileLorebook();   // same drift again - the session guard holds
+    expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(1);
+    expect(await __uiClickButton("Restore from backup")).toBe(true);
+    expect(await LorebookManager.entryText(TABLES_CATEGORY, GENERAL_ENTRY)).toContain("Uneasy");
+    expect(SuccessTableRegistry.get("fear")).toBeDefined();
+  });
+
+  test("reconcile e2e: recreated-with-changes -> conflict modal -> Combine unions both sets", async () => {
+    await CommandRouter.route('define-table name="fear" rows=`1:Uneasy`');
+    const id = (await TrackedLorebook.idFor(TABLES_CATEGORY, GENERAL_ENTRY))!;
+    await api.v1.lorebook.removeEntry(id);
+    const catId = (await LorebookManager.ensureCategory(TABLES_CATEGORY)).id;
+    await api.v1.lorebook.createEntry({
+      id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId,
+      text: "mine\n=====\n" + JSON.stringify([{ name: "dread", valuePerSuccess: 1 }]),
+    });
+    __resetUiMock();
+    await reconcileLorebook();
+    expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(1);
+    expect(await __uiClickButton("Combine both")).toBe(true);
+    expect(SuccessTableRegistry.get("fear")).toBeDefined();
+    expect(SuccessTableRegistry.get("dread")).toBeDefined();
   });
 });

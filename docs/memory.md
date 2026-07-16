@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `1412cb6`** ("define-table /
-> forget-table / win-table: command authoring for success tables").
+> **Last synced with the code as of commit `bd841ad`** ("Virtual lorebook
+> subcategories, tracked cards + reconciliation modals, table aliases").
 
 ---
 
@@ -424,7 +424,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   every dispatch (dependency inversion — the router knows NOTHING about
   stores; game.ts registers the creator-mode sync). Unknown verb lists all.
 
-### src/services.ts (422)
+### src/services.ts (634)
 - `ScopedStorage(prefix = api.v1.script.id)` — story-scoped KV where every key
   is `<prefix>_<key>`: `get/getOrDefault/set/setIfAbsent/has/delete/list`
   (list strips the prefix back off) + `temp*` variants on tempStorage.
@@ -438,6 +438,24 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   allKnowledges/allBackgrounds`), and `bootstrap(specs=SRD_CATEGORIES)` —
   creates missing categories + seeds tutorial entries, returns the OOC setup
   message. **Existing player categories are never touched.**
+- **Tracked cards (the virtual-subcategory machinery, §7.21)**:
+  `GENERAL_ENTRY = "general"`; `CONFIG_GENERAL_HEADER`/`TABLE_GENERAL_HEADER`
+  seed texts. `structuralHash(text)` — content-below-marker only (header edits
+  never conflict), canonical-JSON (recursively sorted keys) djb2, text
+  fallback. **`TrackedLorebook`** — storyStorage `lb:ids` (`cat:<name>` /
+  `ent:<category>/<entry>` → uuid) + `lb:backup:<category>/<entry>` (full
+  text); `remember/idFor/backupOf/refreshBackup/forget/trackedEntries`;
+  **`reconcile()`** → `ReconcileFinding[]`: alive-by-id → backup refresh;
+  recreated + hash-equal → ADOPT the new uuid silently (never recreate a card
+  to keep an old id — ids only mean anything through the map); hash-differ →
+  `conflict {foundId, foundText, backupText}`; gone → `missing {backupText}`.
+  Pure detection — game.ts owns the modals. `adopt(category, entry, id, text)`.
+  `writeTrackedEntry(category, entry, text)` — write-through + ids + backup
+  (all config stores inherit via `writeConfigEntry`). `ensurePath(virtualPath,
+  header?)` — real category `wod:<path>` + tracked `general` (never touches an
+  existing card's text). `combineConfigTexts(backup, found)` — array
+  (name-keyed) or map union, the FOUND (player's newer) defs win, found's
+  header kept; unparseable → undefined (modal hides Combine).
 - **Generic config stores** — THE `wod:config` pattern as two classes (a
   concrete registry is an instance, not a re-implementation):
   `ListConfigStore<T extends {name}>` (JSON array or name→def map; overlay
@@ -457,7 +475,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1257) — the character model + every persistent store
+### src/state.ts (1370) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -536,12 +554,21 @@ without naming them):
 - `ResourceOverrides` = `MapConfigStore<Partial<ResourceDef>>` on
   `wod:config:resources` (`RESOURCE_CONFIG_ENTRY`) — the house-rule layer;
   `current()` feeds `CharacterResources.defsFor`; the wizard `save()`s it.
-- `SuccessTables` = `ListConfigStore<SuccessTable>` on
-  `wod:config:success-tables` (`SUCCESS_TABLES_ENTRY`); no reads of its own —
-  `onChanged` re-projects into rolls.ts' pure `SuccessTableRegistry`
-  (reset-then-register), so loading, saving AND resetting the store keep the
-  registry true (store reset = shipped tables back). The old free function
-  `loadSuccessTablesFromLorebook` is GONE.
+- **`TableLibrary`** (NOT a ListConfigStore — tables live in a category TREE,
+  §7.21): `TABLES_CATEGORY = "wod:config:success-tables"` names the tree root.
+  Implements ConfigStoreLike (self-registers; `entry` label = the root).
+  `loadFromLorebook()` enumerates the root category + every
+  `wod:config:success-tables:<sub>` (one level; deeper ignored), parses EVERY
+  card per category (general first, others by name — a later card SHADOWS an
+  earlier one), registers into the pure `SuccessTableRegistry` (reset first —
+  built-ins reseed) under `name` (root) / `<sub>:name` keys. `put(def, sub?)`
+  → `ensurePath` + read-modify-write the GENERAL card (returns `{shadowed}`
+  when another card wins the key). `remove(key)` edits general only (reports
+  `still: "built-in" | "another-card"`). `subcategories()`. `reset()` =
+  registry reset.
+- **`TableAliases`** — storyStorage `table-aliases` flat map alias→tableKey
+  (stored without `@`, normalized); `all/set/remove/resolve`. Position
+  disambiguates the sigil: `table=` slot → table alias.
 - `ConstraintRegistry` = `ListConfigStore<ConstraintGroup>` on
   `wod:config:constraints` (`CONSTRAINTS_ENTRY`), no defaults,
   make=`makeConstraintGroup`.
@@ -588,7 +615,23 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (1833) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2069) — the verbs (interpreter, wizards, handlers, registrations)
+
+**Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
+argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
+`tableNote` (now async) reads `table=` through it for rolls AND contests.
+`confirmModal(title, body, actions[])` — generic `api.v1.ui.modal.open`
+prompt (actions run + show their outcome in-modal; Cancel/Close dismiss) —
+game-flow confirmations are MODALS here, distinct from window.ts' spec-driven
+form WINDOWS (build order: game precedes window, so the modal helpers can't
+live there). Uses: (1) `define-table` with a missing subcategory → "Create
+table category?" (the pending def rides the closure); (2)
+**`reconcileLorebook()`** — TrackedLorebook findings → adopted = note only;
+conflict → modal [Keep the new card / Combine both (hidden when unparseable) /
+Restore the old card]; missing → [Restore from backup / Forget it]; every
+action reloads all config stores; each distinct drift prompts ONCE per
+session (tempStorage guard `recon:<cat>/<ent>:<kind>:<hash>`). Runs at init
+and FIRST in `syncFromCreatorEdits()`.
 
 **Creator-mode sync (the router's game-side hook)**: `syncFromCreatorEdits()` =
 `CharacterStore.syncFromLorebook()` + `reloadAllConfigStores()`; registered
@@ -687,12 +730,18 @@ can't be mistaken for a pool) · `roll-status [id]` · `cancel-roll [id]` ·
 [label=] [interval=] [on-botch=…] [difficulty=] [vs-difficulty=]` ·
 `continue-contest [id] [difficulty=] [vs-difficulty=] [named overrides]` ·
 `contest-status [id]` · `cancel-contest [id]` · `tables [name]` ·
-`define-table name=".." [rows=<literal: 1:Cowed, 3:Terrified[=2]>]
+`define-table name="[sub::]name" [rows=<literal: 1:Cowed, 3:Terrified[=2]>]
 [value-per-success=N] [cap=N] [overflow-per=N] [overflow-value=N]
-[overflow-label=..] [botch=..] [failure=..] [description=..]` (rows/labels
-are BACKTICK literals — case survives; naming a built-in SHADOWS it; refuses
-a table with nothing to read) · `forget-table <name>` (overlay only;
-built-ins resurface) · `win-table` (window over define-table) ·
+[overflow-label=..] [botch=..] [failure=..] [description=..]` (writes the
+addressed category's GENERAL card; rows/labels are BACKTICK literals — case
+survives; naming a built-in SHADOWS it; a MISSING subcategory prompts a
+create-it modal; refuses a table with nothing to read) ·
+`forget-table <[sub::]name|@alias>` (general card only; built-ins/shadowing
+cards resurface) · `define-table-category name=".."` (creates
+wod:config:success-tables:<name> + its general card) ·
+`table-alias [@a "<[sub::]name>"]` (no args = list; table=@a resolves;
+advisory when the target doesn't exist yet) · `forget-table-alias <@a>` ·
+`win-table` (window over define-table) ·
 `define-constraint name=".." relation=exclusive|restricted|forbidden
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
@@ -758,9 +807,11 @@ mutation). Windows needing DOMAIN-driven fields (condition binding slots)
 will hand-build their part tree and still submit through `composeCommand`.
 
 ### src/index.ts / src/main.ts
-Re-export everything (incl. `./command`, `./state`, `./window`) + `init()`
-(bootstrap, merits, `reloadAllConfigStores()` with per-entry count logging);
-main calls `init().catch`.
+Re-export everything (incl. `./command`, `./state`, `./window`) + `init()`:
+bootstrap → `ensurePath("config")` + `ensurePath("config:success-tables")`
+(the base virtual paths + their general cards) → `reconcileLorebook()` (drift
+modals may open) → merits → `reloadAllConfigStores()` → log with per-entry
+counts + reconciliation notes; main calls `init().catch`.
 
 ### scripts/build-single.ts (91)
 `MODULES` order (= layering, now 14 files incl. command + state),
@@ -768,7 +819,7 @@ main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (2901 + 20 lines, 276 tests, 77 describes)
+### test/ (3068 + 20 lines, 288 tests, 79 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -792,23 +843,30 @@ pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
 `current-contest` pointer · `res:<char>` resource currents · `hp:<char>`
 health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
 · **`cond:<name>`** active conditions (keyed by normalized name — NPCs
-without records carry them too) · `wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
+without records carry them too) · **`lb:ids`** (tracked lorebook uuids:
+`cat:<category>` / `ent:<category>/<entry>`) · **`lb:backup:<category>/<entry>`**
+(tracked-card text backups) · **`table-aliases`** (alias→table-key map) ·
+`wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
 **`current-player`** / **`default-player`** pointers (default "storyteller") ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
 (session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
 live form fields, e.g. `win:define-constraint:relation` - the documented home
-for UI storageKey state).
+for UI storageKey state) · `recon:<category>/<entry>:<kind>:<hash>` (the
+once-per-session reconciliation-modal guard).
 
 **Lorebook** (all data entries = instructions above `=====`, data below):
 `srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
 `srd:merits-flaws` (JSON defs merged over defaults) · `wod:player-characters`
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
-(`wod:named-rolls:library` JSON map) · `wod:config`
-(`wod:config:resources` overrides map; `wod:config:success-tables` optional
-success-table overlay — array or `name → table` map; `wod:config:constraints`
-constraint groups — array of `ConstraintGroup` or `name → group` map;
-`wod:config:conditions` condition-def overlay — array of `ConditionDef` or
-`name → def` map, shadows shipped defaults by name).
+(`wod:named-rolls:library` JSON map) · `wod:config` (entries: `general`
+seeded global-config card, unread for now; `wod:config:resources` overrides
+map; `wod:config:constraints` constraint groups; `wod:config:conditions`
+condition-def overlay — each array or `name → def` map) ·
+**`wod:config:success-tables`** — a CATEGORY (the virtual-subcategory tree,
+§7.21): its `general` card + any extra cards hold bare-named tables; each
+subcategory is the real category `wod:config:success-tables:<sub>` (own
+`general` + extra cards), tables addressed `<sub>::name`. Engine-written
+cards are all tracked (id map + backups above).
 
 ## 7. Design decisions and their WHY (chronological-ish)
 
@@ -957,6 +1015,32 @@ constraint groups — array of `ConstraintGroup` or `name → group` map;
     genericity pays); and the layered command-bus architecture STAYS — ECS and
     event pub/sub were weighed and rejected (no perf need, single dispatcher,
     host.ts already is the hexagonal port+adapter+mock).
+21. **The virtual-subcategory policy** (user-specced; THE lorebook nesting
+    rule — nothing prior conflicted, but it did change one physical fact:
+    `wod:config:success-tables` used to be an ENTRY in `wod:config` and is now
+    a CATEGORY; no chronicle existed, so no migration — the old entry is
+    treated as never having existed). The policy: NovelAI categories cannot
+    nest, so nesting is CONCEPTUAL and ONLY the Lorebook module (services.ts)
+    knows — user code speaks virtual paths. A path `a::b` (folds to `a:b`)
+    maps to the flat real category `wod:a:b`; every engine-owned category has
+    a default **`general`** card (default write target, backed up); table
+    subcategories go ONE level below success-tables for now. Reading a table
+    category = EVERY card, general first, later cards shadow by name (the
+    user's card-overflow complaint solved at both levels); writes always land
+    in general. **Tracked cards**: everything the engine writes gets its
+    uuids mapped (`lb:ids`) and its text backed up (`lb:backup:*`) — the map
+    exists for DRIFT DETECTION and cheap writes, NOT read speed (reads are
+    O(1) registry hits; the rejected alias→uuid-LINE cache would go stale on
+    any edit and duplicate the registry). Reconciliation at init + creator
+    sync: identical recreation (structuralHash ignores the tutorial header) →
+    silently ADOPT the player's new uuid (never destroy-and-recreate a card to
+    keep an old id); structural conflict → modal [keep new / combine (player's
+    defs win) / restore]; deletion → modal [restore from backup / forget].
+    Each distinct drift prompts once per session. **Table aliases** are a flat
+    map, a separate domain from character aliases; the `table=` position
+    disambiguates the `@` sigil (like pool position = saved rolls). These are
+    the project's FIRST MODALS — game-flow confirmations, deliberately distinct
+    from window.ts' spec-driven form windows.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

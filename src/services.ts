@@ -196,6 +196,180 @@ export class LorebookManager {
 }
 
 // =============================================================================
+// TRACKED CARDS - virtual subcategories, id map, backups, reconciliation
+// -----------------------------------------------------------------------------
+// NovelAI lorebook categories cannot nest, so nesting is CONCEPTUAL and this
+// module owns the illusion (the subcategory policy, memory.md 7.21):
+// a virtual path "a::b" (user input, folds to "a:b") maps to the REAL category
+// named "wod:a:b"; every engine-owned category has a default entry "general" -
+// the default write target. Every card the engine writes is TRACKED: its
+// category/entry uuids live in the storyStorage id map (lb:ids) and its full
+// text is backed up (lb:backup:<category>/<entry>) on every write and every
+// healthy sighting. reconcileTracked() detects uuid drift: a card deleted and
+// recreated with identical structure is re-adopted silently (we point our map
+// at the NEW uuid - ids only have meaning through the map, so nothing is ever
+// destroyed to preserve one); a structural conflict or a plain deletion is
+// returned as a finding for the UI (game.ts opens the modal).
+// =============================================================================
+export const GENERAL_ENTRY = "general";
+
+// Default tutorial headers for engine-seeded `general` cards.
+export const CONFIG_GENERAL_HEADER = [
+  "Global configuration for this chronicle. The JSON below the marker holds",
+  "story-wide settings (none are read yet - this card is the documented home",
+  "for future global options). Edit in creator mode.",
+];
+export const TABLE_GENERAL_HEADER = [
+  "Success tables for this category. The JSON below the marker is an array of",
+  "tables (or a map name -> table). [[define-table]] writes here; you may add",
+  "MORE cards to this category to split a large set - every card is read, and",
+  "a later card's table shadows an earlier one with the same name.",
+];
+
+// Content-only structural hash: the tutorial header above the marker never
+// participates, so editing instructions can't trip a conflict. JSON bodies are
+// canonicalized (recursively sorted keys); anything unparseable falls back to
+// whitespace-collapsed text. djb2, hex.
+export function structuralHash(text: string): string {
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  const canon = (v: unknown): unknown => Array.isArray(v) ? v.map(canon)
+    : (v && typeof v === "object")
+      ? Object.fromEntries(Object.keys(v as Record<string, unknown>).sort().map(k => [k, canon((v as Record<string, unknown>)[k])]))
+      : v;
+  let s: string;
+  try { s = JSON.stringify(canon(JSON.parse(body))); } catch { s = body.replace(/\s+/g, " "); }
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+export interface ReconcileFinding {
+  category: string;
+  entry: string;
+  kind: "adopted" | "conflict" | "missing";
+  backupText?: string;
+  foundId?: string;
+  foundText?: string;
+}
+
+export class TrackedLorebook {
+  private static _storage = new ScopedStorage();
+  private static readonly IDS_KEY = "lb:ids";
+  private static _backupKey(category: string, entry: string): string { return `lb:backup:${category}/${entry}`; }
+
+  private static async _ids(): Promise<Record<string, string>> {
+    return ((await TrackedLorebook._storage.get(TrackedLorebook.IDS_KEY)) as Record<string, string> | undefined) ?? {};
+  }
+  private static async _saveIds(map: Record<string, string>): Promise<void> {
+    await TrackedLorebook._storage.set(TrackedLorebook.IDS_KEY, map);
+  }
+
+  static async remember(category: string, entry: string | undefined, id: string): Promise<void> {
+    const map = await TrackedLorebook._ids();
+    map[entry === undefined ? `cat:${category}` : `ent:${category}/${entry}`] = id;
+    await TrackedLorebook._saveIds(map);
+  }
+  static async idFor(category: string, entry?: string): Promise<string | undefined> {
+    return (await TrackedLorebook._ids())[entry === undefined ? `cat:${category}` : `ent:${category}/${entry}`];
+  }
+  static async backupOf(category: string, entry: string): Promise<string | undefined> {
+    return (await TrackedLorebook._storage.get(TrackedLorebook._backupKey(category, entry))) as string | undefined;
+  }
+  static async refreshBackup(category: string, entry: string, text: string): Promise<void> {
+    await TrackedLorebook._storage.set(TrackedLorebook._backupKey(category, entry), text);
+  }
+
+  // Stop tracking a card (the player chose to let it go): map records + backup.
+  static async forget(category: string, entry: string): Promise<void> {
+    const map = await TrackedLorebook._ids();
+    delete map[`ent:${category}/${entry}`];
+    await TrackedLorebook._saveIds(map);
+    await TrackedLorebook._storage.delete(TrackedLorebook._backupKey(category, entry));
+  }
+
+  // Every tracked card, as {category, entry} pairs (from the ent: map keys).
+  static async trackedEntries(): Promise<{ category: string; entry: string }[]> {
+    return Object.keys(await TrackedLorebook._ids())
+      .filter(k => k.startsWith("ent:"))
+      .map(k => {
+        const [category, entry] = k.slice(4).split("/");
+        return { category, entry };
+      });
+  }
+
+  // Compare every tracked card against reality. Identical recreations are
+  // adopted HERE (map re-pointed, backup refreshed); conflicts and deletions
+  // are returned for the UI to resolve.
+  static async reconcile(): Promise<ReconcileFinding[]> {
+    const findings: ReconcileFinding[] = [];
+    for (const { category, entry } of await TrackedLorebook.trackedEntries()) {
+      const knownId = await TrackedLorebook.idFor(category, entry);
+      const entries = await LorebookManager.entriesInCategory(category);
+      const byId = knownId ? entries.find(e => e.id === knownId) : undefined;
+      if (byId) { await TrackedLorebook.refreshBackup(category, entry, byId.text ?? ""); continue; }
+      const want = entry.trim().toLowerCase();
+      const byName = entries.find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+      const backupText = await TrackedLorebook.backupOf(category, entry);
+      if (byName) {
+        if (backupText !== undefined && structuralHash(byName.text ?? "") === structuralHash(backupText)) {
+          await TrackedLorebook.remember(category, entry, byName.id);
+          await TrackedLorebook.refreshBackup(category, entry, byName.text ?? "");
+          findings.push({ category, entry, kind: "adopted", foundId: byName.id });
+        } else {
+          findings.push({ category, entry, kind: "conflict", backupText, foundId: byName.id, foundText: byName.text ?? "" });
+        }
+      } else {
+        findings.push({ category, entry, kind: "missing", backupText });
+      }
+    }
+    return findings;
+  }
+
+  // Accept the player's replacement card as the tracked one.
+  static async adopt(category: string, entry: string, id: string, text: string): Promise<void> {
+    await TrackedLorebook.remember(category, entry, id);
+    await TrackedLorebook.refreshBackup(category, entry, text);
+  }
+}
+
+// Union of two config card texts (both must parse). Shapes are preserved from
+// the FOUND (player's newer) card: map -> spread union; array-of-named-defs ->
+// name-keyed union. The player's defs win collisions; backup-only defs are
+// kept. The found card's header text stays. Undefined = not combinable.
+export function combineConfigTexts(backupText: string, foundText: string): string | undefined {
+  const parse = (t: string): unknown => {
+    try { return JSON.parse(LorebookManager.contentBelowHeader(t).trim()); } catch { return undefined; }
+  };
+  const backup = parse(backupText);
+  const found = parse(foundText);
+  if (backup === undefined || found === undefined) return undefined;
+  // Everything up to (and including) the found card's marker line; the JSON
+  // goes back on its own line below it.
+  const header = foundText.slice(0, foundText.length - LorebookManager.contentBelowHeader(foundText).length);
+  let combined: unknown;
+  if (Array.isArray(backup) && Array.isArray(found)) {
+    const byName = new Map<string, unknown>();
+    const keyOf = (d: unknown): string | undefined => {
+      const n = (d as { name?: unknown })?.name;
+      return typeof n === "string" ? StringUtil.normalize(n) : undefined;
+    };
+    const extras: unknown[] = [];
+    for (const list of [backup, found]) {
+      for (const d of list) {
+        const k = keyOf(d);
+        if (k !== undefined) byName.set(k, d); else if (list === found) extras.push(d);
+      }
+    }
+    combined = [...byName.values(), ...extras];
+  } else if (backup && found && typeof backup === "object" && typeof found === "object" && !Array.isArray(backup) && !Array.isArray(found)) {
+    combined = { ...(backup as Record<string, unknown>), ...(found as Record<string, unknown>) };
+  } else {
+    return undefined;
+  }
+  return `${header}\n${JSON.stringify(combined, null, 2)}`;
+}
+
+// =============================================================================
 // CONFIG STORES - the generic shape of "wod:config" registries
 // -----------------------------------------------------------------------------
 // Every story-config registry works the same way: ONE lorebook entry under the
@@ -238,18 +412,61 @@ function configEntryText(header: string[], data: unknown): string {
 
 // Parse an entry body as JSON; undefined when missing/unparseable (the entry
 // stays for the player to fix - never destroyed by a bad edit).
-function parseConfigBody(text: string | undefined): unknown {
+export function parseConfigBody(text: string | undefined): unknown {
   if (!text) return undefined;
   const body = LorebookManager.contentBelowHeader(text).trim();
   if (!body) return undefined;
   try { return JSON.parse(body); } catch { return undefined; }
 }
 
-// Write-through: create the category/entry on first use, else update in place.
+// Normalize a parsed config body (array of named defs OR name -> def map) to
+// a list of partials that carry their name. Shared by ListConfigStore and the
+// TableLibrary's multi-card loader.
+export function parseNamedConfigList<T extends { name: string }>(parsed: unknown): Array<Partial<T> & { name: string }> {
+  const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
+    ? parsed as Array<Partial<T> & { name: string }>
+    : (parsed && typeof parsed === "object")
+      ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
+      : [];
+  return list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0);
+}
+
+// Write-through for a TRACKED card in any category: create the category/entry
+// on first use, else update in place; record ids in the map and refresh the
+// backup (deletion insurance + the reconciliation baseline).
+export async function writeTrackedEntry(categoryName: string, entryName: string, text: string): Promise<void> {
+  const { id: categoryId } = await LorebookManager.ensureCategory(categoryName);
+  await TrackedLorebook.remember(categoryName, undefined, categoryId);
+  const created = await LorebookManager.ensureEntry(categoryId, entryName, text);
+  if (!created) await LorebookManager.updateEntryText(categoryName, entryName, text);
+  const want = entryName.trim().toLowerCase();
+  const entry = (await api.v1.lorebook.entries(categoryId)).find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+  if (entry) await TrackedLorebook.remember(categoryName, entryName, entry.id);
+  await TrackedLorebook.refreshBackup(categoryName, entryName, text);
+}
+
+// The wod:config family writes through the tracked path.
 async function writeConfigEntry(entry: string, text: string): Promise<void> {
-  const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
-  const created = await LorebookManager.ensureEntry(id, entry, text);
-  if (!created) await LorebookManager.updateEntryText(CONFIG_CATEGORY, entry, text);
+  await writeTrackedEntry(CONFIG_CATEGORY, entry, text);
+}
+
+// Ensure a VIRTUAL PATH exists: the real category `wod:<path>` plus its
+// tracked `general` card (seeded with the given tutorial header + empty JSON
+// when created; an existing card's text is never touched). The subcategory
+// policy's one constructor.
+export async function ensurePath(virtualPath: string, generalHeader: string[] = ["Data for this category. JSON below the marker."]): Promise<{ category: string; createdEntry: boolean }> {
+  const category = `wod:${StringUtil.normalize(virtualPath)}`;
+  const { id: categoryId } = await LorebookManager.ensureCategory(category);
+  await TrackedLorebook.remember(category, undefined, categoryId);
+  const seeded = [...generalHeader, SRD_HEADER_MARKER, "[]"].join("\n");
+  const createdEntry = await LorebookManager.ensureEntry(categoryId, GENERAL_ENTRY, seeded);
+  const want = GENERAL_ENTRY;
+  const entry = (await api.v1.lorebook.entries(categoryId)).find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+  if (entry) {
+    await TrackedLorebook.remember(category, GENERAL_ENTRY, entry.id);
+    await TrackedLorebook.refreshBackup(category, GENERAL_ENTRY, entry.text ?? seeded);
+  }
+  return { category, createdEntry };
 }
 
 // A list of named defs, JSON array (or name -> def map) in the entry, overlaid
@@ -297,12 +514,7 @@ export class ListConfigStore<T extends { name: string }> {
 
   async loadFromLorebook(): Promise<number> {
     const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
-    const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
-      ? parsed as Array<Partial<T> & { name: string }>
-      : (parsed && typeof parsed === "object")
-        ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
-        : [];
-    this._apply(list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(d => this._make(d)));
+    this._apply(parseNamedConfigList<T>(parsed).map(d => this._make(d)));
     return this._overlay.length;
   }
 

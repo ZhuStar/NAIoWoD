@@ -246,6 +246,22 @@ category *id*):
   edit game rules like database tables in the NovelAI lorebook UI. It resolves
   category **names** to ids via `categories()`, then filters entries.
 
+### Tracked cards, backups & reconciliation
+
+Every card the engine writes is **tracked**: its category/entry uuids live in
+a storyStorage id map, and its full text is **backed up** on every write and
+every healthy sighting. Virtual paths (`config`, `config::success-tables`,
+`config::success-tables::<sub>`) map to flat real categories (`wod:config`,
+`wod:config:success-tables`, …), each with a default **`general`** card —
+NovelAI has no nested categories, so the Lorebook module maintains the
+illusion. If you delete a tracked card and recreate it with the **same
+structure** (the hash ignores the tutorial header), the engine silently adopts
+your new card. If the content **differs**, or the card is simply **gone**, a
+**modal** asks what to do: keep the new card / combine both (your newer
+definitions win) / restore the old one — or restore-from-backup / forget it.
+Reconciliation runs at `init()` and on every creator-mode sync, and each
+distinct drift asks at most once per session.
+
 ### Self-seeding: the lorebook *is* the tutorial
 
 A fresh NovelAI story has none of these categories. On load the script calls
@@ -455,21 +471,36 @@ output is a **number**, one level per success).
   rule-specified bonus per batch of extras past the last row), and **`botch`** /
   **`failure`** lines.
 - Built-ins always present: **`degrees`** (Marginal → Phenomenal), **`damage`** and
-  **`soak`** (1 per success). Add your own three equivalent ways — they all write
-  the same lorebook entry (`wod:config:success-tables`, a JSON array of tables
-  *or* a `name → table` map below the `=====` marker, overlaid on the built-ins
-  at init and whenever creator mode syncs):
+  **`soak`** (1 per success).
+- **Tables live in their own lorebook category tree** (they outgrew one card):
+  the category `wod:config:success-tables` holds bare-named tables, and each
+  **virtual subcategory** `<sub>` is the real category
+  `wod:config:success-tables:<sub>` whose tables are addressed
+  **`<sub>::name`** (NovelAI can't nest categories, so the nesting is
+  conceptual — the Lorebook module owns the illusion). Every category has a
+  **`general`** card (the default write target); **every card in a category is
+  read** — split a big set across extra cards freely, a later card's table
+  shadows an earlier one with the same name.
+- Authoring, three equivalent ways (all write the addressed category's
+  `general` card, JSON array *or* `name → table` map below the `=====` marker):
   - **`[[define-table]]`** — rows use a mini-grammar, backtick-quoted so labels
     keep their case:
-    ``[[define-table name="intimidate" rows=`1:Cowed, 3:Terrified, 5:Broken=2` failure=`They hold their ground` cap=6]]``
+    ``[[define-table name="combat::quick-kill" rows=`1:Wounded, 3:Dead` cap=6]]``
     (also `value-per-success=`, `overflow-per=`/`overflow-value=`/`overflow-label=`,
-    `botch=`, `description=`). Naming a built-in **shadows** it;
-    `[[forget-table <name>]]` removes your overlay and the built-in resurfaces.
+    `botch=`, `failure=`, `description=`). A missing subcategory pops a
+    **modal** asking to create it; `[[define-table-category name="combat"]]`
+    creates one outright. Naming a built-in **shadows** it;
+    `[[forget-table <name>]]` removes your general-card entry and the built-in
+    (or the shadowing card) resurfaces.
   - **`[[win-table]]`** — the same thing as a window (the form is derived from
     `define-table`'s spec).
-  - **Hand-edit the entry** in creator mode.
-- **`table=<name>`** on any `roll` / `roll-for` / `resist` / `contest` reads the
-  result through that table (an unknown name is reported, never applied).
+  - **Hand-edit the cards** in creator mode.
+- **Table aliases**: `[[table-alias @qk "combat::quick-kill"]]` — then
+  `table=@qk` anywhere; `[[table-alias]]` lists, `[[forget-table-alias @qk]]`
+  removes. Position disambiguates `@` (table slot = table alias), and an alias
+  may point at a table that doesn't exist yet (advisory).
+- **`table=<key|@alias>`** on any `roll` / `roll-for` / `resist` / `contest`
+  reads the result through that table (an unknown key is reported, never applied).
 
 ### Resisted & contested rolls
 

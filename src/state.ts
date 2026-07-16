@@ -28,8 +28,10 @@ import {
 import {
   ScopedStorage, LorebookManager, MeritFlawRegistry,
   ListConfigStore, MapConfigStore, CONFIG_CATEGORY,
+  ALL_CONFIG_STORES, parseConfigBody, parseNamedConfigList,
+  writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
 } from "./services";
-import { RollSpec, SuccessTable, SuccessTableRegistry, ExtendedRoll, ExtendedContest } from "./rolls";
+import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, ExtendedRoll, ExtendedContest } from "./rolls";
 import { WizardPrompt, WizardStateData } from "./wizard";
 
 // --- LIVE CHARACTER SHEET ---
@@ -883,9 +885,12 @@ export class AliasRegistry {
 // data.
 // =============================================================================
 export const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
-export const SUCCESS_TABLES_ENTRY = "wod:config:success-tables";
 export const CONSTRAINTS_ENTRY = "wod:config:constraints";
 export const CONDITIONS_ENTRY = "wod:config:conditions";
+// Success tables are NOT an entry: this names their category TREE (the
+// virtual-subcategory policy) - wod:config:success-tables and
+// wod:config:success-tables:<sub>.
+export const TABLES_CATEGORY = "wod:config:success-tables";
 
 // The house-rule layer for resources: a map resourceName -> partial def.
 export const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
@@ -899,24 +904,132 @@ export const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
   ],
 });
 
-// Success tables overlay the shipped defaults in rolls.ts' SuccessTableRegistry
-// (the pure layer keeps serving reads); onChanged re-projects on every load,
-// save and reset, so resetting the store also restores the registry defaults.
-export const SuccessTables = new ListConfigStore<SuccessTable>({
-  entry: SUCCESS_TABLES_ENTRY,
-  header: [
-    "Success tables for this chronicle (overlaid on the built-ins - degrees,",
-    "damage, soak). The JSON below the marker is an array of tables (or a map",
-    "name -> table); each row maps accumulated successes to a reading. Attach",
-    "one to any roll with table=<name>; you may edit this by hand in creator",
-    "mode.",
-  ],
-  make: t => ({ ...t, name: StringUtil.normalize(t.name) }),
-  onChanged: overlay => {
+// Success tables live in their OWN category tree (the virtual-subcategory
+// policy): category wod:config:success-tables holds bare-named tables, and
+// each virtual subcategory <sub> is the real category
+// wod:config:success-tables:<sub> whose tables are addressed "<sub>::name".
+// EVERY card in a table category is read (general first, then the others by
+// name - a later card shadows an earlier one), so a large set can spill
+// across cards; [[define-table]] always writes the general card. The registry
+// projection lives in rolls.ts' pure SuccessTableRegistry, reseeded with the
+// built-ins on every load/reset.
+export class TableLibraryStore {
+  readonly entry = TABLES_CATEGORY;   // the reload/reset label (ConfigStoreLike)
+
+  constructor() { ALL_CONFIG_STORES.push(this); }
+
+  reset(): void { SuccessTableRegistry.reset(); }
+
+  // The virtual subcategories that exist right now (real categories named
+  // wod:config:success-tables:<sub>; deeper nesting is out of policy).
+  async subcategories(): Promise<string[]> {
+    const prefix = `${TABLES_CATEGORY}:`;
+    return (await api.v1.lorebook.categories())
+      .map(c => (c.name ?? "").trim().toLowerCase())
+      .filter(n => n.startsWith(prefix))
+      .map(n => n.slice(prefix.length))
+      .filter(sub => sub.length > 0 && !sub.includes(":"))
+      .sort();
+  }
+
+  async loadFromLorebook(): Promise<number> {
     SuccessTableRegistry.reset();
-    for (const t of overlay) SuccessTableRegistry.register(t);
-  },
-});
+    let count = 0;
+    const prefix = `${TABLES_CATEGORY}:`;
+    for (const cat of await api.v1.lorebook.categories()) {
+      const name = (cat.name ?? "").trim().toLowerCase();
+      if (name !== TABLES_CATEGORY && !name.startsWith(prefix)) continue;
+      const sub = name === TABLES_CATEGORY ? "" : name.slice(prefix.length);
+      if (sub.includes(":")) continue;   // one level below success-tables only
+      const entries = [...await api.v1.lorebook.entries(cat.id)].sort((a, b) => {
+        const an = (a.displayName ?? "").trim().toLowerCase();
+        const bn = (b.displayName ?? "").trim().toLowerCase();
+        return (an === GENERAL_ENTRY ? 0 : 1) - (bn === GENERAL_ENTRY ? 0 : 1) || an.localeCompare(bn);
+      });
+      for (const e of entries) {
+        for (const raw of parseNamedConfigList<SuccessTable>(parseConfigBody(e.text))) {
+          const key = sub ? `${sub}:${StringUtil.normalize(raw.name)}` : StringUtil.normalize(raw.name);
+          SuccessTableRegistry.register({ ...(raw as SuccessTable), name: key });
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  // Add or replace one table in the addressed category's GENERAL card (the
+  // engine's write target; player cards elsewhere in the category may shadow
+  // it - reported so the reply can say so).
+  async put(def: SuccessTable, sub?: string): Promise<{ shadowed: boolean }> {
+    const path = sub ? `config:success-tables:${sub}` : "config:success-tables";
+    const { category } = await ensurePath(path, TABLE_GENERAL_HEADER);
+    const existing = parseNamedConfigList<SuccessTable>(
+      parseConfigBody(await LorebookManager.entryText(category, GENERAL_ENTRY)));
+    const list = [...existing.filter(d => StringUtil.normalize(d.name) !== def.name), def];
+    await writeTrackedEntry(category, GENERAL_ENTRY, [...TABLE_GENERAL_HEADER, SRD_HEADER_MARKER, JSON.stringify(list, null, 2)].join("\n"));
+    await this.loadFromLorebook();
+    const key = sub ? `${sub}:${def.name}` : def.name;
+    const now = SuccessTableRegistry.get(key);
+    return { shadowed: JSON.stringify(now) !== JSON.stringify({ ...def, name: key }) };
+  }
+
+  // Remove one table from the addressed category's GENERAL card. Reports what
+  // remains under that key afterwards (a player card or a built-in may still
+  // define it).
+  async remove(key: string): Promise<{ removed: boolean; still?: "built-in" | "another-card" }> {
+    const n = StringUtil.normalize(key);
+    const [sub, base] = n.includes(":") ? [n.slice(0, n.indexOf(":")), n.slice(n.indexOf(":") + 1)] : [undefined, n];
+    const category = sub ? `${TABLES_CATEGORY}:${sub}` : TABLES_CATEGORY;
+    const existing = parseNamedConfigList<SuccessTable>(
+      parseConfigBody(await LorebookManager.entryText(category, GENERAL_ENTRY)));
+    const rest = existing.filter(d => StringUtil.normalize(d.name) !== base);
+    const removed = rest.length !== existing.length;
+    if (removed) {
+      await writeTrackedEntry(category, GENERAL_ENTRY, [...TABLE_GENERAL_HEADER, SRD_HEADER_MARKER, JSON.stringify(rest, null, 2)].join("\n"));
+    }
+    await this.loadFromLorebook();
+    const now = SuccessTableRegistry.get(n);
+    const still = now === undefined ? undefined
+      : DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === n) && JSON.stringify(now) === JSON.stringify({ ...DEFAULT_SUCCESS_TABLES.find(d => StringUtil.normalize(d.name) === n), name: n })
+        ? "built-in" as const : "another-card" as const;
+    return { removed, still };
+  }
+}
+
+export const TableLibrary = new TableLibraryStore();
+
+// =============================================================================
+// TABLE ALIASES - @shorthands for table keys (incl. "sub::name" paths)
+// -----------------------------------------------------------------------------
+// A flat storyStorage map, distinct from character aliases: position
+// disambiguates the @ sigil (table= slot -> table alias), exactly like pool
+// position means saved rolls. Targets are stored as normalized table KEYS and
+// validated advisorily (an alias may point at a table defined later).
+// =============================================================================
+export class TableAliases {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "table-aliases";
+
+  static async all(): Promise<Record<string, string>> {
+    return ((await TableAliases._storage.get(TableAliases.KEY)) as Record<string, string> | undefined) ?? {};
+  }
+  static async set(alias: string, targetKey: string): Promise<void> {
+    const map = await TableAliases.all();
+    map[StringUtil.normalize(alias).replace(/^@/, "")] = StringUtil.normalize(targetKey);
+    await TableAliases._storage.set(TableAliases.KEY, map);
+  }
+  static async remove(alias: string): Promise<boolean> {
+    const map = await TableAliases.all();
+    const key = StringUtil.normalize(alias).replace(/^@/, "");
+    if (!(key in map)) return false;
+    delete map[key];
+    await TableAliases._storage.set(TableAliases.KEY, map);
+    return true;
+  }
+  static async resolve(alias: string): Promise<string | undefined> {
+    return (await TableAliases.all())[StringUtil.normalize(alias).replace(/^@/, "")];
+  }
+}
 
 // Constraint groups: allow/deny rules over trait options. Entirely ST-defined
 // (no built-in defaults); enforced at creation later, surfaced now via

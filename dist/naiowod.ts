@@ -2956,6 +2956,180 @@ class LorebookManager {
 }
 
 // =============================================================================
+// TRACKED CARDS - virtual subcategories, id map, backups, reconciliation
+// -----------------------------------------------------------------------------
+// NovelAI lorebook categories cannot nest, so nesting is CONCEPTUAL and this
+// module owns the illusion (the subcategory policy, memory.md 7.21):
+// a virtual path "a::b" (user input, folds to "a:b") maps to the REAL category
+// named "wod:a:b"; every engine-owned category has a default entry "general" -
+// the default write target. Every card the engine writes is TRACKED: its
+// category/entry uuids live in the storyStorage id map (lb:ids) and its full
+// text is backed up (lb:backup:<category>/<entry>) on every write and every
+// healthy sighting. reconcileTracked() detects uuid drift: a card deleted and
+// recreated with identical structure is re-adopted silently (we point our map
+// at the NEW uuid - ids only have meaning through the map, so nothing is ever
+// destroyed to preserve one); a structural conflict or a plain deletion is
+// returned as a finding for the UI (game.ts opens the modal).
+// =============================================================================
+const GENERAL_ENTRY = "general";
+
+// Default tutorial headers for engine-seeded `general` cards.
+const CONFIG_GENERAL_HEADER = [
+  "Global configuration for this chronicle. The JSON below the marker holds",
+  "story-wide settings (none are read yet - this card is the documented home",
+  "for future global options). Edit in creator mode.",
+];
+const TABLE_GENERAL_HEADER = [
+  "Success tables for this category. The JSON below the marker is an array of",
+  "tables (or a map name -> table). [[define-table]] writes here; you may add",
+  "MORE cards to this category to split a large set - every card is read, and",
+  "a later card's table shadows an earlier one with the same name.",
+];
+
+// Content-only structural hash: the tutorial header above the marker never
+// participates, so editing instructions can't trip a conflict. JSON bodies are
+// canonicalized (recursively sorted keys); anything unparseable falls back to
+// whitespace-collapsed text. djb2, hex.
+function structuralHash(text: string): string {
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  const canon = (v: unknown): unknown => Array.isArray(v) ? v.map(canon)
+    : (v && typeof v === "object")
+      ? Object.fromEntries(Object.keys(v as Record<string, unknown>).sort().map(k => [k, canon((v as Record<string, unknown>)[k])]))
+      : v;
+  let s: string;
+  try { s = JSON.stringify(canon(JSON.parse(body))); } catch { s = body.replace(/\s+/g, " "); }
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+interface ReconcileFinding {
+  category: string;
+  entry: string;
+  kind: "adopted" | "conflict" | "missing";
+  backupText?: string;
+  foundId?: string;
+  foundText?: string;
+}
+
+class TrackedLorebook {
+  private static _storage = new ScopedStorage();
+  private static readonly IDS_KEY = "lb:ids";
+  private static _backupKey(category: string, entry: string): string { return `lb:backup:${category}/${entry}`; }
+
+  private static async _ids(): Promise<Record<string, string>> {
+    return ((await TrackedLorebook._storage.get(TrackedLorebook.IDS_KEY)) as Record<string, string> | undefined) ?? {};
+  }
+  private static async _saveIds(map: Record<string, string>): Promise<void> {
+    await TrackedLorebook._storage.set(TrackedLorebook.IDS_KEY, map);
+  }
+
+  static async remember(category: string, entry: string | undefined, id: string): Promise<void> {
+    const map = await TrackedLorebook._ids();
+    map[entry === undefined ? `cat:${category}` : `ent:${category}/${entry}`] = id;
+    await TrackedLorebook._saveIds(map);
+  }
+  static async idFor(category: string, entry?: string): Promise<string | undefined> {
+    return (await TrackedLorebook._ids())[entry === undefined ? `cat:${category}` : `ent:${category}/${entry}`];
+  }
+  static async backupOf(category: string, entry: string): Promise<string | undefined> {
+    return (await TrackedLorebook._storage.get(TrackedLorebook._backupKey(category, entry))) as string | undefined;
+  }
+  static async refreshBackup(category: string, entry: string, text: string): Promise<void> {
+    await TrackedLorebook._storage.set(TrackedLorebook._backupKey(category, entry), text);
+  }
+
+  // Stop tracking a card (the player chose to let it go): map records + backup.
+  static async forget(category: string, entry: string): Promise<void> {
+    const map = await TrackedLorebook._ids();
+    delete map[`ent:${category}/${entry}`];
+    await TrackedLorebook._saveIds(map);
+    await TrackedLorebook._storage.delete(TrackedLorebook._backupKey(category, entry));
+  }
+
+  // Every tracked card, as {category, entry} pairs (from the ent: map keys).
+  static async trackedEntries(): Promise<{ category: string; entry: string }[]> {
+    return Object.keys(await TrackedLorebook._ids())
+      .filter(k => k.startsWith("ent:"))
+      .map(k => {
+        const [category, entry] = k.slice(4).split("/");
+        return { category, entry };
+      });
+  }
+
+  // Compare every tracked card against reality. Identical recreations are
+  // adopted HERE (map re-pointed, backup refreshed); conflicts and deletions
+  // are returned for the UI to resolve.
+  static async reconcile(): Promise<ReconcileFinding[]> {
+    const findings: ReconcileFinding[] = [];
+    for (const { category, entry } of await TrackedLorebook.trackedEntries()) {
+      const knownId = await TrackedLorebook.idFor(category, entry);
+      const entries = await LorebookManager.entriesInCategory(category);
+      const byId = knownId ? entries.find(e => e.id === knownId) : undefined;
+      if (byId) { await TrackedLorebook.refreshBackup(category, entry, byId.text ?? ""); continue; }
+      const want = entry.trim().toLowerCase();
+      const byName = entries.find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+      const backupText = await TrackedLorebook.backupOf(category, entry);
+      if (byName) {
+        if (backupText !== undefined && structuralHash(byName.text ?? "") === structuralHash(backupText)) {
+          await TrackedLorebook.remember(category, entry, byName.id);
+          await TrackedLorebook.refreshBackup(category, entry, byName.text ?? "");
+          findings.push({ category, entry, kind: "adopted", foundId: byName.id });
+        } else {
+          findings.push({ category, entry, kind: "conflict", backupText, foundId: byName.id, foundText: byName.text ?? "" });
+        }
+      } else {
+        findings.push({ category, entry, kind: "missing", backupText });
+      }
+    }
+    return findings;
+  }
+
+  // Accept the player's replacement card as the tracked one.
+  static async adopt(category: string, entry: string, id: string, text: string): Promise<void> {
+    await TrackedLorebook.remember(category, entry, id);
+    await TrackedLorebook.refreshBackup(category, entry, text);
+  }
+}
+
+// Union of two config card texts (both must parse). Shapes are preserved from
+// the FOUND (player's newer) card: map -> spread union; array-of-named-defs ->
+// name-keyed union. The player's defs win collisions; backup-only defs are
+// kept. The found card's header text stays. Undefined = not combinable.
+function combineConfigTexts(backupText: string, foundText: string): string | undefined {
+  const parse = (t: string): unknown => {
+    try { return JSON.parse(LorebookManager.contentBelowHeader(t).trim()); } catch { return undefined; }
+  };
+  const backup = parse(backupText);
+  const found = parse(foundText);
+  if (backup === undefined || found === undefined) return undefined;
+  // Everything up to (and including) the found card's marker line; the JSON
+  // goes back on its own line below it.
+  const header = foundText.slice(0, foundText.length - LorebookManager.contentBelowHeader(foundText).length);
+  let combined: unknown;
+  if (Array.isArray(backup) && Array.isArray(found)) {
+    const byName = new Map<string, unknown>();
+    const keyOf = (d: unknown): string | undefined => {
+      const n = (d as { name?: unknown })?.name;
+      return typeof n === "string" ? StringUtil.normalize(n) : undefined;
+    };
+    const extras: unknown[] = [];
+    for (const list of [backup, found]) {
+      for (const d of list) {
+        const k = keyOf(d);
+        if (k !== undefined) byName.set(k, d); else if (list === found) extras.push(d);
+      }
+    }
+    combined = [...byName.values(), ...extras];
+  } else if (backup && found && typeof backup === "object" && typeof found === "object" && !Array.isArray(backup) && !Array.isArray(found)) {
+    combined = { ...(backup as Record<string, unknown>), ...(found as Record<string, unknown>) };
+  } else {
+    return undefined;
+  }
+  return `${header}\n${JSON.stringify(combined, null, 2)}`;
+}
+
+// =============================================================================
 // CONFIG STORES - the generic shape of "wod:config" registries
 // -----------------------------------------------------------------------------
 // Every story-config registry works the same way: ONE lorebook entry under the
@@ -3005,11 +3179,54 @@ function parseConfigBody(text: string | undefined): unknown {
   try { return JSON.parse(body); } catch { return undefined; }
 }
 
-// Write-through: create the category/entry on first use, else update in place.
+// Normalize a parsed config body (array of named defs OR name -> def map) to
+// a list of partials that carry their name. Shared by ListConfigStore and the
+// TableLibrary's multi-card loader.
+function parseNamedConfigList<T extends { name: string }>(parsed: unknown): Array<Partial<T> & { name: string }> {
+  const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
+    ? parsed as Array<Partial<T> & { name: string }>
+    : (parsed && typeof parsed === "object")
+      ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
+      : [];
+  return list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0);
+}
+
+// Write-through for a TRACKED card in any category: create the category/entry
+// on first use, else update in place; record ids in the map and refresh the
+// backup (deletion insurance + the reconciliation baseline).
+async function writeTrackedEntry(categoryName: string, entryName: string, text: string): Promise<void> {
+  const { id: categoryId } = await LorebookManager.ensureCategory(categoryName);
+  await TrackedLorebook.remember(categoryName, undefined, categoryId);
+  const created = await LorebookManager.ensureEntry(categoryId, entryName, text);
+  if (!created) await LorebookManager.updateEntryText(categoryName, entryName, text);
+  const want = entryName.trim().toLowerCase();
+  const entry = (await api.v1.lorebook.entries(categoryId)).find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+  if (entry) await TrackedLorebook.remember(categoryName, entryName, entry.id);
+  await TrackedLorebook.refreshBackup(categoryName, entryName, text);
+}
+
+// The wod:config family writes through the tracked path.
 async function writeConfigEntry(entry: string, text: string): Promise<void> {
-  const { id } = await LorebookManager.ensureCategory(CONFIG_CATEGORY);
-  const created = await LorebookManager.ensureEntry(id, entry, text);
-  if (!created) await LorebookManager.updateEntryText(CONFIG_CATEGORY, entry, text);
+  await writeTrackedEntry(CONFIG_CATEGORY, entry, text);
+}
+
+// Ensure a VIRTUAL PATH exists: the real category `wod:<path>` plus its
+// tracked `general` card (seeded with the given tutorial header + empty JSON
+// when created; an existing card's text is never touched). The subcategory
+// policy's one constructor.
+async function ensurePath(virtualPath: string, generalHeader: string[] = ["Data for this category. JSON below the marker."]): Promise<{ category: string; createdEntry: boolean }> {
+  const category = `wod:${StringUtil.normalize(virtualPath)}`;
+  const { id: categoryId } = await LorebookManager.ensureCategory(category);
+  await TrackedLorebook.remember(category, undefined, categoryId);
+  const seeded = [...generalHeader, SRD_HEADER_MARKER, "[]"].join("\n");
+  const createdEntry = await LorebookManager.ensureEntry(categoryId, GENERAL_ENTRY, seeded);
+  const want = GENERAL_ENTRY;
+  const entry = (await api.v1.lorebook.entries(categoryId)).find(e => (e.displayName ?? "").trim().toLowerCase() === want);
+  if (entry) {
+    await TrackedLorebook.remember(category, GENERAL_ENTRY, entry.id);
+    await TrackedLorebook.refreshBackup(category, GENERAL_ENTRY, entry.text ?? seeded);
+  }
+  return { category, createdEntry };
 }
 
 // A list of named defs, JSON array (or name -> def map) in the entry, overlaid
@@ -3057,12 +3274,7 @@ class ListConfigStore<T extends { name: string }> {
 
   async loadFromLorebook(): Promise<number> {
     const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
-    const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
-      ? parsed as Array<Partial<T> & { name: string }>
-      : (parsed && typeof parsed === "object")
-        ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
-        : [];
-    this._apply(list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0).map(d => this._make(d)));
+    this._apply(parseNamedConfigList<T>(parsed).map(d => this._make(d)));
     return this._overlay.length;
   }
 
@@ -4046,9 +4258,12 @@ class AliasRegistry {
 // data.
 // =============================================================================
 const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
-const SUCCESS_TABLES_ENTRY = "wod:config:success-tables";
 const CONSTRAINTS_ENTRY = "wod:config:constraints";
 const CONDITIONS_ENTRY = "wod:config:conditions";
+// Success tables are NOT an entry: this names their category TREE (the
+// virtual-subcategory policy) - wod:config:success-tables and
+// wod:config:success-tables:<sub>.
+const TABLES_CATEGORY = "wod:config:success-tables";
 
 // The house-rule layer for resources: a map resourceName -> partial def.
 const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
@@ -4062,24 +4277,132 @@ const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
   ],
 });
 
-// Success tables overlay the shipped defaults in rolls.ts' SuccessTableRegistry
-// (the pure layer keeps serving reads); onChanged re-projects on every load,
-// save and reset, so resetting the store also restores the registry defaults.
-const SuccessTables = new ListConfigStore<SuccessTable>({
-  entry: SUCCESS_TABLES_ENTRY,
-  header: [
-    "Success tables for this chronicle (overlaid on the built-ins - degrees,",
-    "damage, soak). The JSON below the marker is an array of tables (or a map",
-    "name -> table); each row maps accumulated successes to a reading. Attach",
-    "one to any roll with table=<name>; you may edit this by hand in creator",
-    "mode.",
-  ],
-  make: t => ({ ...t, name: StringUtil.normalize(t.name) }),
-  onChanged: overlay => {
+// Success tables live in their OWN category tree (the virtual-subcategory
+// policy): category wod:config:success-tables holds bare-named tables, and
+// each virtual subcategory <sub> is the real category
+// wod:config:success-tables:<sub> whose tables are addressed "<sub>::name".
+// EVERY card in a table category is read (general first, then the others by
+// name - a later card shadows an earlier one), so a large set can spill
+// across cards; [[define-table]] always writes the general card. The registry
+// projection lives in rolls.ts' pure SuccessTableRegistry, reseeded with the
+// built-ins on every load/reset.
+class TableLibraryStore {
+  readonly entry = TABLES_CATEGORY;   // the reload/reset label (ConfigStoreLike)
+
+  constructor() { ALL_CONFIG_STORES.push(this); }
+
+  reset(): void { SuccessTableRegistry.reset(); }
+
+  // The virtual subcategories that exist right now (real categories named
+  // wod:config:success-tables:<sub>; deeper nesting is out of policy).
+  async subcategories(): Promise<string[]> {
+    const prefix = `${TABLES_CATEGORY}:`;
+    return (await api.v1.lorebook.categories())
+      .map(c => (c.name ?? "").trim().toLowerCase())
+      .filter(n => n.startsWith(prefix))
+      .map(n => n.slice(prefix.length))
+      .filter(sub => sub.length > 0 && !sub.includes(":"))
+      .sort();
+  }
+
+  async loadFromLorebook(): Promise<number> {
     SuccessTableRegistry.reset();
-    for (const t of overlay) SuccessTableRegistry.register(t);
-  },
-});
+    let count = 0;
+    const prefix = `${TABLES_CATEGORY}:`;
+    for (const cat of await api.v1.lorebook.categories()) {
+      const name = (cat.name ?? "").trim().toLowerCase();
+      if (name !== TABLES_CATEGORY && !name.startsWith(prefix)) continue;
+      const sub = name === TABLES_CATEGORY ? "" : name.slice(prefix.length);
+      if (sub.includes(":")) continue;   // one level below success-tables only
+      const entries = [...await api.v1.lorebook.entries(cat.id)].sort((a, b) => {
+        const an = (a.displayName ?? "").trim().toLowerCase();
+        const bn = (b.displayName ?? "").trim().toLowerCase();
+        return (an === GENERAL_ENTRY ? 0 : 1) - (bn === GENERAL_ENTRY ? 0 : 1) || an.localeCompare(bn);
+      });
+      for (const e of entries) {
+        for (const raw of parseNamedConfigList<SuccessTable>(parseConfigBody(e.text))) {
+          const key = sub ? `${sub}:${StringUtil.normalize(raw.name)}` : StringUtil.normalize(raw.name);
+          SuccessTableRegistry.register({ ...(raw as SuccessTable), name: key });
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  // Add or replace one table in the addressed category's GENERAL card (the
+  // engine's write target; player cards elsewhere in the category may shadow
+  // it - reported so the reply can say so).
+  async put(def: SuccessTable, sub?: string): Promise<{ shadowed: boolean }> {
+    const path = sub ? `config:success-tables:${sub}` : "config:success-tables";
+    const { category } = await ensurePath(path, TABLE_GENERAL_HEADER);
+    const existing = parseNamedConfigList<SuccessTable>(
+      parseConfigBody(await LorebookManager.entryText(category, GENERAL_ENTRY)));
+    const list = [...existing.filter(d => StringUtil.normalize(d.name) !== def.name), def];
+    await writeTrackedEntry(category, GENERAL_ENTRY, [...TABLE_GENERAL_HEADER, SRD_HEADER_MARKER, JSON.stringify(list, null, 2)].join("\n"));
+    await this.loadFromLorebook();
+    const key = sub ? `${sub}:${def.name}` : def.name;
+    const now = SuccessTableRegistry.get(key);
+    return { shadowed: JSON.stringify(now) !== JSON.stringify({ ...def, name: key }) };
+  }
+
+  // Remove one table from the addressed category's GENERAL card. Reports what
+  // remains under that key afterwards (a player card or a built-in may still
+  // define it).
+  async remove(key: string): Promise<{ removed: boolean; still?: "built-in" | "another-card" }> {
+    const n = StringUtil.normalize(key);
+    const [sub, base] = n.includes(":") ? [n.slice(0, n.indexOf(":")), n.slice(n.indexOf(":") + 1)] : [undefined, n];
+    const category = sub ? `${TABLES_CATEGORY}:${sub}` : TABLES_CATEGORY;
+    const existing = parseNamedConfigList<SuccessTable>(
+      parseConfigBody(await LorebookManager.entryText(category, GENERAL_ENTRY)));
+    const rest = existing.filter(d => StringUtil.normalize(d.name) !== base);
+    const removed = rest.length !== existing.length;
+    if (removed) {
+      await writeTrackedEntry(category, GENERAL_ENTRY, [...TABLE_GENERAL_HEADER, SRD_HEADER_MARKER, JSON.stringify(rest, null, 2)].join("\n"));
+    }
+    await this.loadFromLorebook();
+    const now = SuccessTableRegistry.get(n);
+    const still = now === undefined ? undefined
+      : DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === n) && JSON.stringify(now) === JSON.stringify({ ...DEFAULT_SUCCESS_TABLES.find(d => StringUtil.normalize(d.name) === n), name: n })
+        ? "built-in" as const : "another-card" as const;
+    return { removed, still };
+  }
+}
+
+const TableLibrary = new TableLibraryStore();
+
+// =============================================================================
+// TABLE ALIASES - @shorthands for table keys (incl. "sub::name" paths)
+// -----------------------------------------------------------------------------
+// A flat storyStorage map, distinct from character aliases: position
+// disambiguates the @ sigil (table= slot -> table alias), exactly like pool
+// position means saved rolls. Targets are stored as normalized table KEYS and
+// validated advisorily (an alias may point at a table defined later).
+// =============================================================================
+class TableAliases {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "table-aliases";
+
+  static async all(): Promise<Record<string, string>> {
+    return ((await TableAliases._storage.get(TableAliases.KEY)) as Record<string, string> | undefined) ?? {};
+  }
+  static async set(alias: string, targetKey: string): Promise<void> {
+    const map = await TableAliases.all();
+    map[StringUtil.normalize(alias).replace(/^@/, "")] = StringUtil.normalize(targetKey);
+    await TableAliases._storage.set(TableAliases.KEY, map);
+  }
+  static async remove(alias: string): Promise<boolean> {
+    const map = await TableAliases.all();
+    const key = StringUtil.normalize(alias).replace(/^@/, "");
+    if (!(key in map)) return false;
+    delete map[key];
+    await TableAliases._storage.set(TableAliases.KEY, map);
+    return true;
+  }
+  static async resolve(alias: string): Promise<string | undefined> {
+    return (await TableAliases.all())[StringUtil.normalize(alias).replace(/^@/, "")];
+  }
+}
 
 // Constraint groups: allow/deny rules over trait options. Entirely ST-defined
 // (no built-in defaults); enforced at creation later, surfaced now via
@@ -4916,13 +5239,31 @@ async function withConditionTags(name: string, spec: RollSpec): Promise<RollSpec
   return { ...spec, tags: [...new Set([...spec.tags, ...condTags])] };
 }
 
-// Read a table=<name> arg against an outcome. The roll itself never interprets
-// its successes - the table does (or the reading is an unknown-table note).
-function tableNote(cmd: ParsedCommand, outcome: RollOutcomeKind, successes: number): string {
-  const name = cmd.named["table"];
-  if (!name) return "";
-  const table = SuccessTableRegistry.get(name);
-  if (!table) return `unknown table "${name}" (see [[tables]])`;
+// A table argument may be a key ("degrees", "combat::quick-kill" -> the
+// boundary folds :: to :) or a @table-alias; this is the ONE seam turning
+// either into a registry key. Paths go one level deep for now (policy).
+async function resolveTableRef(raw: string): Promise<{ key?: string; error?: string }> {
+  const t = StringUtil.normalize(raw);
+  if (t.startsWith("@")) {
+    const hit = await TableAliases.resolve(t.slice(1));
+    return hit ? { key: hit } : { error: `Unknown table alias "${t}". [[table-alias]] lists them.` };
+  }
+  if (t.split(":").filter(Boolean).length > 2) {
+    return { error: `Table paths go one level deep for now ("sub::name").` };
+  }
+  return { key: t };
+}
+
+// Read a table=<key|@alias> arg against an outcome. The roll itself never
+// interprets its successes - the table does (or the reading is an unknown-
+// table note).
+async function tableNote(cmd: ParsedCommand, outcome: RollOutcomeKind, successes: number): Promise<string> {
+  const raw = cmd.named["table"];
+  if (!raw) return "";
+  const ref = await resolveTableRef(raw);
+  if (ref.error) return ref.error;
+  const table = SuccessTableRegistry.get(ref.key!);
+  if (!table) return `unknown table "${ref.key}" (see [[tables]])`;
   return `${table.name}: ${describeTableReading(readSuccessTable(table, outcome, successes))}`;
 }
 
@@ -4956,7 +5297,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   const notes = [
     spend.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
-    tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
+    await tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
 }
@@ -5299,7 +5640,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
 
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
-  const notes = [outcome.note, tableNote(cmd, t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  const notes = [outcome.note, await tableNote(cmd, t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}))`;
 }
 
@@ -5389,23 +5730,46 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
 // List the success tables, or lay one out in full. A table interprets a number
 // of successes; attach table=<name> to a roll/resist/contest to read it.
 async function cmdTables(cmd: ParsedCommand): Promise<string> {
-  const name = cmd.positional[0]?.trim();
-  if (name) {
-    const t = SuccessTableRegistry.get(name);
-    if (!t) return `((OOC-Storyteller: No success table "${StringUtil.normalize(name)}". See [[tables]].))`;
-    return `((OOC-Storyteller: ${describeTable(t)}.))`;
+  const arg = cmd.positional[0]?.trim();
+  if (arg) {
+    const ref = await resolveTableRef(arg);
+    if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+    const t = SuccessTableRegistry.get(ref.key!);
+    if (t) return `((OOC-Storyteller: ${describeTable(t)}.))`;
+    // Not a table - maybe a subcategory: list its contents.
+    const subs = await TableLibrary.subcategories();
+    if (subs.includes(ref.key!)) {
+      const items = SuccessTableRegistry.all().filter(x => x.name.startsWith(`${ref.key}:`))
+        .map(x => x.name.slice(ref.key!.length + 1));
+      return `((OOC-Storyteller: Tables in "${ref.key}": ${items.length ? items.join(", ") : "(none yet)"}. Address them as ${ref.key}::<name>.))`;
+    }
+    return `((OOC-Storyteller: No success table "${ref.key}". See [[tables]].))`;
   }
   const all = SuccessTableRegistry.all();
-  const items = all.map(t => t.description ? `${t.name} (${t.description})` : t.name).join("; ");
-  return `((OOC-Storyteller: Success tables: ${items}. [[tables <name>]] for detail; add table=<name> to a roll/resist/contest.))`;
+  const label = (t: SuccessTable): string => t.description ? `${t.name} (${t.description})` : t.name;
+  const groups = [`general: ${all.filter(t => !t.name.includes(":")).map(label).join("; ")}`];
+  for (const sub of await TableLibrary.subcategories()) {
+    const items = all.filter(t => t.name.startsWith(`${sub}:`)).map(t => t.name.slice(sub.length + 1));
+    groups.push(`${sub}: ${items.length ? items.join(", ") : "(empty)"}`);
+  }
+  const aliases = await TableAliases.all();
+  const aliasBit = Object.keys(aliases).length
+    ? ` Aliases: ${Object.entries(aliases).map(([a, k]) => `@${a} -> ${k}`).join(", ")}.` : "";
+  return `((OOC-Storyteller: Success tables - ${groups.join(" | ")}.${aliasBit} [[tables <name|sub|sub::name>]] for detail; add table=<key|@alias> to a roll/resist/contest.))`;
 }
 
 // Author a success table from the command line (or the win-table window): the
-// same wod:config:success-tables entry the player can hand-edit, one table at
-// a time. Labels ride the backtick-literal channel, so their case survives.
+// addressed category's GENERAL card - the same card the player can hand-edit.
+// name may be "[sub::]name"; a missing subcategory prompts a modal. Labels
+// ride the backtick-literal channel, so their case survives.
 async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
-  const name = cmd.named["name"]?.trim();
-  if (!name) return `((OOC-Storyteller: define-table needs name="..". See [[help define-table]].))`;
+  const rawName = cmd.named["name"]?.trim();
+  if (!rawName) return `((OOC-Storyteller: define-table needs name="..". See [[help define-table]].))`;
+  const segs = StringUtil.normalize(rawName).split(":").filter(Boolean);
+  if (segs.length === 0) return `((OOC-Storyteller: define-table needs name="..". See [[help define-table]].))`;
+  if (segs.length > 2) return `((OOC-Storyteller: Table paths go one level deep for now (name="sub::name").))`;
+  const sub = segs.length === 2 ? segs[0] : undefined;
+  const name = segs[segs.length - 1];
   const rows = parseTableRows(cmd.named["rows"]);
   if ("error" in rows) return `((OOC-Storyteller: ${rows.error}))`;
   // Only supplied fields land in the def; a supplied-but-unreadable number is
@@ -5444,24 +5808,197 @@ async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
   if (!t.rows && t.valuePerSuccess === undefined && !t.botch && !t.failure) {
     return `((OOC-Storyteller: A table needs something to read - give it rows=, value-per-success=, botch= or failure=.))`;
   }
-  const shadows = DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === t.name);
-  await SuccessTables.put(t);
-  const note = shadows ? ` (shadows the built-in - [[forget-table ${t.name}]] restores it)` : "";
-  return `((OOC-Storyteller: Defined table ${describeTable(t)}.${note} Attach with table=${t.name}.))`;
+  const key = sub ? `${sub}:${t.name}` : t.name;
+  const shadows = !sub && DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === t.name);
+  if (sub && !(await LorebookManager.categoryIdByName(`${TABLES_CATEGORY}:${sub}`))) {
+    // The subcategory doesn't exist: confirm its creation via a modal; the
+    // pending def rides the closure and lands only on confirmation.
+    void confirmModal(`Create table category "${sub}"?`,
+      `Table category **${sub}** doesn't exist yet (lorebook category \`${TABLES_CATEGORY}:${sub}\`). Create it and define **${t.name}** inside it?`,
+      [{
+        label: "Create & define",
+        run: async () => {
+          const r = await TableLibrary.put(t, sub);
+          return `Created "${sub}" and defined ${describeTable({ ...t, name: key })}.${r.shadowed ? " (currently shadowed by another card)" : ""}`;
+        },
+      }]);
+    return `((OOC-Storyteller: Table category "${sub}" doesn't exist yet - answer the modal to create it and define ${t.name}.))`;
+  }
+  const r = await TableLibrary.put(t, sub);
+  const note = shadows ? ` (shadows the built-in - [[forget-table ${t.name}]] restores it)`
+    : r.shadowed ? ` (note: another card in the category shadows this name right now)` : "";
+  return `((OOC-Storyteller: Defined table ${describeTable({ ...t, name: key })}.${note} Attach with table=${sub ? `${sub}::${t.name}` : t.name}.))`;
+}
+
+// Create a table subcategory outright (the modal-less path).
+async function cmdDefineTableCategory(cmd: ParsedCommand): Promise<string> {
+  const raw = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!raw) return `((OOC-Storyteller: define-table-category needs name="..".))`;
+  const sub = StringUtil.normalize(raw);
+  if (sub.includes(":") || sub.startsWith("@")) {
+    return `((OOC-Storyteller: A table category is a single name (no "::" and no "@") - subcategories go one level deep for now.))`;
+  }
+  const existed = await LorebookManager.categoryIdByName(`${TABLES_CATEGORY}:${sub}`) !== undefined;
+  await ensurePath(`config:success-tables:${sub}`, TABLE_GENERAL_HEADER);
+  return existed
+    ? `((OOC-Storyteller: Table category "${sub}" already exists.))`
+    : `((OOC-Storyteller: Created table category "${sub}" (lorebook category "${TABLES_CATEGORY}:${sub}", card "general"). Define into it with [[define-table name="${sub}::<name>" ...]].))`;
 }
 
 async function cmdForgetTable(cmd: ParsedCommand): Promise<string> {
-  const name = cmd.positional[0]?.trim();
-  if (!name) return `((OOC-Storyteller: forget-table needs a name.))`;
-  const key = StringUtil.normalize(name);
-  const removed = await SuccessTables.remove(key);
+  const raw = cmd.positional[0]?.trim();
+  if (!raw) return `((OOC-Storyteller: forget-table needs a name.))`;
+  const ref = await resolveTableRef(raw);
+  if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+  const key = ref.key!;
+  const { removed, still } = await TableLibrary.remove(key);
   if (!removed) {
-    return SuccessTableRegistry.get(key)
+    if (!SuccessTableRegistry.get(key)) return `((OOC-Storyteller: No table "${key}".))`;
+    return DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === key)
       ? `((OOC-Storyteller: "${key}" is a built-in table - it can be shadowed with [[define-table]] but not deleted.))`
-      : `((OOC-Storyteller: No table "${key}".))`;
+      : `((OOC-Storyteller: "${key}" isn't in its category's general card - it lives in another card; edit that card in creator mode.))`;
   }
-  const shipped = SuccessTableRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
-  return `((OOC-Storyteller: Forgot table "${key}".${shipped}))`;
+  const note = still === "built-in" ? ` The built-in "${key}" resurfaces.`
+    : still === "another-card" ? ` Another card in the category still defines "${key}".` : "";
+  return `((OOC-Storyteller: Forgot table "${key}".${note}))`;
+}
+
+// --- TABLE ALIASES ------------------------------------------------------------
+async function cmdTableAlias(cmd: ParsedCommand): Promise<string> {
+  const token = cmd.positional[0]?.trim();
+  if (!token) {
+    const all = await TableAliases.all();
+    const items = Object.entries(all).map(([a, k]) => `@${a} -> ${k}`);
+    return items.length
+      ? `((OOC-Storyteller: Table aliases: ${items.join(", ")}. [[table-alias @a "<[sub::]name>"]] defines one.))`
+      : `((OOC-Storyteller: No table aliases yet. [[table-alias @a "<[sub::]name>"]] defines one.))`;
+  }
+  if (!token.startsWith("@")) return `((OOC-Storyteller: Table aliases start with "@", e.g. [[table-alias @qk "combat::quick-kill"]].))`;
+  const target = cmd.positional[1]?.trim();
+  if (!target) return `((OOC-Storyteller: table-alias needs a target table, e.g. [[table-alias ${token} "combat::quick-kill"]].))`;
+  const ref = await resolveTableRef(target);
+  if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+  await TableAliases.set(token, ref.key!);
+  const advisory = SuccessTableRegistry.get(ref.key!) ? "" : ` (no table "${ref.key}" exists yet - the alias waits for it)`;
+  return `((OOC-Storyteller: ${token} now means table ${ref.key}.${advisory}))`;
+}
+
+async function cmdForgetTableAlias(cmd: ParsedCommand): Promise<string> {
+  const token = cmd.positional[0]?.trim();
+  if (!token || !token.startsWith("@")) return `((OOC-Storyteller: forget-table-alias needs an @alias.))`;
+  const removed = await TableAliases.remove(token);
+  return removed
+    ? `((OOC-Storyteller: Forgot table alias ${token}.))`
+    : `((OOC-Storyteller: No table alias ${token}. [[table-alias]] lists them.))`;
+}
+
+// =============================================================================
+// LOREBOOK MODALS & RECONCILIATION
+// -----------------------------------------------------------------------------
+// Game-flow confirmations rendered as api.v1.ui MODALS (blocking, centered) -
+// distinct from the spec-driven form WINDOWS in src/window.ts. Each action
+// button runs its effect and shows the outcome in-modal; Cancel/Close dismiss.
+// Reconciliation (the tracked-card drift check, services.ts) runs at init and
+// on the creator-mode sync; identical recreations were already adopted
+// silently there - only conflicts and deletions reach a modal, and each
+// distinct drift prompts at most once per session (tempStorage guard).
+// =============================================================================
+const _reconGuard = new ScopedStorage();
+
+async function confirmModal(title: string, body: string, actions: { label: string; run: () => Promise<string> }[]): Promise<void> {
+  const part = api.v1.ui.part;
+  const handle = await api.v1.ui.modal.open({ title, size: "small", content: [] });
+  const render = async (result?: string): Promise<void> => {
+    const content: UIPart[] = [part.text({ text: body, markdown: true })];
+    if (result === undefined) {
+      content.push(part.row({ content: actions.map(a => part.button({ text: a.label, callback: async () => render(await a.run()) })) }));
+      content.push(part.row({ content: [part.button({ text: "Cancel", callback: () => handle.close() })] }));
+    } else {
+      content.push(part.box({ content: [part.text({ text: result })] }));
+      content.push(part.row({ content: [part.button({ text: "Close", callback: () => handle.close() })] }));
+    }
+    await handle.update({ content });
+  };
+  await render();
+}
+
+function openConflictModal(f: ReconcileFinding): void {
+  const actions: { label: string; run: () => Promise<string> }[] = [{
+    label: "Keep the new card",
+    run: async () => {
+      await TrackedLorebook.adopt(f.category, f.entry, f.foundId!, f.foundText!);
+      await reloadAllConfigStores();
+      return "Kept your new card - it is the tracked one now.";
+    },
+  }];
+  const combined = f.backupText !== undefined && f.foundText !== undefined
+    ? combineConfigTexts(f.backupText, f.foundText) : undefined;
+  if (combined !== undefined) {
+    actions.push({
+      label: "Combine both",
+      run: async () => {
+        await api.v1.lorebook.updateEntry(f.foundId!, { text: combined });
+        await TrackedLorebook.adopt(f.category, f.entry, f.foundId!, combined);
+        await reloadAllConfigStores();
+        return "Combined - your newer definitions won any collisions.";
+      },
+    });
+  }
+  if (f.backupText !== undefined) {
+    actions.push({
+      label: "Restore the old card",
+      run: async () => {
+        await api.v1.lorebook.updateEntry(f.foundId!, { text: f.backupText! });
+        await TrackedLorebook.adopt(f.category, f.entry, f.foundId!, f.backupText!);
+        await reloadAllConfigStores();
+        return "Restored the card's last tracked text.";
+      },
+    });
+  }
+  void confirmModal(`Recreated card: ${f.entry}`,
+    `The card **${f.entry}** in **${f.category}** was deleted and recreated with different content. What should happen?`,
+    actions);
+}
+
+function openMissingModal(f: ReconcileFinding): void {
+  const actions: { label: string; run: () => Promise<string> }[] = [];
+  if (f.backupText !== undefined) {
+    actions.push({
+      label: "Restore from backup",
+      run: async () => {
+        await writeTrackedEntry(f.category, f.entry, f.backupText!);
+        await reloadAllConfigStores();
+        return "Restored the card from its backup.";
+      },
+    });
+  }
+  actions.push({
+    label: "Forget it",
+    run: async () => {
+      await TrackedLorebook.forget(f.category, f.entry);
+      await reloadAllConfigStores();
+      return "Forgot the card - the engine no longer tracks or restores it.";
+    },
+  });
+  void confirmModal(`Deleted card: ${f.entry}`,
+    `The tracked card **${f.entry}** in **${f.category}** is gone from the lorebook. Restore it from the engine's backup, or let it go?`,
+    actions);
+}
+
+// Detect tracked-card drift and surface it. Returns one-line notes for the
+// caller's log/OOC reply; modals open fire-and-forget.
+async function reconcileLorebook(): Promise<string[]> {
+  const notes: string[] = [];
+  for (const f of await TrackedLorebook.reconcile()) {
+    const card = `"${f.entry}" (${f.category})`;
+    if (f.kind === "adopted") { notes.push(`re-adopted recreated card ${card}`); continue; }
+    const sig = `recon:${f.category}/${f.entry}:${f.kind}:${structuralHash(f.foundText ?? f.backupText ?? "")}`;
+    if (await _reconGuard.tempGet(sig)) continue;
+    await _reconGuard.tempSet(sig, true);
+    if (f.kind === "conflict") { openConflictModal(f); notes.push(`card ${card} was recreated with different content - a modal is waiting`); }
+    else { openMissingModal(f); notes.push(`tracked card ${card} is gone - a modal is waiting`); }
+  }
+  return notes;
 }
 
 // =============================================================================
@@ -5877,6 +6414,7 @@ async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
 // or any wod:config entry: re-sync characters (player edits win) and reload
 // every config store before a command runs, and again when leaving the mode.
 async function syncFromCreatorEdits(): Promise<{ synced: string[]; failed: string[] }> {
+  await reconcileLorebook();   // tracked-card drift first (may open modals)
   const result = await CharacterStore.syncFromLorebook();
   await reloadAllConfigStores();
   return result;
@@ -6072,13 +6610,14 @@ CommandRouter.register("cancel-contest", cmdCancelContest, {
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
 });
 CommandRouter.register("tables", cmdTables, {
-  summary: "list success tables, or lay one out in full",
-  params: [{ key: "name", kind: "positional", hint: "[name]" }],
+  summary: "list success tables (grouped by category), or lay one out in full",
+  params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
 });
 CommandRouter.register("define-table", cmdDefineTable, {
-  summary: "define/replace a success table (overlay; may shadow a built-in)",
+  summary: "define/replace a success table in its category's general card",
+  note: "a missing subcategory prompts a modal to create it",
   params: [
-    { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. intimidate" },
+    { key: "name", kind: "named", required: true, hint: '"[sub::]name"', desc: "Name (optionally sub::name)", example: "e.g. combat::quick-kill" },
     { key: "rows", kind: "named", type: "literal", hint: "`1:Cowed, 3:Terrified[=2]`", desc: "Ladder rows: <successes>:<label>[=<value>], comma-separated", example: "e.g. 1:Cowed, 3:Terrified" },
     { key: "value-per-success", kind: "named", type: "int", desc: "Direct numeric output per success" },
     { key: "cap", kind: "named", type: "int", desc: "Successes beyond this are wasted" },
@@ -6091,8 +6630,23 @@ CommandRouter.register("define-table", cmdDefineTable, {
   ],
 });
 CommandRouter.register("forget-table", cmdForgetTable, {
-  summary: "remove an overlay table; built-ins can only be shadowed",
-  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+  summary: "remove a table from its category's general card; built-ins can only be shadowed",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<[sub::]name|@alias>" }],
+});
+CommandRouter.register("define-table-category", cmdDefineTableCategory, {
+  summary: "create a table subcategory (a real lorebook category with its general card)",
+  params: [{ key: "name", kind: "named", required: true, desc: "Category name (single segment)", example: "e.g. combat" }],
+});
+CommandRouter.register("table-alias", cmdTableAlias, {
+  summary: "define a table alias, or list them (no args); table=@alias resolves it",
+  params: [
+    { key: "token", kind: "positional", hint: "<@alias>" },
+    { key: "target", kind: "positional", hint: '"<[sub::]name>"' },
+  ],
+});
+CommandRouter.register("forget-table-alias", cmdForgetTableAlias, {
+  summary: "remove a table alias",
+  params: [{ key: "token", kind: "positional", required: true, hint: "<@alias>" }],
 });
 CommandRouter.register("define-constraint", cmdDefineConstraint, {
   summary: "define/replace a constraint group",
@@ -6351,16 +6905,22 @@ CommandRouter.register("win-table", cmdWinTable, {
 
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
-// Wire the engine to the host: input hook, lorebook seed, custom merits/flaws.
+// Wire the engine to the host: input hook, lorebook seed, the base virtual
+// paths (config/general + success-tables/general), tracked-card reconciliation
+// (drift modals may open), custom merits/flaws, and every config store.
 // Returns the bootstrap result so the caller can surface the setup note.
 async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onTextAdventureInput", async (params: Parameters<OnTextAdventureInput>[0]) => {
     return processAdventureInput(params.rawInputText);
   });
   const boot = await LorebookManager.bootstrap();
+  await ensurePath("config", CONFIG_GENERAL_HEADER);
+  await ensurePath("config:success-tables", TABLE_GENERAL_HEADER);
+  const recon = await reconcileLorebook();
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "")}=${c.count}`).join(", ")}`);
+  const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}${reconBit}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

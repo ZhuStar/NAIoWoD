@@ -1057,6 +1057,17 @@ Ordered roughly by unlock value:
    number directly); **per-round spends** inside contests (single `resist`/
    `contest` already allow the actor to `spend=`); and folding table readings
    into the LiveCharacter soak/damage pipeline once records go "ready".
+   **The combat damage formula (user ruling, 2026-07-16)**: attack roll
+   (attribute+skill), optionally opposed by a defense roll; a fully successful
+   defense = NO damage roll; otherwise the damage POOL = net attack successes
+   (attack − defense; ALL net successes as stated — note the V20 book adds
+   only successes beyond the first; flagged to the user, recorded as stated)
+   + Strength + weapon bonus/penalty + Potence dots as DICE, with Potence's
+   rating ALSO counted as automatic successes on the damage roll (§7.2: free
+   successes stay separate from their source — `LiveCharacter.Roll`'s
+   `potence: true` + `bonusDiceFrom` already model both halves). Damage roll
+   reads through the `damage` table (1/success), then soak. Attack-vs-defense
+   maps onto the existing resisted-contest machinery (margin = net successes).
 3. **Conditions on live characters** — largely **SHIPPED** (§7.19):
    `ConditionDef` + registry + `afflict`/`advance`/`lift`/`conditions`,
    bindings, `then` chains, mirrors, tags-bite-in-rolls, and the

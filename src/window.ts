@@ -8,7 +8,7 @@
 // window duplicates no grammar: enum params render as button rows (from the
 // spec's options, which reference the rules vocabularies), ints as number
 // inputs, everything else as text inputs; composeCommand does the one
-// sanitizing composition. Windows that need DOMAIN-driven fields (a condition
+// sanitizing composition. Windows that need DOMAIN-driven fields (an affliction
 // def's binding slots) will build their part tree by hand and still submit
 // through composeCommand - the spec covers the static shape (next pass).
 //
@@ -18,7 +18,7 @@
 // =============================================================================
 import { api, UIPart, UiPartHelpers } from "./host";
 import { CommandRouter, CommandSpec, ParamSpec, composeCommand } from "./command";
-import { ConditionRegistry } from "./state";
+import { AfflictionRegistry } from "./state";
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
@@ -37,7 +37,7 @@ function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: s
 // stays live - mode 3) next to a "Choose <key>…" button that opens a MODAL
 // with one button per option; the current value's button is marked ✅;
 // picking writes the field's tempStorage key, closes the modal, and
-// re-renders the window. `options` is a thunk so dynamic lists (condition
+// re-renders the window. `options` is a thunk so dynamic lists (affliction
 // registry, tables) are read at open time.
 export interface PickerOption { value: string; label?: string }
 
@@ -175,23 +175,23 @@ CommandRouter.register("win-table", cmdWinTable, {
   summary: "open a window to define a success table",
 });
 
-// --- CONDITION WINDOWS --------------------------------------------------------
-// The defined conditions, as picker options (description shown when present).
-const conditionOptions = async (): Promise<PickerOption[]> =>
-  ConditionRegistry.all().map(d => ({ value: d.name, label: d.description ? `${d.name} - ${d.description}` : d.name }));
+// --- AFFLICTION WINDOWS --------------------------------------------------------
+// The defined afflictions, as picker options (description shown when present).
+const afflictionOptions = async (): Promise<PickerOption[]> =>
+  AfflictionRegistry.all().map(d => ({ value: d.name, label: d.description ? `${d.name} - ${d.description}` : d.name }));
 
-// [[win-condition]] - define-condition's spec as a form; the `then` and
-// `mirror` fields get pickers over the existing conditions (typing still works).
-async function cmdWinCondition(): Promise<string> {
-  await openCommandWindow("define-condition", {
-    title: "Define condition",
-    blurb: "**Define a condition** (bindings, chains, mirrors, tags)",
-    pickers: { then: conditionOptions, mirror: conditionOptions },
+// [[win-affliction]] - define-affliction's spec as a form; the `then` and
+// `mirror` fields get pickers over the existing afflictions (typing still works).
+async function cmdWinAffliction(): Promise<string> {
+  await openCommandWindow("define-affliction", {
+    title: "Define affliction",
+    blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
+    pickers: { then: afflictionOptions, mirror: afflictionOptions },
   });
-  return `((OOC-Storyteller: Opened the condition window. Fill it in and press Create (it runs [[define-condition]]).))`;
+  return `((OOC-Storyteller: Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).))`;
 }
 
-// [[win-afflict]] - the first DOMAIN-driven window: pick a condition and its
+// [[win-afflict]] - the first DOMAIN-driven window: pick an affliction and its
 // def's binding slots appear as fields; Afflict composes and routes the real
 // [[afflict]] command (openNamed carries the slots). The window duplicates no
 // grammar - the def drives the form.
@@ -201,16 +201,16 @@ export async function openAfflictWindow(): Promise<void> {
   const part = api.v1.ui.part;
   const temp = api.v1.tempStorage;
   const spec = CommandRouter.specFor("afflict")!;
-  const handle = await api.v1.ui.window.open({ title: "Afflict a condition", content: [], defaultWidth: 480, defaultHeight: 480 });
+  const handle = await api.v1.ui.window.open({ title: "Afflict an affliction", content: [], defaultWidth: 480, defaultHeight: 480 });
 
   const render = async (result?: string): Promise<void> => {
-    const chosen = String((await temp.get(AKEY("condition"))) ?? "").trim();
-    const def = chosen ? ConditionRegistry.get(chosen) : undefined;
+    const chosen = String((await temp.get(AKEY("affliction"))) ?? "").trim();
+    const def = chosen ? AfflictionRegistry.get(chosen) : undefined;
     const content: UIPart[] = [
-      part.text({ text: "**Afflict a condition** - pick one; its binding slots appear below.", markdown: true }),
+      part.text({ text: "**Afflict an affliction** - pick one; its binding slots appear below.", markdown: true }),
       pickerField(part, {
-        key: "condition", label: "Condition", storageKey: AKEY("condition"),
-        options: conditionOptions, rerender: () => render(), placeholder: "e.g. feral-whispers",
+        key: "affliction", label: "Affliction", storageKey: AKEY("affliction"),
+        options: afflictionOptions, rerender: () => render(), placeholder: "e.g. feral-whispers",
       }),
       part.text({ text: "On (blank = the current character)" }),
       part.textInput({ storageKey: AKEY("on"), placeholder: "name or @alias" }),
@@ -221,15 +221,15 @@ export async function openAfflictWindow(): Promise<void> {
     }
     content.push(part.row({ content: [
       part.button({ text: "Afflict", callback: async () => {
-        const condition = String((await temp.get(AKEY("condition"))) ?? "").trim();
-        if (!condition) { await render("Pick a condition first."); return; }
+        const affliction = String((await temp.get(AKEY("affliction"))) ?? "").trim();
+        if (!affliction) { await render("Pick an affliction first."); return; }
         const values: Record<string, string> = {
-          condition,
+          affliction,
           on: String((await temp.get(AKEY("on"))) ?? "").trim(),
         };
         // A slot named like a declared param would be skipped by compose; the
         // def vocabulary is the ST's, so just read what the def declares.
-        for (const slot of ConditionRegistry.get(condition)?.bindings ?? []) {
+        for (const slot of AfflictionRegistry.get(affliction)?.bindings ?? []) {
           values[slot] = String((await temp.get(AKEY(`bind:${slot}`))) ?? "").trim();
         }
         const reply = await CommandRouter.route(composeCommand("afflict", values, spec));
@@ -245,12 +245,12 @@ export async function openAfflictWindow(): Promise<void> {
 
 async function cmdWinAfflict(): Promise<string> {
   await openAfflictWindow();
-  return `((OOC-Storyteller: Opened the afflict window. Pick a condition, fill its bindings, and press Afflict (it runs [[afflict]]).))`;
+  return `((OOC-Storyteller: Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).))`;
 }
 
-CommandRouter.register("win-condition", cmdWinCondition, {
-  summary: "open a window to define a condition (then/mirror have pickers)",
+CommandRouter.register("win-affliction", cmdWinAffliction, {
+  summary: "open a window to define an affliction (then/mirror have pickers)",
 });
 CommandRouter.register("win-afflict", cmdWinAfflict, {
-  summary: "open a window to afflict a condition (its binding slots appear on pick)",
+  summary: "open a window to apply an affliction (its binding slots appear on pick)",
 });

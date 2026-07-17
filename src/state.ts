@@ -6,7 +6,7 @@
 // recoverable copy), the named/extended-roll and contest stores, players and
 // aliases, the wod:config registries (instances of the generic config stores -
 // see services.ts), and the live per-character state (resources, health,
-// boosts, effect uses, conditions). Handlers in game.ts act on this layer;
+// boosts, effect uses, afflictions). Handlers in game.ts act on this layer;
 // nothing here parses or routes commands.
 // =============================================================================
 import { api } from "./host";
@@ -23,7 +23,7 @@ import {
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
-  ConditionDef, makeConditionDef, DEFAULT_CONDITIONS,
+  AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
 } from "./rules";
 import {
   ScopedStorage, LorebookManager, MeritFlawRegistry,
@@ -886,7 +886,7 @@ export class AliasRegistry {
 // =============================================================================
 export const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
 export const CONSTRAINTS_ENTRY = "wod:config:constraints";
-export const CONDITIONS_ENTRY = "wod:config:conditions";
+export const AFFLICTIONS_ENTRY = "wod:config:afflictions";
 // Success tables are NOT an entry: this names their category TREE (the
 // virtual-subcategory policy) - wod:config:success-tables and
 // wod:config:success-tables:<sub>.
@@ -1047,21 +1047,21 @@ export const ConstraintRegistry = new ListConfigStore<ConstraintGroup>({
   make: makeConstraintGroup,
 });
 
-// Condition definitions: shipped DEFAULT_CONDITIONS (the Feral Speech pair)
+// Affliction definitions: shipped DEFAULT_AFFLICTIONS (the Feral Speech pair)
 // overlaid by the entry; the overlay may SHADOW a built-in, and
-// [[forget-condition]] removes overlay entries only (the built-in resurfaces).
-export const ConditionRegistry = new ListConfigStore<ConditionDef>({
-  entry: CONDITIONS_ENTRY,
+// [[forget-affliction]] removes overlay entries only (the built-in resurfaces).
+export const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
+  entry: AFFLICTIONS_ENTRY,
   header: [
-    "Condition definitions for this chronicle (overlaid on the built-ins).",
+    "Affliction definitions for this chronicle (overlaid on the built-ins).",
     "The JSON array below the marker lists definitions; each has a name and",
     "optional bindings (required slots like \"target\"), duration, then",
-    "(successor), mirror (condition the target gains, bound back), tags",
-    "(join the afflicted character's rolls) and note. [[define-condition]]",
+    "(successor), mirror (affliction the target gains, bound back), tags",
+    "(join the afflicted character's rolls) and note. [[define-affliction]]",
     "edits this for you; you may also edit it by hand in creator mode.",
   ],
-  make: makeConditionDef,
-  defaults: DEFAULT_CONDITIONS,
+  make: makeAfflictionDef,
+  defaults: DEFAULT_AFFLICTIONS,
 });
 
 // =============================================================================
@@ -1078,38 +1078,38 @@ export class CreatorMode {
   static async set(on: boolean): Promise<void> { await CreatorMode._storage.set("creator-mode", on); }
 }
 
-// One live condition on someone: which definition, and what its slots are bound
+// One live affliction on someone: which definition, and what its slots are bound
 // to (normalized names - possibly NPCs).
-export interface ActiveCondition { def: string; bindings: Record<string, string>; note?: string }
+export interface ActiveAffliction { def: string; bindings: Record<string, string>; note?: string }
 
-export class CharacterConditions {
+export class CharacterAfflictions {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cond:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return `affl:${StringUtil.normalize(name)}`; }
 
-  static async list(name: string): Promise<ActiveCondition[]> {
-    return ((await CharacterConditions._storage.get(CharacterConditions._key(name))) as ActiveCondition[] | undefined) ?? [];
+  static async list(name: string): Promise<ActiveAffliction[]> {
+    return ((await CharacterAfflictions._storage.get(CharacterAfflictions._key(name))) as ActiveAffliction[] | undefined) ?? [];
   }
-  // Add or replace (same def) one condition.
-  static async afflict(name: string, cond: ActiveCondition): Promise<void> {
-    const rest = (await CharacterConditions.list(name)).filter(c => c.def !== cond.def);
-    await CharacterConditions._storage.set(CharacterConditions._key(name), [...rest, cond]);
+  // Add or replace (same def) one affliction.
+  static async afflict(name: string, affl: ActiveAffliction): Promise<void> {
+    const rest = (await CharacterAfflictions.list(name)).filter(c => c.def !== affl.def);
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), [...rest, affl]);
   }
-  // Remove one condition; returns the removed instance (bindings drive mirror-lifting).
-  static async lift(name: string, defName: string): Promise<ActiveCondition | undefined> {
+  // Remove one affliction; returns the removed instance (bindings drive mirror-lifting).
+  static async lift(name: string, defName: string): Promise<ActiveAffliction | undefined> {
     const n = StringUtil.normalize(defName);
-    const all = await CharacterConditions.list(name);
+    const all = await CharacterAfflictions.list(name);
     const hit = all.find(c => c.def === n);
     if (!hit) return undefined;
-    await CharacterConditions._storage.set(CharacterConditions._key(name), all.filter(c => c.def !== n));
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), all.filter(c => c.def !== n));
     return hit;
   }
-  static async clear(name: string): Promise<void> { await CharacterConditions._storage.delete(CharacterConditions._key(name)); }
+  static async clear(name: string): Promise<void> { await CharacterAfflictions._storage.delete(CharacterAfflictions._key(name)); }
 
-  // The tags every active condition grants - merged into the character's rolls.
+  // The tags every active affliction grants - merged into the character's rolls.
   static async tags(name: string): Promise<string[]> {
     const out: string[] = [];
-    for (const c of await CharacterConditions.list(name)) {
-      const def = ConditionRegistry.get(c.def);
+    for (const c of await CharacterAfflictions.list(name)) {
+      const def = AfflictionRegistry.get(c.def);
       if (def?.tags) out.push(...def.tags);
     }
     return out;
@@ -1205,7 +1205,7 @@ export class CharacterResources {
 // Stored as severity counts (hp:<char>) and rebuilt into a HealthTrack on
 // demand (aggravated marks first, then lethal, then bashing) - so penalties,
 // wrap-around and incapacitation all come from the real track. Custom squares/
-// conditions stay a LiveCharacter concern for now.
+// afflictions stay a LiveCharacter concern for now.
 // =============================================================================
 export interface HealthCounts { bashing: number; lethal: number; aggravated: number; }
 const HEAL_ORDER: (keyof HealthCounts)[] = ["aggravated", "lethal", "bashing"];

@@ -7,8 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `5ac54a1`** ("Condition
-> windows: win-condition + win-afflict, and the picker-modal widget").
+> **Last synced with the code as of commit `a154ed7`** ("Rename
+> condition → affliction; reserve 'condition' for future predicates").
 
 ---
 
@@ -132,7 +132,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 
 ### src/host.ts (266 lines)
 - Types: `OnTextAdventureInputReturnValue`, `OnTextAdventureInput`,
-  `LorebookEntryData`, `LorebookCategoryData`, `LorebookCondition`; internal
+  `LorebookEntryData`, `LorebookCategoryData`, `LorebookAffliction`; internal
   `StorageApi`, `WodApi`.
 - **UI contract**: the `UIPart` union + the parts our windows use (text,
   textInput, numberInput, button, row, column, box, collapsibleSection),
@@ -194,15 +194,17 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   `SilverVulnerability` (silver/fire → aggravated AND unsoakable),
   `ArmorReaction` (rating eats intensity for covered kinds).
 - **Square-based `HealthTrack`**: per-square `HealthSquareDef {name, penalty,
-  heal: "normal"|"never"|"special", healCost, condition?}`, `HealthConditionDef`
-  (state label from damaged/total linked boxes — e.g. poison), wrap-around
+  heal: "normal"|"never"|"special", healCost, state?}`, `HealthStateDef`
+  (a named health state whose label derives from damaged/total linked boxes —
+  e.g. poison; config field `states`, summary field `states`, method
+  `States()`, runtime pairing `HealthStateSlot`), wrap-around
   upgrade (bashing past capacity upgrades existing), `Overkill`, `Penalty`
   (deepest filled square, values are NEGATIVE: -1, -2, -5), `Level`,
   `IsIncapacitated/IsDead`, `ApplyDamage/Heal/HealWithPoints`, `Summary()` →
   `HealthSummary {bashing, lethal, aggravated, filled, capacity, overkill,
-  penalty, level, isIncapacitated, isDead, conditions}`.
+  penalty, level, isIncapacitated, isDead, afflictions}`.
   `STANDARD_HEALTH_LEVELS` = classic 7 (Bruised 0 … Incapacitated -5).
-  **Why squares**: conditions, unhealable/costed boxes; was regressed by a
+  **Why squares**: afflictions, unhealable/costed boxes; was regressed by a
   fork once and deliberately restored — keep the simple API working on top.
 - `SoakTypeRule {soakable, pool: traitNames[]}`, `SoakSpec {bashing, lethal,
   aggravated, difficulty}`.
@@ -292,7 +294,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (825) — all game DATA
+### src/rules.ts (831) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
@@ -383,18 +385,19 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   **restricted** owns a member OUTSIDE its reserved scope (empty scope =
   universal). Both senses of "exclusive" covered (mutual-exclusion vs reserved
   access). Enforced at creation later; surfaced now via `[[check-constraints]]`.
-- **Conditions (pure data)**: `ConditionDef {name, description?, bindings?[]
+- **Afflictions (pure data)**: `AfflictionDef {name, description?, bindings?[]
   (required slots like "target"), duration?: EffectDuration (advisory), then?
-  (successor for [[advance]]), mirror? (condition the bound target gains, bound
+  (successor for [[advance]]), mirror? (affliction the bound target gains, bound
   back), tags? (join the afflicted character's rolls), note?}` +
-  `makeConditionDef` (normalize), `describeConditionDef`,
-  `parseConditionDuration("1 turn"|"2 scenes"|"until x"|"instant")` →
-  EffectDuration, `describeDuration`. `DEFAULT_CONDITIONS` = the **Feral
+  `makeAfflictionDef` (normalize), `describeAfflictionDef`,
+  `parseAfflictionDuration("1 turn"|"2 scenes"|"until x"|"instant")` →
+  EffectDuration, `describeDuration`. `DEFAULT_AFFLICTIONS` = the **Feral
   Speech** exemplar: `concentrating-on {target, 1 turn, then feral-whispers}`
-  and `feral-whispers {target, 1 scene, mirror feral-whispers}`. (Health-box
-  conditions are the separate `HealthConditionDef` in core/damage.ts —
-  RENAMED from ConditionDef to free the name; single-scope build forbids
-  duplicates.)
+  and `feral-whispers {target, 1 scene, mirror feral-whispers}`. The NAMING
+  reservation (§7.22) lives as a comment above `AfflictionDef`: an affliction
+  is any parameterized state — good, bad, neutral, or uncategorizable — and
+  the word "condition" is reserved for future predicates. (Health-box states
+  are the separate `HealthStateDef` in core/damage.ts.)
 
 ### src/command.ts (173) — the command bus (pure; depends on core/traits only)
 - `ParsedCommand {name, positional[], named{}, raw}` + `CommandParser.parse` —
@@ -572,17 +575,17 @@ without naming them):
 - `ConstraintRegistry` = `ListConfigStore<ConstraintGroup>` on
   `wod:config:constraints` (`CONSTRAINTS_ENTRY`), no defaults,
   make=`makeConstraintGroup`.
-- `ConditionRegistry` = `ListConfigStore<ConditionDef>` on
-  `wod:config:conditions` (`CONDITIONS_ENTRY`), defaults=`DEFAULT_CONDITIONS`
+- `AfflictionRegistry` = `ListConfigStore<AfflictionDef>` on
+  `wod:config:afflictions` (`AFFLICTIONS_ENTRY`), defaults=`DEFAULT_AFFLICTIONS`
   (the overlay SHADOWS built-ins; `remove` is overlay-only so
-  `forget-condition` resurfaces them), make=`makeConditionDef`.
+  `forget-affliction` resurfaces them), make=`makeAfflictionDef`.
 
 **`CreatorMode`** — the hand-editing flag (storage key `creator-mode`,
 unchanged); `enabled()/set(on)`. The router's game-registered hook consults it.
 
-**Live per-character conditions**: `ActiveCondition {def, bindings:
-{slot→normalized name}, note?}`; **`CharacterConditions`** — storyStorage
-`cond:<name>`, keyed by NORMALIZED NAME, character record NOT required (an NPC
+**Live per-character afflictions**: `ActiveAffliction {def, bindings:
+{slot→normalized name}, note?}`; **`CharacterAfflictions`** — storyStorage
+`affl:<name>`, keyed by NORMALIZED NAME, character record NOT required (an NPC
 animal can carry a mirror); `list/afflict (replaces an instance of the same
 def)/lift (returns the removed instance)/clear/tags` (union of active defs'
 tags).
@@ -643,19 +646,19 @@ gone — a new registry reaches every sync point by existing.
 **Character-argument seam**: **`resolveCharacterRef(token)`** turns a
 character argument (real name or @alias, via `parseAliasToken` +
 `resolveAliasOwner` + the registry chain) into a normalized name — wired into
-`cmdPlay`, `cmdRollFor`, `cmdSetDefault`, condition binding values
+`cmdPlay`, `cmdRollFor`, `cmdSetDefault`, affliction binding values
 (`resolveBindingValue`), and the `vs=` of `cmdVersus`/`cmdExtendedContest`.
 `disp()` = `StringUtil.toTitleCase` for replies.
 
-**Conditions in play**: **tags bite** via `withConditionTags(name, spec)` —
-merges active condition tags into the RollSpec (deduped) in `rollAndReport`,
+**Afflictions in play**: **tags bite** via `withAfflictionTags(name, spec)` —
+merges active affliction tags into the RollSpec (deduped) in `rollAndReport`,
 `cmdVersus` (my side), and `execContestSide` (named sides), so registered
 RollModifiers fire on every roll the afflicted character makes. Helpers:
 `resolveBindingValue` (@aliases else normalize — NPC strings fine),
-`conditionSubject` (`on=` else current character), `conditionLine`,
-`applyCondition` (validates required bindings BEFORE any write; fires
+`afflictionSubject` (`on=` else current character), `afflictionLine`,
+`applyAffliction` (validates required bindings BEFORE any write; fires
 `def.mirror` onto `bindings.target` bound back `{target: subject}` + note
-"(mirror)"), `removeCondition` (lift + lift the mirror from the bound
+"(mirror)"), `removeAffliction` (lift + lift the mirror from the bound
 target). `cmdAdvance` = the manual chain trigger (turn system will automate):
 removes the instance, applies `def.then` CARRYING BINDINGS FORWARD
 (successor's mirror fires). `cmdLift` `spend=` = the Willpower shrug-off via
@@ -698,7 +701,7 @@ params reference the EXPORTED rules vocabularies (`CONSTRAINT_RELATIONS`,
 `CONSTRAINT_DOMAINS`) — a new relation reaches help AND the window by being
 added to the array. Parser/router/spec machinery itself lives in
 `src/command.ts` (see its section). `afflict` is the one `openNamed` spec
-(its slots depend on the condition def).
+(its slots depend on the affliction def).
 
 **`processAdventureInput(rawInputText)`** — extracts every `[[...]]`, routes
 each, replaces with single-line OOC notes; prose-free input →
@@ -742,22 +745,22 @@ wod:config:success-tables:<name> + its general card) ·
 `table-alias [@a "<[sub::]name>"]` (no args = list; table=@a resolves;
 advisory when the target doesn't exist yet) · `forget-table-alias <@a>` ·
 `win-table` (window over define-table) ·
-`win-condition` (define-condition form; then/mirror pickers) ·
-`win-afflict` (pick a condition → its binding slots appear → routes afflict) ·
+`win-affliction` (define-affliction form; then/mirror pickers) ·
+`win-afflict` (pick an affliction → its binding slots appear → routes afflict) ·
 `define-constraint name=".." relation=exclusive|restricted|forbidden
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
 `check-constraints` · `win-constraint` (opens the constraint window - registered
 in `src/window.ts`, emits `define-constraint`) ·
-`define-condition name=".." [bindings="target"] [duration="1 turn|until x|
+`define-affliction name=".." [bindings="target"] [duration="1 turn|until x|
 instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."]
-[note=".."]` · `condition [name]` (list defs, or one in full) ·
-`forget-condition <name>` (overlay only; built-ins resurface) ·
-`afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias> …]` (mirror defs
-also afflict the bound target) · `advance <condition> [on=..]` (end it, begin
-its `then` successor, bindings carried forward) · `lift <condition> [on=..]
+[note=".."]` · `affliction [name]` (list defs, or one in full) ·
+`forget-affliction <name>` (overlay only; built-ins resurface) ·
+`afflict <affliction> [on=<name|@alias>] [<slot>=<name|@alias> …]` (mirror defs
+also afflict the bound target) · `advance <affliction> [on=..]` (end it, begin
+its `then` successor, bindings carried forward) · `lift <affliction> [on=..]
 [spend=res[::effect][!]]` (removes it AND its mirror; spend = shrug-off) ·
-`conditions [<name|@alias>]` (active list; NPCs work too) ·
+`afflictions [<name|@alias>]` (active list; NPCs work too) ·
 `alias <@token> "Target"` (bare @a = global; `@global::a`,
 `@player::<id|storyteller|default>::a`, `@char::<name|default>::a` pin a scope) ·
 `aliases` · `forget-alias <@token>` · `player [name="…"] [default=true]`
@@ -812,11 +815,11 @@ rerender, placeholder?})` = textInput (typing stays live) + a
 `Choose <key>…` button → modal with one button per option (current ✅,
 "(clear)", Cancel); picking writes the temp key, closes, re-renders.
 `openCommandWindow` accepts `opts.pickers: {paramKey → options-thunk}` (same
-temp key — composeCommand untouched). **`[[win-condition]]`** =
-openCommandWindow("define-condition") with pickers on `then`/`mirror`
-(`conditionOptions` = ConditionRegistry.all(), `name - description` labels).
+temp key — composeCommand untouched). **`[[win-affliction]]`** =
+openCommandWindow("define-affliction") with pickers on `then`/`mirror`
+(`afflictionOptions` = AfflictionRegistry.all(), `name - description` labels).
 **`[[win-afflict]]`** (`openAfflictWindow`) — the first DOMAIN-driven window:
-condition pickerField; `on` input; the picked def's `bindings` slots render
+affliction pickerField; `on` input; the picked def's `bindings` slots render
 as inputs (temp `win:afflict:bind:<slot>`; the picker's rerender reveals
 them); Afflict composes `[[afflict]]` via specFor("afflict") (openNamed
 carries the slots) and shows the handler's reply (refusals included)
@@ -844,7 +847,7 @@ storage/lorebook/config registries do `__resetStorageMock();
 __resetLorebookMock(); resetAllConfigStores(); await
 LorebookManager.bootstrap();` in `beforeEach` (ONE call resets every config
 store AND restores the success-table defaults — the per-registry reset list
-that leaked a stale ResourceOverrides cache into the conditions suite is
+that leaked a stale ResourceOverrides cache into the afflictions suite is
 gone); command e2e via `CommandRouter.route(body, {rng})`; wizard e2e
 replies via `processAdventureInput` (plain text). `types/bun-test.d.ts` +
 `types/bun.d.ts` are minimal ambient shims so tsc runs without bun-types
@@ -858,7 +861,7 @@ pointers · `creator-mode` flag · `xroll:<id>` extended actions ·
 `current-extended` pointer · `xcontest:<id>` extended contests ·
 `current-contest` pointer · `res:<char>` resource currents · `hp:<char>`
 health counts · `boost:<char>` trait boosts · `uses:<char>` effect-use ledger
-· **`cond:<name>`** active conditions (keyed by normalized name — NPCs
+· **`affl:<name>`** active afflictions (keyed by normalized name — NPCs
 without records carry them too) · **`lb:ids`** (tracked lorebook uuids:
 `cat:<category>` / `ent:<category>/<entry>`) · **`lb:backup:<category>/<entry>`**
 (tracked-card text backups) · **`table-aliases`** (alias→table-key map) ·
@@ -876,8 +879,8 @@ once-per-session reconciliation-modal guard).
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
 (`wod:named-rolls:library` JSON map) · `wod:config` (entries: `general`
 seeded global-config card, unread for now; `wod:config:resources` overrides
-map; `wod:config:constraints` constraint groups; `wod:config:conditions`
-condition-def overlay — each array or `name → def` map) ·
+map; `wod:config:constraints` constraint groups; `wod:config:afflictions`
+affliction-def overlay — each array or `name → def` map) ·
 **`wod:config:success-tables`** — a CATEGORY (the virtual-subcategory tree,
 §7.21): its `general` card + any extra cards hold bare-named tables; each
 subcategory is the real category `wod:config:success-tables:<sub>` (own
@@ -983,13 +986,14 @@ cards are all tracked (id map + backups above).
     `@` sigil: pool slot = saved roll, character slot = alias. `PlayerStore`
     (current/default player, default "storyteller") is the engine's first
     player-identity concept.
-19. **Conditions are parameterized states, not flat flags** (the user's Feral
-    Speech analysis): a condition can need a **target** ("concentrating-on
+19. **Afflictions are parameterized states, not flat flags** *(shipped as
+    "conditions"; renamed afflictions — §7.22)* (the user's Feral
+    Speech analysis): an affliction can need a **target** ("concentrating-on
     *the squirrel*"), can **chain** into a successor (`then` — concentrating-on
     lasts 1 turn, then feral-whispers begins; `[[advance]]` is the manual
     trigger until the turn system), and involves the OTHER party too. Two
     decisions via questions: **mirror automatically** (a def may declare
-    `mirror="<condition>"`; afflicting the subject also afflicts
+    `mirror="<affliction>"`; afflicting the subject also afflicts
     `bindings.target` — sheet or not — with the mirror bound back; lifting
     lifts both) and **tags bite now** (a def's `tags[]` auto-join every roll
     the afflicted character makes, firing existing `RollModifierRegistry`
@@ -998,9 +1002,11 @@ cards are all tracked (id map + backups above).
     "(ST-enforced)" per §7.12. Binding values resolve `@aliases`; instances
     live under normalized names so sheetless NPCs participate. `lift spend=`
     is the Willpower shrug-off (roadmap #3's wish, via `applySpend`).
-    Naming: damage.ts's health-box states were RENAMED
-    `HealthConditionDef`/`HealthConditionState` to free `ConditionDef` for the
-    central concept (single-scope dist build forbids duplicate globals).
+    Naming history: damage.ts's health-box states were first renamed
+    `HealthConditionDef`/`HealthConditionState` (freeing `ConditionDef` for
+    the central concept; the single-scope dist build forbids duplicate
+    globals), then became `HealthStateDef`/`HealthStateSlot` in the
+    affliction rename (§7.22).
 20. **The architecture pass (pre-windows): specs, generic stores, the split**
     — a dedicated coupling/cohesion/connascence review before the
     command-emitting-windows work. Three defects found and fixed:
@@ -1057,6 +1063,23 @@ cards are all tracked (id map + backups above).
     disambiguates the `@` sigil (like pool position = saved rolls). These are
     the project's FIRST MODALS — game-flow confirmations, deliberately distinct
     from window.ts' spec-driven form windows.
+22. **condition → affliction (a word reservation)** (user directive): the
+    parameterized-state concept is named **affliction**, and — crucially —
+    the name does NOT imply harm: an affliction can be good, bad, neutral, or
+    outside such categorization (Feral Whispers is a gift). The word
+    **condition** is deliberately RESERVED for future conditional things —
+    predicates the engine will someday evaluate. The note lives in the README
+    and as a comment above `AfflictionDef` (rules.ts). Renames: AfflictionDef/
+    AfflictionRegistry/CharacterAfflictions/ActiveAffliction/
+    DEFAULT_AFFLICTIONS; verbs define-affliction/affliction/forget-affliction/
+    afflictions (afflict/advance/lift kept their noun-free names); window
+    win-affliction (win-afflict kept); data keys renamed outright — storage
+    `affl:<name>`, lorebook `wod:config:afflictions` (no chronicle existed,
+    no migration). To complete the reservation, damage.ts's HealthCondition*
+    became **`HealthStateDef`/`HealthStateSlot`** (box field `state?`, config/
+    summary field `states`, method `States()`) — "condition" now appears
+    nowhere as an engine name. NovelAI's own `LorebookCondition` (host.ts)
+    is the HOST's API type and is untouched.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1084,14 +1107,14 @@ Ordered roughly by unlock value:
    `potence: true` + `bonusDiceFrom` already model both halves). Damage roll
    reads through the `damage` table (1/success), then soak. Attack-vs-defense
    maps onto the existing resisted-contest machinery (margin = net successes).
-3. **Conditions on live characters** — largely **SHIPPED** (§7.19):
-   `ConditionDef` + registry + `afflict`/`advance`/`lift`/`conditions`,
+3. **Afflictions on live characters** — largely **SHIPPED** (§7.19):
+   `AfflictionDef` + registry + `afflict`/`advance`/`lift`/`afflictions`,
    bindings, `then` chains, mirrors, tags-bite-in-rolls, and the
    Willpower shrug-off (`lift spend=willpower`). Left: the `suspend` op
-   executing against active conditions (broad "all mental disciplines" AND
+   executing against active afflictions (broad "all mental disciplines" AND
    narrow "effect of Majesty" — granular configuration), duration
    enforcement + auto-`advance` (turn system, #1), and the
-   condition-builder window (#12 — this command set is its substrate).
+   affliction-builder window (#12 — this command set is its substrate).
 4. **Targeting others** — healing others (with "others must be X" —
    `targetMustBe` field already stored), enemy-resistance effects (`resist`
    op); `roll-for` and now the `resist`/`contest` two-side machinery are the
@@ -1112,9 +1135,25 @@ Ordered roughly by unlock value:
 7. **Sorcerer Paths** (static magic) + the "other powers": dynamic magic,
    blood sorcery, ritual magic, Arcana — all currently just words the effect
    grammar can already reference.
-8. **Merits/flaws → automatic roll modifiers** — derive RollModifierRegistry
-   entries from a character's owned merits (today the ST tags rolls manually;
-   Iron-Will-style cost reduction exists as effect data).
+8. **Merits/flaws → automatic roll modifiers + Trait Aptitude + Specialties**
+   — THE NEXT PASS (user decision, 2026-07-16; designs recorded):
+   - *Trait Aptitude* (Devil's Due arcanum — permanent difficulty modifier on
+     one trait): effect-grammar roll ops gain an optional **`trait` gate**
+     (the twin of the existing actionTag gate) plus `permanent: true`;
+     `characterRollEnv`'s resolver RECORDS which traits a pool actually used;
+     a character's owned merits/arcana with permanent trait-gated ops
+     auto-apply when the pool uses the trait. Pure data — delivers this
+     roadmap item with no new registry (Iron-Will-style cost reduction
+     already exists as effect data).
+   - *Specialties*: `specialties` record bucket (trait → list of specialty
+     strings, creator-editable); the V20/DA rule "each 10 counts as TWO
+     successes" as a **`doubleTens`** knob in `Dice.roll`/`RollSpec` beside
+     `nAgain`; applicability is fiction-dependent → a manual `specialty=`
+     roll arg now (advisory pattern), and the **`api.v1.generateWithStory`
+     ask** ("does specialty X apply to this action? yes/no" with story
+     context; chat messages, GLM 4.6 — confirmed in the API reference) as
+     the FIRST Storyteller-loop integration, its own later pass (host
+     contract + mock + prompt design).
 9. **Named-roll + spend integration** — let a saved roll carry its spend;
    composed/multi-resource spends in one command.
 10. **LiveCharacter ⇄ PlayableCharacter unification** — build a LiveCharacter
@@ -1131,8 +1170,8 @@ Ordered roughly by unlock value:
     button row (exists); MANY options → the **picker modal** (current value ✅
     + a Choose… button opening a modal with one button per option — a dropdown
     substitute, to be a third enum-rendering branch of openCommandWindow);
-    open vocabularies → text input. The **condition windows are DONE**
-    (`[[win-condition]]` + `[[win-afflict]]` — the domain-driven pattern
+    open vocabularies → text input. The **affliction windows are DONE**
+    (`[[win-affliction]]` + `[[win-afflict]]` — the domain-driven pattern
     proven; the picker is `pickerField`, reusable via
     `openCommandWindow({pickers})`). Remaining: the `[[win-roll]]` roll-builder window
     (window not modal; **difficulty-as-expression DONE** in

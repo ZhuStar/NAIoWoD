@@ -933,14 +933,14 @@ type HealPolicy = "normal" | "never" | "special";
 interface HealthSquareDef {
   penalty: number;
   name?: string;
-  condition?: string;   // key linking this box to a HealthConditionDef
+  state?: string;      // key linking this box to a HealthStateDef
   heal?: HealPolicy;    // default "normal"
   healCost?: number;    // healing points to clear this box (default 1)
 }
 
-// A condition wired to one or more boxes; its state depends on how many of its
+// A named health state wired to one or more boxes; its state depends on how many of its
 // linked boxes are currently damaged.
-interface HealthConditionDef {
+interface HealthStateDef {
   key: string;
   name?: string;
   // Given how many linked boxes are damaged (and how many exist), return the
@@ -950,26 +950,26 @@ interface HealthConditionDef {
 
 interface HealthTrackConfig {
   squares: HealthSquareDef[];
-  conditions?: HealthConditionDef[];
+  states?: HealthStateDef[];
 }
 
-interface HealthConditionState { key: string; name: string; state: string; damaged: number; total: number; }
+interface HealthStateSlot { key: string; name: string; state: string; damaged: number; total: number; }
 
 interface HealthSummary {
   bashing: number; lethal: number; aggravated: number;
   filled: number; capacity: number; overkill: number;
   penalty: number; level: string;
   isIncapacitated: boolean; isDead: boolean;
-  conditions: HealthConditionState[];
+  states: HealthStateSlot[];
 }
 
-// Damage is stored PER BOX, so boxes can carry conditions, heal costs, or be
+// Damage is stored PER BOX, so boxes can carry named states, heal costs, or be
 // unhealable. Simple use (ApplyDamage / Heal / Penalty / Level / counts) needs
 // none of that and behaves exactly like a plain Storyteller track.
 class HealthTrack {
   private readonly _defs: HealthSquareDef[];
   private readonly _damage: (Severity | null)[];
-  private readonly _conditions: HealthConditionDef[];
+  private readonly _states: HealthStateDef[];
   private _overkill = 0; // damage that spills past a fully-aggravated track
   private readonly _log: Array<{ severity: SeverityName; intensity: number }> = [];
 
@@ -978,7 +978,7 @@ class HealthTrack {
     if (cfg.squares.length === 0) throw new Error("Health track needs at least one square.");
     this._defs = cfg.squares.map(s => ({ heal: "normal", healCost: 1, ...s }));
     this._damage = this._defs.map(() => null);
-    this._conditions = (cfg.conditions ?? []).map(c => ({ ...c }));
+    this._states = (cfg.states ?? []).map(c => ({ ...c }));
   }
 
   get Capacity(): number { return this._defs.length; }
@@ -1064,13 +1064,13 @@ class HealthTrack {
 
   Reset(): void { for (let i = 0; i < this._damage.length; i++) this._damage[i] = null; this._overkill = 0; }
 
-  // Current state of every active condition wired to the track.
-  Conditions(): HealthConditionState[] {
-    const out: HealthConditionState[] = [];
-    for (const c of this._conditions) {
+  // Current state of every active named state wired to the track.
+  States(): HealthStateSlot[] {
+    const out: HealthStateSlot[] = [];
+    for (const c of this._states) {
       let damaged = 0, total = 0;
       for (let i = 0; i < this._defs.length; i++) {
-        if (this._defs[i].condition === c.key) { total++; if (this._damage[i]) damaged++; }
+        if (this._defs[i].state === c.key) { total++; if (this._damage[i]) damaged++; }
       }
       const state = c.state ? c.state(damaged, total) : (damaged > 0 ? "active" : null);
       if (state != null) out.push({ key: c.key, name: c.name ?? c.key, state, damaged, total });
@@ -1084,7 +1084,7 @@ class HealthTrack {
       filled: this.Filled, capacity: this.Capacity, overkill: this._overkill,
       penalty: this.Penalty, level: this.Level,
       isIncapacitated: this.IsIncapacitated, isDead: this.IsDead,
-      conditions: this.Conditions(),
+      states: this.States(),
     };
   }
 }
@@ -1941,7 +1941,7 @@ interface EffectDuration {
   kind: "instant" | "real" | "st" | "until";
   n?: number;               // count of `unit` ("real": minutes/hours; "st": turns/scenes)
   unit?: string;
-  until?: string;           // kind "until": free-form condition
+  until?: string;           // kind "until": free-form affliction
 }
 interface EffectLimits {
   maxPerUse?: number;                  // applications per command (enforced)
@@ -2433,35 +2433,41 @@ function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits): Constr
 }
 
 // =============================================================================
-// CONDITIONS - parameterized character states (bindings, chains, mirrors, tags)
+// AFFLICTIONS - parameterized character states (bindings, chains, mirrors, tags)
 // -----------------------------------------------------------------------------
-// A condition is not a flat video-game flag: it may need BINDINGS (Feral
+// An affliction is not a flat video-game flag: it may need BINDINGS (Feral
 // Speech's "concentrating-on" needs the animal: target=wolf), may CHAIN into a
 // successor when it ends (`then` - concentrating-on lasts a turn, then
 // feral-whispers begins, carrying the bindings forward), may MIRROR onto the
 // bound target (the animal is in the conversation too - even an NPC with no
 // sheet), and may grant TAGS that join the afflicted character's rolls (firing
-// registered RollModifiers - conditions bite mechanically today). Durations
+// registered RollModifiers - afflictions bite mechanically today). Durations
 // reuse the effect grammar's EffectDuration and stay advisory (ST-enforced)
 // until the turn system; [[advance]] is the manual chain trigger.
-// (Health-box conditions - Crippled etc. - are the separate HealthConditionDef
-// in core/damage.ts.)
+// (Health-box states - Crippled etc. - are the separate HealthStateDef in
+// core/damage.ts.)
+//
+// NAMING: an *affliction* is ANY parameterized state attached to someone -
+// good, bad, neutral, or outside such categorization (Feral Whispers is a
+// gift, not a curse). The word does NOT imply harm. We deliberately reserve
+// the word *condition* for future conditional things - predicates the engine
+// will someday evaluate.
 // =============================================================================
-interface ConditionDef {
+interface AfflictionDef {
   name: string;                 // normalized id
   description?: string;
   bindings?: string[];          // required slot names, e.g. ["target"]
   duration?: EffectDuration;    // advisory until the turn system
-  then?: string;                // successor condition ([[advance]] applies it)
-  mirror?: string;              // condition auto-afflicted on bindings.target, bound back
+  then?: string;                // successor affliction ([[advance]] applies it)
+  mirror?: string;              // affliction auto-afflicted on bindings.target, bound back
   tags?: string[];              // tags granted while active
   note?: string;
 }
 
 // Normalize a definition: name/bindings/then/mirror/tags through normalize;
 // empty optionals dropped.
-function makeConditionDef(parts: Partial<ConditionDef> & { name: string }): ConditionDef {
-  const def: ConditionDef = { name: StringUtil.normalize(parts.name) };
+function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): AfflictionDef {
+  const def: AfflictionDef = { name: StringUtil.normalize(parts.name) };
   if (parts.description && parts.description.trim()) def.description = parts.description.trim();
   const bindings = (parts.bindings ?? []).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
   if (bindings.length) def.bindings = bindings;
@@ -2476,7 +2482,7 @@ function makeConditionDef(parts: Partial<ConditionDef> & { name: string }): Cond
 
 // "1 turn" / "2 scenes" / "until eye-contact-breaks" / "instant" -> the effect
 // grammar's duration. Unparseable -> undefined (the def simply has no duration).
-function parseConditionDuration(raw: string | undefined): EffectDuration | undefined {
+function parseAfflictionDuration(raw: string | undefined): EffectDuration | undefined {
   if (!raw) return undefined;
   const t = StringUtil.normalize(raw);
   if (t === "instant") return { kind: "instant" };
@@ -2494,7 +2500,7 @@ function describeDuration(d: EffectDuration | undefined): string {
   return `${d.n ?? 1} ${d.unit ?? d.kind}${(d.n ?? 1) === 1 ? "" : "s"}`;
 }
 
-function describeConditionDef(d: ConditionDef): string {
+function describeAfflictionDef(d: AfflictionDef): string {
   const bits = [d.name];
   if (d.bindings?.length) bits.push(`needs ${d.bindings.join(", ")}`);
   const dur = describeDuration(d.duration);
@@ -2509,15 +2515,15 @@ function describeConditionDef(d: ConditionDef): string {
 // The Feral Speech exemplar (Animalism), faithful to the book: look the animal
 // in the eyes for a moment (concentrating-on, one turn), then converse in its
 // tongue (feral-whispers, mirrored - the animal is in the conversation too).
-const DEFAULT_CONDITIONS: ConditionDef[] = [
-  makeConditionDef({
+const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
+  makeAfflictionDef({
     name: "concentrating-on",
     description: "Locked eyes with the target; nothing else exists this turn",
     bindings: ["target"],
     duration: { kind: "st", n: 1, unit: "turn" },
     then: "feral-whispers",
   }),
-  makeConditionDef({
+  makeAfflictionDef({
     name: "feral-whispers",
     description: "Conversing in the target animal's tongue (Feral Speech)",
     bindings: ["target"],
@@ -3403,7 +3409,7 @@ class LorebookParser {
 // recoverable copy), the named/extended-roll and contest stores, players and
 // aliases, the wod:config registries (instances of the generic config stores -
 // see services.ts), and the live per-character state (resources, health,
-// boosts, effect uses, conditions). Handlers in game.ts act on this layer;
+// boosts, effect uses, afflictions). Handlers in game.ts act on this layer;
 // nothing here parses or routes commands.
 // =============================================================================
 
@@ -4259,7 +4265,7 @@ class AliasRegistry {
 // =============================================================================
 const RESOURCE_CONFIG_ENTRY = "wod:config:resources";
 const CONSTRAINTS_ENTRY = "wod:config:constraints";
-const CONDITIONS_ENTRY = "wod:config:conditions";
+const AFFLICTIONS_ENTRY = "wod:config:afflictions";
 // Success tables are NOT an entry: this names their category TREE (the
 // virtual-subcategory policy) - wod:config:success-tables and
 // wod:config:success-tables:<sub>.
@@ -4420,21 +4426,21 @@ const ConstraintRegistry = new ListConfigStore<ConstraintGroup>({
   make: makeConstraintGroup,
 });
 
-// Condition definitions: shipped DEFAULT_CONDITIONS (the Feral Speech pair)
+// Affliction definitions: shipped DEFAULT_AFFLICTIONS (the Feral Speech pair)
 // overlaid by the entry; the overlay may SHADOW a built-in, and
-// [[forget-condition]] removes overlay entries only (the built-in resurfaces).
-const ConditionRegistry = new ListConfigStore<ConditionDef>({
-  entry: CONDITIONS_ENTRY,
+// [[forget-affliction]] removes overlay entries only (the built-in resurfaces).
+const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
+  entry: AFFLICTIONS_ENTRY,
   header: [
-    "Condition definitions for this chronicle (overlaid on the built-ins).",
+    "Affliction definitions for this chronicle (overlaid on the built-ins).",
     "The JSON array below the marker lists definitions; each has a name and",
     "optional bindings (required slots like \"target\"), duration, then",
-    "(successor), mirror (condition the target gains, bound back), tags",
-    "(join the afflicted character's rolls) and note. [[define-condition]]",
+    "(successor), mirror (affliction the target gains, bound back), tags",
+    "(join the afflicted character's rolls) and note. [[define-affliction]]",
     "edits this for you; you may also edit it by hand in creator mode.",
   ],
-  make: makeConditionDef,
-  defaults: DEFAULT_CONDITIONS,
+  make: makeAfflictionDef,
+  defaults: DEFAULT_AFFLICTIONS,
 });
 
 // =============================================================================
@@ -4451,38 +4457,38 @@ class CreatorMode {
   static async set(on: boolean): Promise<void> { await CreatorMode._storage.set("creator-mode", on); }
 }
 
-// One live condition on someone: which definition, and what its slots are bound
+// One live affliction on someone: which definition, and what its slots are bound
 // to (normalized names - possibly NPCs).
-interface ActiveCondition { def: string; bindings: Record<string, string>; note?: string }
+interface ActiveAffliction { def: string; bindings: Record<string, string>; note?: string }
 
-class CharacterConditions {
+class CharacterAfflictions {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cond:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return `affl:${StringUtil.normalize(name)}`; }
 
-  static async list(name: string): Promise<ActiveCondition[]> {
-    return ((await CharacterConditions._storage.get(CharacterConditions._key(name))) as ActiveCondition[] | undefined) ?? [];
+  static async list(name: string): Promise<ActiveAffliction[]> {
+    return ((await CharacterAfflictions._storage.get(CharacterAfflictions._key(name))) as ActiveAffliction[] | undefined) ?? [];
   }
-  // Add or replace (same def) one condition.
-  static async afflict(name: string, cond: ActiveCondition): Promise<void> {
-    const rest = (await CharacterConditions.list(name)).filter(c => c.def !== cond.def);
-    await CharacterConditions._storage.set(CharacterConditions._key(name), [...rest, cond]);
+  // Add or replace (same def) one affliction.
+  static async afflict(name: string, affl: ActiveAffliction): Promise<void> {
+    const rest = (await CharacterAfflictions.list(name)).filter(c => c.def !== affl.def);
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), [...rest, affl]);
   }
-  // Remove one condition; returns the removed instance (bindings drive mirror-lifting).
-  static async lift(name: string, defName: string): Promise<ActiveCondition | undefined> {
+  // Remove one affliction; returns the removed instance (bindings drive mirror-lifting).
+  static async lift(name: string, defName: string): Promise<ActiveAffliction | undefined> {
     const n = StringUtil.normalize(defName);
-    const all = await CharacterConditions.list(name);
+    const all = await CharacterAfflictions.list(name);
     const hit = all.find(c => c.def === n);
     if (!hit) return undefined;
-    await CharacterConditions._storage.set(CharacterConditions._key(name), all.filter(c => c.def !== n));
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), all.filter(c => c.def !== n));
     return hit;
   }
-  static async clear(name: string): Promise<void> { await CharacterConditions._storage.delete(CharacterConditions._key(name)); }
+  static async clear(name: string): Promise<void> { await CharacterAfflictions._storage.delete(CharacterAfflictions._key(name)); }
 
-  // The tags every active condition grants - merged into the character's rolls.
+  // The tags every active affliction grants - merged into the character's rolls.
   static async tags(name: string): Promise<string[]> {
     const out: string[] = [];
-    for (const c of await CharacterConditions.list(name)) {
-      const def = ConditionRegistry.get(c.def);
+    for (const c of await CharacterAfflictions.list(name)) {
+      const def = AfflictionRegistry.get(c.def);
       if (def?.tags) out.push(...def.tags);
     }
     return out;
@@ -4578,7 +4584,7 @@ class CharacterResources {
 // Stored as severity counts (hp:<char>) and rebuilt into a HealthTrack on
 // demand (aggravated marks first, then lethal, then bashing) - so penalties,
 // wrap-around and incapacitation all come from the real track. Custom squares/
-// conditions stay a LiveCharacter concern for now.
+// afflictions stay a LiveCharacter concern for now.
 // =============================================================================
 interface HealthCounts { bashing: number; lethal: number; aggravated: number; }
 const HEAL_ORDER: (keyof HealthCounts)[] = ["aggravated", "lethal", "bashing"];
@@ -5230,11 +5236,11 @@ async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n
   };
 }
 
-// Merge the tags granted by someone's active conditions into a roll spec
-// (deduped). This is how conditions bite mechanically today: a def's tags fire
+// Merge the tags granted by someone's active afflictions into a roll spec
+// (deduped). This is how afflictions bite mechanically today: a def's tags fire
 // registered RollModifiers on every roll the afflicted character makes.
-async function withConditionTags(name: string, spec: RollSpec): Promise<RollSpec> {
-  const condTags = await CharacterConditions.tags(name);
+async function withAfflictionTags(name: string, spec: RollSpec): Promise<RollSpec> {
+  const condTags = await CharacterAfflictions.tags(name);
   if (!condTags.length) return spec;
   return { ...spec, tags: [...new Set([...spec.tags, ...condTags])] };
 }
@@ -5283,9 +5289,9 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
   }
-  // Active conditions bite: their tags join the roll, firing any registered
+  // Active afflictions bite: their tags join the roll, firing any registered
   // RollModifiers (unregistered ones surface as the usual unknown-tag note).
-  spec = await withConditionTags(char.name, spec);
+  spec = await withAfflictionTags(char.name, spec);
   const spend = await applySpend(char, cmd, ctx, spec.tags, savedSpend);
   if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
   // Rolls see live state: boosted Attributes add to the record's dots, and the
@@ -5590,7 +5596,7 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
       const env = await characterRollEnv(c);
       const merged: Partial<RollModifier> = { ...(extra ?? {}) };
       if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
-      return executeRoll(await withConditionTags(c.name, base), env.resolver, { rng, extra: merged });
+      return executeRoll(await withAfflictionTags(c.name, base), env.resolver, { rng, extra: merged });
     }
   }
   return executeRoll(base, () => 0, { rng, extra });
@@ -5624,7 +5630,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
 
   const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
-  const mySpec = await withConditionTags(me.name, makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags }));
+  const mySpec = await withAfflictionTags(me.name, makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags }));
   const theirSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) });
 
   // The actor may spend on their own roll (fuel / roll-op effects only), exactly
@@ -6079,7 +6085,7 @@ async function cmdCheckConstraints(): Promise<string> {
   return `((OOC-Storyteller: ${disp(char.name)} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
 }
 
-// --- CONDITIONS --------------------------------------------------------------
+// --- AFFLICTIONS --------------------------------------------------------------
 // Parameterized states on characters (and NPCs - no sheet required). afflict
 // validates the def's binding slots (values may be @aliases), mirrors onto the
 // bound target when the def says so, advance walks the chain (concentrating-on
@@ -6096,9 +6102,9 @@ async function resolveBindingValue(raw: string): Promise<{ value?: string; error
   return { value: StringUtil.normalize(raw) };
 }
 
-// Who a condition command operates on: on=<name|@alias> if given (record NOT
-// required - NPCs carry conditions too), else the current character.
-async function conditionSubject(cmd: ParsedCommand): Promise<{ name?: string; error?: string }> {
+// Who an affliction command operates on: on=<name|@alias> if given (record NOT
+// required - NPCs carry afflictions too), else the current character.
+async function afflictionSubject(cmd: ParsedCommand): Promise<{ name?: string; error?: string }> {
   const on = cmd.named["on"]?.trim();
   if (on) {
     const ref = await resolveBindingValue(on);
@@ -6109,8 +6115,8 @@ async function conditionSubject(cmd: ParsedCommand): Promise<{ name?: string; er
   return { name: StringUtil.normalize(cur.name) };
 }
 
-function conditionLine(c: ActiveCondition): string {
-  const def = ConditionRegistry.get(c.def);
+function afflictionLine(c: ActiveAffliction): string {
+  const def = AfflictionRegistry.get(c.def);
   const bits = [c.def];
   const bound = Object.entries(c.bindings).map(([k, v]) => `${k}: ${disp(v)}`).join(", ");
   if (bound) bits.push(`(${bound})`);
@@ -6124,7 +6130,7 @@ function conditionLine(c: ActiveCondition): string {
 // Apply one definition to a subject: validate + resolve bindings, write the
 // instance, then fire the def's mirror onto the bound target. Shared by
 // afflict and advance. Returns the reply fragments or an error.
-async function applyCondition(subject: string, def: ConditionDef, rawBindings: Record<string, string>, note?: string): Promise<{ lines?: string[]; error?: string }> {
+async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string): Promise<{ lines?: string[]; error?: string }> {
   const bindings: Record<string, string> = {};
   for (const slot of def.bindings ?? []) {
     const raw = rawBindings[slot];
@@ -6133,41 +6139,41 @@ async function applyCondition(subject: string, def: ConditionDef, rawBindings: R
     if (r.error) return { error: r.error };
     bindings[slot] = r.value!;
   }
-  const inst: ActiveCondition = { def: def.name, bindings };
+  const inst: ActiveAffliction = { def: def.name, bindings };
   if (note) inst.note = note;
-  await CharacterConditions.afflict(subject, inst);
-  const lines = [`${disp(subject)} is now ${conditionLine(inst)}`];
+  await CharacterAfflictions.afflict(subject, inst);
+  const lines = [`${disp(subject)} is now ${afflictionLine(inst)}`];
   if (def.mirror && bindings["target"]) {
-    const mirrorDef = ConditionRegistry.get(def.mirror);
+    const mirrorDef = AfflictionRegistry.get(def.mirror);
     if (!mirrorDef) lines.push(`mirror "${def.mirror}" is not defined - skipped`);
     else {
-      const mirrorInst: ActiveCondition = { def: mirrorDef.name, bindings: { target: subject }, note: "(mirror)" };
-      await CharacterConditions.afflict(bindings["target"], mirrorInst);
-      lines.push(`${disp(bindings["target"])} is now ${conditionLine(mirrorInst)}`);
+      const mirrorInst: ActiveAffliction = { def: mirrorDef.name, bindings: { target: subject }, note: "(mirror)" };
+      await CharacterAfflictions.afflict(bindings["target"], mirrorInst);
+      lines.push(`${disp(bindings["target"])} is now ${afflictionLine(mirrorInst)}`);
     }
   }
   return { lines };
 }
 
-// Remove one condition from a subject AND its mirror from the bound target.
-async function removeCondition(subject: string, defName: string): Promise<{ removed?: ActiveCondition; alsoLifted?: string; error?: string }> {
-  const removed = await CharacterConditions.lift(subject, defName);
-  if (!removed) return { error: `${disp(subject)} does not have "${StringUtil.normalize(defName)}". [[conditions${subject ? ` ${subject}` : ""}]] lists them.` };
-  const def = ConditionRegistry.get(removed.def);
+// Remove one affliction from a subject AND its mirror from the bound target.
+async function removeAffliction(subject: string, defName: string): Promise<{ removed?: ActiveAffliction; alsoLifted?: string; error?: string }> {
+  const removed = await CharacterAfflictions.lift(subject, defName);
+  if (!removed) return { error: `${disp(subject)} does not have "${StringUtil.normalize(defName)}". [[afflictions${subject ? ` ${subject}` : ""}]] lists them.` };
+  const def = AfflictionRegistry.get(removed.def);
   if (def?.mirror && removed.bindings["target"]) {
-    const gone = await CharacterConditions.lift(removed.bindings["target"], def.mirror);
+    const gone = await CharacterAfflictions.lift(removed.bindings["target"], def.mirror);
     if (gone) return { removed, alsoLifted: `${def.mirror} lifted from ${disp(removed.bindings["target"])}` };
   }
   return { removed };
 }
 
-async function cmdDefineCondition(cmd: ParsedCommand): Promise<string> {
+async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
-  if (!name) return `((OOC-Storyteller: define-condition needs name="...", e.g. [[define-condition name="dazed" tags="off-hand" duration="1 scene"]].))`;
+  if (!name) return `((OOC-Storyteller: define-affliction needs name="...", e.g. [[define-affliction name="dazed" tags="off-hand" duration="1 scene"]].))`;
   const durationRaw = cmd.named["duration"];
-  const duration = parseConditionDuration(durationRaw);
+  const duration = parseAfflictionDuration(durationRaw);
   if (durationRaw && !duration) return `((OOC-Storyteller: Can't read duration "${durationRaw}" - use "1 turn", "2 scenes", "until <x>" or "instant".))`;
-  const def = makeConditionDef({
+  const def = makeAfflictionDef({
     name,
     description: cmd.named["description"],
     bindings: (cmd.named["bindings"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
@@ -6177,70 +6183,70 @@ async function cmdDefineCondition(cmd: ParsedCommand): Promise<string> {
     tags: (cmd.named["tags"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
     note: cmd.named["note"],
   });
-  await ConditionRegistry.put(def);
-  return `((OOC-Storyteller: Defined condition ${describeConditionDef(def)}.))`;
+  await AfflictionRegistry.put(def);
+  return `((OOC-Storyteller: Defined affliction ${describeAfflictionDef(def)}.))`;
 }
 
-async function cmdConditionInfo(cmd: ParsedCommand): Promise<string> {
+async function cmdAfflictionInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) {
-    const items = ConditionRegistry.all().map(d => d.name).join(", ");
-    return `((OOC-Storyteller: Defined conditions: ${items}. [[condition <name>]] for detail; [[conditions]] shows who has what.))`;
+    const items = AfflictionRegistry.all().map(d => d.name).join(", ");
+    return `((OOC-Storyteller: Defined afflictions: ${items}. [[affliction <name>]] for detail; [[afflictions]] shows who has what.))`;
   }
-  const def = ConditionRegistry.get(name);
-  if (!def) return `((OOC-Storyteller: No condition "${StringUtil.normalize(name)}". [[condition]] lists them.))`;
-  return `((OOC-Storyteller: ${describeConditionDef(def)}.))`;
+  const def = AfflictionRegistry.get(name);
+  if (!def) return `((OOC-Storyteller: No affliction "${StringUtil.normalize(name)}". [[affliction]] lists them.))`;
+  return `((OOC-Storyteller: ${describeAfflictionDef(def)}.))`;
 }
 
-async function cmdForgetCondition(cmd: ParsedCommand): Promise<string> {
+async function cmdForgetAffliction(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `((OOC-Storyteller: forget-condition needs a name.))`;
+  if (!name) return `((OOC-Storyteller: forget-affliction needs a name.))`;
   const key = StringUtil.normalize(name);
-  const removed = await ConditionRegistry.remove(key);
+  const removed = await AfflictionRegistry.remove(key);
   if (!removed) {
-    return ConditionRegistry.get(key)
-      ? `((OOC-Storyteller: "${key}" is a built-in condition - it can be shadowed with [[define-condition]] but not deleted.))`
-      : `((OOC-Storyteller: No condition "${key}".))`;
+    return AfflictionRegistry.get(key)
+      ? `((OOC-Storyteller: "${key}" is a built-in affliction - it can be shadowed with [[define-affliction]] but not deleted.))`
+      : `((OOC-Storyteller: No affliction "${key}".))`;
   }
-  const shipped = ConditionRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
-  return `((OOC-Storyteller: Forgot condition "${key}".${shipped}))`;
+  const shipped = AfflictionRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
+  return `((OOC-Storyteller: Forgot affliction "${key}".${shipped}))`;
 }
 
 async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `((OOC-Storyteller: afflict needs a condition, e.g. [[afflict concentrating-on target="Wolf"]]. [[condition]] lists them.))`;
-  const def = ConditionRegistry.get(name);
-  if (!def) return `((OOC-Storyteller: No condition "${StringUtil.normalize(name)}". Define it with [[define-condition]].))`;
-  const subject = await conditionSubject(cmd);
+  if (!name) return `((OOC-Storyteller: afflict needs an affliction, e.g. [[afflict concentrating-on target="Wolf"]]. [[affliction]] lists them.))`;
+  const def = AfflictionRegistry.get(name);
+  if (!def) return `((OOC-Storyteller: No affliction "${StringUtil.normalize(name)}". Define it with [[define-affliction]].))`;
+  const subject = await afflictionSubject(cmd);
   if (subject.error) return `((OOC-Storyteller: ${subject.error}))`;
-  const r = await applyCondition(subject.name!, def, cmd.named);
+  const r = await applyAffliction(subject.name!, def, cmd.named);
   if (r.error) return `((OOC-Storyteller: ${r.error}))`;
   return `((OOC-Storyteller: ${r.lines!.join("; ")}.))`;
 }
 
 // The manual chain trigger (the turn system will automate it): end the
-// condition now and apply its `then` successor, carrying the bindings forward.
+// affliction now and apply its `then` successor, carrying the bindings forward.
 async function cmdAdvance(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `((OOC-Storyteller: advance needs a condition, e.g. [[advance concentrating-on]].))`;
-  const subject = await conditionSubject(cmd);
+  if (!name) return `((OOC-Storyteller: advance needs an affliction, e.g. [[advance concentrating-on]].))`;
+  const subject = await afflictionSubject(cmd);
   if (subject.error) return `((OOC-Storyteller: ${subject.error}))`;
-  const current = (await CharacterConditions.list(subject.name!)).find(c => c.def === StringUtil.normalize(name));
+  const current = (await CharacterAfflictions.list(subject.name!)).find(c => c.def === StringUtil.normalize(name));
   if (!current) return `((OOC-Storyteller: ${disp(subject.name!)} does not have "${StringUtil.normalize(name)}".))`;
-  const def = ConditionRegistry.get(current.def);
+  const def = AfflictionRegistry.get(current.def);
   if (!def?.then) return `((OOC-Storyteller: "${current.def}" has no successor to advance into - [[lift ${current.def}]] to end it.))`;
-  const next = ConditionRegistry.get(def.then);
+  const next = AfflictionRegistry.get(def.then);
   if (!next) return `((OOC-Storyteller: Successor "${def.then}" is not defined.))`;
-  await removeCondition(subject.name!, current.def);
-  const r = await applyCondition(subject.name!, next, current.bindings);
+  await removeAffliction(subject.name!, current.def);
+  const r = await applyAffliction(subject.name!, next, current.bindings);
   if (r.error) return `((OOC-Storyteller: ${current.def} ended, but ${def.then} could not begin: ${r.error}))`;
   return `((OOC-Storyteller: ${current.def} ends; ${r.lines!.join("; ")}.))`;
 }
 
 async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `((OOC-Storyteller: lift needs a condition, e.g. [[lift feral-whispers]].))`;
-  const subject = await conditionSubject(cmd);
+  if (!name) return `((OOC-Storyteller: lift needs an affliction, e.g. [[lift feral-whispers]].))`;
+  const subject = await afflictionSubject(cmd);
   if (subject.error) return `((OOC-Storyteller: ${subject.error}))`;
   let spendNote = "";
   if (cmd.named["spend"]) {
@@ -6251,13 +6257,13 @@ async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
     if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
     spendNote = spend.note ? ` (${spend.note})` : "";
   }
-  const r = await removeCondition(subject.name!, name);
+  const r = await removeAffliction(subject.name!, name);
   if (r.error) return `((OOC-Storyteller: ${r.error}))`;
   const also = r.alsoLifted ? `; ${r.alsoLifted}` : "";
   return `((OOC-Storyteller: ${disp(subject.name!)} shakes off ${r.removed!.def}${spendNote}${also}.))`;
 }
 
-async function cmdConditions(cmd: ParsedCommand): Promise<string> {
+async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
   let subject: string;
   const arg = cmd.positional[0]?.trim();
   if (arg) {
@@ -6266,12 +6272,12 @@ async function cmdConditions(cmd: ParsedCommand): Promise<string> {
     subject = r.value!;
   } else {
     const cur = await CharacterStore.getCurrent();
-    if (!cur) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]] or name someone: [[conditions "Wolf"]].))`;
+    if (!cur) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]] or name someone: [[afflictions "Wolf"]].))`;
     subject = StringUtil.normalize(cur.name);
   }
-  const list = await CharacterConditions.list(subject);
-  if (!list.length) return `((OOC-Storyteller: ${disp(subject)} has no conditions.))`;
-  return `((OOC-Storyteller: ${disp(subject)} - ${list.map(conditionLine).join("; ")}.))`;
+  const list = await CharacterAfflictions.list(subject);
+  if (!list.length) return `((OOC-Storyteller: ${disp(subject)} has no afflictions.))`;
+  return `((OOC-Storyteller: ${disp(subject)} - ${list.map(afflictionLine).join("; ")}.))`;
 }
 
 // --- ALIASES & PLAYERS ------------------------------------------------------
@@ -6670,53 +6676,53 @@ CommandRouter.register("forget-constraint", cmdForgetConstraint, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts" });
-CommandRouter.register("define-condition", cmdDefineCondition, {
-  summary: "define/replace a condition (overlay; may shadow a built-in)",
+CommandRouter.register("define-affliction", cmdDefineAffliction, {
+  summary: "define/replace an affliction (overlay; may shadow a built-in)",
   params: [
     { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. dazed" },
     { key: "bindings", kind: "named", hint: '"target"', desc: "Required slots (comma-separated)", example: "e.g. target" },
     { key: "duration", kind: "named", hint: '"1 turn|until x|instant"', desc: "Advisory duration" },
-    { key: "then", kind: "named", desc: "Successor condition ([[advance]] applies it)" },
-    { key: "mirror", kind: "named", desc: "Condition the bound target gains, bound back" },
+    { key: "then", kind: "named", desc: "Successor affliction ([[advance]] applies it)" },
+    { key: "mirror", kind: "named", desc: "Affliction the bound target gains, bound back" },
     { key: "tags", kind: "named", hint: '"a,b"', desc: "Tags joined to the afflicted character's rolls" },
     { key: "description", kind: "named", type: "literal", desc: "Description" },
     { key: "note", kind: "named", desc: "Note (optional)" },
   ],
 });
-CommandRouter.register("condition", cmdConditionInfo, {
-  summary: "list defined conditions, or show one in full",
+CommandRouter.register("affliction", cmdAfflictionInfo, {
+  summary: "list defined afflictions, or show one in full",
   params: [{ key: "name", kind: "positional", hint: "[name]" }],
 });
-CommandRouter.register("forget-condition", cmdForgetCondition, {
+CommandRouter.register("forget-affliction", cmdForgetAffliction, {
   summary: "remove an overlay definition; built-ins can only be shadowed",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("afflict", cmdAfflict, {
-  summary: "apply a condition; extra <slot>=<name|@alias> args fill its bindings",
+  summary: "apply an affliction; extra <slot>=<name|@alias> args fill its bindings",
   note: "mirror defs also afflict the bound target",
   openNamed: true,
   params: [
-    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
   ],
 });
 CommandRouter.register("advance", cmdAdvance, {
-  summary: "end a condition and begin its successor, bindings carried forward",
+  summary: "end an affliction and begin its successor, bindings carried forward",
   params: [
-    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>" },
   ],
 });
 CommandRouter.register("lift", cmdLift, {
-  summary: "remove a condition - and its mirror; spend = shrug-off",
+  summary: "remove an affliction - and its mirror; spend = shrug-off",
   params: [
-    { key: "condition", kind: "positional", required: true, hint: "<condition>" },
+    { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>" },
     { key: "spend", kind: "named", hint: SPEND_HINT },
   ],
 });
-CommandRouter.register("conditions", cmdConditions, {
-  summary: "active conditions; NPCs work too",
+CommandRouter.register("afflictions", cmdAfflictions, {
+  summary: "active afflictions; NPCs work too",
   params: [{ key: "who", kind: "positional", hint: "<name|@alias>" }],
 });
 CommandRouter.register("alias", cmdAlias, {
@@ -6784,7 +6790,7 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
 // window duplicates no grammar: enum params render as button rows (from the
 // spec's options, which reference the rules vocabularies), ints as number
 // inputs, everything else as text inputs; composeCommand does the one
-// sanitizing composition. Windows that need DOMAIN-driven fields (a condition
+// sanitizing composition. Windows that need DOMAIN-driven fields (an affliction
 // def's binding slots) will build their part tree by hand and still submit
 // through composeCommand - the spec covers the static shape (next pass).
 //
@@ -6810,7 +6816,7 @@ function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: s
 // stays live - mode 3) next to a "Choose <key>…" button that opens a MODAL
 // with one button per option; the current value's button is marked ✅;
 // picking writes the field's tempStorage key, closes the modal, and
-// re-renders the window. `options` is a thunk so dynamic lists (condition
+// re-renders the window. `options` is a thunk so dynamic lists (affliction
 // registry, tables) are read at open time.
 interface PickerOption { value: string; label?: string }
 
@@ -6948,23 +6954,23 @@ CommandRouter.register("win-table", cmdWinTable, {
   summary: "open a window to define a success table",
 });
 
-// --- CONDITION WINDOWS --------------------------------------------------------
-// The defined conditions, as picker options (description shown when present).
-const conditionOptions = async (): Promise<PickerOption[]> =>
-  ConditionRegistry.all().map(d => ({ value: d.name, label: d.description ? `${d.name} - ${d.description}` : d.name }));
+// --- AFFLICTION WINDOWS --------------------------------------------------------
+// The defined afflictions, as picker options (description shown when present).
+const afflictionOptions = async (): Promise<PickerOption[]> =>
+  AfflictionRegistry.all().map(d => ({ value: d.name, label: d.description ? `${d.name} - ${d.description}` : d.name }));
 
-// [[win-condition]] - define-condition's spec as a form; the `then` and
-// `mirror` fields get pickers over the existing conditions (typing still works).
-async function cmdWinCondition(): Promise<string> {
-  await openCommandWindow("define-condition", {
-    title: "Define condition",
-    blurb: "**Define a condition** (bindings, chains, mirrors, tags)",
-    pickers: { then: conditionOptions, mirror: conditionOptions },
+// [[win-affliction]] - define-affliction's spec as a form; the `then` and
+// `mirror` fields get pickers over the existing afflictions (typing still works).
+async function cmdWinAffliction(): Promise<string> {
+  await openCommandWindow("define-affliction", {
+    title: "Define affliction",
+    blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
+    pickers: { then: afflictionOptions, mirror: afflictionOptions },
   });
-  return `((OOC-Storyteller: Opened the condition window. Fill it in and press Create (it runs [[define-condition]]).))`;
+  return `((OOC-Storyteller: Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).))`;
 }
 
-// [[win-afflict]] - the first DOMAIN-driven window: pick a condition and its
+// [[win-afflict]] - the first DOMAIN-driven window: pick an affliction and its
 // def's binding slots appear as fields; Afflict composes and routes the real
 // [[afflict]] command (openNamed carries the slots). The window duplicates no
 // grammar - the def drives the form.
@@ -6974,16 +6980,16 @@ async function openAfflictWindow(): Promise<void> {
   const part = api.v1.ui.part;
   const temp = api.v1.tempStorage;
   const spec = CommandRouter.specFor("afflict")!;
-  const handle = await api.v1.ui.window.open({ title: "Afflict a condition", content: [], defaultWidth: 480, defaultHeight: 480 });
+  const handle = await api.v1.ui.window.open({ title: "Afflict an affliction", content: [], defaultWidth: 480, defaultHeight: 480 });
 
   const render = async (result?: string): Promise<void> => {
-    const chosen = String((await temp.get(AKEY("condition"))) ?? "").trim();
-    const def = chosen ? ConditionRegistry.get(chosen) : undefined;
+    const chosen = String((await temp.get(AKEY("affliction"))) ?? "").trim();
+    const def = chosen ? AfflictionRegistry.get(chosen) : undefined;
     const content: UIPart[] = [
-      part.text({ text: "**Afflict a condition** - pick one; its binding slots appear below.", markdown: true }),
+      part.text({ text: "**Afflict an affliction** - pick one; its binding slots appear below.", markdown: true }),
       pickerField(part, {
-        key: "condition", label: "Condition", storageKey: AKEY("condition"),
-        options: conditionOptions, rerender: () => render(), placeholder: "e.g. feral-whispers",
+        key: "affliction", label: "Affliction", storageKey: AKEY("affliction"),
+        options: afflictionOptions, rerender: () => render(), placeholder: "e.g. feral-whispers",
       }),
       part.text({ text: "On (blank = the current character)" }),
       part.textInput({ storageKey: AKEY("on"), placeholder: "name or @alias" }),
@@ -6994,15 +7000,15 @@ async function openAfflictWindow(): Promise<void> {
     }
     content.push(part.row({ content: [
       part.button({ text: "Afflict", callback: async () => {
-        const condition = String((await temp.get(AKEY("condition"))) ?? "").trim();
-        if (!condition) { await render("Pick a condition first."); return; }
+        const affliction = String((await temp.get(AKEY("affliction"))) ?? "").trim();
+        if (!affliction) { await render("Pick an affliction first."); return; }
         const values: Record<string, string> = {
-          condition,
+          affliction,
           on: String((await temp.get(AKEY("on"))) ?? "").trim(),
         };
         // A slot named like a declared param would be skipped by compose; the
         // def vocabulary is the ST's, so just read what the def declares.
-        for (const slot of ConditionRegistry.get(condition)?.bindings ?? []) {
+        for (const slot of AfflictionRegistry.get(affliction)?.bindings ?? []) {
           values[slot] = String((await temp.get(AKEY(`bind:${slot}`))) ?? "").trim();
         }
         const reply = await CommandRouter.route(composeCommand("afflict", values, spec));
@@ -7018,14 +7024,14 @@ async function openAfflictWindow(): Promise<void> {
 
 async function cmdWinAfflict(): Promise<string> {
   await openAfflictWindow();
-  return `((OOC-Storyteller: Opened the afflict window. Pick a condition, fill its bindings, and press Afflict (it runs [[afflict]]).))`;
+  return `((OOC-Storyteller: Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).))`;
 }
 
-CommandRouter.register("win-condition", cmdWinCondition, {
-  summary: "open a window to define a condition (then/mirror have pickers)",
+CommandRouter.register("win-affliction", cmdWinAffliction, {
+  summary: "open a window to define an affliction (then/mirror have pickers)",
 });
 CommandRouter.register("win-afflict", cmdWinAfflict, {
-  summary: "open a window to afflict a condition (its binding slots appear on pick)",
+  summary: "open a window to apply an affliction (its binding slots appear on pick)",
 });
 //#endregion src/window.ts
 

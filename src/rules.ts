@@ -179,7 +179,7 @@ export interface EffectDuration {
   kind: "instant" | "real" | "st" | "until";
   n?: number;               // count of `unit` ("real": minutes/hours; "st": turns/scenes)
   unit?: string;
-  until?: string;           // kind "until": free-form condition
+  until?: string;           // kind "until": free-form affliction
 }
 export interface EffectLimits {
   maxPerUse?: number;                  // applications per command (enforced)
@@ -671,35 +671,41 @@ export function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits):
 }
 
 // =============================================================================
-// CONDITIONS - parameterized character states (bindings, chains, mirrors, tags)
+// AFFLICTIONS - parameterized character states (bindings, chains, mirrors, tags)
 // -----------------------------------------------------------------------------
-// A condition is not a flat video-game flag: it may need BINDINGS (Feral
+// An affliction is not a flat video-game flag: it may need BINDINGS (Feral
 // Speech's "concentrating-on" needs the animal: target=wolf), may CHAIN into a
 // successor when it ends (`then` - concentrating-on lasts a turn, then
 // feral-whispers begins, carrying the bindings forward), may MIRROR onto the
 // bound target (the animal is in the conversation too - even an NPC with no
 // sheet), and may grant TAGS that join the afflicted character's rolls (firing
-// registered RollModifiers - conditions bite mechanically today). Durations
+// registered RollModifiers - afflictions bite mechanically today). Durations
 // reuse the effect grammar's EffectDuration and stay advisory (ST-enforced)
 // until the turn system; [[advance]] is the manual chain trigger.
-// (Health-box conditions - Crippled etc. - are the separate HealthConditionDef
-// in core/damage.ts.)
+// (Health-box states - Crippled etc. - are the separate HealthStateDef in
+// core/damage.ts.)
+//
+// NAMING: an *affliction* is ANY parameterized state attached to someone -
+// good, bad, neutral, or outside such categorization (Feral Whispers is a
+// gift, not a curse). The word does NOT imply harm. We deliberately reserve
+// the word *condition* for future conditional things - predicates the engine
+// will someday evaluate.
 // =============================================================================
-export interface ConditionDef {
+export interface AfflictionDef {
   name: string;                 // normalized id
   description?: string;
   bindings?: string[];          // required slot names, e.g. ["target"]
   duration?: EffectDuration;    // advisory until the turn system
-  then?: string;                // successor condition ([[advance]] applies it)
-  mirror?: string;              // condition auto-afflicted on bindings.target, bound back
+  then?: string;                // successor affliction ([[advance]] applies it)
+  mirror?: string;              // affliction auto-afflicted on bindings.target, bound back
   tags?: string[];              // tags granted while active
   note?: string;
 }
 
 // Normalize a definition: name/bindings/then/mirror/tags through normalize;
 // empty optionals dropped.
-export function makeConditionDef(parts: Partial<ConditionDef> & { name: string }): ConditionDef {
-  const def: ConditionDef = { name: StringUtil.normalize(parts.name) };
+export function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): AfflictionDef {
+  const def: AfflictionDef = { name: StringUtil.normalize(parts.name) };
   if (parts.description && parts.description.trim()) def.description = parts.description.trim();
   const bindings = (parts.bindings ?? []).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
   if (bindings.length) def.bindings = bindings;
@@ -714,7 +720,7 @@ export function makeConditionDef(parts: Partial<ConditionDef> & { name: string }
 
 // "1 turn" / "2 scenes" / "until eye-contact-breaks" / "instant" -> the effect
 // grammar's duration. Unparseable -> undefined (the def simply has no duration).
-export function parseConditionDuration(raw: string | undefined): EffectDuration | undefined {
+export function parseAfflictionDuration(raw: string | undefined): EffectDuration | undefined {
   if (!raw) return undefined;
   const t = StringUtil.normalize(raw);
   if (t === "instant") return { kind: "instant" };
@@ -732,7 +738,7 @@ export function describeDuration(d: EffectDuration | undefined): string {
   return `${d.n ?? 1} ${d.unit ?? d.kind}${(d.n ?? 1) === 1 ? "" : "s"}`;
 }
 
-export function describeConditionDef(d: ConditionDef): string {
+export function describeAfflictionDef(d: AfflictionDef): string {
   const bits = [d.name];
   if (d.bindings?.length) bits.push(`needs ${d.bindings.join(", ")}`);
   const dur = describeDuration(d.duration);
@@ -747,15 +753,15 @@ export function describeConditionDef(d: ConditionDef): string {
 // The Feral Speech exemplar (Animalism), faithful to the book: look the animal
 // in the eyes for a moment (concentrating-on, one turn), then converse in its
 // tongue (feral-whispers, mirrored - the animal is in the conversation too).
-export const DEFAULT_CONDITIONS: ConditionDef[] = [
-  makeConditionDef({
+export const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
+  makeAfflictionDef({
     name: "concentrating-on",
     description: "Locked eyes with the target; nothing else exists this turn",
     bindings: ["target"],
     duration: { kind: "st", n: 1, unit: "turn" },
     then: "feral-whispers",
   }),
-  makeConditionDef({
+  makeAfflictionDef({
     name: "feral-whispers",
     description: "Conversing in the target animal's tongue (Feral Speech)",
     bindings: ["target"],

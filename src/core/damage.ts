@@ -233,14 +233,14 @@ export type HealPolicy = "normal" | "never" | "special";
 export interface HealthSquareDef {
   penalty: number;
   name?: string;
-  condition?: string;   // key linking this box to a HealthConditionDef
+  state?: string;      // key linking this box to a HealthStateDef
   heal?: HealPolicy;    // default "normal"
   healCost?: number;    // healing points to clear this box (default 1)
 }
 
-// A condition wired to one or more boxes; its state depends on how many of its
+// A named health state wired to one or more boxes; its state depends on how many of its
 // linked boxes are currently damaged.
-export interface HealthConditionDef {
+export interface HealthStateDef {
   key: string;
   name?: string;
   // Given how many linked boxes are damaged (and how many exist), return the
@@ -250,26 +250,26 @@ export interface HealthConditionDef {
 
 export interface HealthTrackConfig {
   squares: HealthSquareDef[];
-  conditions?: HealthConditionDef[];
+  states?: HealthStateDef[];
 }
 
-export interface HealthConditionState { key: string; name: string; state: string; damaged: number; total: number; }
+export interface HealthStateSlot { key: string; name: string; state: string; damaged: number; total: number; }
 
 export interface HealthSummary {
   bashing: number; lethal: number; aggravated: number;
   filled: number; capacity: number; overkill: number;
   penalty: number; level: string;
   isIncapacitated: boolean; isDead: boolean;
-  conditions: HealthConditionState[];
+  states: HealthStateSlot[];
 }
 
-// Damage is stored PER BOX, so boxes can carry conditions, heal costs, or be
+// Damage is stored PER BOX, so boxes can carry named states, heal costs, or be
 // unhealable. Simple use (ApplyDamage / Heal / Penalty / Level / counts) needs
 // none of that and behaves exactly like a plain Storyteller track.
 export class HealthTrack {
   private readonly _defs: HealthSquareDef[];
   private readonly _damage: (Severity | null)[];
-  private readonly _conditions: HealthConditionDef[];
+  private readonly _states: HealthStateDef[];
   private _overkill = 0; // damage that spills past a fully-aggravated track
   private readonly _log: Array<{ severity: SeverityName; intensity: number }> = [];
 
@@ -278,7 +278,7 @@ export class HealthTrack {
     if (cfg.squares.length === 0) throw new Error("Health track needs at least one square.");
     this._defs = cfg.squares.map(s => ({ heal: "normal", healCost: 1, ...s }));
     this._damage = this._defs.map(() => null);
-    this._conditions = (cfg.conditions ?? []).map(c => ({ ...c }));
+    this._states = (cfg.states ?? []).map(c => ({ ...c }));
   }
 
   get Capacity(): number { return this._defs.length; }
@@ -364,13 +364,13 @@ export class HealthTrack {
 
   Reset(): void { for (let i = 0; i < this._damage.length; i++) this._damage[i] = null; this._overkill = 0; }
 
-  // Current state of every active condition wired to the track.
-  Conditions(): HealthConditionState[] {
-    const out: HealthConditionState[] = [];
-    for (const c of this._conditions) {
+  // Current state of every active named state wired to the track.
+  States(): HealthStateSlot[] {
+    const out: HealthStateSlot[] = [];
+    for (const c of this._states) {
       let damaged = 0, total = 0;
       for (let i = 0; i < this._defs.length; i++) {
-        if (this._defs[i].condition === c.key) { total++; if (this._damage[i]) damaged++; }
+        if (this._defs[i].state === c.key) { total++; if (this._damage[i]) damaged++; }
       }
       const state = c.state ? c.state(damaged, total) : (damaged > 0 ? "active" : null);
       if (state != null) out.push({ key: c.key, name: c.name ?? c.key, state, damaged, total });
@@ -384,7 +384,7 @@ export class HealthTrack {
       filled: this.Filled, capacity: this.Capacity, overkill: this._overkill,
       penalty: this.Penalty, level: this.Level,
       isIncapacitated: this.IsIncapacitated, isDead: this.IsDead,
-      conditions: this.Conditions(),
+      states: this.States(),
     };
   }
 }

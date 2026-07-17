@@ -24,9 +24,9 @@ import {
   CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS, CreatorMode,
   type SuccessTable, type ExtendedContest, type RollExecution,
   parseAliasToken, AliasRegistry, PlayerStore,
-  ConditionRegistry, CharacterConditions, CONDITIONS_ENTRY,
-  makeConditionDef, describeConditionDef, parseConditionDuration, describeDuration,
-  type ConditionDef, type ActiveCondition,
+  AfflictionRegistry, CharacterAfflictions, AFFLICTIONS_ENTRY,
+  makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
+  type AfflictionDef, type ActiveAffliction,
   makeConstraintGroup, describeConstraint, checkConstraints, ConstraintRegistry, CONSTRAINTS_ENTRY,
   type ConstraintGroup, type ConstraintRelation, type ConstraintDomain, type OwnedTraits,
   openConstraintWindow, api, __resetUiMock, __uiWindows, __uiClickButton,
@@ -949,7 +949,7 @@ describe("Morality polarity (Torment vs Humanity)", () => {
   });
 });
 
-describe("Health: per-square penalties, conditions & heal policies", () => {
+describe("Health: per-square penalties, afflictions & heal policies", () => {
   test("extra levels and custom penalties come from the squares array", () => {
     const track = new HealthTrack([
       { name: "OK", penalty: 0 }, { name: "OK", penalty: 0 },
@@ -962,23 +962,23 @@ describe("Health: per-square penalties, conditions & heal policies", () => {
     expect(track.Penalty).toBe(-1);
   });
 
-  test("a condition reflects how many of its linked boxes are damaged", () => {
+  test("a health state reflects how many of its linked boxes are damaged", () => {
     const h = new HealthTrack({
       squares: [
         { name: "A", penalty: 0 },
-        { name: "Gut", penalty: -1, condition: "poison" },
-        { name: "Gut", penalty: -2, condition: "poison" },
+        { name: "Gut", penalty: -1, state: "poison" },
+        { name: "Gut", penalty: -2, state: "poison" },
       ],
-      conditions: [{
+      states: [{
         key: "poison", name: "Poisoned",
         state: (d) => d === 0 ? null : d === 1 ? "queasy" : "retching",
       }],
     });
-    expect(h.Conditions()).toHaveLength(0);
+    expect(h.States()).toHaveLength(0);
     h.ApplyDamage("lethal", 2);   // fills boxes 0 and 1 -> one poison box
-    expect(h.Conditions()[0]).toMatchObject({ state: "queasy", damaged: 1, total: 2 });
+    expect(h.States()[0]).toMatchObject({ state: "queasy", damaged: 1, total: 2 });
     h.ApplyDamage("lethal", 1);   // fills box 2 -> both poison boxes
-    expect(h.Conditions()[0].state).toBe("retching");
+    expect(h.States()[0].state).toBe("retching");
   });
 
   test("unhealable boxes resist Heal; shallow wounds clear first", () => {
@@ -1008,15 +1008,15 @@ describe("Health: per-square penalties, conditions & heal policies", () => {
     expect(h.Heal("aggravated", 1, { allowSpecial: true })).toBe(1);
   });
 
-  test("Summary includes active conditions; harmless no-ops; fatal kills", () => {
+  test("Summary includes active health states; harmless no-ops; fatal kills", () => {
     const h = new HealthTrack({
-      squares: [{ name: "A", penalty: 0, condition: "burning" }, { name: "B", penalty: -1 }],
-      conditions: [{ key: "burning" }],
+      squares: [{ name: "A", penalty: 0, state: "burning" }, { name: "B", penalty: -1 }],
+      states: [{ key: "burning" }],
     });
     h.ApplyDamage("harmless", 3);
     expect(h.Filled).toBe(0);
     h.ApplyDamage("aggravated", 1);
-    expect(h.Summary().conditions[0]).toMatchObject({ key: "burning", state: "active", damaged: 1 });
+    expect(h.Summary().states[0]).toMatchObject({ key: "burning", state: "active", damaged: 1 });
     h.ApplyDamage("fatal", 1);
     expect(h.Fatal).toBe(1);
     expect(h.IsDead).toBe(true);
@@ -2592,70 +2592,70 @@ describe("alias & player commands (e2e)", () => {
 });
 
 // =============================================================================
-// CONDITIONS - parameterized states (bindings, chains, mirrors, live tags)
+// AFFLICTIONS - parameterized states (bindings, chains, mirrors, live tags)
 // =============================================================================
-describe("conditions: defs + duration grammar (pure)", () => {
-  test("parseConditionDuration reads the mini-grammar", () => {
-    expect(parseConditionDuration("1 turn")).toEqual({ kind: "st", n: 1, unit: "turn" });
-    expect(parseConditionDuration("2 scenes")).toEqual({ kind: "st", n: 2, unit: "scene" });
-    expect(parseConditionDuration("until eye-contact-breaks")).toEqual({ kind: "until", until: "eye-contact-breaks" });
-    expect(parseConditionDuration("instant")).toEqual({ kind: "instant" });
-    expect(parseConditionDuration("whenever")).toBeUndefined();
+describe("afflictions: defs + duration grammar (pure)", () => {
+  test("parseAfflictionDuration reads the mini-grammar", () => {
+    expect(parseAfflictionDuration("1 turn")).toEqual({ kind: "st", n: 1, unit: "turn" });
+    expect(parseAfflictionDuration("2 scenes")).toEqual({ kind: "st", n: 2, unit: "scene" });
+    expect(parseAfflictionDuration("until eye-contact-breaks")).toEqual({ kind: "until", until: "eye-contact-breaks" });
+    expect(parseAfflictionDuration("instant")).toEqual({ kind: "instant" });
+    expect(parseAfflictionDuration("whenever")).toBeUndefined();
     expect(describeDuration({ kind: "st", n: 1, unit: "turn" })).toBe("1 turn");
   });
 
-  test("makeConditionDef normalizes; describeConditionDef lays it out", () => {
-    const d = makeConditionDef({ name: " Feral  Whispers ", bindings: ["Target"], then: "Next Thing", tags: ["Off Hand"] });
+  test("makeAfflictionDef normalizes; describeAfflictionDef lays it out", () => {
+    const d = makeAfflictionDef({ name: " Feral  Whispers ", bindings: ["Target"], then: "Next Thing", tags: ["Off Hand"] });
     expect(d.name).toBe("feral-whispers");
     expect(d.bindings).toEqual(["target"]);
     expect(d.then).toBe("next-thing");
     expect(d.tags).toEqual(["off-hand"]);
-    expect(describeConditionDef(d)).toContain("needs target");
+    expect(describeAfflictionDef(d)).toContain("needs target");
   });
 
   test("the Feral Speech pair ships as defaults", () => {
-    expect(ConditionRegistry.get("concentrating-on")!.then).toBe("feral-whispers");
-    expect(ConditionRegistry.get("feral-whispers")!.mirror).toBe("feral-whispers");
+    expect(AfflictionRegistry.get("concentrating-on")!.then).toBe("feral-whispers");
+    expect(AfflictionRegistry.get("feral-whispers")!.mirror).toBe("feral-whispers");
   });
 });
 
-describe("conditions: registry overlay + define/forget commands", () => {
+describe("afflictions: registry overlay + define/forget commands", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("define-condition writes the overlay and round-trips the lorebook", async () => {
-    const r = await CommandRouter.route('define-condition name="dazed" tags="off-hand" duration="1 scene" description=`Head ringing`');
-    expect(r).toContain("Defined condition dazed");
-    ConditionRegistry.reset();
-    expect(ConditionRegistry.get("dazed")).toBeUndefined();
-    expect(await ConditionRegistry.loadFromLorebook()).toBe(1);
-    expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);
-    expect(ConditionRegistry.get("dazed")!.description).toBe("Head ringing");
+  test("define-affliction writes the overlay and round-trips the lorebook", async () => {
+    const r = await CommandRouter.route('define-affliction name="dazed" tags="off-hand" duration="1 scene" description=`Head ringing`');
+    expect(r).toContain("Defined affliction dazed");
+    AfflictionRegistry.reset();
+    expect(AfflictionRegistry.get("dazed")).toBeUndefined();
+    expect(await AfflictionRegistry.loadFromLorebook()).toBe(1);
+    expect(AfflictionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);
+    expect(AfflictionRegistry.get("dazed")!.description).toBe("Head ringing");
   });
 
   test("an overlay def can shadow a built-in; forgetting resurfaces it", async () => {
-    await CommandRouter.route('define-condition name="feral-whispers" duration="2 scenes"');
-    expect(describeDuration(ConditionRegistry.get("feral-whispers")!.duration)).toBe("2 scenes");
-    expect(await CommandRouter.route("forget-condition feral-whispers")).toContain("resurfaces");
-    expect(ConditionRegistry.get("feral-whispers")!.mirror).toBe("feral-whispers"); // the shipped def again
-    expect(await CommandRouter.route("forget-condition feral-whispers")).toContain("built-in");
+    await CommandRouter.route('define-affliction name="feral-whispers" duration="2 scenes"');
+    expect(describeDuration(AfflictionRegistry.get("feral-whispers")!.duration)).toBe("2 scenes");
+    expect(await CommandRouter.route("forget-affliction feral-whispers")).toContain("resurfaces");
+    expect(AfflictionRegistry.get("feral-whispers")!.mirror).toBe("feral-whispers"); // the shipped def again
+    expect(await CommandRouter.route("forget-affliction feral-whispers")).toContain("built-in");
   });
 
   test("bad duration is refused with the grammar", async () => {
-    expect(await CommandRouter.route('define-condition name="x" duration="sometimes"')).toContain("Can't read duration");
+    expect(await CommandRouter.route('define-affliction name="x" duration="sometimes"')).toContain("Can't read duration");
   });
 });
 
-describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs)", () => {
+describe("afflictions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs)", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("afflict validates bindings; @alias values resolve; conditions lists", async () => {
+  test("afflict validates bindings; @alias values resolve; afflictions lists", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     expect(await CommandRouter.route("afflict concentrating-on")).toContain("needs target=");
     await CommandRouter.route('alias @prey "Grey Wolf"');            // the wolf is an NPC - no sheet
     const r = await CommandRouter.route("afflict concentrating-on target=@prey");
     expect(r).toContain("Kvar is now concentrating-on (target: Grey Wolf)");
     expect(r).toContain("1 turn (ST-enforced)");
-    expect(await CommandRouter.route("conditions")).toContain("concentrating-on (target: Grey Wolf)");
+    expect(await CommandRouter.route("afflictions")).toContain("concentrating-on (target: Grey Wolf)");
   });
 
   test("advance carries bindings into the successor and fires its mirror on the NPC", async () => {
@@ -2665,10 +2665,10 @@ describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs
     expect(adv).toContain("concentrating-on ends");
     expect(adv).toContain("Kvar is now feral-whispers (target: Grey Wolf)");
     expect(adv).toContain("Grey Wolf is now feral-whispers (target: Kvar)"); // the mirror, on a sheetless NPC
-    expect(await CommandRouter.route('conditions "Grey Wolf"')).toContain("feral-whispers (target: Kvar)");
+    expect(await CommandRouter.route('afflictions "Grey Wolf"')).toContain("feral-whispers (target: Kvar)");
   });
 
-  test("lift removes both sides of a mirrored condition; spend= is the shrug-off", async () => {
+  test("lift removes both sides of a mirrored affliction; spend= is the shrug-off", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route('afflict feral-whispers target="Grey Wolf"');
     await CommandRouter.route("gain willpower 2");
@@ -2676,11 +2676,11 @@ describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs
     expect(lifted).toContain("shakes off feral-whispers");
     expect(lifted).toContain("spent 1 willpower");
     expect(lifted).toContain("feral-whispers lifted from Grey Wolf");
-    expect(await CommandRouter.route("conditions")).toContain("no conditions");
-    expect(await CommandRouter.route('conditions "Grey Wolf"')).toContain("no conditions");
+    expect(await CommandRouter.route("afflictions")).toContain("no afflictions");
+    expect(await CommandRouter.route('afflictions "Grey Wolf"')).toContain("no afflictions");
   });
 
-  test("advance with no successor and lifting an absent condition report cleanly", async () => {
+  test("advance with no successor and lifting an absent affliction report cleanly", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route('afflict feral-whispers target="Grey Wolf"');
     expect(await CommandRouter.route("advance feral-whispers")).toContain("no successor");
@@ -2688,13 +2688,13 @@ describe("conditions: the Feral Speech flow (afflict/advance/lift, mirrors, NPCs
   });
 });
 
-describe("conditions: tags bite in rolls and contests", () => {
+describe("afflictions: tags bite in rolls and contests", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("an active condition's registered tag changes the roll TODAY", async () => {
+  test("an active affliction's registered tag changes the roll TODAY", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     // off-hand is a shipped RollModifier: +1 difficulty.
-    await CommandRouter.route('define-condition name="dazed" tags="off-hand"');
+    await CommandRouter.route('define-affliction name="dazed" tags="off-hand"');
     const before = await CommandRouter.route("roll 3", { rng: seqRng([6, 6, 6]) });
     expect(before).toContain("vs diff 6");
     await CommandRouter.route("afflict dazed");
@@ -2705,11 +2705,11 @@ describe("conditions: tags bite in rolls and contests", () => {
     expect(healed).toContain("vs diff 6");
   });
 
-  test("contest sides carry their conditions too", async () => {
+  test("contest sides carry their afflictions too", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     await CommandRouter.route('create-playable name="Erik" templates=mortal');
     await CommandRouter.route('play name="Rok"');
-    await CommandRouter.route('define-condition name="dazed" tags="off-hand"');
+    await CommandRouter.route('define-affliction name="dazed" tags="off-hand"');
     await CommandRouter.route('afflict dazed on="Erik"');
     // Erik's side (named opponent) rolls at +1 difficulty; Rok's stays at 6.
     const r = await CommandRouter.route('resist 3 3 vs="Erik"', { rng: seqRng([6, 6, 6, 6, 6, 6]) });
@@ -2741,7 +2741,7 @@ describe("command specs: derived help + composeCommand", () => {
   });
 
   test("[[help]] is DERIVED from the registered specs (one source of truth)", async () => {
-    expect(await CommandRouter.route("help define-condition")).toContain('duration="1 turn|until x|instant"');
+    expect(await CommandRouter.route("help define-affliction")).toContain('duration="1 turn|until x|instant"');
     expect(await CommandRouter.route("help define-constraint")).toContain("relation=exclusive|restricted|forbidden");
     expect(await CommandRouter.route("help creator-mode")).toContain("set=true|false");
     expect(await CommandRouter.route("help lift")).toContain("spend=res[::effect][!]");
@@ -2792,28 +2792,28 @@ describe("config stores: reload/reset-all", () => {
 
   test("every store self-registered into ALL_CONFIG_STORES", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
-      CONDITIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY,
+      AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY,
     ].sort());
   });
 
   test("reloadAllConfigStores reloads every registry and reports per-entry counts", async () => {
-    await CommandRouter.route('define-condition name="dazed" tags="off-hand"');
+    await CommandRouter.route('define-affliction name="dazed" tags="off-hand"');
     await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status"');
     resetAllConfigStores();
-    expect(ConditionRegistry.get("dazed")).toBeUndefined();
+    expect(AfflictionRegistry.get("dazed")).toBeUndefined();
     const counts = Object.fromEntries((await reloadAllConfigStores()).map(c => [c.entry, c.count]));
-    expect(counts[CONDITIONS_ENTRY]).toBe(1);
+    expect(counts[AFFLICTIONS_ENTRY]).toBe(1);
     expect(counts[CONSTRAINTS_ENTRY]).toBe(1);
     expect(counts[RESOURCE_CONFIG_ENTRY]).toBe(0);
-    expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);
+    expect(AfflictionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);
   });
 
   test("resetAllConfigStores clears overlays AND restores the success-table defaults", async () => {
     SuccessTableRegistry.register({ name: "degrees", failure: "X", rows: [] });   // shadow a shipped table
-    await CommandRouter.route('define-condition name="dazed"');
+    await CommandRouter.route('define-affliction name="dazed"');
     resetAllConfigStores();
     expect(SuccessTableRegistry.get("degrees")!.rows!.length).toBe(5);            // shipped default resurfaces
-    expect(ConditionRegistry.get("dazed")).toBeUndefined();
+    expect(AfflictionRegistry.get("dazed")).toBeUndefined();
   });
 });
 
@@ -2824,14 +2824,14 @@ describe("command router: beforeRoute hooks (creator-mode live sync)", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("while creator mode is on, a hand-edited config entry is live for the very NEXT command", async () => {
-    await CommandRouter.route('define-condition name="dazed" description=`Old words`');
+    await CommandRouter.route('define-affliction name="dazed" description=`Old words`');
     await CommandRouter.route("creator-mode set=true");
     const entry = ["hand edit", "=====",
       JSON.stringify([{ name: "dazed", description: "New words", tags: ["off-hand"] }])].join("\n");
-    await LorebookManager.updateEntryText(CONFIG_CATEGORY, CONDITIONS_ENTRY, entry);
-    expect(await CommandRouter.route("condition dazed")).toContain("New words");   // the hook re-loaded it
+    await LorebookManager.updateEntryText(CONFIG_CATEGORY, AFFLICTIONS_ENTRY, entry);
+    expect(await CommandRouter.route("affliction dazed")).toContain("New words");   // the hook re-loaded it
     await CommandRouter.route("creator-mode set=false");
-    expect(ConditionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);            // off-path synced too
+    expect(AfflictionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);            // off-path synced too
     expect(await CreatorMode.enabled()).toBe(false);
   });
 });
@@ -3068,9 +3068,9 @@ describe("table subcategories: paths, cards, aliases, modals", () => {
 });
 
 // =============================================================================
-// CONDITION WINDOWS - the picker modal + win-condition + win-afflict
+// AFFLICTION WINDOWS - the picker modal + win-affliction + win-afflict
 // =============================================================================
-describe("condition windows: picker modal, win-condition, win-afflict", () => {
+describe("affliction windows: picker modal, win-affliction, win-afflict", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   const texts = (): string[] => {
@@ -3085,26 +3085,26 @@ describe("condition windows: picker modal, win-condition, win-afflict", () => {
     return out;
   };
 
-  test("the mirror picker lists conditions, marks the current value, writes the field, and closes", async () => {
-    await CommandRouter.route("win-condition");
-    await api.v1.tempStorage.set("win:define-condition:mirror", "feral-whispers");
+  test("the mirror picker lists afflictions, marks the current value, writes the field, and closes", async () => {
+    await CommandRouter.route("win-affliction");
+    await api.v1.tempStorage.set("win:define-affliction:mirror", "feral-whispers");
     expect(await __uiClickButton("Choose mirror…")).toBe(true);
     expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(1);
     const labels = texts();
     expect(labels.some(t => t.startsWith("✅ feral-whispers"))).toBe(true);          // current, marked
     expect(await __uiClickButton("concentrating-on - Locked eyes with the target; nothing else exists this turn")).toBe(true);
-    expect(await api.v1.tempStorage.get("win:define-condition:mirror")).toBe("concentrating-on");
+    expect(await api.v1.tempStorage.get("win:define-affliction:mirror")).toBe("concentrating-on");
     expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(0);            // picker closed itself
   });
 
-  test("win-condition Create defines the condition with the picked mirror", async () => {
-    await CommandRouter.route("win-condition");
-    await api.v1.tempStorage.set("win:define-condition:name", "beast-bond");
-    await api.v1.tempStorage.set("win:define-condition:bindings", "target");
+  test("win-affliction Create defines the affliction with the picked mirror", async () => {
+    await CommandRouter.route("win-affliction");
+    await api.v1.tempStorage.set("win:define-affliction:name", "beast-bond");
+    await api.v1.tempStorage.set("win:define-affliction:bindings", "target");
     expect(await __uiClickButton("Choose mirror…")).toBe(true);
     expect(await __uiClickButton("feral-whispers - Conversing in the target animal's tongue (Feral Speech)")).toBe(true);
     expect(await __uiClickButton("Create")).toBe(true);
-    const def = ConditionRegistry.get("beast-bond")!;
+    const def = AfflictionRegistry.get("beast-bond")!;
     expect(def.mirror).toBe("feral-whispers");
     expect(def.bindings).toEqual(["target"]);
   });
@@ -3113,20 +3113,20 @@ describe("condition windows: picker modal, win-condition, win-afflict", () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route("win-afflict");
     expect(texts().some(t => t === "Binding: target")).toBe(false);                  // nothing picked yet
-    expect(await __uiClickButton("Choose condition…")).toBe(true);
+    expect(await __uiClickButton("Choose affliction…")).toBe(true);
     expect(await __uiClickButton("concentrating-on - Locked eyes with the target; nothing else exists this turn")).toBe(true);
     expect(texts().some(t => t === "Binding: target")).toBe(true);                   // the def drove the form
     await api.v1.tempStorage.set("win:afflict:bind:target", "grey wolf");
     expect(await __uiClickButton("Afflict")).toBe(true);
-    expect(await CommandRouter.route("conditions")).toContain("concentrating-on (target: Grey Wolf)");
+    expect(await CommandRouter.route("afflictions")).toContain("concentrating-on (target: Grey Wolf)");
   });
 
-  test("win-afflict refusals surface in-window: no condition picked; missing binding via the handler", async () => {
+  test("win-afflict refusals surface in-window: no affliction picked; missing binding via the handler", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route("win-afflict");
     expect(await __uiClickButton("Afflict")).toBe(true);
-    expect(texts().some(t => t === "Pick a condition first.")).toBe(true);
-    await api.v1.tempStorage.set("win:afflict:condition", "concentrating-on");
+    expect(texts().some(t => t === "Pick an affliction first.")).toBe(true);
+    await api.v1.tempStorage.set("win:afflict:affliction", "concentrating-on");
     expect(await __uiClickButton("Afflict")).toBe(true);                             // target left blank
     expect(texts().some(t => t.includes("needs target="))).toBe(true);               // the handler's refusal, in-window
   });

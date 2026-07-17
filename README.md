@@ -17,7 +17,7 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | `src/rules.ts` | The Dark Ages **data**: templates, resources + the effect grammar, roads, disciplines, merits, SRD seeds. |
 | `src/command.ts` | The command bus: parser, **CommandSpec** (each verb's declarative grammar — help text is derived from it, windows compose from it), `composeCommand`, and the hook-extensible router. |
 | `src/services.ts` | Storage/Lorebook managers, merit registry, lorebook parser, and the **generic config stores** every `wod:config` registry instantiates. |
-| `src/state.ts` | The character model and every persistent store: playable characters, named/extended rolls, contests, players & aliases, config registries, live per-character state (resources, health, boosts, uses, conditions). |
+| `src/state.ts` | The character model and every persistent store: playable characters, named/extended rolls, contests, players & aliases, config registries, live per-character state (resources, health, boosts, uses, afflictions). |
 | `src/game.ts` | The verbs: effect interpreter, wizards, every `[[…]]` command handler + its spec registration. |
 | `src/window.ts` | `api.v1.ui` windows that **emit commands** (no second path) — forms are rendered *from the CommandSpec*; the first is `[[win-constraint]]`. |
 | `src/index.ts` | Re-exports everything + `init()` — the one entry point with side effects. |
@@ -73,7 +73,7 @@ runner is built in.
 - **`DamageReaction`** — a character's say over an incoming packet
   (`UndeadPhysiology`, `SilverVulnerability`, `ArmorReaction`).
 - **`HealthTrack`** — square-based damage track: per-square wound penalties,
-  condition-linked boxes (poisoned…), heal policies (`never`/`special`) and
+  affliction-linked boxes (poisoned…), heal policies (`never`/`special`) and
   per-box heal costs (`HealWithPoints`). Simple use is unchanged.
 - **`MoralityTrait`** — a 0–10 rating with a **polarity**: *descending*
   (Humanity, lost at 0) or *ascending* (Torment, unplayable at 10);
@@ -640,14 +640,20 @@ entry), stored and surfaced now, enforced at creation later.
   the creation engine consumes them). **`[[forget-constraint <name>]]`** removes
   one; defining an existing name replaces it.
 
-### Conditions — parameterized states, not flat flags
+### Afflictions — parameterized states, not flat flags
 
-A **condition** can need **bindings** (a target), can **chain** into a successor,
+> **On the name:** an *affliction* is any parameterized state attached to
+> someone — it can be **good, bad, neutral, or outside such categorization**
+> (Feral Whispers is a gift, not a curse). The word does *not* imply harm. We
+> reserve the word **condition** for future *conditional* things — predicates
+> the engine will someday evaluate.
+
+An **affliction** can need **bindings** (a target), can **chain** into a successor,
 can **mirror** onto the bound target, and can grant **tags** that join the
 afflicted character's rolls — so registered `RollModifier`s fire *today*.
 Durations are advisory (ST-enforced) until the turn system; `[[advance]]` is the
 manual chain trigger. Definitions are data: shipped defaults overlaid by a
-`wod:config:conditions` lorebook entry (`[[define-condition]]` writes it).
+`wod:config:afflictions` lorebook entry (`[[define-affliction]]` writes it).
 
 The shipped exemplar is Animalism's **Feral Speech**: lock eyes for a turn, then
 converse in the animal's tongue — and the animal (an NPC with no sheet) is in
@@ -658,24 +664,24 @@ the conversation too:
 [[afflict concentrating-on target=@prey]]   # Kvar: concentrating-on (target: Grey Wolf) - 1 turn
 [[advance concentrating-on]]                # -> Kvar: feral-whispers (target: Grey Wolf)
                                             #    Grey Wolf: feral-whispers (target: Kvar)   (the mirror)
-[[conditions "Grey Wolf"]]                  # NPCs carry conditions - no sheet needed
+[[afflictions "Grey Wolf"]]                  # NPCs carry afflictions - no sheet needed
 [[lift feral-whispers spend=willpower]]     # the shrug-off; the mirror lifts too
 ```
 
-- **`define-condition name=".." [bindings="target"] [duration="1 turn|until x|instant"]
+- **`define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"]
   [then=".."] [mirror=".."] [tags="a,b"]`** — an overlay definition may *shadow*
   a built-in (forgetting it resurfaces the built-in).
-- **`afflict <condition> [on=<name|@alias>] [<slot>=<name|@alias>]`** — validates
+- **`afflict <affliction> [on=<name|@alias>] [<slot>=<name|@alias>]`** — validates
   the def's binding slots (values resolve `@aliases`); `mirror` defs also afflict
   the bound target, bound back the other way.
-- **`advance <condition>`** — ends it and begins `then`, carrying bindings
+- **`advance <affliction>`** — ends it and begins `then`, carrying bindings
   forward (the successor's mirror fires — that's how the wolf joins the
-  conversation). **`lift <condition> [spend=…]`** removes it *and its mirror*;
+  conversation). **`lift <affliction> [spend=…]`** removes it *and its mirror*;
   the spend is the classic pay-Willpower-to-shake-it-off.
-- **`conditions [<name|@alias>]`** lists anyone's active conditions;
-  **`condition [name]`** lists/inspects definitions.
+- **`afflictions [<name|@alias>]`** lists anyone's active afflictions;
+  **`affliction [name]`** lists/inspects definitions.
 - A def's **tags** merge into every roll (and contest side) the afflicted
-  character makes — e.g. a house-ruled `dazed` condition with tag `off-hand`
+  character makes — e.g. a house-ruled `dazed` affliction with tag `off-hand`
   is a real +1 difficulty right now.
 
 ### Windows are just command emitters
@@ -700,12 +706,12 @@ exactly one place.
 For choice fields too long to inline as button rows there's the **picker**:
 each such field is a text input (type the value directly) next to a
 **Choose…** button that opens a modal with one button per option, the current
-value marked ✅ — picking writes the field and re-renders. The condition
+value marked ✅ — picking writes the field and re-renders. The affliction
 windows use it:
 
-- **`[[win-condition]]`** — `define-condition` as a form; the `then` and
-  `mirror` fields get pickers over the existing conditions.
-- **`[[win-afflict]]`** — the first *domain-driven* window: pick a condition
+- **`[[win-affliction]]`** — `define-affliction` as a form; the `then` and
+  `mirror` fields get pickers over the existing afflictions.
+- **`[[win-afflict]]`** — the first *domain-driven* window: pick an affliction
   and its def's **binding slots appear as fields** (the def drives the form,
   not a spec); Afflict composes and routes the real `[[afflict]]`, so mirrors
   and validation behave exactly as if you'd typed it.

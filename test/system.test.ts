@@ -11,7 +11,7 @@ import {
   MoralityTrait,
   ScopedStorage, LorebookManager, __resetLorebookMock, __resetStorageMock,
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
-  MeritFlawRegistry, SRD_CATEGORIES,
+  MeritFlawRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
   ExtendedRoll, applyInterval, ExtendedRollStore,
@@ -3256,6 +3256,61 @@ describe("roll window: win-roll + the table sidecar", () => {
     await set("specialty", "swords");
     expect(await __uiClickButton("Roll")).toBe(true);
     expect(texts().some(t => t.includes("specialty: Swords (+1 die)"))).toBe(true);
+  });
+});
+
+// =============================================================================
+// SHEET - the record as the engine reads it + the creator-mode hand-edit loop
+// =============================================================================
+describe("sheet: engine view of the record + creator-mode manual fill", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("sheet shows the seeded record; enhancements mark effective values", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const s = await CommandRouter.route("sheet");
+    expect(s).toContain("Kvar [vampire, potential]");
+    expect(s).toContain("strength 1");
+    expect(s).toContain("Abilities (nonzero): none");
+    expect(s).toContain("Pool starts: willpower 0");
+    await CommandRouter.route("take-merit trait-enhancement::strength 2");
+    expect(await CommandRouter.route("sheet")).toContain("strength 1 (3 eff)");
+  });
+
+  test("the manual-fill loop: hand-edit the lorebook JSON in creator mode, sheet shows the sync, the roll uses it", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("creator-mode set=true");
+    const entry = (await LorebookManager.entriesInCategory(PLAYER_CHARACTERS_CATEGORY)).find(e => (e.displayName ?? "") === "pc:kvar")!;
+    const text = entry.text ?? "";
+    const body = JSON.parse(LorebookManager.contentBelowHeader(text)) as {
+      attributes: Record<string, number>; abilities: Record<string, number>;
+      poolStarts: Record<string, number>; specialties: Record<string, string[]>;
+    };
+    body.attributes["dexterity"] = 4;
+    body.abilities["melee"] = 3;
+    body.poolStarts["willpower"] = 5;
+    body.specialties["melee"] = ["Swords"];
+    // Edit like a player would: keep everything through the MARKER LINE (the
+    // header itself mentions "=====" inline, so index-of would cut too early),
+    // replace only the JSON below it.
+    const lines = text.split("\n");
+    const mi = lines.findIndex(l => l.trim() === SRD_HEADER_MARKER);
+    await api.v1.lorebook.updateEntry(entry.id, { text: [...lines.slice(0, mi + 1), JSON.stringify(body, null, 2)].join("\n") });
+    const s = await CommandRouter.route("sheet");            // beforeRoute synced the edit in
+    expect(s).toContain("dexterity 4");
+    expect(s).toContain("melee 3");
+    expect(s).toContain("willpower 5");
+    expect(s).toContain("Specialties: melee: Swords");
+    const r = await CommandRouter.route("roll dexterity+melee 6 specialty=melee", { rng: seqRng([6, 6, 6, 6, 6, 6, 6, 6]) });
+    expect(r).toContain("(8)");                              // 4 + 3 dice + the specialty die
+    expect(r).toContain("specialty: Swords (+1 die)");
+  });
+
+  test("sheet <name> targets another character; unknown names refuse", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('create-playable name="Sela" templates=mortal');
+    await CommandRouter.route('play name="Kvar"');
+    expect(await CommandRouter.route("sheet sela")).toContain("Sela [mortal, potential]");
+    expect(await CommandRouter.route("sheet nope")).toContain("No character named");
   });
 });
 

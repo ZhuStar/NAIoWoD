@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `43c58b6`** ("win-roll: the
-> roll builder window + the SavedRoll.table sidecar").
+> **Last synced with the code as of commit `d5d446d`** ("[[sheet]]: the
+> record as the engine reads it — the creator-mode manual-fill loop's
+> verification half").
 
 ---
 
@@ -643,7 +644,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2387) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2440) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -673,9 +674,14 @@ gone — a new registry reaches every sync point by existing.
 **Character-argument seam**: **`resolveCharacterRef(token)`** turns a
 character argument (real name or @alias, via `parseAliasToken` +
 `resolveAliasOwner` + the registry chain) into a normalized name — wired into
-`cmdPlay`, `cmdRollFor`, `cmdSetDefault`, affliction binding values
-(`resolveBindingValue`), and the `vs=` of `cmdVersus`/`cmdExtendedContest`.
-`disp()` = `StringUtil.toTitleCase` for replies.
+`cmdPlay`, `cmdRollFor`, `cmdSetDefault`, `cmdSheet`, affliction binding
+values (`resolveBindingValue`), and the `vs=` of
+`cmdVersus`/`cmdExtendedContest`. `disp()` = `StringUtil.toTitleCase` for
+replies. **`cmdSheet`** renders the record as the engine reads it: every
+numeric bucket through the `characterRollEnv` resolver, so the sheet marks
+`base (eff)` wherever enhancement/boost changes what a roll uses — the
+verification half of the creator-mode manual-fill loop (edit the pc: entry's
+JSON, any command syncs it, `[[sheet]]` shows what landed).
 
 **Owned powers in play**: `poolTraitsOf(char, pool)` — THE gate seam: a
 pre-parse of the POOL ONLY (a trait appearing just in the difficulty
@@ -757,7 +763,10 @@ verb's CommandSpec at the bottom of game.ts — the grammars below match it):
 `help [verb]` (list commands, or one's usage) ·
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
 `play [name="…"]` (no name → default) · `characters` (list; marks
-current/default) · `set-default name="…"` · `roll <pool|@name>
+current/default) · `sheet [name|@alias]` (the record as the ENGINE reads it —
+all numeric buckets, merits, specialties; effective value marked when
+enhancements/boosts differ: `strength 1 (3 eff)`; the verification half of
+the creator-mode manual-fill loop) · `set-default name="…"` · `roll <pool|@name>
 [difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]
 table=` (difficulty may be a number OR a trait/calculation like `stamina+3`) ·
 `roll-for "Name" <pool|@name> …` (doesn't change selection) ·
@@ -913,7 +922,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3405 + 20 lines, 312 tests, 82 describes)
+### test/ (3460 + 20 lines, 315 tests, 83 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),

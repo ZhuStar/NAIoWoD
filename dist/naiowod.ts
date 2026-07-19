@@ -6799,6 +6799,55 @@ async function cmdCharacters(): Promise<string> {
   return `((OOC-Storyteller: Characters: ${items.join("; ")}. [[play name="..."]] to switch.))`;
 }
 
+// The record as the ENGINE reads it: every numeric bucket, with the effective
+// value marked wherever enhancements/boosts change what a roll will actually
+// use. This is the verification half of the creator-mode loop: hand-edit the
+// lorebook JSON, run [[sheet]], see exactly what synced.
+async function cmdSheet(cmd: ParsedCommand): Promise<string> {
+  const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
+  let char: PlayableCharacter | undefined;
+  if (raw) {
+    const ref = await resolveCharacterRef(raw);
+    if (ref.error) return `((OOC-Storyteller: ${ref.error}))`;
+    char = await CharacterStore.load(ref.name!);
+    if (!char) return `((OOC-Storyteller: No character named "${ref.name}".))`;
+  } else {
+    char = await CharacterStore.getCurrent();
+    if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  }
+  const { resolver } = await characterRollEnv(char);
+  const fmt = (bucket: Record<string, number>, skipZeros: boolean): string => {
+    const bits = Object.entries(bucket ?? {})
+      .filter(([, v]) => !skipZeros || v !== 0)
+      .map(([k, v]) => {
+        const eff = resolver(k);
+        return eff !== v ? `${k} ${v} (${eff} eff)` : `${k} ${v}`;
+      });
+    return bits.length ? bits.join(", ") : "none";
+  };
+  const parts = [
+    `${disp(char.name)} [${char.templates.join("+")}, ${char.stage}]`,
+    `Attributes: ${fmt(char.attributes, false)}`,
+    `Abilities (nonzero): ${fmt(char.abilities, true)}`,
+  ];
+  const optional: Array<[string, Record<string, number>]> = [
+    ["Backgrounds", char.backgrounds], ["Virtues", char.virtues],
+    ["Disciplines", char.disciplines], ["Traits", char.traits],
+    ["Pool starts", char.poolStarts],
+  ];
+  for (const [label, bucket] of optional) {
+    if (Object.keys(bucket ?? {}).length) parts.push(`${label}: ${fmt(bucket, false)}`);
+  }
+  if (Object.keys(char.meritsFlaws ?? {}).length) {
+    parts.push(`Merits/Flaws: ${Object.entries(char.meritsFlaws).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[merits]] for detail)`);
+  }
+  const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
+  if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
+  if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
+  parts.push(`Live pools via [[resources]], damage via [[health]]`);
+  return `((OOC-Storyteller: ${parts.join(". ")}.))`;
+}
+
 async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
   if (!name) return `((OOC-Storyteller: set-default needs a name, e.g. [[set-default name="Rok"]].))`;
@@ -6862,6 +6911,10 @@ CommandRouter.register("play", cmdPlay, {
 });
 CommandRouter.register("characters", cmdCharacters, {
   summary: "list playable characters; marks current/default",
+});
+CommandRouter.register("sheet", cmdSheet, {
+  summary: "show a character's record as the engine reads it (effective values marked)",
+  params: [{ key: "character", kind: "positional", hint: '"<name|@alias>"' }],
 });
 CommandRouter.register("set-default", cmdSetDefault, {
   summary: "change the default character",

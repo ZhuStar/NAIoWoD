@@ -323,6 +323,17 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
 - **`creator-mode set=true`** lets the player edit those entries directly; edits
   sync **lorebook → storage** whenever a command runs and when creator mode is
   turned off. Unparseable edits are reported and skipped, never synced.
+  **Manual fill works today**: with creator mode on, open the `pc:<name>`
+  entry and edit the JSON below the `=====` line — set attribute/ability dots,
+  add keys to any numeric bucket (anything there is rollable by name), set
+  `poolStarts` (e.g. `"willpower": 5` — resources start there), add
+  `specialties`/`meritsFlaws`. Keep the header and marker line intact, and
+  don't touch `id`/`name` (they're the identity).
+- **`sheet [name]`** shows a character's record **as the engine reads it** —
+  every numeric bucket, merits, specialties — with the *effective* value
+  marked wherever enhancements or boosts change what a roll will use
+  (`strength 1 (3 eff)`). It's the verification half of the manual-fill loop:
+  edit the JSON, run `[[sheet]]`, see exactly what synced.
 - **`play name="…"`** selects who to act as; **`play`** with no name hands
   control back to the default. **`roll <pool> …`** rolls for the current
   character; **`roll-for "Name" <pool> …`** rolls on another character's behalf

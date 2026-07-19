@@ -729,6 +729,39 @@ Defaults live in `DEFAULT_MERITS_FLAWS` (an in-code list served by
 `MeritFlawRegistry.loadFromLorebook()` merges any JSON definitions found in
 `srd:merits-flaws`, so custom content needs no code change.
 
+### Owned powers: parameterized merits with passive effects
+
+A def may declare a **`param`** slot and **`passive`** ops — always-on effects
+while owned, whose amounts scale with the points taken and whose `"$param"`
+fields substitute the instance's value. You own such a def as a
+**`name::param` instance**: `[[take-merit trait-affinity::melee 2]]`
+(`[[drop-merit …]]`, `[[merits]]` to list). Roll ops on passives are gated:
+`trait` fires only when the roll's **pool** actually used that trait (a trait
+appearing only in the difficulty expression doesn't count), `target` on the
+roll carrying that action tag.
+
+The shipped Devil's Due arcana:
+
+- **Trait Affinity** — `-1 difficulty` per point on rolls whose pool uses the
+  trait. One favoured trait may reach 3 points; every other caps at 2 —
+  advisory, flagged by `[[check-constraints]]`.
+- **Trait Enhancement** — permanently raises the trait's **effective** value
+  by the points taken *and* its advancement ceiling, while XP still prices
+  from the un-enhanced base: Strength 3 with +2 rolls 5 dice today, can be
+  raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
+  `base → effective` and the advisory ceiling.
+
+### Specialties
+
+`[[specialty melee `Swords`]]` (backticks keep the label's case) adds one;
+`[[specialties]]` lists, `[[forget-specialty]]` removes. On a roll,
+**`specialty=<trait|label>`** applies exactly **one** specialty for **+1
+die** — the pool must use its trait (otherwise an advisory note, no die), and
+a trait with several specialties needs the label. Named rolls can bake one in
+(`[[name-roll slash dexterity+melee specialty=melee]]`). Whether a specialty
+*fits the fiction* is the Storyteller's call today; asking the AI Storyteller
+via the Generation API is the planned automation.
+
 ```ts
 const sasha = CharacterFactory.create(TEMPLATE_GHOUL, "Sasha", {
   tags: ["revenant", "zantosa"],          // free-form prerequisite tags

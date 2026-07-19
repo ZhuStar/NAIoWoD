@@ -24,6 +24,7 @@ import {
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
+  EffectOp, resolveMeritInstance, passiveOpsOf,
 } from "./rules";
 import {
   ScopedStorage, LorebookManager, MeritFlawRegistry,
@@ -496,8 +497,13 @@ export interface PlayableCharacter {
   disciplines: Record<string, number>;
   traits: Record<string, number>;
   poolStarts: Record<string, number>;
-  meritsFlaws: Record<string, number>;    // name -> points; kind via the registry
+  // name -> points; kind via the registry. Parameterized defs are owned as
+  // "name:<param>" instances ("trait-affinity:melee" - typed with :: ).
+  meritsFlaws: Record<string, number>;
   tags: string[];                         // free-form (clan, ghoul, ...)
+  // trait -> specialty labels (VERBATIM case - display text). At most one
+  // specialty applies per roll, chosen by the specialty= argument.
+  specialties?: Record<string, string[]>;
 }
 
 export class CharacterStore {
@@ -530,6 +536,7 @@ export class CharacterStore {
       poolStarts: { willpower: 0 },
       meritsFlaws: {},
       tags: [],
+      specialties: {},
     };
   }
 
@@ -610,11 +617,54 @@ export class CharacterStore {
 
 // Resolve a trait name to its value from a character record's numeric buckets.
 // Shared by the roll plumbing (game.ts) and CharacterBoosts' cap math.
+// NOTE: returns the UN-ENHANCED base - Trait Enhancement folds in at the roll
+// env (game.ts characterRollEnv), and XP pricing reads this base by design.
 export function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
   const n = StringUtil.normalize(name);
   const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
   for (const b of buckets) if (n in b) return b[n];
   return 0;
+}
+
+// --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
+// A character's meritsFlaws bucket maps instance keys ("iron-will",
+// "trait-affinity:melee") to points. Resolution goes through the registry;
+// unknown or malformed keys are skipped here and SURFACED by
+// [[check-constraints]], never silently enforced.
+export interface OwnedMeritInstance {
+  key: string;
+  def: MeritFlawDef;
+  param?: string;
+  points: number;
+}
+
+export function ownedMeritInstances(char: PlayableCharacter): OwnedMeritInstance[] {
+  const out: OwnedMeritInstance[] = [];
+  for (const [key, points] of Object.entries(char.meritsFlaws ?? {})) {
+    const hit = resolveMeritInstance(key, n => MeritFlawRegistry.get(n));
+    if (hit) out.push({ key: StringUtil.normalize(key), def: hit.def, param: hit.param, points });
+  }
+  return out;
+}
+
+// Every always-on op the character's merits grant ($param substituted,
+// amounts scaled by points). Roll-op gates (actionTag/trait) are judged at
+// the roll site.
+export function passiveOpsFor(char: PlayableCharacter): EffectOp[] {
+  return ownedMeritInstances(char).flatMap(inst => passiveOpsOf(inst.def, inst.param, inst.points));
+}
+
+// Permanent per-trait enhancement totals (the "enhance" passive op): raises
+// the EFFECTIVE trait everywhere and, advisorily, the advancement ceiling by
+// the same amount. XP pricing keeps reading the un-enhanced base.
+export function enhancementsFor(char: PlayableCharacter): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const op of passiveOpsFor(char)) {
+    if (op.op.toLowerCase() !== "enhance" || !op.target) continue;
+    const t = StringUtil.normalize(op.target);
+    out[t] = (out[t] ?? 0) + (op.amount ?? 1);
+  }
+  return out;
 }
 
 // =============================================================================
@@ -630,7 +680,7 @@ const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
 // A saved roll is a RollSpec plus an optional `spend` sidecar (the resource/role
 // token to pay when the roll is invoked). `spend` stays OUT of the pure RollSpec -
 // it's a game-layer concern the roll pipeline never sees.
-export type SavedRoll = RollSpec & { spend?: string };
+export type SavedRoll = RollSpec & { spend?: string; specialty?: string };
 
 export class NamedRollStore {
   private static _text(map: Record<string, SavedRoll>): string {

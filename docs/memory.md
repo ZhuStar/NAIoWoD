@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `a154ed7`** ("Rename
-> condition → affliction; reserve 'condition' for future predicates").
+> **Last synced with the code as of commit `8023701`** ("Owned powers:
+> parameterized merits + passive effects — Trait Affinity, Trait Enhancement,
+> Specialties").
 
 ---
 
@@ -294,7 +295,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (831) — all game DATA
+### src/rules.ts (891) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
@@ -367,7 +368,19 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   `bonusDiceFrom` until per-power effects exist.
 - Merits & Flaws: `MeritFlawDef {name, kind, points: n|n[], requires?
   {templates any-of, tags all-of, meritsFlaws all-of}, description}`;
-  `DEFAULT_MERITS_FLAWS` (13 examples incl. Iron Will, Acute Senses…).
+  `DEFAULT_MERITS_FLAWS` (15 defs incl. Iron Will, Acute Senses… and the
+  Devil's Due arcana). **Owned-power pattern (§7.23)**: `MeritFlawDef` gains
+  `param?` (instance-parameter slot — owned as `name:<value>` instances,
+  typed `name::value`), `passive?: EffectOp[]` (always-on ops; amounts SCALE
+  by points taken; `"$<param>"` fields substitute the instance value) and
+  `atMostOneAt?` (advisory cross-instance cap). `EffectOp` gains the
+  **`trait` gate** (twin of the actionTag `target` gate): the op applies only
+  when the roll's POOL used that trait. Helpers: `resolveMeritInstance(key,
+  lookup)` (splits `base:param` only when the base def declares `param`;
+  param defs owned bare are malformed) and `passiveOpsOf(def, param, points)`
+  (substituted, scaled). Shipped arcana: **trait-affinity** {param: trait,
+  atMostOneAt: 3, passive difficulty −1/point} and **trait-enhancement**
+  {param: trait, passive enhance +1/point}.
 - SRD lorebook seeds: `SRD_HEADER_MARKER = "====="` — **every data entry is
   human instructions ABOVE the marker, data BELOW it** (user design: the
   tutorial lives in the entry card itself, no separate readme). `srdEntryText`
@@ -478,7 +491,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1370) — the character model + every persistent store
+### src/state.ts (1420) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -518,7 +531,7 @@ and the future "ready character" path):
 
 **Named rolls**: `NamedRollStore` — ONE lorebook entry
 (`wod:named-rolls` / `wod:named-rolls:library`) holding a JSON map
-`{name: SavedRoll}` where **`SavedRoll = RollSpec & { spend? }`** (the optional
+`{name: SavedRoll}` where **`SavedRoll = RollSpec & { spend?; specialty? }`** (the optional
 resource/role token, a game-layer sidecar kept OUT of the pure RollSpec); **read
 fresh every call** (no cache) so hand edits are always live;
 `all/get/names/save/remove`. A saved `spend` is auto-paid on `[[roll @name]]`
@@ -593,6 +606,16 @@ tags).
 **`resolveTraitFromRecord(char, name)`** — a record's numeric buckets
 (attributes → abilities → backgrounds → virtues → disciplines → traits →
 poolStarts → 0); shared by game.ts roll plumbing and `CharacterBoosts` caps.
+Returns the UN-ENHANCED base by design (XP prices from it); Trait Enhancement
+folds in at the roll env.
+
+**Owned powers (state side)**: `PlayableCharacter` gains
+`specialties?: Record<trait, string[]>` (VERBATIM labels — display text;
+seeded `{}`). `ownedMeritInstances(char)` resolves the meritsFlaws bucket's
+keys (incl. `name:<param>` instances) through the registry (unknown keys
+skipped here, surfaced by check-constraints); `passiveOpsFor(char)` = every
+substituted+scaled passive op; `enhancementsFor(char)` = per-trait "enhance"
+totals (effective bonus + advisory advancement ceiling).
 
 **Live per-character state** (all story-scoped via ScopedStorage, keyed by
 normalized character name; all default lazily from the record/template):
@@ -618,7 +641,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2069) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2368) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -649,6 +672,23 @@ character argument (real name or @alias, via `parseAliasToken` +
 `cmdPlay`, `cmdRollFor`, `cmdSetDefault`, affliction binding values
 (`resolveBindingValue`), and the `vs=` of `cmdVersus`/`cmdExtendedContest`.
 `disp()` = `StringUtil.toTitleCase` for replies.
+
+**Owned powers in play**: `poolTraitsOf(char, pool)` — THE gate seam: a
+pre-parse of the POOL ONLY (a trait appearing just in the difficulty
+expression does NOT count as used; `resolveSpec` feeds both through one
+resolver, hence the separate pass). `characterRollEnv` resolver = record +
+`enhancementsFor` + boosts. `passiveRollExtra(char, poolTraits, tags)` folds
+owned passive roll ops into rolls, `cmdVersus`'s side AND `execContestSide`
+(named sides; unmet gates skip SILENTLY — passives don't spam).
+`resolveSpecialty(char, ref, poolTraits)` — trait or label, ambiguity
+refused, pool-must-use-trait advisory, `diceMod +1`, at most ONE per roll;
+`specialty=` rides ROLL_KNOBS and the SavedRoll sidecar. `applySpend`/
+`applyEffectSpec` thread `rollTraits` so SPEND ops honor the trait gate
+("needs a roll using X - skipped"). `unmetRequirements` +
+`meritInstanceFindings` (unknown keys, atMostOneAt) feed take-merit and the
+check-constraints report — reported even when ZERO constraint groups exist
+(the check no longer short-circuits on an empty registry); `ownedTraitsOf`
+resolves parameterized keys for the merit/flaw split.
 
 **Afflictions in play**: **tags bite** via `withAfflictionTags(name, spec)` —
 merges active affliction tags into the RollSpec (deduped) in `rollAndReport`,
@@ -750,7 +790,14 @@ advisory when the target doesn't exist yet) · `forget-table-alias <@a>` ·
 `define-constraint name=".." relation=exclusive|restricted|forbidden
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
-`check-constraints` · `win-constraint` (opens the constraint window - registered
+`check-constraints` (constraint conflicts + merit-instance caps + unknown
+merit keys) · `take-merit <name[::param]> [points] [waive=true]` ·
+`drop-merit <name[::param]>` · `merits` (instances + enhancement
+base→effective→ceiling + advisory issues) · `specialty <trait> <literal>` ·
+`forget-specialty <trait> [<literal>]` · `specialties` · (roll knob
+everywhere: `specialty=<trait|label>` — ONE specialty, +1 die, pool must use
+its trait; SavedRoll carries it as a sidecar) ·
+`win-constraint` (opens the constraint window - registered
 in `src/window.ts`, emits `define-constraint`) ·
 `define-affliction name=".." [bindings="target"] [duration="1 turn|until x|
 instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."]
@@ -838,7 +885,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3133 + 20 lines, 292 tests, 80 describes)
+### test/ (3279 + 20 lines, 304 tests, 81 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1080,6 +1127,24 @@ cards are all tracked (id map + backups above).
     summary field `states`, method `States()`) — "condition" now appears
     nowhere as an engine name. NovelAI's own `LorebookCondition` (host.ts)
     is the HOST's API type and is untouched.
+23. **Owned powers are parameterized merits with passive effects** (user
+    fork: DEF-DRIVEN over first-class stores — powers live as data, not
+    ad-hoc state). A `MeritFlawDef` may declare a `param` slot (owned as
+    `name::value` instances), `passive` ops (always-on; amounts scale by
+    points; `"$param"` substitutes) and `atMostOneAt` (advisory
+    cross-instance cap — checked, not blocked, until the creation engine).
+    The `trait` gate on EffectOp is the actionTag gate's twin and fires on
+    the POOL ONLY — `poolTraitsOf` pre-parses the pool because resolveSpec
+    feeds pool AND difficultyExpr through one resolver (a trait in the
+    difficulty is not "used"). Trait Enhancement is a PERMANENT layer beside
+    the temporary boosts: effective = record + enhancement + boost, XP prices
+    from the un-enhanced record (§ the user's Strength 3+2→5, ceiling 7,
+    eventual 9 example), ceilings advisory until the XP engine. Specialties
+    are record data with VERBATIM labels; at most ONE applies per roll
+    (+1 die, user's rule — not V20's double-10s), the pool must use its
+    trait, and fiction-fit stays the ST's call until the generateWithStory
+    ask ships. Passives with unmet gates skip SILENTLY (no note spam);
+    spend-op gates note their skip (the player paid).
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1135,9 +1200,14 @@ Ordered roughly by unlock value:
 7. **Sorcerer Paths** (static magic) + the "other powers": dynamic magic,
    blood sorcery, ritual magic, Arcana — all currently just words the effect
    grammar can already reference.
-8. **Owned-power roll effects: Trait Affinity + Specialties + Trait
-   Enhancement (+ merits/flaws → automatic modifiers)** — THE NEXT PASS
-   (user-specced 2026-07-16, corrected & completed 2026-07-17):
+8. **Owned-power roll effects — SHIPPED** (§7.23): Trait Affinity, Trait
+   Enhancement and Specialties are live (parameterized merits + passive
+   effects + the specialty= knob). LEFT from this item: the
+   **`generateWithStory` specialty-applicability ask** ("which specialty
+   applies, if any?" with story context; chat messages, GLM 4.6 — confirmed
+   in the API reference) — the FIRST Storyteller-loop integration, its own
+   pass (host contract + mock + prompt design). Original spec follows for
+   reference:
    - *Trait Affinity* (Devil's Due; earlier misrecorded "Trait Aptitude"):
      each stack LOWERS DIFFICULTY BY 1 on any roll whose pool uses that
      Attribute/Ability. Stacking rule: ONE chosen trait may hold up to

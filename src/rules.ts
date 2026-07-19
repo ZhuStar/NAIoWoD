@@ -168,6 +168,10 @@ export interface EffectOp {
   amount?: number;          // magnitude per effect unit (default 1)
   fillToCap?: boolean;      // one application raises/heals to the cap
   cap?: number | string;    // literal, or a pool expression ("stamina+3") on the character
+  // Gate: the op applies only when the roll's POOL actually used this trait
+  // (the twin of the actionTag gate roll ops carry in `target`). A trait that
+  // appears only in the difficulty expression does NOT count.
+  trait?: string;
 }
 export interface EffectCost {
   units?: number;           // resource units per application (default 1)
@@ -544,9 +548,65 @@ export interface MeritFlawDef {
   points: number | number[]; // freebie cost (merit) / bonus granted (flaw); array = variable rating
   requires?: MeritFlawRequirements;
   description?: string;
+  // --- Parameterized instances + passive effects (the owned-power pattern) ---
+  // `param` names an instance-parameter slot (e.g. "trait"): the def is then
+  // owned as `name::<value>` instances ("trait-affinity::melee"), and any
+  // passive-op field equal to "$<param>" substitutes the instance's value.
+  param?: string;
+  // Always-on ops while the merit is owned - no cost, no spend. Amounts SCALE
+  // by the points the instance was taken at (trait-affinity at 2 points =
+  // -2 difficulty). Roll ops honor the actionTag (`target`) and `trait` gates.
+  passive?: EffectOp[];
+  // Cross-instance cap: at most ONE instance of this def may sit at this
+  // points value (trait-affinity: 3 - one favoured trait). ADVISORY - the
+  // constraint check reports violations; the creation engine will enforce.
+  atMostOneAt?: number;
+}
+
+// "trait-affinity:melee" -> its base def name + instance param. The suffix is
+// split off ONLY when the base def declares `param` (plain names with colons
+// stay whole otherwise; lookup tries the full key first).
+export function resolveMeritInstance(key: string, lookup: (name: string) => MeritFlawDef | undefined):
+  { def: MeritFlawDef; param?: string } | undefined {
+  const full = StringUtil.normalize(key);
+  const whole = lookup(full);
+  if (whole) return whole.param ? undefined : { def: whole };   // a param def owned bare is malformed
+  const i = full.lastIndexOf(":");
+  if (i <= 0) return undefined;
+  const base = lookup(full.slice(0, i));
+  if (!base?.param) return undefined;
+  const param = full.slice(i + 1);
+  return param ? { def: base, param } : undefined;
+}
+
+// An instance's passive ops, with "$<param>" substituted and amounts scaled
+// by the points taken. Pure - ownership walks live in state.ts.
+export function passiveOpsOf(def: MeritFlawDef, param: string | undefined, points: number): EffectOp[] {
+  const sub = (v: string | undefined): string | undefined =>
+    def.param && v === `$${def.param}` ? param : v;
+  return (def.passive ?? []).map(op => {
+    const out: EffectOp = { ...op, op: op.op };
+    out.target = sub(op.target);
+    out.trait = sub(op.trait);
+    if (out.target === undefined) delete out.target;
+    if (out.trait === undefined) delete out.trait;
+    out.amount = (op.amount ?? 1) * Math.max(1, points);
+    return out;
+  });
 }
 
 export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
+  // Devil's Due arcana, modeled as parameterized merits with passive effects.
+  {
+    name: "Trait Affinity", kind: "merit", points: [1, 2, 3], param: "trait", atMostOneAt: 3,
+    passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
+    description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait. One favoured trait may reach 3; every other caps at 2.",
+  },
+  {
+    name: "Trait Enhancement", kind: "merit", points: [1, 2, 3], param: "trait",
+    passive: [{ op: "enhance", amount: 1, target: "$trait" }],
+    description: "Devil's Due: permanently raises the trait's effective value AND its advancement ceiling by the points taken; XP still prices from the un-enhanced base.",
+  },
   { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
   { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },
   { name: "Iron Will", kind: "merit", points: 3, description: "Resistant to Dominate and mental control." },

@@ -33,6 +33,7 @@ import {
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, CONFIG_CATEGORY,
+  resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -3129,5 +3130,150 @@ describe("affliction windows: picker modal, win-affliction, win-afflict", () => 
     await api.v1.tempStorage.set("win:afflict:affliction", "concentrating-on");
     expect(await __uiClickButton("Afflict")).toBe(true);                             // target left blank
     expect(texts().some(t => t.includes("needs target="))).toBe(true);               // the handler's refusal, in-window
+  });
+});
+
+// =============================================================================
+// OWNED POWERS - parameterized merits, passive effects, specialties
+// =============================================================================
+describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("resolveMeritInstance: plain names, parameterized instances, malformed forms", () => {
+    const lookup = (n: string) => MeritFlawRegistry.get(n);
+    expect(resolveMeritInstance("iron-will", lookup)!.def.name).toBe("Iron Will");
+    const inst = resolveMeritInstance("trait-affinity:melee", lookup)!;
+    expect(inst.def.name).toBe("Trait Affinity");
+    expect(inst.param).toBe("melee");
+    expect(resolveMeritInstance("trait-affinity", lookup)).toBeUndefined();   // param def owned bare
+    expect(resolveMeritInstance("nope:melee", lookup)).toBeUndefined();       // unknown base
+  });
+
+  test("passiveOpsOf: $param substitution + points scaling", () => {
+    const def = MeritFlawRegistry.get("trait-affinity")!;
+    const ops = passiveOpsOf(def, "melee", 2);
+    expect(ops).toEqual([{ op: "difficulty", trait: "melee", amount: -2 }]);
+  });
+
+  test("Trait Affinity lowers difficulty when the POOL uses the trait - and only then", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("take-merit trait-affinity::melee 2");
+    const hit = await CommandRouter.route("roll dexterity+melee", { rng: seqRng([6]) });
+    expect(hit).toContain("vs diff 4");
+    expect(hit).toContain("trait-affinity (melee): difficulty -2");
+    const miss = await CommandRouter.route("roll strength+brawl", { rng: seqRng([6, 6]) });
+    expect(miss).toContain("vs diff 6");
+    // The seam: melee ONLY in the difficulty expression is NOT "using" it.
+    const diffOnly = await CommandRouter.route("roll strength+brawl melee+6", { rng: seqRng([6, 6]) });
+    expect(diffOnly).toContain("vs diff 6");
+    expect(diffOnly).not.toContain("trait-affinity");
+  });
+
+  test("affinity applies to contest sides (both named characters)", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Erik"');
+    await CommandRouter.route("take-merit trait-affinity::brawl 1");
+    await CommandRouter.route('play name="Rok"');
+    const r = await CommandRouter.route('resist strength+brawl strength+brawl vs="Erik"', { rng: seqRng([6, 6]) });
+    expect(r).toContain("vs diff 6");   // Rok, no affinity
+    expect(r).toContain("vs diff 5");   // Erik's side
+  });
+
+  test("atMostOneAt: two traits at 3 is flagged by check-constraints (advisory)", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("take-merit trait-affinity::melee 3");
+    await CommandRouter.route("take-merit trait-affinity::brawl 3");
+    await CommandRouter.route('define-constraint name="noop" relation=exclusive domain=background members="status"');
+    const report = await CommandRouter.route("check-constraints");
+    expect(report).toContain("only ONE instance at the top value");
+    expect(report).toContain("melee");
+    expect(report).toContain("brawl");
+  });
+
+  test("merit findings surface even with zero constraint groups defined", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const clean = await CommandRouter.route("check-constraints");
+    expect(clean).toContain("No constraint groups defined");
+    expect(clean).toContain("check out");
+    await CommandRouter.route("take-merit trait-affinity::melee 3");
+    await CommandRouter.route("take-merit trait-affinity::brawl 3");
+    const report = await CommandRouter.route("check-constraints");
+    expect(report).toContain("only ONE instance at the top value");
+  });
+
+  test("Trait Enhancement grows the pool, stacks with boosts, and reports the ceiling", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const c = (await CharacterStore.getCurrent())!;
+    c.attributes["strength"] = 3;
+    await CharacterStore.save(c);
+    await CommandRouter.route("take-merit trait-enhancement::strength 2");
+    const r = await CommandRouter.route("roll strength", { rng: seqRng([6, 6, 6, 6, 6]) });   // exactly 5 dice
+    expect(r).toContain("(5)");
+    const m = await CommandRouter.route("merits");
+    expect(m).toContain("strength: base 3 -> effective 5 (ceiling +2, advisory)");
+  });
+
+  test("take-merit validates points and prerequisites (waive overrides)", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 5")).toContain("one of [1, 2, 3]");
+    expect(await CommandRouter.route("take-merit trait-affinity")).toContain("name its trait");
+    expect(await CommandRouter.route("take-merit eat-food")).toContain("prerequisites not met");
+    expect(await CommandRouter.route("take-merit eat-food waive=true")).toContain("takes eat-food");
+    expect(await CommandRouter.route("drop-merit eat-food")).toContain("drops eat-food");
+  });
+
+  test("specialties: add (case kept), roll +1 die with note, one per roll, forget", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const c = (await CharacterStore.getCurrent())!;
+    c.abilities["melee"] = 2;
+    c.attributes["dexterity"] = 2;
+    await CharacterStore.save(c);
+    await CommandRouter.route("specialty melee `Swords`");
+    expect(await CommandRouter.route("specialties")).toContain("melee: Swords");
+    const r = await CommandRouter.route("roll dexterity+melee specialty=melee", { rng: seqRng([6, 6, 6, 6, 6]) });   // 4 + 1 die
+    expect(r).toContain("(5)");
+    expect(r).toContain("specialty: Swords (+1 die)");
+    // by label; and pool-lacks-trait is an advisory skip
+    const byLabel = await CommandRouter.route("roll dexterity+melee specialty=`Swords`", { rng: seqRng([6, 6, 6, 6, 6]) });
+    expect(byLabel).toContain("specialty: Swords (+1 die)");
+    const skip = await CommandRouter.route("roll strength specialty=melee", { rng: seqRng([6]) });
+    expect(skip).toContain("pool didn't use melee - no die");
+    expect(await CommandRouter.route("forget-specialty melee")).toContain("forgets specialty Swords");
+  });
+
+  test("specialty ambiguity: several under one trait needs the label", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("specialty melee `Swords`");
+    await CommandRouter.route("specialty melee `Axes`");
+    const r = await CommandRouter.route("roll dexterity+melee specialty=melee", { rng: seqRng([1, 1]) });
+    expect(r).toContain("has several (Swords, Axes) - name one");
+    expect(await CommandRouter.route("forget-specialty melee")).toContain("name the one to forget");
+  });
+
+  test("a named roll carries its specialty sidecar", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const c = (await CharacterStore.getCurrent())!;
+    c.abilities["melee"] = 2;
+    c.attributes["dexterity"] = 2;
+    await CharacterStore.save(c);
+    await CommandRouter.route("specialty melee `Swords`");
+    const saved = await CommandRouter.route("name-roll slash dexterity+melee specialty=melee");
+    expect(saved).toContain("specialty=melee");
+    const r = await CommandRouter.route("roll @slash", { rng: seqRng([6, 6, 6, 6, 6]) });
+    expect(r).toContain("specialty: Swords (+1 die)");
+  });
+
+  test("a trait-gated SPEND op applies only when the pool used the trait", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await ResourceOverrides.save({
+      mana: { kind: "pool", start: 5, max: 10,
+        effects: { edge: { label: "Edge", apply: [{ op: "difficulty", amount: -1, trait: "melee" }] } } },
+    });
+    const hit = await CommandRouter.route("roll dexterity+melee spend=mana::edge", { rng: seqRng([6, 6]) });
+    expect(hit).toContain("vs diff 5");
+    const miss = await CommandRouter.route("roll strength spend=mana::edge", { rng: seqRng([6]) });
+    expect(miss).toContain('needs a roll using "melee" - skipped');
+    expect(miss).toContain("vs diff 6");
   });
 });

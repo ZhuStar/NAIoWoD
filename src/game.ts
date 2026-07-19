@@ -19,6 +19,7 @@ import {
   ConstraintRelation, ConstraintDomain, CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS,
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionDef,
+  MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
@@ -42,7 +43,7 @@ import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
-  resolveTraitFromRecord,
+  resolveTraitFromRecord, ownedMeritInstances, enhancementsFor, SavedRoll,
   ResourceOverrides, RESOURCE_CONFIG_ENTRY, TableLibrary, TableAliases, TABLES_CATEGORY,
   ConstraintRegistry, AfflictionRegistry,
   ActiveAffliction, CharacterAfflictions,
@@ -377,7 +378,7 @@ interface EffectApplication {
 
 async function applyEffectSpec(
   char: PlayableCharacter, def: ResourceDef, effectName: string, spec: EffectSpec,
-  opts: { targetArg?: string; applications?: number; rng?: Rng; rollTags?: string[] } = {}
+  opts: { targetArg?: string; applications?: number; rng?: Rng; rollTags?: string[]; rollTraits?: string[] } = {}
 ): Promise<EffectApplication> {
   const notes: string[] = [];
   const resolver = (n: string): number => resolveTraitFromRecord(char, n);
@@ -434,6 +435,12 @@ async function applyEffectSpec(
         const wanted = StringUtil.normalize(op.target);
         if (!(opts.rollTags ?? []).includes(wanted)) { notes.push(`${kind} needs tag "${wanted}" - skipped`); continue; }
       }
+      // A trait gate: the op applies only when the roll's POOL used the trait
+      // (a trait appearing only in the difficulty expression doesn't count).
+      if (op.trait) {
+        const wanted = StringUtil.normalize(op.trait);
+        if (!(opts.rollTraits ?? []).includes(wanted)) { notes.push(`${kind} needs a roll using "${wanted}" - skipped`); continue; }
+      }
       anyRollOp = true;
       if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + (op.amount ?? 1) * effectUnits;
       else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + (op.amount ?? 1) * effectUnits;
@@ -479,7 +486,7 @@ async function applyEffectSpec(
 // "!" makes it MANDATORY: if it can't be paid, `refuse` is set and the caller
 // does NOT roll (Willpower/Resolve as required spell fuel). Only roll-op (or
 // pure-cost) effects belong inside a roll; standalone ops point at [[spend]].
-async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[], spendOverride?: string): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[], rollTraits: string[], spendOverride?: string): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
   // An explicit spend= on the command wins; otherwise a saved roll's own spend
   // (the `@name` sidecar) applies automatically.
   const raw = cmd.named["spend"] ?? spendOverride;
@@ -509,7 +516,7 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
     return { note: "", refuse: `${def.name}::${effectName} is a ${kind} effect - use [[spend ${def.name}::${effectName} ...]] outside a roll` };
   }
 
-  const r = await applyEffectSpec(char, def, effectName ?? "", e, { applications, rng: ctx.rng, rollTags });
+  const r = await applyEffectSpec(char, def, effectName ?? "", e, { applications, rng: ctx.rng, rollTags, rollTraits });
   if (r.insufficient) return mandatory ? { note: "", refuse: r.insufficient } : { note: `${r.insufficient} - spent nothing` };
   if (r.refuse) return { note: "", refuse: r.refuse };
   return { extra: r.extra, note: `${r.notes.join("; ")}: ${e.label}` };
@@ -519,11 +526,83 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
 // penalty to fold into the dice pool. Shared by rolls and contests.
 async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n: string) => number; penalty: number }> {
   const boosts = await CharacterBoosts.all(char);
+  const enh = enhancementsFor(char);   // Trait Enhancement: permanent, beside the temporary boosts
   const penalty = (await CharacterHealth.summary(char)).penalty;
   return {
-    resolver: (n: string): number => resolveTraitFromRecord(char, n) + (boosts[StringUtil.normalize(n)] ?? 0),
+    resolver: (n: string): number => {
+      const key = StringUtil.normalize(n);
+      return resolveTraitFromRecord(char, key) + (enh[key] ?? 0) + (boosts[key] ?? 0);
+    },
     penalty,
   };
+}
+
+// Which traits a POOL expression actually resolves (normalized). This is the
+// gate for Trait Affinity, trait-gated ops and specialties - deliberately a
+// pre-parse of the pool ONLY: a trait that appears just in the difficulty
+// expression must not count as "using" it.
+function poolTraitsOf(char: PlayableCharacter, pool: string): string[] {
+  const used = new Set<string>();
+  parsePoolExpression(pool, (n: string): number => {
+    const key = StringUtil.normalize(n);
+    used.add(key);
+    return resolveTraitFromRecord(char, key);
+  });
+  return [...used];
+}
+
+// Fold the character's PASSIVE roll ops (owned merits/arcana - Trait Affinity
+// et al.) into a roll: trait-gated ops fire iff the pool used the trait,
+// actionTag-gated ops iff the roll carries the tag; unmet gates skip SILENTLY
+// (passives must not spam every unrelated roll). "enhance" is env-level and
+// ignored here.
+function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: string[]): { extra: Partial<RollModifier>; notes: string[] } {
+  const extra: Partial<RollModifier> = {};
+  const notes: string[] = [];
+  for (const inst of ownedMeritInstances(char)) {
+    for (const op of passiveOpsOf(inst.def, inst.param, inst.points)) {
+      const kind = op.op.toLowerCase();
+      if (!ROLL_OPS.has(kind)) continue;
+      if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
+      if (op.trait && !poolTraits.includes(StringUtil.normalize(op.trait))) continue;
+      const amount = op.amount ?? 1;
+      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + amount;
+      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + amount;
+      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + amount;
+      else if (kind === "nagain") { extra.nAgain = Math.min(extra.nAgain ?? 10, amount); }
+      const who = `${StringUtil.normalize(inst.def.name)}${inst.param ? ` (${inst.param})` : ""}`;
+      notes.push(`${who}: ${kind} ${amount > 0 ? "+" : ""}${amount}`);
+    }
+  }
+  return { extra, notes };
+}
+
+// Resolve a specialty= reference (a trait name, or a specialty label) against
+// the character's specialties. AT MOST ONE specialty applies per roll - the
+// argument names it. Applying requires the pool to have used the trait
+// (advisory note otherwise, no die).
+function resolveSpecialty(char: PlayableCharacter, ref: string, poolTraits: string[]): { note: string; extra?: Partial<RollModifier> } {
+  const want = StringUtil.normalize(ref);
+  const specs = char.specialties ?? {};
+  let trait: string | undefined;
+  let label: string | undefined;
+  const traitLabels = specs[want];
+  if (traitLabels && traitLabels.length > 0) {
+    if (traitLabels.length > 1) return { note: `specialty: "${want}" has several (${traitLabels.join(", ")}) - name one` };
+    trait = want;
+    label = traitLabels[0];
+  } else {
+    const hits: Array<{ trait: string; label: string }> = [];
+    for (const [t, labels] of Object.entries(specs)) {
+      for (const l of labels) if (StringUtil.normalize(l) === want) hits.push({ trait: t, label: l });
+    }
+    if (hits.length === 0) return { note: `no specialty "${ref}" (see [[specialties]])` };
+    if (hits.length > 1) return { note: `specialty "${ref}" is ambiguous (${hits.map(h => h.trait).join(", ")}) - use the trait` };
+    trait = hits[0].trait;
+    label = hits[0].label;
+  }
+  if (!poolTraits.includes(trait)) return { note: `specialty ${label} (${trait}): pool didn't use ${trait} - no die` };
+  return { note: `specialty: ${label} (+1 die)`, extra: { diceMod: 1 } };
 }
 
 // Merge the tags granted by someone's active afflictions into a roll spec
@@ -568,13 +647,15 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   if (!args.pool) return `((OOC-Storyteller: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].))`;
   let spec: RollSpec;
   let savedSpend: string | undefined;
+  let savedSpecialty: string | undefined;
   if (args.pool.startsWith("@")) {
     // Saved roll: load the base spec, then apply the supplied overrides (pool is
     // never overridden, so passing `args` straight through to overrideSpec is safe).
     const name = StringUtil.normalize(args.pool.slice(1));
     const base = await NamedRollStore.get(name);
     if (!base) return `((OOC-Storyteller: No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].))`;
-    savedSpend = base.spend;   // auto-paid unless the command overrides spend=
+    savedSpend = base.spend;         // auto-paid unless the command overrides spend=
+    savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
     spec = overrideSpec(base, args);
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
@@ -582,16 +663,29 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   // Active afflictions bite: their tags join the roll, firing any registered
   // RollModifiers (unregistered ones surface as the usual unknown-tag note).
   spec = await withAfflictionTags(char.name, spec);
-  const spend = await applySpend(char, cmd, ctx, spec.tags, savedSpend);
+  const poolTraits = poolTraitsOf(char, spec.pool);
+  const spend = await applySpend(char, cmd, ctx, spec.tags, poolTraits, savedSpend);
   if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
-  // Rolls see live state: boosted Attributes add to the record's dots, and the
-  // wound penalty (negative) comes off the dice pool.
+  // Rolls see live state: enhancements + boosts add to the record's dots, the
+  // wound penalty (negative) comes off the dice pool, owned passives (Trait
+  // Affinity et al.) fold in, and at most one specialty grants its die.
   const env = await characterRollEnv(char);
+  const passive = passiveRollExtra(char, poolTraits, spec.tags);
+  const specialtyRef = cmd.named["specialty"] ?? savedSpecialty;
+  const specialty = specialtyRef ? resolveSpecialty(char, specialtyRef, poolTraits) : { note: "" };
   const extra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
+  for (const p of [passive.extra, specialty.extra ?? {}]) {
+    if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
+    if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
+    if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
+    if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
+  }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const exec = executeRoll(spec, env.resolver, { rng: ctx.rng, extra });
   const notes = [
     spend.note,
+    ...passive.notes,
+    specialty.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
     await tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
@@ -622,9 +716,14 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   if (!args.pool) return `((OOC-Storyteller: name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
   const spec = makeRollSpec({ ...args, pool: args.pool });
   const spend = cmd.named["spend"]?.trim();
-  await NamedRollStore.save(name, spend ? { ...spec, spend } : spec);
+  const specialty = cmd.named["specialty"]?.trim();
+  const saved: SavedRoll = { ...spec };
+  if (spend) saved.spend = spend;
+  if (specialty) saved.specialty = specialty;
+  await NamedRollStore.save(name, saved);
   const key = StringUtil.normalize(name);
-  return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}${spend ? `, spend=${spend}` : ""}. Use it with [[roll @${key}]].))`;
+  const sidecars = [spend ? `spend=${spend}` : "", specialty ? `specialty=${specialty}` : ""].filter(Boolean).join(", ");
+  return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}. Use it with [[roll @${key}]].))`;
 }
 
 async function cmdListRolls(): Promise<string> {
@@ -884,9 +983,16 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
     const c = await CharacterStore.load(charName);
     if (c) {
       const env = await characterRollEnv(c);
+      const spec = await withAfflictionTags(c.name, base);
+      // Owned passives (Trait Affinity et al.) apply to contest sides too.
+      const passive = passiveRollExtra(c, poolTraitsOf(c, spec.pool), spec.tags);
       const merged: Partial<RollModifier> = { ...(extra ?? {}) };
+      if (passive.extra.difficultyMod) merged.difficultyMod = (merged.difficultyMod ?? 0) + passive.extra.difficultyMod;
+      if (passive.extra.diceMod) merged.diceMod = (merged.diceMod ?? 0) + passive.extra.diceMod;
+      if (passive.extra.autoSuccesses) merged.autoSuccesses = (merged.autoSuccesses ?? 0) + passive.extra.autoSuccesses;
+      if (passive.extra.nAgain !== undefined) merged.nAgain = Math.min(merged.nAgain ?? 10, passive.extra.nAgain);
       if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
-      return executeRoll(await withAfflictionTags(c.name, base), env.resolver, { rng, extra: merged });
+      return executeRoll(spec, env.resolver, { rng, extra: merged });
     }
   }
   return executeRoll(base, () => 0, { rng, extra });
@@ -925,7 +1031,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
 
   // The actor may spend on their own roll (fuel / roll-op effects only), exactly
   // like [[roll spend=...]]; standalone effects refuse with the [[spend]] pointer.
-  const spend = await applySpend(me, cmd, ctx, mySpec.tags);
+  const spend = await applySpend(me, cmd, ctx, mySpec.tags, poolTraitsOf(me, mySpec.pool));
   if (spend.refuse) return `((OOC-Storyteller: ${disp(me.name)} can't: ${spend.refuse}.))`;
 
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
@@ -1310,7 +1416,9 @@ function ownedTraitsOf(char: PlayableCharacter): OwnedTraits {
   const merits: string[] = [];
   const flaws: string[] = [];
   for (const name of Object.keys(char.meritsFlaws)) {
-    const def = MeritFlawRegistry.get(name);
+    // Parameterized instances ("trait-affinity:melee") resolve to their base
+    // def for the merit/flaw split; the full instance key stays the trait.
+    const def = resolveMeritInstance(name, n => MeritFlawRegistry.get(n))?.def ?? MeritFlawRegistry.get(name);
     (def && def.kind === "flaw" ? flaws : merits).push(StringUtil.normalize(name));
   }
   return {
@@ -1368,11 +1476,169 @@ async function cmdCheckConstraints(): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
   const groups = ConstraintRegistry.all();
-  if (!groups.length) return `((OOC-Storyteller: No constraint groups defined - nothing to check.))`;
-  const violations = checkConstraints(groups, ownedTraitsOf(char));
-  if (!violations.length) return `((OOC-Storyteller: ${disp(char.name)} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.))`;
-  const lines = violations.map(v => v.detail).join("; ");
-  return `((OOC-Storyteller: ${disp(char.name)} - ${violations.length} constraint issue${violations.length === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
+  const violations = groups.length ? checkConstraints(groups, ownedTraitsOf(char)) : [];
+  const meritIssues = meritInstanceFindings(char);
+  const total = violations.length + meritIssues.length;
+  if (!total) {
+    return groups.length
+      ? `((OOC-Storyteller: ${disp(char.name)} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.))`
+      : `((OOC-Storyteller: No constraint groups defined and ${disp(char.name)}'s merits/flaws check out - nothing to flag.))`;
+  }
+  const lines = [...violations.map(v => v.detail), ...meritIssues].join("; ");
+  return `((OOC-Storyteller: ${disp(char.name)} - ${total} constraint issue${total === 1 ? "" : "s"} (ST-enforced): ${lines}.))`;
+}
+
+// Advisory merit-instance findings: unknown/malformed keys and atMostOneAt
+// violations ("one favoured trait" caps). Reported, never enforced - the
+// creation engine will enforce.
+function meritInstanceFindings(char: PlayableCharacter): string[] {
+  const findings: string[] = [];
+  const atTop = new Map<string, string[]>();   // def name -> instance keys at the capped value
+  const known = new Set<string>();
+  for (const inst of ownedMeritInstances(char)) {
+    known.add(inst.key);
+    const cap = inst.def.atMostOneAt;
+    if (cap !== undefined && inst.points >= cap) {
+      const list = atTop.get(inst.def.name) ?? [];
+      list.push(inst.param ?? inst.key);
+      atTop.set(inst.def.name, list);
+    }
+  }
+  for (const key of Object.keys(char.meritsFlaws)) {
+    if (!known.has(StringUtil.normalize(key))) findings.push(`unknown merit/flaw "${StringUtil.normalize(key)}"`);
+  }
+  for (const [defName, traits] of atTop) {
+    if (traits.length > 1) findings.push(`${StringUtil.normalize(defName)} allows only ONE instance at the top value (have: ${traits.join(", ")})`);
+  }
+  return findings;
+}
+
+// =============================================================================
+// OWNED POWERS - merits/flaws (incl. parameterized instances) + specialties
+// -----------------------------------------------------------------------------
+// take-merit/drop-merit edit the record's meritsFlaws bucket (write-through:
+// lorebook first). Parameterized defs are taken as name::<param> instances;
+// their passive ops fold into every roll automatically. Specialties live on
+// the record (verbatim labels); the specialty= roll argument applies one.
+// =============================================================================
+function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements): string[] {
+  if (!req) return [];
+  const missing: string[] = [];
+  if (req.templates?.length) {
+    const mine = char.templates.map(t => StringUtil.normalize(t));
+    if (!req.templates.some(t => mine.includes(StringUtil.normalize(t)))) missing.push(`template:${req.templates.join("|")}`);
+  }
+  const tags = char.tags.map(t => StringUtil.normalize(t));
+  for (const t of req.tags ?? []) if (!tags.includes(StringUtil.normalize(t))) missing.push(`tag:${StringUtil.normalize(t)}`);
+  for (const m of req.meritsFlaws ?? []) if (!(StringUtil.normalize(m) in char.meritsFlaws)) missing.push(`merit-flaw:${StringUtil.normalize(m)}`);
+  return missing;
+}
+
+async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const raw = cmd.positional[0]?.trim();
+  if (!raw) return `((OOC-Storyteller: take-merit needs a name, e.g. [[take-merit trait-affinity::melee 2]].))`;
+  const key = StringUtil.normalize(raw);
+  const hit = resolveMeritInstance(key, n => MeritFlawRegistry.get(n));
+  if (!hit) {
+    const bare = MeritFlawRegistry.get(key);
+    return bare?.param
+      ? `((OOC-Storyteller: "${key}" is parameterized - name its ${bare.param}: [[take-merit ${key}::<${bare.param}>]].))`
+      : `((OOC-Storyteller: Unknown merit/flaw "${key}". Custom definitions go in the srd:merits-flaws lorebook category.))`;
+  }
+  const allowed = Array.isArray(hit.def.points) ? hit.def.points : [hit.def.points];
+  const points = intOrUndef(cmd.positional[1] ?? "") ?? allowed[0];
+  if (!allowed.includes(points)) {
+    return `((OOC-Storyteller: ${hit.def.name} must be taken at one of [${allowed.join(", ")}] points (got ${points}).))`;
+  }
+  const missing = unmetRequirements(char, hit.def.requires);
+  if (missing.length && cmd.named["waive"] !== "true") {
+    return `((OOC-Storyteller: ${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.))`;
+  }
+  char.meritsFlaws[key] = points;
+  await CharacterStore.save(char);
+  const passiveBits = passiveOpsOf(hit.def, hit.param, points)
+    .map(o => `${o.op}${o.trait ? ` [${o.trait}]` : o.target ? ` [${o.target}]` : ""} ${(o.amount ?? 1) > 0 ? "+" : ""}${o.amount ?? 1}`);
+  return `((OOC-Storyteller: ${disp(char.name)} takes ${key} (${points} pt${points === 1 ? "" : "s"})${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}.))`;
+}
+
+async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const key = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  if (!key) return `((OOC-Storyteller: drop-merit needs a name.))`;
+  if (!(key in char.meritsFlaws)) return `((OOC-Storyteller: ${disp(char.name)} does not have "${key}". [[merits]] lists them.))`;
+  delete char.meritsFlaws[key];
+  await CharacterStore.save(char);
+  return `((OOC-Storyteller: ${disp(char.name)} drops ${key}.))`;
+}
+
+async function cmdMerits(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const insts = ownedMeritInstances(char);
+  if (!insts.length && !Object.keys(char.meritsFlaws).length) {
+    return `((OOC-Storyteller: ${disp(char.name)} has no merits or flaws. [[take-merit <name[::param]> [points]]] takes one.))`;
+  }
+  const items = insts.map(i => `${i.key} (${i.points}${i.def.kind === "flaw" ? ", flaw" : ""})`);
+  const enh = enhancementsFor(char);
+  const enhBits = Object.entries(enh).map(([t, n]) => {
+    const base = resolveTraitFromRecord(char, t);
+    return `${t}: base ${base} -> effective ${base + n} (ceiling +${n}, advisory)`;
+  });
+  const issues = meritInstanceFindings(char);
+  const parts = [`Merits/Flaws: ${items.join("; ")}`];
+  if (enhBits.length) parts.push(`Enhancements - ${enhBits.join("; ")}`);
+  if (issues.length) parts.push(`Issues (ST-enforced): ${issues.join("; ")}`);
+  return `((OOC-Storyteller: ${parts.join(". ")}.))`;
+}
+
+async function cmdSpecialty(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  const label = cmd.positional[1]?.trim();   // backtick literal keeps its case
+  if (!trait || !label) return `((OOC-Storyteller: specialty needs a trait and a label, e.g. [[specialty melee \`Swords\`]].))`;
+  char.specialties ??= {};
+  const list = (char.specialties[trait] ??= []);
+  if (list.some(l => StringUtil.normalize(l) === StringUtil.normalize(label))) {
+    return `((OOC-Storyteller: ${disp(char.name)} already has specialty ${label} (${trait}).))`;
+  }
+  list.push(label);
+  await CharacterStore.save(char);
+  return `((OOC-Storyteller: ${disp(char.name)} gains specialty ${label} (${trait}). Apply it with specialty=${trait} on a roll.))`;
+}
+
+async function cmdForgetSpecialty(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  const label = cmd.positional[1]?.trim();
+  const list = char.specialties?.[trait];
+  if (!trait || !list?.length) return `((OOC-Storyteller: No specialties under "${trait}". [[specialties]] lists them.))`;
+  let removed: string;
+  if (label) {
+    const i = list.findIndex(l => StringUtil.normalize(l) === StringUtil.normalize(label));
+    if (i < 0) return `((OOC-Storyteller: No specialty "${label}" under ${trait}.))`;
+    removed = list.splice(i, 1)[0];
+  } else if (list.length === 1) {
+    removed = list.splice(0, 1)[0];
+  } else {
+    return `((OOC-Storyteller: ${trait} has several specialties (${list.join(", ")}) - name the one to forget.))`;
+  }
+  if (!list.length) delete char.specialties![trait];
+  await CharacterStore.save(char);
+  return `((OOC-Storyteller: ${disp(char.name)} forgets specialty ${removed} (${trait}).))`;
+}
+
+async function cmdSpecialties(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return `((OOC-Storyteller: No active character. Select one with [[play name="..."]].))`;
+  const entries = Object.entries(char.specialties ?? {}).filter(([, l]) => l.length);
+  if (!entries.length) return `((OOC-Storyteller: ${disp(char.name)} has no specialties. [[specialty <trait> \`<Label>\`]] adds one.))`;
+  const items = entries.map(([t, labels]) => `${t}: ${labels.join(", ")}`);
+  return `((OOC-Storyteller: Specialties - ${items.join("; ")}. One applies per roll via specialty=.))`;
 }
 
 // --- AFFLICTIONS --------------------------------------------------------------
@@ -1543,7 +1809,7 @@ async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
     // The shrug-off: pay to end it. Only someone with a sheet can spend.
     const char = await CharacterStore.load(subject.name!);
     if (!char) return `((OOC-Storyteller: ${disp(subject.name!)} has no sheet to spend from.))`;
-    const spend = await applySpend(char, cmd, ctx, []);
+    const spend = await applySpend(char, cmd, ctx, [], []);
     if (spend.refuse) return `((OOC-Storyteller: ${disp(char.name)} can't: ${spend.refuse}.))`;
     spendNote = spend.note ? ` (${spend.note})` : "";
   }
@@ -1732,6 +1998,7 @@ const ROLL_KNOBS: ParamSpec[] = [
   { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
   { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
   { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Resource to spend on the roll" },
+  { key: "specialty", kind: "named", hint: "<trait|label>", desc: "Apply ONE specialty (+1 die; pool must use its trait)" },
 ];
 
 CommandRouter.register("help", cmdHelp, {
@@ -1965,7 +2232,39 @@ CommandRouter.register("forget-constraint", cmdForgetConstraint, {
   summary: "remove a constraint group",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
-CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts" });
+CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts (incl. merit-instance caps)" });
+CommandRouter.register("take-merit", cmdTakeMerit, {
+  summary: "take a merit/flaw; parameterized defs take name::param instances",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
+    { key: "points", kind: "positional", hint: "[points]" },
+    { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive unmet prerequisites" },
+  ],
+});
+CommandRouter.register("drop-merit", cmdDropMerit, {
+  summary: "drop an owned merit/flaw instance",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
+});
+CommandRouter.register("merits", cmdMerits, {
+  summary: "list owned merits/flaws, enhancement totals and advisory issues",
+});
+CommandRouter.register("specialty", cmdSpecialty, {
+  summary: "add a specialty to a trait (labels keep their case)",
+  params: [
+    { key: "trait", kind: "positional", required: true, hint: "<trait>" },
+    { key: "label", kind: "positional", required: true, type: "literal", hint: "`<Label>`" },
+  ],
+});
+CommandRouter.register("forget-specialty", cmdForgetSpecialty, {
+  summary: "remove a specialty (label needed only when a trait has several)",
+  params: [
+    { key: "trait", kind: "positional", required: true, hint: "<trait>" },
+    { key: "label", kind: "positional", type: "literal", hint: "[`<Label>`]" },
+  ],
+});
+CommandRouter.register("specialties", cmdSpecialties, {
+  summary: "list the current character's specialties",
+});
 CommandRouter.register("define-affliction", cmdDefineAffliction, {
   summary: "define/replace an affliction (overlay; may shadow a built-in)",
   params: [

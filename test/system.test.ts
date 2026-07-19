@@ -3134,6 +3134,132 @@ describe("affliction windows: picker modal, win-affliction, win-afflict", () => 
 });
 
 // =============================================================================
+// ROLL WINDOW - [[win-roll]] (build, roll, save) + the SavedRoll.table sidecar
+// =============================================================================
+describe("roll window: win-roll + the table sidecar", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  const texts = (): string[] => {
+    const out: string[] = [];
+    const walk = (parts: Array<Record<string, unknown>>): void => {
+      for (const p of parts ?? []) {
+        if (typeof p["text"] === "string") out.push(p["text"] as string);
+        if (Array.isArray(p["content"])) walk(p["content"] as Array<Record<string, unknown>>);
+      }
+    };
+    for (const w of __uiWindows()) walk(w.options.content as unknown as Array<Record<string, unknown>>);
+    return out;
+  };
+  const set = (k: string, v: string) => api.v1.tempStorage.set(`win:roll:${k}`, v);
+
+  test("name-roll bakes a table sidecar; @name reads it; table= on invocation overrides; @pools refuse to save", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const saved = await CommandRouter.route("name-roll bite strength+brawl 6 table=degrees");
+    expect(saved).toContain("table=degrees");
+    expect(await CommandRouter.route("list-rolls")).toContain("table=degrees");
+    const hit = await CommandRouter.route("roll @bite", { rng: seqRng([6, 6]) });
+    expect(hit).toContain("degrees:");                                               // the sidecar read the outcome
+    const overridden = await CommandRouter.route("roll @bite table=nope", { rng: seqRng([6, 6]) });
+    expect(overridden).toContain(`unknown table "nope"`);                            // command override wins
+    expect(overridden).not.toContain("degrees:");
+    expect(await CommandRouter.route("name-roll chained @bite")).toContain("not a saved @name");
+  });
+
+  test("win-roll opens; Roll refuses without a pool, then routes [[roll]] for the current character", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("win-roll");
+    expect(__uiWindows().length).toBe(1);
+    expect(__uiWindows()[0].options.title).toBe("Build a roll");
+    expect(await __uiClickButton("Roll")).toBe(true);
+    expect(texts().some(t => t === "Needs a pool.")).toBe(true);
+    await set("pool", "dexterity+melee");
+    await set("difficulty", "6");
+    expect(await __uiClickButton("Roll")).toBe(true);
+    expect(texts().some(t => t.includes("Kvar") && t.includes("vs diff 6"))).toBe(true);
+  });
+
+  test("a filled For field routes [[roll-for]] without switching characters", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Kvar"');
+    await CommandRouter.route("win-roll");
+    await set("for", "erik");
+    await set("pool", "strength+brawl");
+    expect(await __uiClickButton("Roll")).toBe(true);
+    expect(texts().some(t => t.includes("Erik") && t.includes("vs diff"))).toBe(true);
+    expect((await CommandRouter.route("characters"))).toContain("Kvar (current");    // still Kvar's seat
+  });
+
+  test("Save refuses without a name, then stores pool + knobs + table sidecar via [[name-roll]]", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("win-roll");
+    await set("pool", "dexterity+melee");
+    expect(await __uiClickButton("Save")).toBe(true);
+    expect(texts().some(t => t === "Needs a Save-as name to save.")).toBe(true);
+    await set("save-as", "strike");
+    await set("difficulty", "7");
+    await set("table", "degrees");
+    expect(await __uiClickButton("Save")).toBe(true);
+    const saved = (await NamedRollStore.get("strike"))!;
+    expect(saved.pool).toBe("dexterity+melee");
+    expect(saved.difficulty).toBe(7);
+    expect(saved.table).toBe("degrees");
+    const invoked = await CommandRouter.route("roll @strike", { rng: seqRng([7, 7]) });
+    expect(invoked).toContain("vs diff 7");
+    expect(invoked).toContain("degrees:");
+  });
+
+  test("the pool picker offers @saved rolls; picking one writes the field", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("name-roll dodge dexterity+dodge 6");
+    await CommandRouter.route("win-roll");
+    expect(await __uiClickButton("Choose pool…")).toBe(true);
+    expect(await __uiClickButton("@dodge")).toBe(true);
+    expect(await api.v1.tempStorage.get("win:roll:pool")).toBe("@dodge");
+  });
+
+  test("the specialty picker follows the For field's character", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Kvar"');
+    await CommandRouter.route("specialty melee `Swords`");
+    await CommandRouter.route('play name="Erik"');
+    await CommandRouter.route("specialty brawl `Grappling`");
+    await CommandRouter.route('play name="Kvar"');
+    await CommandRouter.route("win-roll");
+    expect(await __uiClickButton("Choose specialty…")).toBe(true);
+    expect(texts().some(t => t.includes("Swords (melee)"))).toBe(true);              // current character's
+    expect(await __uiClickButton("Cancel")).toBe(true);
+    await set("for", "erik");
+    expect(await __uiClickButton("Choose specialty…")).toBe(true);
+    const labels = texts();
+    expect(labels.some(t => t.includes("Grappling (brawl)"))).toBe(true);            // For's character
+    expect(labels.some(t => t.includes("Swords (melee)"))).toBe(false);
+  });
+
+  test("the table picker lists tables and @aliases", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("table-alias @deg degrees");
+    await CommandRouter.route("win-roll");
+    expect(await __uiClickButton("Choose table…")).toBe(true);
+    const labels = texts();
+    expect(labels.some(t => t.includes("degrees"))).toBe(true);
+    expect(labels.some(t => t.includes("@deg"))).toBe(true);
+  });
+
+  test("window knobs ride into the roll: spend and specialty fields reach the pipeline", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("specialty melee `Swords`");
+    await CommandRouter.route("win-roll");
+    await set("pool", "dexterity+melee");
+    await set("difficulty", "6");
+    await set("specialty", "swords");
+    expect(await __uiClickButton("Roll")).toBe(true);
+    expect(texts().some(t => t.includes("specialty: Swords (+1 die)"))).toBe(true);
+  });
+});
+
+// =============================================================================
 // OWNED POWERS - parameterized merits, passive effects, specialties
 // =============================================================================
 describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {

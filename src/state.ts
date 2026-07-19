@@ -677,10 +677,13 @@ export function enhancementsFor(char: PlayableCharacter): Record<string, number>
 export const NAMED_ROLLS_CATEGORY = "wod:named-rolls";
 const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
 
-// A saved roll is a RollSpec plus an optional `spend` sidecar (the resource/role
-// token to pay when the roll is invoked). `spend` stays OUT of the pure RollSpec -
-// it's a game-layer concern the roll pipeline never sees.
-export type SavedRoll = RollSpec & { spend?: string; specialty?: string };
+// A saved roll is a RollSpec plus optional game-layer sidecars: `spend` (the
+// resource/role token to pay), `specialty` (applied to the roll), and `table`
+// (read against the outcome) - all applied when the roll is invoked, all
+// overridable by the invoking command's own arguments. Sidecars stay OUT of
+// the pure RollSpec - the roll pipeline never sees them - and are stored raw
+// (resolved at invoke time, like every command argument).
+export type SavedRoll = RollSpec & { spend?: string; specialty?: string; table?: string };
 
 export class NamedRollStore {
   private static _text(map: Record<string, SavedRoll>): string {
@@ -688,7 +691,8 @@ export class NamedRollStore {
       "Saved rolls for this chronicle: a JSON object { name: rollspec } below the",
       "marker. Invoke one with [[roll @name]]; edit this map freely by hand.",
       "Each spec: pool, difficulty (or difficultyExpr), difficultyMod, requires,",
-      "diceMod, tags[], and an optional spend (paid automatically on [[roll @name]]).",
+      "diceMod, tags[], and optional sidecars applied on [[roll @name]]: spend",
+      "(paid automatically), specialty (its die), table (reads the outcome).",
       SRD_HEADER_MARKER,
       JSON.stringify(map, null, 2),
     ].join("\n");

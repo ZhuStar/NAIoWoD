@@ -629,11 +629,10 @@ async function resolveTableRef(raw: string): Promise<{ key?: string; error?: str
   return { key: t };
 }
 
-// Read a table=<key|@alias> arg against an outcome. The roll itself never
-// interprets its successes - the table does (or the reading is an unknown-
-// table note).
-async function tableNote(cmd: ParsedCommand, outcome: RollOutcomeKind, successes: number): Promise<string> {
-  const raw = cmd.named["table"];
+// Read a table ref (table=<key|@alias>, or a saved roll's table sidecar)
+// against an outcome. The roll itself never interprets its successes - the
+// table does (or the reading is an unknown-table note).
+async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, successes: number): Promise<string> {
   if (!raw) return "";
   const ref = await resolveTableRef(raw);
   if (ref.error) return ref.error;
@@ -648,6 +647,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   let spec: RollSpec;
   let savedSpend: string | undefined;
   let savedSpecialty: string | undefined;
+  let savedTable: string | undefined;
   if (args.pool.startsWith("@")) {
     // Saved roll: load the base spec, then apply the supplied overrides (pool is
     // never overridden, so passing `args` straight through to overrideSpec is safe).
@@ -656,6 +656,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     if (!base) return `((OOC-Storyteller: No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].))`;
     savedSpend = base.spend;         // auto-paid unless the command overrides spend=
     savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
+    savedTable = base.table;         // read against the outcome unless table= overrides
     spec = overrideSpec(base, args);
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
@@ -687,7 +688,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     ...passive.notes,
     specialty.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
-    await tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
+    await tableNote(cmd.named["table"] ?? savedTable, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
 }
@@ -708,21 +709,35 @@ async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
   return rollAndReport(char, cmd, ctx, 1);
 }
 
+// The sidecars a saved roll carries beyond its spec, as "k=v" display pairs.
+function describeSidecars(saved: SavedRoll): string {
+  return [
+    saved.spend ? `spend=${saved.spend}` : "",
+    saved.specialty ? `specialty=${saved.specialty}` : "",
+    saved.table ? `table=${saved.table}` : "",
+  ].filter(Boolean).join(", ");
+}
+
 // Save a reusable roll: name is positional[0], then the roll grammar at offset 1.
 async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) return `((OOC-Storyteller: name-roll needs a name, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
   const args = extractRollArgs(cmd, 1);
   if (!args.pool) return `((OOC-Storyteller: name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
+  // A @reference can't be saved: invocation doesn't chain saved rolls, so the
+  // stored pool must be a real expression (same guard as extended-roll).
+  if (args.pool.startsWith("@")) return `((OOC-Storyteller: name-roll takes a pool expression (e.g. dexterity+dodge), not a saved @name.))`;
   const spec = makeRollSpec({ ...args, pool: args.pool });
   const spend = cmd.named["spend"]?.trim();
   const specialty = cmd.named["specialty"]?.trim();
+  const table = cmd.named["table"]?.trim();
   const saved: SavedRoll = { ...spec };
   if (spend) saved.spend = spend;
   if (specialty) saved.specialty = specialty;
+  if (table) saved.table = table;
   await NamedRollStore.save(name, saved);
   const key = StringUtil.normalize(name);
-  const sidecars = [spend ? `spend=${spend}` : "", specialty ? `specialty=${specialty}` : ""].filter(Boolean).join(", ");
+  const sidecars = describeSidecars(saved);
   return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}. Use it with [[roll @${key}]].))`;
 }
 
@@ -730,7 +745,10 @@ async function cmdListRolls(): Promise<string> {
   const map = await NamedRollStore.all();
   const names = Object.keys(map);
   if (!names.length) return `((OOC-Storyteller: No saved rolls yet. Save one with [[name-roll <name> <pool> ...]].))`;
-  const items = names.map(n => `${n} (${describeSpec(map[n])}${map[n].spend ? `, spend=${map[n].spend}` : ""})`).join("; ");
+  const items = names.map(n => {
+    const sidecars = describeSidecars(map[n]);
+    return `${n} (${describeSpec(map[n])}${sidecars ? `, ${sidecars}` : ""})`;
+  }).join("; ");
   return `((OOC-Storyteller: Saved rolls: ${items}.))`;
 }
 
@@ -1042,7 +1060,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
 
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
-  const notes = [outcome.note, await tableNote(cmd, t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  const notes = [outcome.note, await tableNote(cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}))`;
 }
 
@@ -2040,10 +2058,11 @@ CommandRouter.register("roll-for", cmdRollFor, {
     { key: "table", kind: "named", desc: "Success table to read the outcome" }],
 });
 CommandRouter.register("name-roll", cmdNameRoll, {
-  summary: "save a roll under a name; @name invokes it and its spend= is baked in",
+  summary: "save a roll under a name; @name invokes it with its spend/specialty/table baked in",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>" },
-    { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS],
+    { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS,
+    { key: "table", kind: "named", desc: "Success table read when the roll is invoked" }],
 });
 CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
 CommandRouter.register("forget-roll", cmdForgetRoll, {

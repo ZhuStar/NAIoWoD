@@ -18,7 +18,11 @@
 // =============================================================================
 import { api, UIPart, UiPartHelpers } from "./host";
 import { CommandRouter, CommandSpec, ParamSpec, composeCommand } from "./command";
-import { AfflictionRegistry } from "./state";
+import { SuccessTableRegistry } from "./rolls";
+import {
+  AfflictionRegistry, CharacterStore, NamedRollStore, CharacterResources,
+  TableAliases, PlayableCharacter,
+} from "./state";
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
@@ -253,4 +257,119 @@ CommandRouter.register("win-affliction", cmdWinAffliction, {
 });
 CommandRouter.register("win-afflict", cmdWinAfflict, {
   summary: "open a window to apply an affliction (its binding slots appear on pick)",
+});
+
+// --- THE ROLL WINDOW ---------------------------------------------------------
+// [[win-roll]] - build a roll from every knob the engine has, fire it (for the
+// current character or any named one), and optionally save it as a named roll.
+// One window multiplexes THREE verbs: Roll composes [[roll]] (For blank) or
+// [[roll-for]] (For filled); Save composes [[name-roll]] (For ignored - saved
+// rolls are chronicle-global). The knob fields are WALKED from [[roll]]'s own
+// CommandSpec so the window duplicates no grammar; `diff-mod` is skipped (with
+// difficulty blank, a lone modifier would slide into the difficulty positional
+// slot - and a form user types the final difficulty anyway).
+const RKEY = (k: string): string => `win:roll:${k}`;
+
+// The character the option lists describe: the For field's name when filled,
+// else the current character. An unknown name just yields empty picker lists -
+// the options are a convenience, never a gate (typing stays live).
+async function rollWindowChar(): Promise<PlayableCharacter | undefined> {
+  const forName = String((await api.v1.tempStorage.get(RKEY("for"))) ?? "").trim();
+  return forName ? CharacterStore.load(forName) : CharacterStore.getCurrent();
+}
+
+const characterOptions = async (): Promise<PickerOption[]> =>
+  (await CharacterStore.listNames()).map(n => ({ value: n }));
+const savedRollOptions = async (): Promise<PickerOption[]> =>
+  (await NamedRollStore.names()).map(n => ({ value: `@${n}` }));
+const spendOptions = async (): Promise<PickerOption[]> => {
+  const char = await rollWindowChar();
+  return char ? CharacterResources.defsFor(char).map(d => ({ value: d.name })) : [];
+};
+const specialtyOptions = async (): Promise<PickerOption[]> => {
+  const char = await rollWindowChar();
+  return Object.entries(char?.specialties ?? {}).flatMap(([trait, labels]) =>
+    labels.map(l => ({ value: l, label: `${l} (${trait})` })));
+};
+const tableOptions = async (): Promise<PickerOption[]> => [
+  ...SuccessTableRegistry.all().map(t => ({ value: t.name })),
+  ...Object.keys(await TableAliases.all()).map(a => ({ value: `@${a}` })),
+];
+
+export async function openRollWindow(): Promise<void> {
+  const part = api.v1.ui.part;
+  const temp = api.v1.tempStorage;
+  const field = async (k: string): Promise<string> => String((await temp.get(RKEY(k))) ?? "").trim();
+  const pickers: Record<string, () => Promise<PickerOption[]>> = {
+    spend: spendOptions, specialty: specialtyOptions, table: tableOptions,
+  };
+  const handle = await api.v1.ui.window.open({ title: "Build a roll", content: [], defaultWidth: 480, defaultHeight: 640 });
+
+  // Compose+route `verb`, reading each of ITS spec params from the form (the
+  // field keys ARE the param keys); `extra` pre-binds cross-verb params.
+  const submit = async (verb: string, extra: Record<string, string>): Promise<void> => {
+    const spec = CommandRouter.specFor(verb)!;
+    const values: Record<string, string> = {};
+    for (const p of spec.params ?? []) values[p.key] = extra[p.key] ?? (await field(p.key));
+    const reply = await CommandRouter.route(composeCommand(verb, values, spec));
+    await render(reply);
+  };
+
+  const render = async (result?: string): Promise<void> => {
+    const knobs = (CommandRouter.specFor("roll")?.params ?? []).filter(p => p.key !== "pool" && p.key !== "diff-mod");
+    const content: UIPart[] = [
+      part.text({ text: "**Build a roll** - Roll fires it; Save stores it as a named roll.", markdown: true }),
+      pickerField(part, {
+        key: "for", label: "For (blank = the current character)", storageKey: RKEY("for"),
+        options: characterOptions, rerender: () => render(), placeholder: "name",
+      }),
+      pickerField(part, {
+        key: "pool", label: "Pool", storageKey: RKEY("pool"),
+        options: savedRollOptions, rerender: () => render(), placeholder: "e.g. dexterity+melee, or @saved",
+      }),
+    ];
+    for (const p of knobs) {
+      if (p.type === "int") {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.numberInput({ storageKey: RKEY(p.key) }));
+      } else if (pickers[p.key]) {
+        content.push(pickerField(part, {
+          key: p.key, label: p.desc ?? p.key, storageKey: RKEY(p.key),
+          options: pickers[p.key], rerender: () => render(), placeholder: p.example ?? p.hint,
+        }));
+      } else {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.textInput({ storageKey: RKEY(p.key), placeholder: p.example ?? p.hint }));
+      }
+    }
+    content.push(part.text({ text: "Save as (optional - Save stores the roll under this name)" }));
+    content.push(part.textInput({ storageKey: RKEY("save-as"), placeholder: "e.g. strike" }));
+    content.push(part.row({ content: [
+      part.button({ text: "Roll", callback: async () => {
+        const pool = await field("pool");
+        if (!pool) { await render("Needs a pool."); return; }
+        const forName = await field("for");
+        await submit(forName ? "roll-for" : "roll", forName ? { character: forName } : {});
+      } }),
+      part.button({ text: "Save", callback: async () => {
+        const name = await field("save-as");
+        if (!name) { await render("Needs a Save-as name to save."); return; }
+        if (!(await field("pool"))) { await render("Needs a pool."); return; }
+        await submit("name-roll", { name });
+      } }),
+      part.button({ text: "Close", callback: () => handle.close() }),
+    ] }));
+    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    await handle.update({ content });
+  };
+  await render();
+}
+
+async function cmdWinRoll(): Promise<string> {
+  await openRollWindow();
+  return `((OOC-Storyteller: Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).))`;
+}
+
+CommandRouter.register("win-roll", cmdWinRoll, {
+  summary: "open a window to build, roll, and save rolls",
 });

@@ -412,15 +412,20 @@ the `wod:named-rolls` lorebook entry.
 ```
 
 - **`name-roll <name> <pool> …`** saves a roll (same grammar as `roll`), and can
-  bake in a **`spend=`** (e.g. `[[name-roll gutcheck stamina+courage 8 spend=willpower]]`).
+  bake in sidecars: **`spend=`** (e.g. `[[name-roll gutcheck stamina+courage 8
+  spend=willpower]]`), **`specialty=`**, and **`table=`** (the success table
+  read against the outcome whenever the roll is invoked). The pool must be a
+  real expression — a `@name` reference can't be saved.
 - **`@name`** in any `roll` / `roll-for` loads that saved spec; supplied args
   **override** its difficulty, modifier, `requires`, `dice-modifier` or `tags`
-  for that one use (the pool itself is fixed). A saved `spend=` is **paid
-  automatically** unless the command supplies its own `spend=`. This
-  override-merge is the same primitive extended rolls reuse for helpers and
-  continuations.
-- **`list-rolls`** shows the library (with any saved spend); **`forget-roll
+  for that one use (the pool itself is fixed). Saved sidecars apply
+  automatically — the spend is **paid**, the specialty adds its die, the table
+  reads the outcome — unless the command supplies its own `spend=` /
+  `specialty=` / `table=`. This override-merge is the same primitive extended
+  rolls reuse for helpers and continuations.
+- **`list-rolls`** shows the library (with any saved sidecars); **`forget-roll
   <name>`** removes one (or just edit the JSON map in the lorebook directly).
+- **`[[win-roll]]`** opens the roll **builder window** — see *Windows* below.
 
 ### Extended rolls
 
@@ -715,6 +720,15 @@ windows use it:
   and its def's **binding slots appear as fields** (the def drives the form,
   not a spec); Afflict composes and routes the real `[[afflict]]`, so mirrors
   and validation behave exactly as if you'd typed it.
+- **`[[win-roll]]`** — the roll **builder**: one window that multiplexes three
+  verbs. Fill the pool (its picker offers `@saved` rolls) and any knobs — the
+  knob fields are *walked from `roll`'s own spec*, with pickers for `spend`
+  (the character's resources), `specialty` (their specialties), and `table`
+  (tables + `@aliases`). **Roll** fires it — as `[[roll]]`, or `[[roll-for]]`
+  when the **For** field names someone else (its picker lists characters; the
+  resource/specialty pickers follow it). **Save** stores it under the *Save
+  as* name via `[[name-roll]]`, sidecars included (For is ignored — saved
+  rolls are chronicle-global).
 
 The host UI contract + off-host mock (`src/host.ts`, `src/window.ts`) are the
 shared foundation; the full UI reference lives in `docs/ui-*.md`.

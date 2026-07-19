@@ -4115,10 +4115,13 @@ function enhancementsFor(char: PlayableCharacter): Record<string, number> {
 const NAMED_ROLLS_CATEGORY = "wod:named-rolls";
 const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
 
-// A saved roll is a RollSpec plus an optional `spend` sidecar (the resource/role
-// token to pay when the roll is invoked). `spend` stays OUT of the pure RollSpec -
-// it's a game-layer concern the roll pipeline never sees.
-type SavedRoll = RollSpec & { spend?: string; specialty?: string };
+// A saved roll is a RollSpec plus optional game-layer sidecars: `spend` (the
+// resource/role token to pay), `specialty` (applied to the roll), and `table`
+// (read against the outcome) - all applied when the roll is invoked, all
+// overridable by the invoking command's own arguments. Sidecars stay OUT of
+// the pure RollSpec - the roll pipeline never sees them - and are stored raw
+// (resolved at invoke time, like every command argument).
+type SavedRoll = RollSpec & { spend?: string; specialty?: string; table?: string };
 
 class NamedRollStore {
   private static _text(map: Record<string, SavedRoll>): string {
@@ -4126,7 +4129,8 @@ class NamedRollStore {
       "Saved rolls for this chronicle: a JSON object { name: rollspec } below the",
       "marker. Invoke one with [[roll @name]]; edit this map freely by hand.",
       "Each spec: pool, difficulty (or difficultyExpr), difficultyMod, requires,",
-      "diceMod, tags[], and an optional spend (paid automatically on [[roll @name]]).",
+      "diceMod, tags[], and optional sidecars applied on [[roll @name]]: spend",
+      "(paid automatically), specialty (its die), table (reads the outcome).",
       SRD_HEADER_MARKER,
       JSON.stringify(map, null, 2),
     ].join("\n");
@@ -5447,11 +5451,10 @@ async function resolveTableRef(raw: string): Promise<{ key?: string; error?: str
   return { key: t };
 }
 
-// Read a table=<key|@alias> arg against an outcome. The roll itself never
-// interprets its successes - the table does (or the reading is an unknown-
-// table note).
-async function tableNote(cmd: ParsedCommand, outcome: RollOutcomeKind, successes: number): Promise<string> {
-  const raw = cmd.named["table"];
+// Read a table ref (table=<key|@alias>, or a saved roll's table sidecar)
+// against an outcome. The roll itself never interprets its successes - the
+// table does (or the reading is an unknown-table note).
+async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, successes: number): Promise<string> {
   if (!raw) return "";
   const ref = await resolveTableRef(raw);
   if (ref.error) return ref.error;
@@ -5466,6 +5469,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   let spec: RollSpec;
   let savedSpend: string | undefined;
   let savedSpecialty: string | undefined;
+  let savedTable: string | undefined;
   if (args.pool.startsWith("@")) {
     // Saved roll: load the base spec, then apply the supplied overrides (pool is
     // never overridden, so passing `args` straight through to overrideSpec is safe).
@@ -5474,6 +5478,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     if (!base) return `((OOC-Storyteller: No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].))`;
     savedSpend = base.spend;         // auto-paid unless the command overrides spend=
     savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
+    savedTable = base.table;         // read against the outcome unless table= overrides
     spec = overrideSpec(base, args);
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
@@ -5505,7 +5510,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     ...passive.notes,
     specialty.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
-    await tableNote(cmd, exec.outcome, exec.result?.net ?? 0),
+    await tableNote(cmd.named["table"] ?? savedTable, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}))`;
 }
@@ -5526,21 +5531,35 @@ async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
   return rollAndReport(char, cmd, ctx, 1);
 }
 
+// The sidecars a saved roll carries beyond its spec, as "k=v" display pairs.
+function describeSidecars(saved: SavedRoll): string {
+  return [
+    saved.spend ? `spend=${saved.spend}` : "",
+    saved.specialty ? `specialty=${saved.specialty}` : "",
+    saved.table ? `table=${saved.table}` : "",
+  ].filter(Boolean).join(", ");
+}
+
 // Save a reusable roll: name is positional[0], then the roll grammar at offset 1.
 async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) return `((OOC-Storyteller: name-roll needs a name, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
   const args = extractRollArgs(cmd, 1);
   if (!args.pool) return `((OOC-Storyteller: name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].))`;
+  // A @reference can't be saved: invocation doesn't chain saved rolls, so the
+  // stored pool must be a real expression (same guard as extended-roll).
+  if (args.pool.startsWith("@")) return `((OOC-Storyteller: name-roll takes a pool expression (e.g. dexterity+dodge), not a saved @name.))`;
   const spec = makeRollSpec({ ...args, pool: args.pool });
   const spend = cmd.named["spend"]?.trim();
   const specialty = cmd.named["specialty"]?.trim();
+  const table = cmd.named["table"]?.trim();
   const saved: SavedRoll = { ...spec };
   if (spend) saved.spend = spend;
   if (specialty) saved.specialty = specialty;
+  if (table) saved.table = table;
   await NamedRollStore.save(name, saved);
   const key = StringUtil.normalize(name);
-  const sidecars = [spend ? `spend=${spend}` : "", specialty ? `specialty=${specialty}` : ""].filter(Boolean).join(", ");
+  const sidecars = describeSidecars(saved);
   return `((OOC-Storyteller: Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}. Use it with [[roll @${key}]].))`;
 }
 
@@ -5548,7 +5567,10 @@ async function cmdListRolls(): Promise<string> {
   const map = await NamedRollStore.all();
   const names = Object.keys(map);
   if (!names.length) return `((OOC-Storyteller: No saved rolls yet. Save one with [[name-roll <name> <pool> ...]].))`;
-  const items = names.map(n => `${n} (${describeSpec(map[n])}${map[n].spend ? `, spend=${map[n].spend}` : ""})`).join("; ");
+  const items = names.map(n => {
+    const sidecars = describeSidecars(map[n]);
+    return `${n} (${describeSpec(map[n])}${sidecars ? `, ${sidecars}` : ""})`;
+  }).join("; ");
   return `((OOC-Storyteller: Saved rolls: ${items}.))`;
 }
 
@@ -5860,7 +5882,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
 
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
-  const notes = [outcome.note, await tableNote(cmd, t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  const notes = [outcome.note, await tableNote(cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
   return `((OOC-Storyteller: ${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}))`;
 }
 
@@ -6858,10 +6880,11 @@ CommandRouter.register("roll-for", cmdRollFor, {
     { key: "table", kind: "named", desc: "Success table to read the outcome" }],
 });
 CommandRouter.register("name-roll", cmdNameRoll, {
-  summary: "save a roll under a name; @name invokes it and its spend= is baked in",
+  summary: "save a roll under a name; @name invokes it with its spend/specialty/table baked in",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>" },
-    { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS],
+    { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS,
+    { key: "table", kind: "named", desc: "Success table read when the roll is invoked" }],
 });
 CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
 CommandRouter.register("forget-roll", cmdForgetRoll, {
@@ -7439,6 +7462,121 @@ CommandRouter.register("win-affliction", cmdWinAffliction, {
 });
 CommandRouter.register("win-afflict", cmdWinAfflict, {
   summary: "open a window to apply an affliction (its binding slots appear on pick)",
+});
+
+// --- THE ROLL WINDOW ---------------------------------------------------------
+// [[win-roll]] - build a roll from every knob the engine has, fire it (for the
+// current character or any named one), and optionally save it as a named roll.
+// One window multiplexes THREE verbs: Roll composes [[roll]] (For blank) or
+// [[roll-for]] (For filled); Save composes [[name-roll]] (For ignored - saved
+// rolls are chronicle-global). The knob fields are WALKED from [[roll]]'s own
+// CommandSpec so the window duplicates no grammar; `diff-mod` is skipped (with
+// difficulty blank, a lone modifier would slide into the difficulty positional
+// slot - and a form user types the final difficulty anyway).
+const RKEY = (k: string): string => `win:roll:${k}`;
+
+// The character the option lists describe: the For field's name when filled,
+// else the current character. An unknown name just yields empty picker lists -
+// the options are a convenience, never a gate (typing stays live).
+async function rollWindowChar(): Promise<PlayableCharacter | undefined> {
+  const forName = String((await api.v1.tempStorage.get(RKEY("for"))) ?? "").trim();
+  return forName ? CharacterStore.load(forName) : CharacterStore.getCurrent();
+}
+
+const characterOptions = async (): Promise<PickerOption[]> =>
+  (await CharacterStore.listNames()).map(n => ({ value: n }));
+const savedRollOptions = async (): Promise<PickerOption[]> =>
+  (await NamedRollStore.names()).map(n => ({ value: `@${n}` }));
+const spendOptions = async (): Promise<PickerOption[]> => {
+  const char = await rollWindowChar();
+  return char ? CharacterResources.defsFor(char).map(d => ({ value: d.name })) : [];
+};
+const specialtyOptions = async (): Promise<PickerOption[]> => {
+  const char = await rollWindowChar();
+  return Object.entries(char?.specialties ?? {}).flatMap(([trait, labels]) =>
+    labels.map(l => ({ value: l, label: `${l} (${trait})` })));
+};
+const tableOptions = async (): Promise<PickerOption[]> => [
+  ...SuccessTableRegistry.all().map(t => ({ value: t.name })),
+  ...Object.keys(await TableAliases.all()).map(a => ({ value: `@${a}` })),
+];
+
+async function openRollWindow(): Promise<void> {
+  const part = api.v1.ui.part;
+  const temp = api.v1.tempStorage;
+  const field = async (k: string): Promise<string> => String((await temp.get(RKEY(k))) ?? "").trim();
+  const pickers: Record<string, () => Promise<PickerOption[]>> = {
+    spend: spendOptions, specialty: specialtyOptions, table: tableOptions,
+  };
+  const handle = await api.v1.ui.window.open({ title: "Build a roll", content: [], defaultWidth: 480, defaultHeight: 640 });
+
+  // Compose+route `verb`, reading each of ITS spec params from the form (the
+  // field keys ARE the param keys); `extra` pre-binds cross-verb params.
+  const submit = async (verb: string, extra: Record<string, string>): Promise<void> => {
+    const spec = CommandRouter.specFor(verb)!;
+    const values: Record<string, string> = {};
+    for (const p of spec.params ?? []) values[p.key] = extra[p.key] ?? (await field(p.key));
+    const reply = await CommandRouter.route(composeCommand(verb, values, spec));
+    await render(reply);
+  };
+
+  const render = async (result?: string): Promise<void> => {
+    const knobs = (CommandRouter.specFor("roll")?.params ?? []).filter(p => p.key !== "pool" && p.key !== "diff-mod");
+    const content: UIPart[] = [
+      part.text({ text: "**Build a roll** - Roll fires it; Save stores it as a named roll.", markdown: true }),
+      pickerField(part, {
+        key: "for", label: "For (blank = the current character)", storageKey: RKEY("for"),
+        options: characterOptions, rerender: () => render(), placeholder: "name",
+      }),
+      pickerField(part, {
+        key: "pool", label: "Pool", storageKey: RKEY("pool"),
+        options: savedRollOptions, rerender: () => render(), placeholder: "e.g. dexterity+melee, or @saved",
+      }),
+    ];
+    for (const p of knobs) {
+      if (p.type === "int") {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.numberInput({ storageKey: RKEY(p.key) }));
+      } else if (pickers[p.key]) {
+        content.push(pickerField(part, {
+          key: p.key, label: p.desc ?? p.key, storageKey: RKEY(p.key),
+          options: pickers[p.key], rerender: () => render(), placeholder: p.example ?? p.hint,
+        }));
+      } else {
+        content.push(part.text({ text: p.desc ?? p.key }));
+        content.push(part.textInput({ storageKey: RKEY(p.key), placeholder: p.example ?? p.hint }));
+      }
+    }
+    content.push(part.text({ text: "Save as (optional - Save stores the roll under this name)" }));
+    content.push(part.textInput({ storageKey: RKEY("save-as"), placeholder: "e.g. strike" }));
+    content.push(part.row({ content: [
+      part.button({ text: "Roll", callback: async () => {
+        const pool = await field("pool");
+        if (!pool) { await render("Needs a pool."); return; }
+        const forName = await field("for");
+        await submit(forName ? "roll-for" : "roll", forName ? { character: forName } : {});
+      } }),
+      part.button({ text: "Save", callback: async () => {
+        const name = await field("save-as");
+        if (!name) { await render("Needs a Save-as name to save."); return; }
+        if (!(await field("pool"))) { await render("Needs a pool."); return; }
+        await submit("name-roll", { name });
+      } }),
+      part.button({ text: "Close", callback: () => handle.close() }),
+    ] }));
+    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    await handle.update({ content });
+  };
+  await render();
+}
+
+async function cmdWinRoll(): Promise<string> {
+  await openRollWindow();
+  return `((OOC-Storyteller: Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).))`;
+}
+
+CommandRouter.register("win-roll", cmdWinRoll, {
+  summary: "open a window to build, roll, and save rolls",
 });
 //#endregion src/window.ts
 

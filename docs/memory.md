@@ -7,9 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `8023701`** ("Owned powers:
-> parameterized merits + passive effects — Trait Affinity, Trait Enhancement,
-> Specialties").
+> **Last synced with the code as of commit `43c58b6`** ("win-roll: the
+> roll builder window + the SavedRoll.table sidecar").
 
 ---
 
@@ -491,7 +490,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1420) — the character model + every persistent store
+### src/state.ts (1424) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -531,11 +530,14 @@ and the future "ready character" path):
 
 **Named rolls**: `NamedRollStore` — ONE lorebook entry
 (`wod:named-rolls` / `wod:named-rolls:library`) holding a JSON map
-`{name: SavedRoll}` where **`SavedRoll = RollSpec & { spend?; specialty? }`** (the optional
-resource/role token, a game-layer sidecar kept OUT of the pure RollSpec); **read
-fresh every call** (no cache) so hand edits are always live;
-`all/get/names/save/remove`. A saved `spend` is auto-paid on `[[roll @name]]`
-unless the command supplies its own `spend=` (via `applySpend`'s `spendOverride`).
+`{name: SavedRoll}` where **`SavedRoll = RollSpec & { spend?; specialty?;
+table? }`** (game-layer sidecars kept OUT of the pure RollSpec, stored raw and
+resolved at invoke time); **read fresh every call** (no cache) so hand edits
+are always live; `all/get/names/save/remove`. On `[[roll @name]]` the sidecars
+apply automatically — spend auto-paid (via `applySpend`'s `spendOverride`),
+specialty applied, table read against the outcome — each unless the command
+supplies its own `spend=`/`specialty=`/`table=`. The saved pool must be a real
+expression (`name-roll` refuses `@` references, like extended-roll).
 
 **Extended rolls**: `ExtendedRollStore` — storage keys `xroll:<id>` + pointer
 `current-extended`; `resolve(id?)` = explicit id → current-if-open →
@@ -641,11 +643,13 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2368) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2387) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
-`tableNote` (now async) reads `table=` through it for rolls AND contests.
+`tableNote(raw, outcome, successes)` reads a table REF through it for rolls
+AND contests — the caller resolves the ref (`cmd.named["table"] ?? savedTable`
+in rollAndReport, so a SavedRoll's table sidecar applies unless overridden).
 `confirmModal(title, body, actions[])` — generic `api.v1.ui.modal.open`
 prompt (actions run + show their outcome in-modal; Cancel/Close dismiss) —
 game-flow confirmations are MODALS here, distinct from window.ts' spec-driven
@@ -754,10 +758,11 @@ verb's CommandSpec at the bottom of game.ts — the grammars below match it):
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
 `play [name="…"]` (no name → default) · `characters` (list; marks
 current/default) · `set-default name="…"` · `roll <pool|@name>
-[difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]`
-(difficulty may be a number OR a trait/calculation like `stamina+3`) ·
+[difficulty|expr] [diff-mod] requires= dice-modifier= tags= spend=res[:effect][!]
+table=` (difficulty may be a number OR a trait/calculation like `stamina+3`) ·
 `roll-for "Name" <pool|@name> …` (doesn't change selection) ·
-`name-roll <name> <pool> … [spend=…]` (bakes in a spend) · `list-rolls` ·
+`name-roll <name> <pool> … [spend=…] [specialty=…] [table=…]` (bakes in the
+sidecars; refuses a `@` pool) · `list-rolls` (shows sidecars) ·
 `forget-roll <name>` ·
 `extended-roll <pool> requires=<target> intervals=<max> [interval=] [label=]
 [on-botch=…] + roll knobs` (rolls interval 1; `requires` is repurposed as the
@@ -787,6 +792,10 @@ advisory when the target doesn't exist yet) · `forget-table-alias <@a>` ·
 `win-table` (window over define-table) ·
 `win-affliction` (define-affliction form; then/mirror pickers) ·
 `win-afflict` (pick an affliction → its binding slots appear → routes afflict) ·
+`win-roll` (the roll BUILDER: one window multiplexing roll / roll-for /
+name-roll — For picker chooses the verb, pool picker offers @saved, knob
+fields walked from roll's spec with spend/specialty/table pickers, Save as →
+name-roll) ·
 `define-constraint name=".." relation=exclusive|restricted|forbidden
 domain=background|merit|flaw|meritflaw|any members="a,b" [max=N] [scope=".."]
 [note=".."]` · `constraints` · `constraint <name>` · `forget-constraint <name>` ·
@@ -826,7 +835,8 @@ named `:effect`, roll-ops-only rule — standalone effects refuse with a
 `[[spend]]` pointer);
 `characterRollEnv(char)` = `{resolver (traits+boosts), penalty}` shared by rolls
 AND contests; `rollAndReport` folds the **wound penalty into extra.diceMod**
-(noted) and reads `table=` via `tableNote(cmd, outcome, successes)`.
+(noted) and reads `cmd.named["table"] ?? savedTable` via
+`tableNote(raw, outcome, successes)` (the SavedRoll table sidecar).
 `rollOverridesFromNamed` for continue-roll. Trait values come from state.ts'
 `resolveTraitFromRecord`.
 
@@ -840,9 +850,10 @@ zero resolver so only literals count; a deleted char degrades to ad-hoc.
 → botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
 `execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
-### src/window.ts (256) — api.v1.ui windows that EMIT commands, DERIVED from specs
-Imports host + **command** + **state** (registries feed domain windows and
-picker options; still NOT game — the split's dependency win).
+### src/window.ts (375) — api.v1.ui windows that EMIT commands, DERIVED from specs
+Imports host + **command** + **rolls** (SuccessTableRegistry for the table
+picker) + **state** (registries feed domain windows and picker options; still
+NOT game — the split's dependency win).
 **A window is an abstraction over the command layer, not a second path**, and
 since the architecture pass its form is **derived from the verb's
 CommandSpec**: `openCommandWindow(verb, {title?, blurb?, submitLabel?})` looks
@@ -871,6 +882,23 @@ as inputs (temp `win:afflict:bind:<slot>`; the picker's rerender reveals
 them); Afflict composes `[[afflict]]` via specFor("afflict") (openNamed
 carries the slots) and shows the handler's reply (refusals included)
 in-window.
+**`[[win-roll]]`** (`openRollWindow`) — the roll BUILDER, one window
+multiplexing THREE verbs (temp `win:roll:<key>`; field keys ARE the param
+keys): a **For** pickerField (`characterOptions` = CharacterStore.listNames;
+blank = current) chooses Roll's verb (`roll` vs `roll-for`); a **Pool**
+pickerField (`savedRollOptions` = @NamedRollStore.names); the knob fields are
+WALKED from `specFor("roll")` (skipping `pool` — custom row — and `diff-mod`:
+with difficulty blank a lone modifier would slide into the difficulty
+positional slot) with pickers on `spend` (`spendOptions` =
+CharacterResources.defsFor of `rollWindowChar()` — the For-else-current
+character, read at modal-open so options FOLLOW the For field), `specialty`
+(`specialtyOptions` = that character's specialties, "label (trait)" display),
+`table` (`tableOptions` = SuccessTableRegistry.all + @TableAliases); a
+**Save as** input; buttons **Roll** (refuses blank pool in-window) / **Save**
+(refuses blank Save-as name; composes `name-roll`, For ignored — saved rolls
+are chronicle-global) / Close; `submit(verb, extra)` walks the TARGET verb's
+spec params reading each from the form (`extra` pre-binds cross-verb params:
+`character`, `name`) → composeCommand → route → reply in the result box.
 
 ### src/index.ts / src/main.ts
 Re-export everything (incl. `./command`, `./state`, `./window`) + `init()`:
@@ -885,7 +913,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3279 + 20 lines, 304 tests, 81 describes)
+### test/ (3405 + 20 lines, 312 tests, 82 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1259,13 +1287,15 @@ Ordered roughly by unlock value:
     open vocabularies → text input. The **affliction windows are DONE**
     (`[[win-affliction]]` + `[[win-afflict]]` — the domain-driven pattern
     proven; the picker is `pickerField`, reusable via
-    `openCommandWindow({pickers})`). Remaining: the `[[win-roll]]` roll-builder window
-    (window not modal; **difficulty-as-expression DONE** in
-    `RollSpec.difficultyExpr`; still to do the **advisory**
-    `self:`/`ally:`/`target:`/`opposition:` prefixes - in the "Design notes"
-    section of `docs/ui-parts.md`); migrating the TEXT wizards
-    (`RESOURCES_WIZARD`) to render as windows; and a template-definer window
-    once the Choice primitive lands.
+    `openCommandWindow({pickers})`). The **`[[win-roll]]` roll builder is
+    DONE** (one window multiplexing roll/roll-for/name-roll; knob fields
+    walked from roll's spec; For-aware spend/specialty pickers; Save bakes
+    the spend/specialty/**table** sidecars — `SavedRoll.table` added with it;
+    **difficulty-as-expression DONE** in `RollSpec.difficultyExpr`).
+    Remaining: the **advisory** `self:`/`ally:`/`target:`/`opposition:`
+    prefixes - in the "Design notes" section of `docs/ui-parts.md`; migrating
+    the TEXT wizards (`RESOURCES_WIZARD`) to render as windows; and a
+    template-definer window once the Choice primitive lands.
 13. **Creation-budget wizard** (same engine).
 14. **Aliases + redefinable default character** — **DONE** (§7.18):
     `[[set-default]]` changes the default character; `@` aliases in three

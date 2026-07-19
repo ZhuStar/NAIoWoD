@@ -1135,25 +1135,41 @@ Ordered roughly by unlock value:
 7. **Sorcerer Paths** (static magic) + the "other powers": dynamic magic,
    blood sorcery, ritual magic, Arcana — all currently just words the effect
    grammar can already reference.
-8. **Merits/flaws → automatic roll modifiers + Trait Aptitude + Specialties**
-   — THE NEXT PASS (user decision, 2026-07-16; designs recorded):
-   - *Trait Aptitude* (Devil's Due arcanum — permanent difficulty modifier on
-     one trait): effect-grammar roll ops gain an optional **`trait` gate**
-     (the twin of the existing actionTag gate) plus `permanent: true`;
-     `characterRollEnv`'s resolver RECORDS which traits a pool actually used;
-     a character's owned merits/arcana with permanent trait-gated ops
-     auto-apply when the pool uses the trait. Pure data — delivers this
-     roadmap item with no new registry (Iron-Will-style cost reduction
-     already exists as effect data).
-   - *Specialties*: `specialties` record bucket (trait → list of specialty
-     strings, creator-editable); the V20/DA rule "each 10 counts as TWO
-     successes" as a **`doubleTens`** knob in `Dice.roll`/`RollSpec` beside
-     `nAgain`; applicability is fiction-dependent → a manual `specialty=`
-     roll arg now (advisory pattern), and the **`api.v1.generateWithStory`
-     ask** ("does specialty X apply to this action? yes/no" with story
-     context; chat messages, GLM 4.6 — confirmed in the API reference) as
-     the FIRST Storyteller-loop integration, its own later pass (host
-     contract + mock + prompt design).
+8. **Owned-power roll effects: Trait Affinity + Specialties + Trait
+   Enhancement (+ merits/flaws → automatic modifiers)** — THE NEXT PASS
+   (user-specced 2026-07-16, corrected & completed 2026-07-17):
+   - *Trait Affinity* (Devil's Due; earlier misrecorded "Trait Aptitude"):
+     each stack LOWERS DIFFICULTY BY 1 on any roll whose pool uses that
+     Attribute/Ability. Stacking rule: ONE chosen trait may hold up to
+     THREE stacks; every OTHER trait caps at TWO; the number of
+     affinity-bearing traits is bounded only by points to spend. Engine:
+     effect-grammar roll ops gain an optional **`trait` gate** (the twin of
+     the existing actionTag gate) plus `permanent: true`;
+     `characterRollEnv`'s resolver RECORDS which traits a pool actually
+     used; owned merits/arcana with permanent trait-gated ops auto-apply.
+     Stack caps are validation data. Pure data — no new registry
+     (Iron-Will-style cost reduction already exists as effect data).
+   - *Specialties* (user correction — NOT the V20 double-10s rule): when a
+     specialty applies the roll gains **+1 DIE**, and **at most ONE
+     specialty applies per roll** even if several could. `specialties`
+     record bucket (trait → list of strings, creator-editable);
+     applicability is fiction-dependent → a manual `specialty=` roll arg now
+     (advisory pattern), and the **`api.v1.generateWithStory` ask** ("does
+     specialty X apply to this action? yes/no" with story context; chat
+     messages, GLM 4.6 — confirmed in the API reference) as the FIRST
+     Storyteller-loop integration, its own later pass (host contract + mock
+     + prompt design).
+   - *Trait Enhancement* (user-specced 2026-07-17): +N permanently raises
+     the trait's EFFECTIVE value for all purposes AND extends its
+     advancement POTENTIAL, while XP keeps operating on the BASE. Worked
+     example (user's): Strength 3 with +2 Enhancement = effective 5; the
+     next dot is priced as raising base 3→4; the XP-raise ceiling becomes
+     template max + N (5 → 7), so the eventual effective tops at 9. Engine:
+     a permanent per-trait enhancement layer BESIDE CharacterBoosts (boosts
+     stay the temporary layer) feeding every effective-value read
+     (`resolveTraitFromRecord` consumers), plus a max-extension consumed by
+     the future allocation/XP engine (#5, #16); XP costs read the
+     un-enhanced base.
 9. **Named-roll + spend integration** — let a saved roll carry its spend;
    composed/multi-resource spends in one command.
 10. **LiveCharacter ⇄ PlayableCharacter unification** — build a LiveCharacter

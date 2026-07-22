@@ -8,7 +8,8 @@
 // lorebook sync is a beforeRoute hook registered here: the router dispatches,
 // the game decides what must happen first.
 // =============================================================================
-import { api, OnTextAdventureInputReturnValue, UIPart } from "./host";
+// `api`, `UIPart`, `OnTextAdventureInputReturnValue` are ambient host globals
+// (types vendored in types/novelai/script-types.d.ts).
 import { StringUtil } from "./core/traits";
 import { Rng } from "./core/dice";
 import { SeverityName, HealthSummary } from "./core/damage";

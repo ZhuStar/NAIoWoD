@@ -16,7 +16,7 @@
 // part tree and lets tests fire button callbacks (see host.ts __ui* helpers) -
 // which exercises the whole window -> command -> store path without a screen.
 // =============================================================================
-import { api, UIPart, UiPartHelpers } from "./host";
+import { UiPartHelpers } from "./host";
 import { CommandRouter, CommandSpec, ParamSpec, composeCommand } from "./command";
 import { SuccessTableRegistry } from "./rolls";
 import {

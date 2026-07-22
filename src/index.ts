@@ -18,7 +18,7 @@ export * from "./state";
 export * from "./game";
 export * from "./window";
 
-import { api, log, OnTextAdventureInput } from "./host";
+import { log } from "./host";
 import {
   LorebookManager, MeritFlawRegistry, reloadAllConfigStores,
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,

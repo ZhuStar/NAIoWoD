@@ -10,7 +10,8 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | Path | What |
 | --- | --- |
 | `CLAUDE.md` + `docs/memory.md` | **The project's externalized memory** — session bootstrap + the fine-grained map of everything (files/classes/functions, state, decisions & rationale, roadmap). Updated in the same commit as any change it describes. |
-| `src/host.ts` | NovelAI API contract (storage, lorebook, hooks, **`ui`**) + the off-host mock — the only module that touches `globalThis`. |
+| `src/host.ts` | Release-safe glue over the host API: the project logger + two aliases over ambient types. Declares **no** NovelAI types (those are ambient, below). |
+| `src/host-mock.ts` | The off-host in-memory `api` + test hooks (`__reset*`/`__ui*`). Installs `globalThis.api` when no real host exists. **Test-only — never in the release.** |
 | `src/core/` | Pure mechanics (`traits`, `dice`, `damage`) — no host imports. |
 | `src/wizard.ts` | Medium-agnostic wizard engine (structured prompts; text renderer now, modals later). |
 | `src/rolls.ts` | Pure roll machinery: specs, pool expressions, tag modifiers, extended-roll state machine. |
@@ -24,8 +25,9 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | `src/main.ts` | Runtime entry — boots the engine by calling `init()` (runs last in the built artifact). |
 | `scripts/build-single.ts` → `dist/naiowod.ts` | Concatenates `src/*` into one readable, editable TS file — **the deployment artifact** (see below). |
 | `docs/novelai-api.md` | **Working reference for the NovelAI scripting API** (plus the full official docs mirrored as `docs/*.html`). |
-| `test/` | The Bun test suite (`system.test.ts`; `build.test.ts` keeps `dist/naiowod.ts` in sync with `src/`). |
-| `types/` | Ambient shims so `tsc` can check tests and scripts without installing `bun-types`. |
+| `test/` | The Bun test suite (`system.test.ts`; `build.test.ts` keeps `dist/naiowod.ts` in sync with `src/` and guards that the release redefines no NovelAI type). |
+| `types/novelai/script-types.d.ts` | **NovelAI's own type declarations, vendored** — the ambient source of truth (`api`, `UIPart*`, `WindowOptions`, `LorebookEntry`, …). Our code checks against these; the release redefines none of them. |
+| `types/` | Also holds ambient shims so `tsc` can check tests and scripts without installing `bun-types`. |
 
 ### One artifact, many modules
 
@@ -41,10 +43,18 @@ kept honest by `test/build.test.ts`, which fails the suite if it ever drifts
 from `src/`. **To deploy, paste the contents of `dist/naiowod.ts` into NovelAI's
 script editor — it's plain TypeScript, nothing else needed.** (A `.naiscript`
 YAML frontmatter header, with an embedded script id, is only for
-exporting/importing scripts; pasting doesn't use it.) Off-host (tests, local
-runs) the mock in `src/host.ts` yields to a real host-provided `api` when one
-exists, and importing the engine has **no side effects** — everything
-host-facing happens in `init()`, which the built artifact calls last.
+exporting/importing scripts; pasting doesn't use it.)
+
+**The release redefines no NovelAI type.** The host injects a global `api` and
+all of its types; we vendor NovelAI's own declarations at
+`types/novelai/script-types.d.ts` and treat them as ambient, so `src/` uses the
+real `UIPart`/`WindowOptions`/`LorebookEntry`/… (checked by `tsc` against
+reality) and the concatenated artifact declares **none** of them — pasting it
+into an editor that already knows those types can't collide. The off-host mock
+(`src/host-mock.ts`) is **not** part of the artifact; on-host the real `api` is
+already global. Importing the engine has **no side effects** — everything
+host-facing happens in `init()`, which the built artifact calls last. (Tests and
+local scripts `import "../src/host-mock"` first to install an in-memory `api`.)
 
 ## Commands
 
@@ -741,8 +751,9 @@ windows use it:
   as* name via `[[name-roll]]`, sidecars included (For is ignored — saved
   rolls are chronicle-global).
 
-The host UI contract + off-host mock (`src/host.ts`, `src/window.ts`) are the
-shared foundation; the full UI reference lives in `docs/ui-*.md`.
+The ambient host types (`types/novelai/script-types.d.ts`), the off-host mock
+(`src/host-mock.ts`), and the spec-driven forms (`src/window.ts`) are the shared
+foundation; the full UI reference lives in `docs/ui-*.md`.
 
 🚧 Next: allocation commands (attributes/abilities/…), multi-template
 resolution, and turning a finished sheet into a `LiveCharacter`.

@@ -9,7 +9,7 @@
 // boosts, effect uses, afflictions). Handlers in game.ts act on this layer;
 // nothing here parses or routes commands.
 // =============================================================================
-import { api } from "./host";
+// `api` is the ambient host global (types in types/novelai/script-types.d.ts).
 import {
   StringUtil, Category, PointSource, Stat, Tracker, Pool, MoralityTrait,
 } from "./core/traits";

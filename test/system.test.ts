@@ -1,4 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+// Installs the off-host mock onto globalThis.api (side effect) and provides the
+// test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton } from "../src/host-mock";
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -9,7 +12,7 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  ScopedStorage, LorebookManager, __resetLorebookMock, __resetStorageMock,
+  ScopedStorage, LorebookManager,
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
@@ -29,7 +32,7 @@ import {
   type AfflictionDef, type ActiveAffliction,
   makeConstraintGroup, describeConstraint, checkConstraints, ConstraintRegistry, CONSTRAINTS_ENTRY,
   type ConstraintGroup, type ConstraintRelation, type ConstraintDomain, type OwnedTraits,
-  openConstraintWindow, api, __resetUiMock, __uiWindows, __uiClickButton,
+  openConstraintWindow,
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, CONFIG_CATEGORY,

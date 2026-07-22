@@ -7,7 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `d5d446d`** ("[[sheet]]: the
+> **Last synced with the code as of commit `cb5b4c3`** ("Vendor NovelAI's
+> script-types.d.ts as ambient truth; release redefines no NovelAI type"). Prior:
+> `d5d446d` ("[[sheet]]: the
 > record as the engine reads it — the creator-mode manual-fill loop's
 > verification half").
 
@@ -40,16 +42,24 @@ bun run build       # regenerate dist/naiowod.ts (scripts/build-single.ts)
 ```
 
 **The full verification battery used before every push** (all must pass):
-1. `bun run build` then `bun test` (includes the dist-sync test) — 0 fail.
-2. `bun x tsc --noEmit` clean.
-3. Standalone type-check of the artifact (copy `dist/naiowod.ts` to a temp dir
-   outside the project, run tsc on it alone with
-   `--strict --skipLibCheck --target ES2021 --lib ES2021,DOM,DOM.Iterable`).
-   This catches global-scope collisions the per-module check can't (it once
-   caught `StorageManager` shadowing the DOM global → renamed `ScopedStorage`).
-4. Import purity: `bun -e 'await import("./src/index.ts")'` must print nothing
-   (side effects live only in `init()`).
-5. A live e2e: `init()` then drive `processAdventureInput("[[...]]")`.
+1. `bun run build` then `bun test` (includes the dist-sync test + the
+   release-purity guards in build.test.ts) — 0 fail.
+2. `bun x tsc --noEmit` clean. This now checks src AGAINST NovelAI's real
+   ambient types (`types/novelai/script-types.d.ts`), not our old mirror.
+3. Standalone type-check of the artifact — SIMULATES THE NOVELAI EDITOR: copy
+   BOTH `dist/naiowod.ts` and `types/novelai/script-types.d.ts` to a temp dir
+   and run tsc on them together (`--strict --skipLibCheck --target ES2021
+   --lib ES2021`). Zero errors proves the release is collision-free AND
+   type-correct against reality (no DOM/console assumed — the artifact needs
+   only the ambient `api` + ES built-ins). (History: the DOM-lib flags were for
+   the old self-typed artifact; that era once caught `StorageManager` shadowing
+   the DOM global → renamed `ScopedStorage`.)
+4. Import purity: `bun -e 'await import("./src/host-mock.ts"); await
+   import("./src/index.ts")'` must print nothing (side effects live only in
+   `init()`). host-mock is imported FIRST so `globalThis.api` exists before any
+   top-level `new ScopedStorage()` reads `api.v1.script.id`.
+5. A live e2e: `import "./src/host-mock"`, then `init()` and drive commands
+   (create → win-roll → roll, etc.).
 
 **Commit conventions**: descriptive body; end with the `Co-Authored-By:
 Claude <model> <noreply@anthropic.com>` and `Claude-Session:` trailers exactly
@@ -68,7 +78,9 @@ Real ES modules with strict layering, enforced by imports (a module may only
 import from layers above it in this list):
 
 ```
-src/host.ts          host contract + off-host mock (ONLY file touching globalThis)
+types/novelai/script-types.d.ts  VENDORED NovelAI declarations - ambient truth (not a module)
+src/host.ts          release-safe glue: log() + UiPartHelpers/UIHandle aliases (NO NovelAI types)
+src/host-mock.ts     off-host mock + __reset*/__ui* hooks; installs globalThis.api. TEST-ONLY (NOT in the build)
 src/core/traits.ts   pure: names, Stat/Tracker/Pool, morality
 src/core/dice.ts     pure: the d10 roller
 src/core/damage.ts   pure: Severity/Kind, packets, reactions, HealthTrack, soak
@@ -91,6 +103,15 @@ single **readable, editable, paste-ready TypeScript file** with `//#region`
 markers per module. It is **committed**, and `test/build.test.ts` fails the
 suite if it drifts from `src/` (so it can never go stale). It is **not** a
 bundle: nothing is minified or transpiled.
+- **The release redefines NO NovelAI type and no `api`** (§7.24). NovelAI's own
+  declarations are vendored at `types/novelai/script-types.d.ts` and treated as
+  ambient (it has no import/export, so every `type`/`interface`/`declare
+  namespace api` is global; `tsconfig.include` already globs `types/`). So
+  `src/` uses the REAL `api`/`UIPart`/`WindowOptions`/`LorebookEntry`/… and the
+  artifact declares none of them — pasted into an editor that knows those types,
+  it can't collide. `src/host-mock.ts` (the off-host `api`) is NOT in MODULES,
+  so it never enters dist. build.test.ts guards this (no `declare namespace
+  api`, no top-level `const api`, no redeclared NovelAI type, no `__mock*`).
 - **Why no `.naiscript` frontmatter**: NovelAI's script editor takes plain TS;
   the YAML `/*--- ---*/` header (with an embedded script id) only matters for
   the export/import flow, which the user avoids because baked-in ids cause
@@ -100,11 +121,21 @@ bundle: nothing is minified or transpiled.
   file to be hand-readable/editable ("naiscript is just TS with a metadata
   header above"). An earlier IIFE build was replaced.
 
-**Host vs mock** (`src/host.ts`): `const __host = globalThis as {api?}` — if
-the real NovelAI `api` exists it is used; otherwise an in-memory mock (4
-storage stores as Maps, an empty lorebook, uuid fallback, hooks.register that
-just logs). Test helpers: `__resetLorebookMock()`, `__resetStorageMock()`.
-`log(...)` routes through `api.v1.log`.
+**Host, mock, ambient types** (§7.24): `api` is the AMBIENT global (types from
+the vendored d.ts). `src/host.ts` is release-safe glue: `export function log`
+(routes through `api.v1.log`) + two OUR-OWNED aliases over ambient types —
+`UiPartHelpers = typeof api.v1.ui.part`, `UIHandle =
+Awaited<ReturnType<typeof api.v1.ui.window.open>>`. `src/host-mock.ts` (TEST-
+ONLY, not in the build) installs `globalThis.api = {...}` when no real host
+exists — 3 storage stores as Maps, an empty lorebook, uuid fallback,
+hooks.register that just logs, the UI recorder — typed loosely (assigned
+through `any`; only the runtime surface we call). Test/off-host hooks live
+there: `__resetLorebookMock/__resetStorageMock/__resetUiMock/__uiWindows/
+__uiClickButton`. **Ordering**: any off-host consumer imports host-mock BEFORE
+the engine, so `globalThis.api` exists before a top-level `new ScopedStorage()`
+reads `api.v1.script.id`. On-host, NovelAI's `api` is already global and the
+mock's install is skipped. `main.ts` errors via `api.v1.error` (not `console`),
+so the release depends only on the documented API.
 
 **`init()`** (`src/index.ts`): registers the `onTextAdventureInput` hook →
 `processAdventureInput(rawInputText)`, then `LorebookManager.bootstrap()`,
@@ -112,16 +143,21 @@ just logs). Test helpers: `__resetLorebookMock()`, `__resetStorageMock()`.
 config registry in one sweep), logs a summary with per-entry counts, returns
 `{ setupMessage }` (the OOC note when SRD categories were created).
 
-## 4. NovelAI host facts (details in `docs/novelai-api.md` + `docs/*.html` mirror)
+## 4. NovelAI host facts (FULL machine-readable truth now vendored at
+`types/novelai/script-types.d.ts`; prose in `docs/novelai-api.md` + `docs/*.html`)
 
-- Four storage stores share `get/set/remove/list` (all async):
-  `api.v1.storage` (per script), `storyStorage` (per story — **we use this**,
-  via `ScopedStorage`), `historyStorage` (story + undo-aware — planned home for
-  mechanical state), `tempStorage` (session, self-clearing). **No
-  `setIfAbsent`** on the host (ScopedStorage emulates it).
-- Lorebook: `entries(categoryId?)/categories()/entry/createCategory/createEntry`
-  (create* resolve to the **new id**; pass `api.v1.uuid()` to control ids),
-  `updateEntry/removeEntry`. Entries filter by category **id**, not name.
+- Four storage stores share `get/set/remove/list/has/getOrDefault/setIfAbsent`
+  (all async): `api.v1.storage` (per script), `storyStorage` (per story — **we
+  use this**, via `ScopedStorage`), `historyStorage` (story + undo-aware —
+  planned home for mechanical state), `tempStorage` (session, self-clearing).
+  NOTE: the real host DOES expose `setIfAbsent`/`has`/`getOrDefault` (the d.ts
+  confirms) — an earlier memory said otherwise. `ScopedStorage` predates that
+  and still emulates `setIfAbsent` over `get/set`; harmless, not worth reworking.
+- Lorebook: `entries(categoryId?)/categories()/category(id)/entry/createCategory/
+  createEntry/updateCategory/updateEntry/removeCategory/removeEntry` (create*
+  resolve to the **new id**; pass `api.v1.uuid()` to control ids). Entries
+  filter by category **id**, not name. Real names: `LorebookEntry`,
+  `LorebookCategory` (we adopted these, retiring our `*Data` aliases).
 - `onTextAdventureInput` handler gets `{continuityId, inputText, rawInputText,
   mode}` and may return `{inputText?, mode?, stopGeneration?,
   stopFurtherScripts?}`. **The host strips newlines from returned inputText**
@@ -131,21 +167,35 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 
 ## 5. Fine-grained module map
 
-### src/host.ts (266 lines)
-- Types: `OnTextAdventureInputReturnValue`, `OnTextAdventureInput`,
-  `LorebookEntryData`, `LorebookCategoryData`, `LorebookAffliction`; internal
-  `StorageApi`, `WodApi`.
-- **UI contract**: the `UIPart` union + the parts our windows use (text,
-  textInput, numberInput, button, row, column, box, collapsibleSection),
-  `WindowOptions`/`ModalOptions`, `UIHandle {update,close,isClosed,closed}`,
-  `UiPartHelpers`, `UiApi` (`window.open`/`modal.open`/`part.*`/`toast`) - now a
-  field on `WodApi.v1.ui`. Shapes from `docs/ui-api-reference.md`.
-- `api` (the guarded mock/real switch), `log()`, `__resetLorebookMock()`,
-  `__resetStorageMock()`.
-- **UI mock**: `window.open`/`modal.open` record `{options,handle}`; the handle's
-  `update` merges + re-records; `part.*` add `type`. Test hooks
-  `__resetUiMock()`, `__uiWindows()`, `__uiClickButton(text)` (fires a button's
-  callback - drives the whole window→command path off-host).
+### types/novelai/script-types.d.ts (vendored, ~4.3k lines) — the ambient truth
+NovelAI's own declarations, verbatim. No import/export, so every `type`/
+`interface`/`declare namespace api` is GLOBAL; `tsconfig.include` globs
+`types/`, so it's ambient for all of src/test. This is the ONE definition of
+`api`, `UIPart[Registry]`/`UIPart*`, `WindowOptions`, `ModalOptions`,
+`LorebookEntry`, `LorebookCategory`, `LorebookCondition`,
+`OnTextAdventureInput[ReturnValue]`, `Section`, `Message`, `HookCallbacks`, …
+Our code redefines none of these. (It also reveals unused-yet capabilities:
+`generate`/`generateWithStory`, decorations, theme, story mode, richer hooks.)
+
+### src/host.ts (25 lines) — release-safe glue only
+- `export function log(...)` → `api.v1.log` (ambient).
+- Two OUR aliases over ambient types (not NovelAI redefinitions):
+  `UiPartHelpers = typeof api.v1.ui.part` (window.ts params),
+  `UIHandle = Awaited<ReturnType<typeof api.v1.ui.window.open>>`.
+- Declares NO NovelAI type and NO `const api`. This is all of host.ts that
+  reaches the release.
+
+### src/host-mock.ts (139 lines) — off-host mock + test hooks, TEST-ONLY
+- NOT in `MODULES`, so it never enters dist. Installs `globalThis.api = {...}`
+  when absent (3 Map-backed storages, empty lorebook, uuid fallback,
+  `hooks.register` that logs, `log`/`error`→console). Typed loosely (assigned
+  through `any`; only the runtime surface the engine calls).
+- **UI mock**: `window.open`/`modal.open` record `{options}`; the handle's
+  `update` merges + re-records; `__mockPart` adds `type`. Test hooks:
+  `__resetLorebookMock/__resetStorageMock/__resetUiMock/__uiWindows/
+  __uiClickButton(text)` (fires a button's callback → drives the whole
+  window→command path off-host). Imported first by the test suite + e2e scratch
+  so `globalThis.api` exists before any top-level store construction.
 
 ### src/core/traits.ts (300)
 - `StringUtil.normalize` (lowercase, trim, spaces→hyphens — **every key in the
@@ -644,7 +694,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2440) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2441) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -922,7 +972,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3460 + 20 lines, 315 tests, 83 describes)
+### test/ (3463 + 34 lines, 316 tests, 82 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1182,6 +1232,29 @@ cards are all tracked (id map + backups above).
     trait, and fiction-fit stays the ST's call until the generateWithStory
     ask ships. Passives with unmet gates skip SILENTLY (no note spam);
     spend-op gates note their skip (the player paid).
+24. **Vendor NovelAI's types; the release redefines none** (user directive:
+    "a file in dist that's the release [that] cannot carry any NovelAI type
+    definition — if we put script-types.d.ts somewhere, it won't have to,
+    right?"). YES. We vendor NovelAI's own `script-types.d.ts` at
+    `types/novelai/` as the AMBIENT source of truth (it has no import/export,
+    so `api` + every `UIPart`/`WindowOptions`/`LorebookEntry`/… is global; the
+    existing `tsconfig.include: ["types"]` picks it up). Our mirror in host.ts
+    is DELETED — `tsc` now checks src against NovelAI's REAL types (the mirror
+    turned out accurate: zero fixes needed). host.ts shrinks to `log` + two
+    aliases; the off-host mock + test hooks move to `src/host-mock.ts`, which is
+    NOT in the build MODULES, so the concatenated `dist/naiowod.ts` carries no
+    NovelAI type and no `const api` — pasted into an editor that knows those
+    types, it can't collide. WHY a separate mock file (not inline-and-strip):
+    the release must exclude the mock cleanly, and off-host consumers install it
+    explicitly (`import "../src/host-mock"` first, before any top-level
+    `new ScopedStorage()` reads `api.v1.script.id`). The standalone artifact
+    check now compiles dist TOGETHER WITH the d.ts (ES2021 only — the artifact
+    needs nothing but the ambient api + ES built-ins; `main.ts` errors via
+    `api.v1.error`, not `console`). build.test.ts guards the invariant. Bonus:
+    the d.ts corrected a stale fact (the host DOES have `setIfAbsent`) and
+    surfaced unused capabilities for later (`generateWithStory`, decorations,
+    theme). We kept the release name `dist/naiowod.ts` (it IS the paste
+    artifact); no second dist file — tests run on `src/` modules.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

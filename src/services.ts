@@ -1,4 +1,4 @@
-import { api, log, LorebookEntryData } from "./host";
+import { log } from "./host";
 import { StringUtil, Stat, Category } from "./core/traits";
 import { SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER, DEFAULT_MERITS_FLAWS, MeritFlawDef } from "./rules";
 
@@ -86,7 +86,7 @@ export class LorebookManager {
     return categories.find(c => (c.name ?? "").trim().toLowerCase() === want)?.id;
   }
 
-  static async entriesInCategory(categoryName: string): Promise<LorebookEntryData[]> {
+  static async entriesInCategory(categoryName: string): Promise<LorebookEntry[]> {
     const id = await LorebookManager.categoryIdByName(categoryName);
     if (id === undefined) return [];
     return api.v1.lorebook.entries(id);

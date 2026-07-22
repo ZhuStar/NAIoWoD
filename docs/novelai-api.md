@@ -8,7 +8,11 @@ surface we need, distilled from NovelAI's **official example scripts**
 *(inferred)*. The prose docs live at
 [docs.novelai.net/en/scripting](https://docs.novelai.net/en/scripting/introduction/)
 (ui-extensions, ui-parts, modals-and-windows, storage-api, lorebook-api) and the
-complete machine-readable truth is `https://novelai.net/scripting/types/script-types.d.ts`.
+complete machine-readable truth is `https://novelai.net/scripting/types/script-types.d.ts`
+— now **vendored in this repo** at `types/novelai/script-types.d.ts` and treated
+as the ambient source of truth (the engine redefines none of its types; the
+release artifact carries none of them). Refresh that file when NovelAI updates
+their API.
 
 Ground rules:
 

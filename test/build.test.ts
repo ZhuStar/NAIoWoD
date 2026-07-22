@@ -18,3 +18,17 @@ test("the single file is plain import-free TypeScript (no naiscript frontmatter)
   const wiring = out.split("\n").filter((l) => /^(import|export)\b/.test(l));
   expect(wiring).toEqual([]);
 });
+
+test("the release redefines NO NovelAI type and no `api` (they are ambient on-host)", async () => {
+  const out = await buildSingleFile();
+  // The host provides `api` and every UI/lorebook type; the artifact must not
+  // redeclare them or it collides when pasted into an editor that knows them.
+  expect(out).not.toMatch(/\bdeclare namespace api\b/);
+  expect(out).not.toMatch(/^(const|let|var)\s+api\b/m);
+  for (const name of ["UIPart", "UIPartButton", "WindowOptions", "ModalOptions", "LorebookCondition", "LorebookEntry", "OnTextAdventureInput"]) {
+    expect(out).not.toMatch(new RegExp(`^(interface|type)\\s+${name}\\b`, "m"));
+  }
+  // The off-host mock and its test hooks must never ship in the release
+  // (the header comments may name the file; the mock CODE must be absent).
+  expect(out).not.toMatch(/__uiClickButton|__resetStorageMock|__openMockWindow|__mockStore/);
+});

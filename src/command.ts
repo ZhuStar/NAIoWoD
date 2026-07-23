@@ -167,7 +167,7 @@ export class CommandRouter {
     const cmd = CommandParser.parse(body);
     for (const hook of CommandRouter._beforeRoute) await hook();
     const def = CommandRouter._registry.get(cmd.name);
-    if (!def) return `((OOC-Storyteller: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.))`;
+    if (!def) return `[SYSTEM]: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`;
     return def.handler(cmd, ctx);
   }
 }

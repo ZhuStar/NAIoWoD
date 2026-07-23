@@ -187,7 +187,7 @@ export class LorebookManager {
   private static _setupMessage(specs: SrdCategorySpec[], created: string[]): string {
     const lines = created.map(name => `• ${name} — ${specs.find(s => s.name === name)?.blurb ?? "game data"}`);
     return [
-      "((OOC — Storyteller setup))",
+      "[SYSTEM]: Storyteller setup",
       "I've added the lorebook categories this game needs and filled them with starter data and examples. Open your Lorebook and review / edit:",
       ...lines,
       `Each entry starts with instructions; the data is below its "${SRD_HEADER_MARKER}" line. Tune these to your chronicle, then we’re ready to play.`,

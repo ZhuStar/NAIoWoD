@@ -7,9 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `cb5b4c3`** ("Vendor NovelAI's
-> script-types.d.ts as ambient truth; release redefines no NovelAI type"). Prior:
-> `d5d446d` ("[[sheet]]: the
+> **Last synced with the code as of commit `db53ac7`** ("Engine reply
+> prefix ((OOC-Storyteller: …)) → [SYSTEM]: …"). Prior: `cb5b4c3` (vendor
+> NovelAI's script-types.d.ts as ambient truth); `d5d446d` ("[[sheet]]: the
 > record as the engine reads it — the creator-mode manual-fill loop's
 > verification half").
 
@@ -161,7 +161,11 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 - `onTextAdventureInput` handler gets `{continuityId, inputText, rawInputText,
   mode}` and may return `{inputText?, mode?, stopGeneration?,
   stopFurtherScripts?}`. **The host strips newlines from returned inputText**
-  → all OOC replies are single-line `((OOC-Storyteller: ...))`.
+  → all engine replies are single-line **`[SYSTEM]: ...`** (the mechanical
+  voice; the player is planning a speaker scheme — Player/OOC-Player/ST/OOC-ST/
+  <character-name> — where the engine is SYSTEM). Changed from
+  `((OOC-Storyteller: ...))` in §7.25; the init setup banner is
+  `[SYSTEM]: Storyteller setup` (multi-line — not through the hook).
 - `api.v1.uuid()`, `api.v1.generate` (future Storyteller loop), UI extension
   API (`api.v1.ui.*` — future wizard renderer), permissions for document edit.
 
@@ -804,7 +808,7 @@ added to the array. Parser/router/spec machinery itself lives in
 (its slots depend on the affliction def).
 
 **`processAdventureInput(rawInputText)`** — extracts every `[[...]]`, routes
-each, replaces with single-line OOC notes; prose-free input →
+each, replaces with single-line `[SYSTEM]:` notes; prose-free input →
 `stopGeneration: true`; non-command input → wizard reply (if active) else
 untouched (`undefined`).
 
@@ -923,7 +927,7 @@ pre-seeded into tempStorage; no native select part exists), int →
 `example`); temp keys **`win:<verb>:<param>`**; the submit button collects the
 temp values, refuses on a missing required param, then routes
 `composeCommand(verb, values, spec)` through the SAME `CommandRouter` and
-shows the OOC reply in-window. `openConstraintWindow()` =
+shows the `[SYSTEM]:` reply in-window. `openConstraintWindow()` =
 `openCommandWindow("define-constraint", …)`; `[[win-constraint]]` and
 `[[win-table]]` (over define-table) register at module load (pure registry
 mutation). **The picker** (selection-widgets mode 2, docs/ui-parts.md;
@@ -1255,6 +1259,18 @@ cards are all tracked (id map + backups above).
     surfaced unused capabilities for later (`generateWithStory`, decorations,
     theme). We kept the release name `dist/naiowod.ts` (it IS the paste
     artifact); no second dist file — tests run on `src/` modules.
+
+25. **Engine reply prefix `((OOC-Storyteller: ...))` → `[SYSTEM]: ...`** (user
+    directive, ahead of live play): the engine's mechanical replies are the
+    SYSTEM voice in a wider speaker scheme the player is introducing —
+    `Player:` / `OOC-Player:` / `ST:` / `OOC-ST:` / `<character-name>:` (incl.
+    the player's). All ~242 inlined `\`((OOC-Storyteller: BODY))\`` literals
+    became `\`[SYSTEM]: BODY\`` (greedy per-line sed; no central formatter
+    existed — a future speaker-tag pass may add one). The init setup banner
+    aligned too (`[SYSTEM]: Storyteller setup`). `processAdventureInput`
+    concatenation is unchanged — the reply string just carries the new prefix.
+    NOTE: `ST:`/narration voices are NOT the engine's to emit yet; they arrive
+    with the generateWithStory Storyteller loop.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

@@ -917,7 +917,7 @@ describe("processAdventureInput (the [[...]] hook)", () => {
   test("keeps surrounding prose and lets generation proceed", async () => {
     const r = await processAdventureInput('I sit down to plan. [[creator-mode set=false]] Then I sleep.');
     expect(r!.stopGeneration).toBe(false);
-    expect(r!.inputText!.startsWith("I sit down to plan. ((OOC-Storyteller:")).toBe(true);
+    expect(r!.inputText!.startsWith("I sit down to plan. [SYSTEM]:")).toBe(true);
     expect(r!.inputText!.endsWith("Then I sleep.")).toBe(true);
   });
 

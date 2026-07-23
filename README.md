@@ -281,7 +281,7 @@ with **instructions written into the card itself**, then a marker line, then the
 data — so the game teaches itself in-app instead of sending you to this README.
 Categories that already exist are left untouched (your edits are safe), and
 `bootstrap()` is idempotent; when it creates anything it returns a player-facing
-`[SYSTEM]: Storyteller setup` note.
+`[SYSTEM: Storyteller setup]` note.
 
 **Entry format.** On read, everything **above a `=====` marker line** (≥3 `=`)
 is a human header and is ignored; the data is what follows. In list entries,
@@ -304,10 +304,14 @@ Conventions (defined in `SRD_CATEGORIES`, installed by `bootstrap()`):
 
 In adventure mode, `[[…]]` blocks in the input box are commands. The
 `onTextAdventureInput` hook extracts each one, dispatches it through
-`CommandRouter`, and replaces it with a single-line **`[SYSTEM]: …`** note (the
-engine's mechanical voice — distinct from the in-fiction ST/character voices);
-if the input contained *only* commands, generation is suppressed (you're
-operating the system, not the story).
+`CommandRouter`, and replaces it with a single-line **`[SYSTEM: …]`** note (the
+engine's mechanical voice — distinct from the in-fiction ST/character voices).
+Generation is then suppressed for the turn (`stopGeneration`) when the input was
+*only* commands, **or** when any command was a **read-only query** (`help`,
+`characters`, `sheet`, `resources`, `health`, `merits`, `tables`, … — the
+`QUIET_VERBS` in `game.ts`): querying the system never makes the AI narrate,
+even with prose around it. An in-fiction action (`roll`, `spend`, `damage`, …)
+wrapped in prose still generates.
 
 ```
 [[create-playable name="Erik the Red" templates="vampire,werewolf,mage"]]

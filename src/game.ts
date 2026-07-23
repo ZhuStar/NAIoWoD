@@ -38,7 +38,7 @@ import {
   WizardDefinition, WizardPrompt, WizardStateData, WizardResult, resolveReply, renderPromptText,
 } from "./wizard";
 import {
-  ParsedCommand, CommandContext, CommandHandler, CommandRouter, ParamSpec, sys,
+  ParsedCommand, CommandParser, CommandContext, CommandHandler, CommandRouter, ParamSpec, sys,
 } from "./command";
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
@@ -2410,9 +2410,23 @@ CommandRouter.register("player", cmdPlayer, {
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
-// Replace every [[command]] in the player's adventure-mode input with its OOC
-// note, running commands in order. If the input was ONLY commands (no prose),
-// generation is suppressed - the player is operating the system, not the story.
+// "Quiet" verbs: read-only commands that only REPORT (list / show / query).
+// Issuing one suppresses AI generation for the turn even amid prose - the
+// player is querying the system, not narrating an action the Storyteller should
+// continue. (Generation belongs to in-fiction ACTIONS - rolls, spends, damage,
+// afflicting - not to operating the machine.) This is the game-layer "quiet the
+// turn" policy; it stays OUT of the pure CommandSpec (which describes grammar).
+// To silence another command's turn, add its verb here.
+const QUIET_VERBS = new Set<string>([
+  "help", "characters", "sheet", "list-rolls", "roll-status", "contest-status",
+  "resources", "health", "tables", "constraints", "constraint",
+  "check-constraints", "merits", "specialties", "affliction", "afflictions",
+]);
+
+// Replace every [[command]] in the player's adventure-mode input with its
+// [SYSTEM: ...] note, running commands in order. Generation is suppressed when
+// the input was ONLY commands (no prose) OR any command was a QUIET (query) one
+// - either way the player is operating the system, not advancing the story.
 export async function processAdventureInput(rawInputText: string): Promise<OnTextAdventureInputReturnValue | undefined> {
   const matches = [...rawInputText.matchAll(COMMAND_PATTERN)];
   if (matches.length === 0) {
@@ -2428,8 +2442,10 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
 
   let out = "";
   let cursor = 0;
+  let anyQuiet = false;
   for (const m of matches) {
     out += rawInputText.slice(cursor, m.index);
+    if (QUIET_VERBS.has(CommandParser.parse(m[1]).name)) anyQuiet = true;
     out += await CommandRouter.route(m[1]);
     cursor = (m.index ?? 0) + m[0].length;
   }
@@ -2437,5 +2453,5 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
 
   const prose = rawInputText.replace(COMMAND_PATTERN, "").trim();
   // The host forbids newlines in inputText (it would replace them with spaces).
-  return { inputText: out.replace(/\n/g, " "), stopGeneration: prose.length === 0 };
+  return { inputText: out.replace(/\n/g, " "), stopGeneration: prose.length === 0 || anyQuiet };
 }

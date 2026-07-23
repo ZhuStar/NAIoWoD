@@ -20,9 +20,9 @@ import { Rng } from "./core/dice";
 // output is a one-line change - never a find-and-replace across the handlers.
 // If a general `speak(speaker, body)` lands later, `sys` becomes its SYSTEM
 // specialization. Callers pass the already-composed body (interpolated string).
-export const SYSTEM_PREFIX = "[SYSTEM]: ";
+// The format (bracket style, label) lives HERE and nowhere else.
 export function sys(body: string): string {
-  return `${SYSTEM_PREFIX}${body}`;
+  return `[SYSTEM: ${body}]`;
 }
 
 // --- PARSER ------------------------------------------------------------------

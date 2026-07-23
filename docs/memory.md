@@ -7,10 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `a1f9997`** ("Central output
-> formatter: sys() + SYSTEM_PREFIX in command.ts"). Prior: `db53ac7` (reply
-> prefix → [SYSTEM]:); `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient
-> truth); `d5d446d` ("[[sheet]]: the
+> **Last synced with the code as of commit `50be872`** ("[SYSTEM: ...]
+> format + QUIET_VERBS stop generation for query commands"). Prior: `a1f9997`
+> (central sys() formatter); `db53ac7` (reply prefix → [SYSTEM]:); `cb5b4c3`
+> (vendor NovelAI's script-types.d.ts as ambient truth); `d5d446d` ("[[sheet]]: the
 > record as the engine reads it — the creator-mode manual-fill loop's
 > verification half").
 
@@ -162,11 +162,14 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 - `onTextAdventureInput` handler gets `{continuityId, inputText, rawInputText,
   mode}` and may return `{inputText?, mode?, stopGeneration?,
   stopFurtherScripts?}`. **The host strips newlines from returned inputText**
-  → all engine replies are single-line **`[SYSTEM]: ...`** (the mechanical
+  → all engine replies are single-line **`[SYSTEM: ...]`** (the mechanical
   voice; the player is planning a speaker scheme — Player/OOC-Player/ST/OOC-ST/
-  <character-name> — where the engine is SYSTEM). Changed from
-  `((OOC-Storyteller: ...))` in §7.25; the init setup banner is
-  `[SYSTEM]: Storyteller setup` (multi-line — not through the hook).
+  <character-name> — where the engine is SYSTEM). Format lives ONLY in `sys()`
+  (command.ts): `((OOC-Storyteller: ...))` → `[SYSTEM]: ...` (§7.25) →
+  centralized (§7.26) → `[SYSTEM: ...]` (§7.27). The init setup banner is
+  `[SYSTEM: Storyteller setup]` (multi-line — not through the hook).
+  `stopGeneration` is set when the input was command-ONLY OR any command was a
+  read-only query (`QUIET_VERBS`, §7.27) — the hook's cancel-the-turn lever.
 - `api.v1.uuid()`, `api.v1.generate` (future Storyteller loop), UI extension
   API (`api.v1.ui.*` — future wizard renderer), permissions for document edit.
 
@@ -468,13 +471,13 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   are the separate `HealthStateDef` in core/damage.ts.)
 
 ### src/command.ts (185) — the command bus (pure; depends on core/traits only)
-- **`sys(body)` + `SYSTEM_PREFIX`** (§7.26) — THE engine output formatter:
-  `sys(body) = \`${SYSTEM_PREFIX}${body}\`` = `[SYSTEM]: <body>`. Every command
-  reply routes through it (game.ts, window.ts) AND the init setup banner
-  (services.ts imports it — the one services→command dependency, allowed by
-  layering); `SYSTEM_PREFIX` is the ONE place the prefix string lives. Re-tagging
-  the engine voice (or a future general `speak(speaker, body)`) is a one-line
-  change, never a sweep. Re-exported via index.
+- **`sys(body)`** (§7.26–7.27) — THE engine output formatter: `sys(body) =
+  \`[SYSTEM: ${body}]\``. Every command reply routes through it (game.ts,
+  window.ts) AND the init setup banner (services.ts imports it — the one
+  services→command dependency, allowed by layering). The output format (bracket
+  style, label) lives HERE and nowhere else: re-tagging the engine voice (or a
+  future general `speak(speaker, body)`) is a one-line change, never a sweep.
+  Re-exported via index.
 - `ParsedCommand {name, positional[], named{}, raw}` + `CommandParser.parse` —
   quote-aware tokenizer; body-level gluing BEFORE tokenization (`@`-space and
   `::`-space stripped, backtick spans protected), then **every token/value
@@ -706,7 +709,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2441) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2457) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -816,9 +819,12 @@ added to the array. Parser/router/spec machinery itself lives in
 (its slots depend on the affliction def).
 
 **`processAdventureInput(rawInputText)`** — extracts every `[[...]]`, routes
-each, replaces with single-line `[SYSTEM]:` notes; prose-free input →
-`stopGeneration: true`; non-command input → wizard reply (if active) else
-untouched (`undefined`).
+each, replaces with single-line `[SYSTEM: ...]` notes; `stopGeneration: true`
+when the input was command-ONLY **or** any command's verb is in **`QUIET_VERBS`**
+(the game-layer set of read-only query commands — help/characters/sheet/
+resources/health/merits/tables/… — kept OUT of the pure CommandSpec; it uses
+`CommandParser.parse(body).name` to test each match); non-command input →
+wizard reply (if active) else untouched (`undefined`).
 
 **The command surface** (registered verbs; [[help]] DERIVES each line from the
 verb's CommandSpec at the bottom of game.ts — the grammars below match it):
@@ -935,7 +941,7 @@ pre-seeded into tempStorage; no native select part exists), int →
 `example`); temp keys **`win:<verb>:<param>`**; the submit button collects the
 temp values, refuses on a missing required param, then routes
 `composeCommand(verb, values, spec)` through the SAME `CommandRouter` and
-shows the `[SYSTEM]:` reply in-window. `openConstraintWindow()` =
+shows the `[SYSTEM: ...]` reply in-window. `openConstraintWindow()` =
 `openCommandWindow("define-constraint", …)`; `[[win-constraint]]` and
 `[[win-table]]` (over define-table) register at module load (pure registry
 mutation). **The picker** (selection-widgets mode 2, docs/ui-parts.md;
@@ -984,7 +990,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3463 + 34 lines, 316 tests, 82 describes)
+### test/ (3474 + 34 lines, 317 tests, 82 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1290,6 +1296,19 @@ cards are all tracked (id map + backups above).
     into a general `speak(speaker, body)` when the Player/ST/OOC voices land —
     is a one-line change. Chose command.ts over host.ts/core: it's the
     command-reply convention, and game/window already depend on command.
+27. **`[SYSTEM: ...]` format + "quiet the turn" for query commands** (user, two
+    small live-play asks). (a) Format: `[SYSTEM]: ...` → `[SYSTEM: ...]` — a
+    one-line edit in `sys()` (the §7.26 centralization paying off; `SYSTEM_PREFIX`
+    dropped, the wrap lives inline in `sys`). (b) Generation control: the lever
+    is the `onTextAdventureInput` return's **`stopGeneration`** (the "cancel the
+    turn" flag the user guessed at — confirmed by the vendored d.ts). Previously
+    set only when the input was command-ONLY; now ALSO when any command's verb is
+    a read-only query. Home decision: a game-layer **`QUIET_VERBS`** set next to
+    `processAdventureInput`, NOT a `CommandSpec.quiet` flag — generation-
+    suppression is a turn/game POLICY, and CommandSpec must stay pure grammar
+    (it feeds help + windows, lower layers). `processAdventureInput` tests each
+    match with `CommandParser.parse(body).name`. Querying the system never makes
+    the AI narrate; an in-fiction action wrapped in prose still generates.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

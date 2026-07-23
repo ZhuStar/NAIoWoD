@@ -917,8 +917,19 @@ describe("processAdventureInput (the [[...]] hook)", () => {
   test("keeps surrounding prose and lets generation proceed", async () => {
     const r = await processAdventureInput('I sit down to plan. [[creator-mode set=false]] Then I sleep.');
     expect(r!.stopGeneration).toBe(false);
-    expect(r!.inputText!.startsWith("I sit down to plan. [SYSTEM]:")).toBe(true);
+    expect(r!.inputText!.startsWith("I sit down to plan. [SYSTEM:")).toBe(true);
     expect(r!.inputText!.endsWith("Then I sleep.")).toBe(true);
+  });
+
+  test("a QUIET (listing) command suppresses generation even amid prose", async () => {
+    // help is read-only: querying the system should never trigger narration,
+    // even when the player wrapped prose around the command.
+    const r = await processAdventureInput('Let me think. [[help]] Now, onward!');
+    expect(r!.stopGeneration).toBe(true);
+    expect(r!.inputText).toContain("[SYSTEM:");
+    // A NON-quiet command with the same prose still lets generation proceed.
+    const r2 = await processAdventureInput('Let me think. [[creator-mode set=false]] Now, onward!');
+    expect(r2!.stopGeneration).toBe(false);
   });
 
   test("returns undefined for plain input (leaves it untouched)", async () => {

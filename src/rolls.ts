@@ -269,6 +269,7 @@ export interface ExtendedRoll {
   maxRolls: number;        // intervals allowed
   interval: string;        // advisory spacing label ("" if none)
   onBotch: BotchPolicy;
+  table?: string;          // success-table key read against each interval's net
   accumulated: number;
   rollsUsed: number;
   status: ExtendedStatus;
@@ -438,6 +439,7 @@ export const DEFAULT_SUCCESS_TABLES: SuccessTable[] = [
   },
   { name: "damage", description: "Each success is one level of damage", valuePerSuccess: 1, botch: "Botch - you may hit an ally or yourself", failure: "No damage" },
   { name: "soak", description: "Each success soaks one level", valuePerSuccess: 1, failure: "Nothing soaked" },
+  { name: "climbing", description: "~10 ft climbed per success (Storyteller may vary the distance)", valuePerSuccess: 10, botch: "Botch - you may become stuck, panic, or fall", failure: "No progress this interval - reposition or find a new route" },
 ];
 
 export class SuccessTableRegistry {

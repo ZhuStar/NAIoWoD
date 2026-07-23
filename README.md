@@ -439,9 +439,12 @@ the `wod:named-rolls` lorebook entry.
 
 - **`name-roll <name> <pool> …`** saves a roll (same grammar as `roll`), and can
   bake in sidecars: **`spend=`** (e.g. `[[name-roll gutcheck stamina+courage 8
-  spend=willpower]]`), **`specialty=`**, and **`table=`** (the success table
-  read against the outcome whenever the roll is invoked). The pool must be a
-  real expression — a `@name` reference can't be saved.
+  spend=willpower]]`), **`specialty=`**, **`table=`** (the success table
+  read against the outcome whenever the roll is invoked), a **`description=`**
+  (verbatim rules text, shown by `roll-info`), and the **extended** knobs
+  (`extended=true`, `intervals=`, `interval=`, `on-botch=`) that turn it into a
+  *named procedure* — see below. The pool must be a real expression — a `@name`
+  reference can't be saved.
 - **`@name`** in any `roll` / `roll-for` loads that saved spec; supplied args
   **override** its difficulty, modifier, `requires`, `dice-modifier` or `tags`
   for that one use (the pool itself is fixed). Saved sidecars apply
@@ -449,8 +452,10 @@ the `wod:named-rolls` lorebook entry.
   reads the outcome — unless the command supplies its own `spend=` /
   `specialty=` / `table=`. This override-merge is the same primitive extended
   rolls reuse for helpers and continuations.
-- **`list-rolls`** shows the library (with any saved sidecars); **`forget-roll
-  <name>`** removes one (or just edit the JSON map in the lorebook directly).
+- **`list-rolls`** shows the library (with any saved sidecars, marking any that
+  are `[extended]`); **`roll-info <name>`** prints one roll in full — spec, tags,
+  table, extended shape, and its description; **`forget-roll <name>`** removes one
+  (or just edit the JSON map in the lorebook directly).
 - **`[[win-roll]]`** opens the roll **builder window** — see *Windows* below.
 
 ### Extended rolls
@@ -482,6 +487,43 @@ Some actions take several rolls to finish — you accumulate successes toward a
   persists across turns (story storage) and defaults to the action in progress,
   so you rarely need the id.
 
+### Named procedures — a saved roll that *extends*
+
+A **named procedure** is just a saved roll that has been marked **extended** (and
+usually carries a `table` and a `description`). Invoking it launches an extended
+action instead of a single roll — the shape (pool, difficulty, tags, table,
+default intervals) lives in the save; the **target is supplied at play time**,
+because it depends on the fiction (how tall is the wall?).
+
+The engine ships one to start with — **`climbing`**, the first of Dark Ages:
+Vampire's *Drama* rolls — seeded into your library on first run (create-if-missing,
+so your edits and deletions stick):
+
+```
+[[roll-info climbing]]                 # the full Drama text + shape
+[[roll @climbing requires=3]]          # wall height / ft-per-success = 3 successes
+[[continue-roll]]                      # each interval reads the climbing table
+[[continue-roll]]                      # "= 30 so far", then "succeeded"
+```
+
+- **Invoke** with **`[[roll @<name> requires=<target>]]`** (`target=` also works).
+  `requires` is the *whole* action — for `climbing` it's wall height ÷ ft-per-
+  success (the Storyteller's call). Without a target the roll refuses and tells
+  you how to give one. `intervals=` overrides the saved max-rolls default;
+  `interval=` / `on-botch=` and the usual roll knobs override for that launch.
+- Each interval rolls through the **same live modifiers a single roll gets** —
+  affliction tags, Trait Enhancement, boosts, the wound penalty, and any owned
+  passive gated on the pool's traits **or the roll's tags**. That last part is the
+  point of the `climb` tag: a grip-improving power (Protean's Talons, Vicissitude
+  bone spurs) can carry a passive `difficulty −2 target:climb` and it will reach
+  every climbing interval. Saved rolls are hand-editable JSON, so you can add more
+  tags later as new powers need them.
+- A **value table** (like `climbing`, 10 ft per success) reads the **accumulated
+  distance** so far — *the climb ends when you've climbed the whole distance* —
+  while a qualitative table (degrees) reads each interval's own result.
+- Author your own with `[[name-roll <name> <pool> … extended=true intervals=<n>
+  description=\`…\`]]`, or hand-edit the `wod:named-rolls` entry.
+
 ### Success tables — what a number of successes *means*
 
 A roll never interprets its own result. It produces a **count** and hands it to
@@ -502,7 +544,8 @@ output is a **number**, one level per success).
   rule-specified bonus per batch of extras past the last row), and **`botch`** /
   **`failure`** lines.
 - Built-ins always present: **`degrees`** (Marginal → Phenomenal), **`damage`** and
-  **`soak`** (1 per success).
+  **`soak`** (1 per success), and **`climbing`** (~10 ft per success — the
+  `climbing` named procedure reads it).
 - **Tables live in their own lorebook category tree** (they outgrew one card):
   the category `wod:config:success-tables` holds bare-named tables, and each
   **virtual subcategory** `<sub>` is the real category

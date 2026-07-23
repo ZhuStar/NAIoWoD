@@ -16,7 +16,7 @@ import {
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
-  overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY,
+  overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY, DEFAULT_NAMED_ROLLS,
   ExtendedRoll, applyInterval, ExtendedRollStore,
   readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry, parseTableRows,
   compareRolls, applyContestRound, describeContest,
@@ -3270,6 +3270,84 @@ describe("roll window: win-roll + the table sidecar", () => {
     await set("specialty", "swords");
     expect(await __uiClickButton("Roll")).toBe(true);
     expect(texts().some(t => t.includes("specialty: Swords (+1 die)"))).toBe(true);
+  });
+});
+
+// =============================================================================
+// NAMED PROCEDURES - extended saved rolls + carried table/description + defaults
+// =============================================================================
+describe("named procedures: extended saved rolls, table + description, defaults", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("SavedRoll round-trips extended + description through the lorebook JSON", async () => {
+    await CommandRouter.route("name-roll siege stamina+survival 7 extended=true intervals=5 interval=`1 night` description=`A long grind.`");
+    const saved = (await NamedRollStore.get("siege"))!;
+    expect(saved.extended).toEqual({ intervals: 5, interval: "1 night" });
+    expect(saved.description).toBe("A long grind.");
+    expect(saved.pool).toBe("stamina+survival");
+  });
+
+  test("seedDefaults creates the library with climbing when missing, and never re-clobbers", async () => {
+    expect(await NamedRollStore.get("climbing")).toBeUndefined();       // fresh: nothing yet
+    const n = await NamedRollStore.seedDefaults();
+    expect(n).toBe(Object.keys(DEFAULT_NAMED_ROLLS).length);
+    const climb = (await NamedRollStore.get("climbing"))!;
+    expect(climb.extended).toBeDefined();
+    expect(climb.tags).toContain("climb");
+    expect(climb.table).toBe("climbing");
+    // Second call: library exists -> no-op (returns 0).
+    expect(await NamedRollStore.seedDefaults()).toBe(0);
+    // A deleted default is NOT resurrected by a later seed.
+    await NamedRollStore.remove("climbing");
+    expect(await NamedRollStore.seedDefaults()).toBe(0);
+    expect(await NamedRollStore.get("climbing")).toBeUndefined();
+  });
+
+  test("invoking a saved extended roll launches an extended action, reads its table, and accumulates to the target", async () => {
+    await NamedRollStore.seedDefaults();
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');   // dexterity 1 + athletics 0 = 1 die
+    const start = await CommandRouter.route("roll @climbing requires=2", { rng: seqRng([6]) });
+    expect(start).toContain("starts extended");
+    expect(start).toContain("climbing: 1 success = 10 so far");   // accumulated distance: 1 success x 10 ft
+    expect(start).toContain("total 1/2");
+    const done = await CommandRouter.route("continue-roll", { rng: seqRng([6]) });
+    expect(done).toContain("succeeded");
+    expect(done).toContain("= 20 so far");                        // accumulated distance climbed: 2 x 10 ft
+  });
+
+  test("an extended saved roll refuses without a target; a non-extended saved roll still single-rolls", async () => {
+    await NamedRollStore.seedDefaults();
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    expect(await CommandRouter.route("roll @climbing")).toContain("give it a target");
+    await CommandRouter.route("name-roll jab dexterity+brawl 6");
+    const single = await CommandRouter.route("roll @jab", { rng: seqRng([6]) });
+    expect(single).toContain("vs diff 6");
+    expect(single).not.toContain("starts extended");
+  });
+
+  test("the climb tag rides the launched base, so a tag-gated passive reaches the extended interval", async () => {
+    await NamedRollStore.seedDefaults();
+    // A merit whose passive drops difficulty by 2 ONLY on climb-tagged rolls.
+    const entryText = 'x\n=====\n[{"name":"Sure Grip","kind":"merit","points":[1],"passive":[{"op":"difficulty","amount":-2,"target":"climb"}]}]';
+    const cat = await LorebookManager.ensureCategory("srd:merits-flaws");
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: "srd:merits-flaws:custom2", category: cat.id, text: entryText });
+    await MeritFlawRegistry.loadFromLorebook();
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("take-merit sure-grip 1");
+    // A 5 is below diff 6 but meets diff 4 (6-2). With the gate firing, it counts.
+    const start = await CommandRouter.route("roll @climbing requires=3", { rng: seqRng([5]) });
+    expect(start).toContain("total 1/3");   // the -2 (climb-gated) turned the 5 into a success
+  });
+
+  test("roll-info shows the extended shape + description and is quiet; list-rolls marks [extended]", async () => {
+    await NamedRollStore.seedDefaults();
+    const info = await CommandRouter.route("roll-info climbing");
+    expect(info).toContain("extended");
+    expect(info).toContain("Scaling vertical surfaces");
+    expect(info).toContain("requires=<target>");
+    expect(await CommandRouter.route("list-rolls")).toContain("[extended");
+    const q = await processAdventureInput("Hmm. [[roll-info climbing]] Right.");
+    expect(q!.stopGeneration).toBe(true);   // a query stops generation
   });
 });
 

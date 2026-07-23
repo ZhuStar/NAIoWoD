@@ -33,6 +33,7 @@ import {
   SuccessTable, SuccessTableRegistry, readSuccessTable, describeTableReading, describeTable,
   parseTableRows, DEFAULT_SUCCESS_TABLES, RollOutcomeKind,
   ContestMode, ContestOutcome, compareRolls, ExtendedContest, applyContestRound, describeContest, RollExecution,
+  BotchPolicy,
 } from "./rolls";
 import {
   WizardDefinition, WizardPrompt, WizardStateData, WizardResult, resolveReply, renderPromptText,
@@ -44,7 +45,7 @@ import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
-  resolveTraitFromRecord, ownedMeritInstances, enhancementsFor, SavedRoll,
+  resolveTraitFromRecord, ownedMeritInstances, enhancementsFor, SavedRoll, ExtendedSavedConfig,
   ResourceOverrides, RESOURCE_CONFIG_ENTRY, TableLibrary, TableAliases, TABLES_CATEGORY,
   ConstraintRegistry, AfflictionRegistry,
   ActiveAffliction, CharacterAfflictions,
@@ -642,6 +643,90 @@ async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, succ
   return `${table.name}: ${describeTableReading(readSuccessTable(table, outcome, successes))}`;
 }
 
+// Table reading for an EXTENDED interval. A value-per-success table (climbing:
+// 10 ft/success) reports the ACCUMULATED total - "how far the whole action has
+// gone", the distance climbed so far - because that is the point of an extended
+// action: the climb ends when you have climbed the entire distance. Qualitative
+// tables (degrees) still read this interval's own net, since each interval has
+// its own quality. When the pool is empty (nothing banked, or a botch reset it)
+// the value branch falls back to this interval's outcome flavour.
+async function extendedTableNote(raw: string | undefined, outcome: RollOutcomeKind, net: number, accumulated: number): Promise<string> {
+  if (!raw) return "";
+  const ref = await resolveTableRef(raw);
+  if (ref.error) return ref.error;
+  const table = SuccessTableRegistry.get(ref.key!);
+  if (!table) return `unknown table "${ref.key}" (see [[tables]])`;
+  if (table.valuePerSuccess !== undefined && accumulated > 0) {
+    return `${table.name}: ${describeTableReading(readSuccessTable(table, "success", accumulated))} so far`;
+  }
+  return `${table.name}: ${describeTableReading(readSuccessTable(table, outcome, net))}`;
+}
+
+// Execute ONE roll for a character with the full live env - the shared path for
+// extended intervals so they respect the SAME modifiers a single roll does:
+// active affliction tags bite, enhancements/boosts fold into the resolver, the
+// wound penalty comes off the pool, and owned passive roll-ops apply (gated by
+// the pool's traits AND the roll's tags - this is how a `climb` tag lets a
+// grip power's `-2 difficulty` reach an extended climb). No spend/specialty
+// here - those are single-roll concerns.
+async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: CommandContext): Promise<{ exec: RollExecution; notes: string[] }> {
+  const tagged = await withAfflictionTags(char.name, spec);
+  const poolTraits = poolTraitsOf(char, tagged.pool);
+  const env = await characterRollEnv(char);
+  const passive = passiveRollExtra(char, poolTraits, tagged.tags);
+  const extra: Partial<RollModifier> = {};
+  const p = passive.extra;
+  if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
+  if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
+  if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
+  if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
+  if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
+  const exec = executeRoll(tagged, env.resolver, { rng: ctx.rng, extra });
+  const notes = [...passive.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : ""].filter(Boolean);
+  return { exec, notes };
+}
+
+// Start an extended action and roll its first interval as `char`. THE one
+// launcher - used by [[extended-roll]] and by invoking a saved extended roll.
+// `base.requires` is forced to 1 by callers (each interval is a plain roll; the
+// accumulated `target` is the extended goal). Reads `table` against the
+// interval's net so each report shows what the successes MEAN (10 ft/success).
+async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { target: number; maxRolls: number; interval: string; onBotch: BotchPolicy; label: string; table?: string }, ctx: CommandContext): Promise<string> {
+  const action: ExtendedRoll = {
+    id: api.v1.uuid(), label: opts.label,
+    base, target: opts.target, maxRolls: opts.maxRolls,
+    interval: opts.interval, onBotch: opts.onBotch, table: opts.table,
+    accumulated: 0, rollsUsed: 0, status: "open", log: [],
+  };
+  const { exec, notes } = await execCharacterRoll(char, base, ctx);
+  const { action: after, note } = applyInterval(action, exec, char.name);
+  await ExtendedRollStore.save(after);
+  if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
+  const extras = [...notes, await extendedTableNote(after.table, exec.outcome, exec.result?.net ?? 0, after.accumulated)].filter(Boolean).join("; ");
+  const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
+  return sys(`${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}${extras ? ` (${extras})` : ""}.${tail}`);
+}
+
+// Invoke a saved EXTENDED roll: the save holds the shape (pool, difficulty,
+// tags, table, botch/interval defaults); the TARGET and any overrides come at
+// play time. `requires=`/`target=` is the accumulated goal (the full climb).
+async function launchExtendedFromSaved(char: PlayableCharacter, name: string, saved: SavedRoll, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
+  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
+  const target = args.requires ?? intOf(cmd.named["target"]);
+  if (target === undefined || target < 1) {
+    return sys(`"${name}" is an extended roll - give it a target, e.g. [[roll @${name} requires=4]] (the successes = the whole action; for climbing, wall height / ft-per-success).`);
+  }
+  const cfg = saved.extended ?? {};
+  const maxRolls = intOf(cmd.named["intervals"]) ?? cfg.intervals;
+  if (maxRolls === undefined || maxRolls < 1) return sys(`"${name}" needs intervals=<max rolls> (its save defines none), e.g. [[roll @${name} requires=${target} intervals=6]].`);
+  const onBotch = cmd.named["on-botch"] ? parseBotchPolicy(cmd.named["on-botch"]) : (cfg.onBotch ?? "fail");
+  const base = overrideSpec(saved, { ...args, requires: 1 });   // each interval is a plain roll
+  return launchExtended(char, base, {
+    target, maxRolls, interval: cmd.named["interval"] ?? cfg.interval ?? "",
+    onBotch, label: cmd.named["label"] ?? name, table: saved.table,
+  }, ctx);
+}
+
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
   const args = extractRollArgs(cmd, offset);
   if (!args.pool) return sys(`roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].`);
@@ -655,6 +740,9 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     const name = StringUtil.normalize(args.pool.slice(1));
     const base = await NamedRollStore.get(name);
     if (!base) return sys(`No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].`);
+    // A saved EXTENDED roll (a "named procedure") launches an extended action
+    // instead of a single roll - the target is play-time input, not baked in.
+    if (base.extended) return launchExtendedFromSaved(char, name, base, cmd, args, ctx);
     savedSpend = base.spend;         // auto-paid unless the command overrides spend=
     savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
     savedTable = base.table;         // read against the outcome unless table= overrides
@@ -713,10 +801,20 @@ async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
 // The sidecars a saved roll carries beyond its spec, as "k=v" display pairs.
 function describeSidecars(saved: SavedRoll): string {
   return [
+    saved.extended ? describeExtendedSaved(saved.extended) : "",
     saved.spend ? `spend=${saved.spend}` : "",
     saved.specialty ? `specialty=${saved.specialty}` : "",
     saved.table ? `table=${saved.table}` : "",
   ].filter(Boolean).join(", ");
+}
+
+// The extended shape of a saved procedure (its defaults; the target is play-time).
+function describeExtendedSaved(cfg: ExtendedSavedConfig): string {
+  const bits = ["extended"];
+  if (cfg.intervals !== undefined) bits.push(`≤${cfg.intervals} rolls`);
+  if (cfg.interval) bits.push(`every ${cfg.interval}`);
+  if (cfg.onBotch) bits.push(`botch ${cfg.onBotch}`);
+  return `[${bits.join(", ")}]`;
 }
 
 // Save a reusable roll: name is positional[0], then the roll grammar at offset 1.
@@ -732,14 +830,31 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const spend = cmd.named["spend"]?.trim();
   const specialty = cmd.named["specialty"]?.trim();
   const table = cmd.named["table"]?.trim();
+  const description = cmd.named["description"]?.trim();   // literal channel: verbatim prose
   const saved: SavedRoll = { ...spec };
   if (spend) saved.spend = spend;
   if (specialty) saved.specialty = specialty;
   if (table) saved.table = table;
+  if (description) saved.description = description;
+  // A "named procedure": extended=true (or any extended knob) makes invoking it
+  // launch an extended action; the target stays play-time input.
+  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
+  const intervals = intOf(cmd.named["intervals"]);
+  const interval = cmd.named["interval"]?.trim();
+  const onBotchRaw = cmd.named["on-botch"]?.trim();
+  const extendedFlag = ["true", "yes", "1"].includes((cmd.named["extended"] ?? "").toLowerCase());
+  if (extendedFlag || intervals !== undefined || interval || onBotchRaw) {
+    const cfg: ExtendedSavedConfig = {};
+    if (intervals !== undefined) cfg.intervals = intervals;
+    if (interval) cfg.interval = interval;
+    if (onBotchRaw) cfg.onBotch = parseBotchPolicy(onBotchRaw);
+    saved.extended = cfg;
+  }
   await NamedRollStore.save(name, saved);
   const key = StringUtil.normalize(name);
   const sidecars = describeSidecars(saved);
-  return sys(`Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}. Use it with [[roll @${key}]].`);
+  const descBit = saved.description ? " (+description)" : "";
+  return sys(`Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}${descBit}. Use it with [[roll @${key}${saved.extended ? " requires=<target>" : ""}]].`);
 }
 
 async function cmdListRolls(): Promise<string> {
@@ -750,7 +865,24 @@ async function cmdListRolls(): Promise<string> {
     const sidecars = describeSidecars(map[n]);
     return `${n} (${describeSpec(map[n])}${sidecars ? `, ${sidecars}` : ""})`;
   }).join("; ");
-  return sys(`Saved rolls: ${items}.`);
+  return sys(`Saved rolls: ${items}. [[roll-info <name>]] for detail.`);
+}
+
+// Full detail of one saved roll: spec, sidecars, and the rules description.
+async function cmdRollInfo(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`roll-info needs a name, e.g. [[roll-info climbing]]. [[list-rolls]] lists them.`);
+  const key = StringUtil.normalize(name);
+  const saved = await NamedRollStore.get(key);
+  if (!saved) return sys(`No saved roll named "${key}". See [[list-rolls]].`);
+  const sidecars = describeSidecars(saved);
+  const invoke = saved.extended ? `[[roll @${key} requires=<target>]]` : `[[roll @${key}]]`;
+  const parts = [`${key} = ${describeSpec(saved)}${sidecars ? `, ${sidecars}` : ""}`];
+  if (saved.description) parts.push(saved.description);
+  parts.push(`Invoke: ${invoke}`);
+  // Join as sentences without doubling a period a part already ends with
+  // (the description is verbatim prose and usually ends in one).
+  return sys(parts.map(p => p.replace(/\.\s*$/, "")).join(". "));
 }
 
 async function cmdForgetRoll(cmd: ParsedCommand): Promise<string> {
@@ -791,26 +923,17 @@ async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise
   if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const args = extractRollArgs(cmd, 0);
   if (!args.pool) return sys(`extended-roll needs a pool, e.g. [[extended-roll strength+stamina requires=8 intervals=4]].`);
-  if (args.pool.startsWith("@")) return sys(`extended-roll takes a pool expression (e.g. strength+stamina), not a saved @name.`);
+  if (args.pool.startsWith("@")) return sys(`extended-roll takes a pool expression (e.g. strength+stamina), not a saved @name - invoke a saved extended roll with [[roll @name requires=<target>]].`);
   const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
   const maxRolls = intOf(cmd.named["intervals"]) ?? 0;
   if (maxRolls < 1) return sys(`extended-roll needs intervals=<max rolls> (at least 1).`);
-  const target = args.requires ?? 1;   // `requires=` is the accumulated target
-  const base = makeRollSpec({ ...args, pool: args.pool, requires: 1 });
-  const action: ExtendedRoll = {
-    id: api.v1.uuid(),
-    label: cmd.named["label"] ?? "",
-    base, target, maxRolls,
-    interval: cmd.named["interval"] ?? "",
+  const base = makeRollSpec({ ...args, pool: args.pool, requires: 1 });   // each interval is a plain roll
+  return launchExtended(char, base, {
+    target: args.requires ?? 1,   // `requires=` is the accumulated target
+    maxRolls, interval: cmd.named["interval"] ?? "",
     onBotch: parseBotchPolicy(cmd.named["on-botch"]),
-    accumulated: 0, rollsUsed: 0, status: "open", log: [],
-  };
-  const exec = executeRoll(base, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
-  const { action: after, note } = applyInterval(action, exec, char.name);
-  await ExtendedRollStore.save(after);
-  if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
-  const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
-  return sys(`${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}.${tail}`);
+    label: cmd.named["label"] ?? "", table: cmd.named["table"],
+  }, ctx);
 }
 
 async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -820,11 +943,12 @@ async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise
   if (!action) return sys(`No open extended action. Start one with [[extended-roll ...]] or name its id.`);
   if (action.status !== "open") return sys(`That extended action is already ${action.status}.`);
   const spec = overrideSpec(action.base, rollOverridesFromNamed(cmd));
-  const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
+  const { exec, notes } = await execCharacterRoll(char, spec, ctx);
   const { action: after, note } = applyInterval(action, exec, char.name);
   await ExtendedRollStore.save(after);
   if (after.status !== "open" && (await ExtendedRollStore.currentId()) === after.id) await ExtendedRollStore.clearCurrent();
-  return sys(`${disp(char.name)} continues ${describeExtended(after)}. This interval: ${note}.`);
+  const extras = [...notes, await extendedTableNote(after.table, exec.outcome, exec.result?.net ?? 0, after.accumulated)].filter(Boolean).join("; ");
+  return sys(`${disp(char.name)} continues ${describeExtended(after)}. This interval: ${note}${extras ? ` (${extras})` : ""}.`);
 }
 
 async function cmdRollStatus(cmd: ParsedCommand): Promise<string> {
@@ -2112,13 +2236,22 @@ CommandRouter.register("roll-for", cmdRollFor, {
     { key: "table", kind: "named", desc: "Success table to read the outcome" }],
 });
 CommandRouter.register("name-roll", cmdNameRoll, {
-  summary: "save a roll under a name; @name invokes it with its spend/specialty/table baked in",
+  summary: "save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure)",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>" },
     { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS,
-    { key: "table", kind: "named", desc: "Success table read when the roll is invoked" }],
+    { key: "table", kind: "named", desc: "Success table read when the roll is invoked" },
+    { key: "extended", kind: "named", type: "enum", options: ["true"], desc: "Make it an extended procedure (target supplied at invoke)" },
+    { key: "intervals", kind: "named", type: "int", desc: "Extended: default max rolls" },
+    { key: "interval", kind: "named", desc: "Extended: advisory spacing (e.g. 1 turn)" },
+    { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"], desc: "Extended: botch policy" },
+    { key: "description", kind: "named", type: "literal", desc: "Rules prose (verbatim)" }],
 });
 CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
+CommandRouter.register("roll-info", cmdRollInfo, {
+  summary: "show a saved roll's full spec, sidecars, and description",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
 CommandRouter.register("forget-roll", cmdForgetRoll, {
   summary: "delete a saved roll",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
@@ -2418,7 +2551,7 @@ const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 // turn" policy; it stays OUT of the pure CommandSpec (which describes grammar).
 // To silence another command's turn, add its verb here.
 const QUIET_VERBS = new Set<string>([
-  "help", "characters", "sheet", "list-rolls", "roll-status", "contest-status",
+  "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
 ]);

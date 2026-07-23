@@ -32,7 +32,7 @@ import {
   ALL_CONFIG_STORES, parseConfigBody, parseNamedConfigList,
   writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
 } from "./services";
-import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, ExtendedRoll, ExtendedContest } from "./rolls";
+import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, ExtendedRoll, ExtendedContest, BotchPolicy } from "./rolls";
 import { WizardPrompt, WizardStateData } from "./wizard";
 
 // --- LIVE CHARACTER SHEET ---
@@ -677,13 +677,39 @@ export function enhancementsFor(char: PlayableCharacter): Record<string, number>
 export const NAMED_ROLLS_CATEGORY = "wod:named-rolls";
 const NAMED_ROLLS_ENTRY = "wod:named-rolls:library";
 
+// The extended nature of a saved roll (a "named procedure"): its PRESENCE means
+// invoking the roll launches an extended action instead of a single roll. These
+// are DEFAULTS for that action; the `target` (successes to reach) is NOT here -
+// it's the Storyteller's play-time call (e.g. a wall's height / ft-per-success),
+// supplied at invoke.
+export interface ExtendedSavedConfig {
+  intervals?: number;   // default max rolls (overridable at invoke)
+  interval?: string;    // advisory spacing label ("1 turn")
+  onBotch?: BotchPolicy; // default botch policy
+}
+
 // A saved roll is a RollSpec plus optional game-layer sidecars: `spend` (the
-// resource/role token to pay), `specialty` (applied to the roll), and `table`
-// (read against the outcome) - all applied when the roll is invoked, all
-// overridable by the invoking command's own arguments. Sidecars stay OUT of
-// the pure RollSpec - the roll pipeline never sees them - and are stored raw
-// (resolved at invoke time, like every command argument).
-export type SavedRoll = RollSpec & { spend?: string; specialty?: string; table?: string };
+// resource/role token to pay), `specialty` (applied to the roll), `table` (read
+// against the outcome), plus - for a "named procedure" - `extended` (invoking it
+// launches an extended action) and a `description` (rules prose). Sidecars stay
+// OUT of the pure RollSpec - the roll pipeline never sees them - and are stored
+// raw (resolved at invoke time, like every command argument).
+export type SavedRoll = RollSpec & {
+  spend?: string; specialty?: string; table?: string;
+  extended?: ExtendedSavedConfig; description?: string;
+};
+
+// Pre-saved rolls seeded into a fresh chronicle's library (create-if-missing;
+// never clobbers an existing library, so player edits/deletes stick). The set
+// grows as DATA - these are the Dark Ages "Drama" named systems. Editable like
+// any saved roll (they live in the lorebook after seeding).
+export const DEFAULT_NAMED_ROLLS: Record<string, SavedRoll> = {
+  climbing: {
+    pool: "dexterity+athletics", difficulty: 6, difficultyMod: 0, diceMod: 0, requires: 1, tags: ["climb"],
+    table: "climbing", extended: { intervals: 10 },
+    description: "Scaling vertical surfaces - cliff faces or walls. Roll Dexterity + Athletics (difficulty 6; grip-improving Disciplines such as Protean's Talons of the Beast or Vicissitude bone spurs reduce this to 4). Extended: each success moves the climber up ~10 feet (the Storyteller may vary the distance for easy slopes or tightly-bounded walls). Failure means no progress this interval; a botch can leave the climber stuck, panicked by the height, or falling.",
+  },
+};
 
 export class NamedRollStore {
   private static _text(map: Record<string, SavedRoll>): string {
@@ -736,6 +762,17 @@ export class NamedRollStore {
     delete map[key];
     await NamedRollStore._write(map);
     return true;
+  }
+
+  // Seed the starter library on a FRESH chronicle: if the library entry is
+  // missing, create it with DEFAULT_NAMED_ROLLS. Never clobbers an existing
+  // library (even an emptied one), so player edits and deletes persist across
+  // loads. Returns how many were seeded (0 when the library already exists).
+  static async seedDefaults(): Promise<number> {
+    const existing = await LorebookManager.entryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY);
+    if (existing) return 0;
+    await NamedRollStore._write({ ...DEFAULT_NAMED_ROLLS });
+    return Object.keys(DEFAULT_NAMED_ROLLS).length;
   }
 }
 

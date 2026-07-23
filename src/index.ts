@@ -23,6 +23,7 @@ import {
   LorebookManager, MeritFlawRegistry, reloadAllConfigStores,
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,
 } from "./services";
+import { NamedRollStore } from "./state";
 import { processAdventureInput, reconcileLorebook } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
@@ -40,7 +41,8 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   const recon = await reconcileLorebook();
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
+  const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}${reconBit}`);
   return { setupMessage: boot.message };
 }

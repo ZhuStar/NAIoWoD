@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `50be872`** ("[SYSTEM: ...]
-> format + QUIET_VERBS stop generation for query commands"). Prior: `a1f9997`
-> (central sys() formatter); `db53ac7` (reply prefix → [SYSTEM]:); `cb5b4c3`
-> (vendor NovelAI's script-types.d.ts as ambient truth); `d5d446d` ("[[sheet]]: the
-> record as the engine reads it — the creator-mode manual-fill loop's
-> verification half").
+> **Last synced with the code as of commit `95ac0fc`** ("named procedures:
+> saved rolls that can be extended + carry a table & description; ship the
+> climbing Drama default"). Prior: `50be872` ([SYSTEM: ...] format + QUIET_VERBS
+> stop generation for query commands); `a1f9997` (central sys() formatter);
+> `db53ac7` (reply prefix → [SYSTEM]:); `cb5b4c3` (vendor NovelAI's
+> script-types.d.ts as ambient truth).
 
 ---
 
@@ -281,7 +281,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
   later, same wizard logic.
 
-### src/rolls.ts (576) — pure roll machinery
+### src/rolls.ts (578) — pure roll machinery
 - `RollSpec {pool, difficulty(6), difficultyExpr?, difficultyMod, requires(≥1),
   diceMod, tags[]}` — serializable (that's what enables named rolls);
   `makeRollSpec`. **`difficultyExpr`** (optional) is the difficulty as a pool
@@ -556,7 +556,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1424) — the character model + every persistent store
+### src/state.ts (1461) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -709,7 +709,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2457) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2590) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -990,7 +990,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3474 + 34 lines, 317 tests, 82 describes)
+### test/ (3552 + 34 lines, 323 tests, 83 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1309,6 +1309,50 @@ cards are all tracked (id map + backups above).
     (it feeds help + windows, lower layers). `processAdventureInput` tests each
     match with `CommandParser.parse(body).name`. Querying the system never makes
     the AI narrate; an in-fiction action wrapped in prose still generates.
+28. **Named procedures — a saved roll that can be EXTENDED and carry a table +
+    description; ship a starter Drama set** (user, live-testing Dark Ages:
+    Vampire's *Drama* named rolls, Climbing first — "I still think it's a saved
+    roll, it's just extended, and maybe defines a table"). Kept as ONE concept,
+    NOT a new "procedure" type: `SavedRoll` gains `extended?: ExtendedSavedConfig`
+    (`{intervals?, interval?, onBotch?}` — the extended DEFAULTS; presence ⇒
+    invoking `@name` launches an extended action) and `description?` (verbatim
+    rules prose, literal channel). The **target is play-time input**
+    (`requires=`/`target=`; wall height ÷ ft-per-success, the ST's call), NEVER
+    baked into the save — refused with guidance if absent; intervals fall back to
+    the save's `extended.intervals`. `launchExtended` is now THE one launcher
+    (shared by `[[extended-roll]]` and the saved-`@name` extended branch in
+    `rollAndReport`); each interval rolls through the FULL character env
+    (`execCharacterRoll`: affliction tags + enhancements/boosts + wound penalty +
+    tag/trait-gated passives), so a saved roll's `climb` tag lets a grip power's
+    `−2 difficulty target:climb` reach the extended climb — the gate the claws
+    will use (unifying extended with the single-roll env is what makes that gate
+    meaningful; extended-roll formerly used only the raw record resolver).
+    **Extended value-table readings ACCUMULATE**: a `valuePerSuccess` table
+    (climbing = 10 ft/success) reports the TOTAL distance so far
+    (`accumulated × value`, "= 20 so far") because the climb ends when you've
+    climbed the ENTIRE distance (the user's model); qualitative tables (degrees)
+    still read the interval's own net (`extendedTableNote` splits on
+    `valuePerSuccess`; an empty pool / botch-reset falls back to the interval
+    outcome). `DEFAULT_NAMED_ROLLS` (state.ts) + a `climbing` success table
+    (rolls.ts, `valuePerSuccess:10`) ship the flagship **climbing** procedure
+    (dexterity+athletics, diff 6, tags climb, extended ≤10, the Drama text);
+    `NamedRollStore.seedDefaults()` (called from `init`) CREATES the library only
+    if MISSING — a player's edits/deletes stick, never re-clobbered (chosen over
+    an overlay: matches "pre-saved, fully-owned, hand-editable"; trade-off — new
+    defaults don't reach existing chronicles, fine for starter content). Saved
+    rolls stay revisable (the library is hand-editable JSON, so more tags can be
+    added later — the user's plan for grip powers). Authoring/display:
+    `name-roll` accepts `extended=true`/`intervals=`/`interval=`/`on-botch=`/
+    `description=` (echoed via `describeExtendedSaved`); new **`roll-info <name>`**
+    (a QUIET verb, §7.27) prints the full spec + sidecars + description + invoke
+    hint (sentence-joined without doubling a trailing period); `list-rolls` marks
+    `[extended]` and points at roll-info. Follow-ups RECORDED (not built here):
+    win-roll window fields for extended/description + the two live-play UX fixes
+    ("Choose pool…" → "Choose saved roll…", collapse the advanced knobs); the
+    claws/grip powers themselves (an affliction/merit whose `passive` is
+    `{op:"difficulty", amount:-2, target:"climb"}`); and the **`generateWithStory`
+    ask for the play-time ft-per-success / target** (the user: "which distance per
+    success is where we enter with the Generation API" — asks the AI off-screen).
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1428,10 +1472,14 @@ Ordered roughly by unlock value:
     walked from roll's spec; For-aware spend/specialty pickers; Save bakes
     the spend/specialty/**table** sidecars — `SavedRoll.table` added with it;
     **difficulty-as-expression DONE** in `RollSpec.difficultyExpr`).
-    Remaining: the **advisory** `self:`/`ally:`/`target:`/`opposition:`
-    prefixes - in the "Design notes" section of `docs/ui-parts.md`; migrating
-    the TEXT wizards (`RESOURCES_WIZARD`) to render as windows; and a
-    template-definer window once the Choice primitive lands.
+    Remaining: **win-roll fields for the named-procedure knobs**
+    (extended toggle + intervals/interval/on-botch, a description input) and the
+    two live-play UX fixes — "Choose pool…" → "Choose saved roll…", collapse the
+    advanced knobs so name + buttons stay visible (§7.28); the **advisory**
+    `self:`/`ally:`/`target:`/`opposition:` prefixes - in the "Design notes"
+    section of `docs/ui-parts.md`; migrating the TEXT wizards
+    (`RESOURCES_WIZARD`) to render as windows; and a template-definer window
+    once the Choice primitive lands.
 13. **Creation-budget wizard** (same engine).
 14. **Aliases + redefinable default character** — **DONE** (§7.18):
     `[[set-default]]` changes the default character; `@` aliases in three

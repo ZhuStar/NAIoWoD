@@ -17,7 +17,7 @@
 // which exercises the whole window -> command -> store path without a screen.
 // =============================================================================
 import { UiPartHelpers } from "./host";
-import { CommandRouter, CommandSpec, ParamSpec, composeCommand } from "./command";
+import { CommandRouter, CommandSpec, ParamSpec, composeCommand, sys } from "./command";
 import { SuccessTableRegistry } from "./rolls";
 import {
   AfflictionRegistry, CharacterStore, NamedRollStore, CharacterResources,
@@ -159,7 +159,7 @@ export async function openConstraintWindow(): Promise<void> {
 // [[win-constraint]] - a UI over [[define-constraint]], derived from its spec.
 async function cmdWinConstraint(): Promise<string> {
   await openConstraintWindow();
-  return `[SYSTEM]: Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).`;
+  return sys(`Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).`);
 }
 
 CommandRouter.register("win-constraint", cmdWinConstraint, {
@@ -172,7 +172,7 @@ async function cmdWinTable(): Promise<string> {
     title: "Define success table",
     blurb: "**Define a success table** (ladder rows, numeric output, or both)",
   });
-  return `[SYSTEM]: Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).`;
+  return sys(`Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).`);
 }
 
 CommandRouter.register("win-table", cmdWinTable, {
@@ -192,7 +192,7 @@ async function cmdWinAffliction(): Promise<string> {
     blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
     pickers: { then: afflictionOptions, mirror: afflictionOptions },
   });
-  return `[SYSTEM]: Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).`;
+  return sys(`Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).`);
 }
 
 // [[win-afflict]] - the first DOMAIN-driven window: pick an affliction and its
@@ -249,7 +249,7 @@ export async function openAfflictWindow(): Promise<void> {
 
 async function cmdWinAfflict(): Promise<string> {
   await openAfflictWindow();
-  return `[SYSTEM]: Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).`;
+  return sys(`Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).`);
 }
 
 CommandRouter.register("win-affliction", cmdWinAffliction, {
@@ -367,7 +367,7 @@ export async function openRollWindow(): Promise<void> {
 
 async function cmdWinRoll(): Promise<string> {
   await openRollWindow();
-  return `[SYSTEM]: Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).`;
+  return sys(`Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).`);
 }
 
 CommandRouter.register("win-roll", cmdWinRoll, {

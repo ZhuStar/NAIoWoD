@@ -7,9 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `db53ac7`** ("Engine reply
-> prefix ((OOC-Storyteller: …)) → [SYSTEM]: …"). Prior: `cb5b4c3` (vendor
-> NovelAI's script-types.d.ts as ambient truth); `d5d446d` ("[[sheet]]: the
+> **Last synced with the code as of commit `a1f9997`** ("Central output
+> formatter: sys() + SYSTEM_PREFIX in command.ts"). Prior: `db53ac7` (reply
+> prefix → [SYSTEM]:); `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient
+> truth); `d5d446d` ("[[sheet]]: the
 > record as the engine reads it — the creator-mode manual-fill loop's
 > verification half").
 
@@ -466,7 +467,14 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   the word "condition" is reserved for future predicates. (Health-box states
   are the separate `HealthStateDef` in core/damage.ts.)
 
-### src/command.ts (173) — the command bus (pure; depends on core/traits only)
+### src/command.ts (185) — the command bus (pure; depends on core/traits only)
+- **`sys(body)` + `SYSTEM_PREFIX`** (§7.26) — THE engine output formatter:
+  `sys(body) = \`${SYSTEM_PREFIX}${body}\`` = `[SYSTEM]: <body>`. Every command
+  reply routes through it (game.ts, window.ts) AND the init setup banner
+  (services.ts imports it — the one services→command dependency, allowed by
+  layering); `SYSTEM_PREFIX` is the ONE place the prefix string lives. Re-tagging
+  the engine voice (or a future general `speak(speaker, body)`) is a one-line
+  change, never a sweep. Re-exported via index.
 - `ParsedCommand {name, positional[], named{}, raw}` + `CommandParser.parse` —
   quote-aware tokenizer; body-level gluing BEFORE tokenization (`@`-space and
   `::`-space stripped, backtick spans protected), then **every token/value
@@ -1265,12 +1273,23 @@ cards are all tracked (id map + backups above).
     SYSTEM voice in a wider speaker scheme the player is introducing —
     `Player:` / `OOC-Player:` / `ST:` / `OOC-ST:` / `<character-name>:` (incl.
     the player's). All ~242 inlined `\`((OOC-Storyteller: BODY))\`` literals
-    became `\`[SYSTEM]: BODY\`` (greedy per-line sed; no central formatter
-    existed — a future speaker-tag pass may add one). The init setup banner
+    became `\`[SYSTEM]: BODY\`` (greedy per-line sed). The init setup banner
     aligned too (`[SYSTEM]: Storyteller setup`). `processAdventureInput`
     concatenation is unchanged — the reply string just carries the new prefix.
     NOTE: `ST:`/narration voices are NOT the engine's to emit yet; they arrive
-    with the generateWithStory Storyteller loop.
+    with the generateWithStory Storyteller loop. (Superseded by §7.26, which
+    centralized the format.)
+26. **Central output formatter `sys()`** (user follow-up: "shouldn't we have a
+    central function so we never find-and-replace 242 strings again?"). YES.
+    `sys(body)` + `SYSTEM_PREFIX` in command.ts (the reply formatter belongs
+    with the command bus); every `\`[SYSTEM]: BODY\`` literal became
+    `sys(\`BODY\`)` (greedy sed; the 14 nested-ternary-backtick lines survive
+    because the outer closing backtick is still the line's last). The setup
+    banner uses it too (services→command import, allowed by layering). Now the
+    prefix lives in ONE place: re-tagging the engine voice — or growing `sys`
+    into a general `speak(speaker, body)` when the Player/ST/OOC voices land —
+    is a one-line change. Chose command.ts over host.ts/core: it's the
+    command-reply convention, and game/window already depend on command.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

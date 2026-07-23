@@ -2431,6 +2431,18 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
 // the router dispatches, the game decides.
 // =============================================================================
 
+// --- OUTPUT VOICE ------------------------------------------------------------
+// The engine's ONE reply formatter. Every command reply is the SYSTEM speaker
+// in the player's wider scheme (Player / OOC-Player / ST / OOC-ST /
+// <character-name>). Centralized here so re-tagging or re-wrapping the engine's
+// output is a one-line change - never a find-and-replace across the handlers.
+// If a general `speak(speaker, body)` lands later, `sys` becomes its SYSTEM
+// specialization. Callers pass the already-composed body (interpolated string).
+const SYSTEM_PREFIX = "[SYSTEM]: ";
+function sys(body: string): string {
+  return `${SYSTEM_PREFIX}${body}`;
+}
+
 // --- PARSER ------------------------------------------------------------------
 // A command body -> { name, positional[], named{}, raw }. Pure and
 // dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -2585,7 +2597,7 @@ class CommandRouter {
     const cmd = CommandParser.parse(body);
     for (const hook of CommandRouter._beforeRoute) await hook();
     const def = CommandRouter._registry.get(cmd.name);
-    if (!def) return `[SYSTEM]: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`;
+    if (!def) return sys(`Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`);
     return def.handler(cmd, ctx);
   }
 }
@@ -2777,7 +2789,7 @@ class LorebookManager {
   private static _setupMessage(specs: SrdCategorySpec[], created: string[]): string {
     const lines = created.map(name => `• ${name} — ${specs.find(s => s.name === name)?.blurb ?? "game data"}`);
     return [
-      "[SYSTEM]: Storyteller setup",
+      sys("Storyteller setup"),
       "I've added the lorebook categories this game needs and filled them with starter data and examples. Open your Lorebook and review / edit:",
       ...lines,
       `Each entry starts with instructions; the data is below its "${SRD_HEADER_MARKER}" line. Tune these to your chronicle, then we’re ready to play.`,
@@ -4816,25 +4828,25 @@ const WIZARD_DEFS: Record<string, WizardDefinition> = { resources: RESOURCES_WIZ
 async function answerActiveWizard(active: ActiveWizard, raw: string): Promise<string> {
   if (/^\s*cancel\s*$/i.test(raw)) {
     await WizardSession.clear();
-    return `[SYSTEM]: Wizard cancelled - nothing saved.`;
+    return sys(`Wizard cancelled - nothing saved.`);
   }
   const def = WIZARD_DEFS[active.def];
   if (!def) {
     await WizardSession.clear();
-    return `[SYSTEM]: The active wizard "${active.def}" no longer exists - session cleared.`;
+    return sys(`The active wizard "${active.def}" no longer exists - session cleared.`);
   }
   const resolved = resolveReply(active.prompt, raw);
   if ("error" in resolved) {
-    return `[SYSTEM]: ${resolved.error}. ${renderPromptText(active.prompt)}`;
+    return sys(`${resolved.error}. ${renderPromptText(active.prompt)}`);
   }
   const r = await def.answer(active.state, resolved.value);
-  if (r.error) return `[SYSTEM]: ${r.error}. ${renderPromptText(active.prompt)}`;
+  if (r.error) return sys(`${r.error}. ${renderPromptText(active.prompt)}`);
   if (r.done) {
     await WizardSession.clear();
-    return `[SYSTEM]: ${def.title} finished. ${r.summary ?? ""}`;
+    return sys(`${def.title} finished. ${r.summary ?? ""}`);
   }
   await WizardSession.set({ def: active.def, state: r.state!, prompt: r.prompt! });
-  return `[SYSTEM]: ${renderPromptText(r.prompt!)}`;
+  return sys(`${renderPromptText(r.prompt!)}`);
 }
 
 // --- COMMAND HANDLERS -------------------------------------------------------
@@ -4848,11 +4860,11 @@ const disp = (name: string): string => StringUtil.toTitleCase(name);
 async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   const set = (cmd.named["set"] ?? cmd.positional[0] ?? "").toLowerCase();
   if (set !== "true" && set !== "false") {
-    return `[SYSTEM]: creator-mode needs set=true or set=false.`;
+    return sys(`creator-mode needs set=true or set=false.`);
   }
   if (set === "true") {
     await CreatorMode.set(true);
-    return `[SYSTEM]: Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.`;
+    return sys(`Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.`);
   }
   // Leaving creator mode: capture any final lorebook edits, then switch off.
   const { synced, failed } = await syncFromCreatorEdits();
@@ -4860,23 +4872,23 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
   if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
-  return `[SYSTEM]: ${parts.join(" ")}`;
+  return sys(`${parts.join(" ")}`);
 }
 
 async function cmdCreatePlayable(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
-  if (!name) return `[SYSTEM]: create-playable needs name="...".`;
+  if (!name) return sys(`create-playable needs name="...".`);
   const rawTemplates = (cmd.named["templates"] ?? cmd.named["template"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
-  if (rawTemplates.length === 0) return `[SYSTEM]: create-playable needs templates="a,b,..." (at least one).`;
+  if (rawTemplates.length === 0) return sys(`create-playable needs templates="a,b,..." (at least one).`);
   const unknown = rawTemplates.filter(t => !(t in TEMPLATES));
   if (unknown.length) {
-    return `[SYSTEM]: Unknown template(s): ${unknown.join(", ")}. Valid: ${Object.keys(TEMPLATES).join(", ")}.`;
+    return sys(`Unknown template(s): ${unknown.join(", ")}. Valid: ${Object.keys(TEMPLATES).join(", ")}.`);
   }
   if (name.startsWith("@")) {
-    return `[SYSTEM]: Character names cannot start with "@" - that sigil is reserved for aliases.`;
+    return sys(`Character names cannot start with "@" - that sigil is reserved for aliases.`);
   }
   if (await CharacterStore.load(name)) {
-    return `[SYSTEM]: A character named "${name}" already exists. Edit it in creator mode, or pick another name.`;
+    return sys(`A character named "${name}" already exists. Edit it in creator mode, or pick another name.`);
   }
   const char = await CharacterStore.newPotential(name, rawTemplates);
   await CharacterStore.save(char);
@@ -4887,7 +4899,7 @@ async function cmdCreatePlayable(cmd: ParsedCommand): Promise<string> {
     await CharacterStore.setCurrent(name);
     note = " Selected as your default character.";
   }
-  return `[SYSTEM]: Created playable character "${name}" [${rawTemplates.join("+")}] - Attributes at 1, Abilities at 0, everything else unassigned.${note} Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it. Tip: [[configure-resources]] walks you through tuning how resources work.`;
+  return sys(`Created playable character "${name}" [${rawTemplates.join("+")}] - Attributes at 1, Abilities at 0, everything else unassigned.${note} Its sheet is the "pc:${StringUtil.normalize(name)}" entry in "${PLAYER_CHARACTERS_CATEGORY}"; use creator mode to edit it. Tip: [[configure-resources]] walks you through tuning how resources work.`);
 }
 
 async function cmdPlay(cmd: ParsedCommand): Promise<string> {
@@ -4896,16 +4908,16 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
     // No argument: hand control back to the default character.
     const def = await CharacterStore.getDefaultName();
     const dc = def ? await CharacterStore.load(def) : undefined;
-    if (!dc) return `[SYSTEM]: No default character to return to. Name one with [[play name="..."]].`;
+    if (!dc) return sys(`No default character to return to. Name one with [[play name="..."]].`);
     await CharacterStore.setCurrent(dc.name);
-    return `[SYSTEM]: Playing your default character, "${disp(dc.name)}".`;
+    return sys(`Playing your default character, "${disp(dc.name)}".`);
   }
   const ref = await resolveCharacterRef(name);
-  if (ref.error) return `[SYSTEM]: ${ref.error}`;
+  if (ref.error) return sys(`${ref.error}`);
   const char = await CharacterStore.load(ref.name!);
-  if (!char) return `[SYSTEM]: No character named "${ref.name}". Create it with [[create-playable ...]].`;
+  if (!char) return sys(`No character named "${ref.name}". Create it with [[create-playable ...]].`);
   await CharacterStore.setCurrent(char.name);
-  return `[SYSTEM]: Now playing "${disp(char.name)}".`;
+  return sys(`Now playing "${disp(char.name)}".`);
 }
 
 
@@ -5232,7 +5244,7 @@ async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, succ
 
 async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, offset: number): Promise<string> {
   const args = extractRollArgs(cmd, offset);
-  if (!args.pool) return `[SYSTEM]: roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].`;
+  if (!args.pool) return sys(`roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].`);
   let spec: RollSpec;
   let savedSpend: string | undefined;
   let savedSpecialty: string | undefined;
@@ -5242,7 +5254,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     // never overridden, so passing `args` straight through to overrideSpec is safe).
     const name = StringUtil.normalize(args.pool.slice(1));
     const base = await NamedRollStore.get(name);
-    if (!base) return `[SYSTEM]: No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].`;
+    if (!base) return sys(`No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].`);
     savedSpend = base.spend;         // auto-paid unless the command overrides spend=
     savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
     savedTable = base.table;         // read against the outcome unless table= overrides
@@ -5255,7 +5267,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   spec = await withAfflictionTags(char.name, spec);
   const poolTraits = poolTraitsOf(char, spec.pool);
   const spend = await applySpend(char, cmd, ctx, spec.tags, poolTraits, savedSpend);
-  if (spend.refuse) return `[SYSTEM]: ${disp(char.name)} can't: ${spend.refuse}.`;
+  if (spend.refuse) return sys(`${disp(char.name)} can't: ${spend.refuse}.`);
   // Rolls see live state: enhancements + boosts add to the record's dots, the
   // wound penalty (negative) comes off the dice pool, owned passives (Trait
   // Affinity et al.) fold in, and at most one specialty grants its die.
@@ -5279,22 +5291,22 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
     await tableNote(cmd.named["table"] ?? savedTable, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
-  return `[SYSTEM]: ${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}`;
+  return sys(`${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}`);
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   return rollAndReport(char, cmd, ctx, 0);
 }
 
 async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const target = cmd.positional[0]?.trim();
-  if (!target) return `[SYSTEM]: roll-for needs a character name, e.g. [[roll-for "Erik" strength+brawl]].`;
+  if (!target) return sys(`roll-for needs a character name, e.g. [[roll-for "Erik" strength+brawl]].`);
   const ref = await resolveCharacterRef(target);
-  if (ref.error) return `[SYSTEM]: ${ref.error}`;
+  if (ref.error) return sys(`${ref.error}`);
   const char = await CharacterStore.load(ref.name!);
-  if (!char) return `[SYSTEM]: No character named "${ref.name}".`;
+  if (!char) return sys(`No character named "${ref.name}".`);
   return rollAndReport(char, cmd, ctx, 1);
 }
 
@@ -5310,12 +5322,12 @@ function describeSidecars(saved: SavedRoll): string {
 // Save a reusable roll: name is positional[0], then the roll grammar at offset 1.
 async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: name-roll needs a name, e.g. [[name-roll dodge dexterity+dodge 6]].`;
+  if (!name) return sys(`name-roll needs a name, e.g. [[name-roll dodge dexterity+dodge 6]].`);
   const args = extractRollArgs(cmd, 1);
-  if (!args.pool) return `[SYSTEM]: name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].`;
+  if (!args.pool) return sys(`name-roll needs a pool, e.g. [[name-roll dodge dexterity+dodge 6]].`);
   // A @reference can't be saved: invocation doesn't chain saved rolls, so the
   // stored pool must be a real expression (same guard as extended-roll).
-  if (args.pool.startsWith("@")) return `[SYSTEM]: name-roll takes a pool expression (e.g. dexterity+dodge), not a saved @name.`;
+  if (args.pool.startsWith("@")) return sys(`name-roll takes a pool expression (e.g. dexterity+dodge), not a saved @name.`);
   const spec = makeRollSpec({ ...args, pool: args.pool });
   const spend = cmd.named["spend"]?.trim();
   const specialty = cmd.named["specialty"]?.trim();
@@ -5327,27 +5339,27 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   await NamedRollStore.save(name, saved);
   const key = StringUtil.normalize(name);
   const sidecars = describeSidecars(saved);
-  return `[SYSTEM]: Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}. Use it with [[roll @${key}]].`;
+  return sys(`Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}. Use it with [[roll @${key}]].`);
 }
 
 async function cmdListRolls(): Promise<string> {
   const map = await NamedRollStore.all();
   const names = Object.keys(map);
-  if (!names.length) return `[SYSTEM]: No saved rolls yet. Save one with [[name-roll <name> <pool> ...]].`;
+  if (!names.length) return sys(`No saved rolls yet. Save one with [[name-roll <name> <pool> ...]].`);
   const items = names.map(n => {
     const sidecars = describeSidecars(map[n]);
     return `${n} (${describeSpec(map[n])}${sidecars ? `, ${sidecars}` : ""})`;
   }).join("; ");
-  return `[SYSTEM]: Saved rolls: ${items}.`;
+  return sys(`Saved rolls: ${items}.`);
 }
 
 async function cmdForgetRoll(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: forget-roll needs a name, e.g. [[forget-roll dodge]].`;
+  if (!name) return sys(`forget-roll needs a name, e.g. [[forget-roll dodge]].`);
   const key = StringUtil.normalize(name);
   return (await NamedRollStore.remove(key))
-    ? `[SYSTEM]: Forgot saved roll "${key}".`
-    : `[SYSTEM]: No saved roll named "${key}".`;
+    ? sys(`Forgot saved roll "${key}".`)
+    : sys(`No saved roll named "${key}".`);
 }
 
 // Named-only roll overrides for a continuation (no positional pool/difficulty, so
@@ -5376,13 +5388,13 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
 // Start an extended action and roll its first interval as the current character.
 async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const args = extractRollArgs(cmd, 0);
-  if (!args.pool) return `[SYSTEM]: extended-roll needs a pool, e.g. [[extended-roll strength+stamina requires=8 intervals=4]].`;
-  if (args.pool.startsWith("@")) return `[SYSTEM]: extended-roll takes a pool expression (e.g. strength+stamina), not a saved @name.`;
+  if (!args.pool) return sys(`extended-roll needs a pool, e.g. [[extended-roll strength+stamina requires=8 intervals=4]].`);
+  if (args.pool.startsWith("@")) return sys(`extended-roll takes a pool expression (e.g. strength+stamina), not a saved @name.`);
   const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
   const maxRolls = intOf(cmd.named["intervals"]) ?? 0;
-  if (maxRolls < 1) return `[SYSTEM]: extended-roll needs intervals=<max rolls> (at least 1).`;
+  if (maxRolls < 1) return sys(`extended-roll needs intervals=<max rolls> (at least 1).`);
   const target = args.requires ?? 1;   // `requires=` is the accumulated target
   const base = makeRollSpec({ ...args, pool: args.pool, requires: 1 });
   const action: ExtendedRoll = {
@@ -5398,43 +5410,43 @@ async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise
   await ExtendedRollStore.save(after);
   if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
   const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
-  return `[SYSTEM]: ${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}.${tail}`;
+  return sys(`${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}.${tail}`);
 }
 
 async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const action = await ExtendedRollStore.resolve(cmd.positional[0]);
-  if (!action) return `[SYSTEM]: No open extended action. Start one with [[extended-roll ...]] or name its id.`;
-  if (action.status !== "open") return `[SYSTEM]: That extended action is already ${action.status}.`;
+  if (!action) return sys(`No open extended action. Start one with [[extended-roll ...]] or name its id.`);
+  if (action.status !== "open") return sys(`That extended action is already ${action.status}.`);
   const spec = overrideSpec(action.base, rollOverridesFromNamed(cmd));
   const exec = executeRoll(spec, n => resolveTraitFromRecord(char, n), { rng: ctx.rng });
   const { action: after, note } = applyInterval(action, exec, char.name);
   await ExtendedRollStore.save(after);
   if (after.status !== "open" && (await ExtendedRollStore.currentId()) === after.id) await ExtendedRollStore.clearCurrent();
-  return `[SYSTEM]: ${disp(char.name)} continues ${describeExtended(after)}. This interval: ${note}.`;
+  return sys(`${disp(char.name)} continues ${describeExtended(after)}. This interval: ${note}.`);
 }
 
 async function cmdRollStatus(cmd: ParsedCommand): Promise<string> {
   const action = await ExtendedRollStore.resolve(cmd.positional[0]);
-  if (!action) return `[SYSTEM]: No extended action found. Start one with [[extended-roll ...]].`;
+  if (!action) return sys(`No extended action found. Start one with [[extended-roll ...]].`);
   const recent = action.log.slice(-3).map(l => `${disp(l.by)}: ${l.outcome === "botch" ? "botch" : `+${l.net}`}`).join(", ");
-  return `[SYSTEM]: ${describeExtended(action)}${recent ? ` | recent: ${recent}` : ""}.`;
+  return sys(`${describeExtended(action)}${recent ? ` | recent: ${recent}` : ""}.`);
 }
 
 async function cmdCancelRoll(cmd: ParsedCommand): Promise<string> {
   const action = await ExtendedRollStore.resolve(cmd.positional[0]);
-  if (!action) return `[SYSTEM]: No extended action to cancel.`;
+  if (!action) return sys(`No extended action to cancel.`);
   await ExtendedRollStore.remove(action.id);
   if ((await ExtendedRollStore.currentId()) === action.id) await ExtendedRollStore.clearCurrent();
-  return `[SYSTEM]: Cancelled extended action${action.label ? ` "${action.label}"` : ""} (was ${action.accumulated}/${action.target}).`;
+  return sys(`Cancelled extended action${action.label ? ` "${action.label}"` : ""} (was ${action.accumulated}/${action.target}).`);
 }
 
 async function cmdResources(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const views = await CharacterResources.all(char);
-  if (!views.length) return `[SYSTEM]: ${disp(char.name)} has no resources.`;
+  if (!views.length) return sys(`${disp(char.name)} has no resources.`);
   const uses = await EffectUses.counts(char);
   const items = views.map(v => {
     const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
@@ -5450,7 +5462,7 @@ async function cmdResources(): Promise<string> {
     ].filter(Boolean).join("; ");
     return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
   }).join("; ");
-  return `[SYSTEM]: ${disp(char.name)} resources - ${items}.`;
+  return sys(`${disp(char.name)} resources - ${items}.`);
 }
 
 // One line of health state for OOC replies.
@@ -5466,23 +5478,23 @@ function healthLine(s: HealthSummary): string {
 // has a group/bucket constraint to pick within.
 async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const raw = cmd.positional[0]?.trim();
-  if (!raw) return `[SYSTEM]: spend needs a resource, e.g. [[spend willpower]], [[spend blood:heal 2]] or [[spend blood:boost strength 2]].`;
+  if (!raw) return sys(`spend needs a resource, e.g. [[spend willpower]], [[spend blood:heal 2]] or [[spend blood:boost strength 2]].`);
   const [which, effectName] = raw.split(":").map(s => s.trim());
   const def = CharacterResources.resolveDef(char, which);
-  if (!def) return `[SYSTEM]: ${disp(char.name)} has no resource "${which}".`;
+  if (!def) return sys(`${disp(char.name)} has no resource "${which}".`);
   const e = resourceEffect(def, effectName || undefined);
-  if (effectName && !e) return `[SYSTEM]: ${def.name} has no "${effectName}" effect.`;
+  if (effectName && !e) return sys(`${def.name} has no "${effectName}" effect.`);
 
   if (!e) {
     // No effect configured: plain deduction (with optional reason).
     const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
     const { spent } = await CharacterResources.spend(char, which, amount);
-    if (spent === 0) return `[SYSTEM]: ${disp(char.name)} has no ${def.name} to spend.`;
+    if (spent === 0) return sys(`${disp(char.name)} has no ${def.name} to spend.`);
     const now = await CharacterResources.current(char, def);
     const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
-    return `[SYSTEM]: ${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.`;
+    return sys(`${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.`);
   }
 
   // Does any increase op need the player to pick a trait within a constraint?
@@ -5490,81 +5502,81 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
     o.op.toLowerCase() === "increase" && "need" in CharacterBoosts.resolveIncreaseTarget(char, o.target, undefined));
   const targetArg = needsTarget ? cmd.positional[1]?.trim() : undefined;
   if (needsTarget && !targetArg) {
-    return `[SYSTEM]: ${def.name}${effectName ? `:${effectName}` : ""} needs a trait, e.g. [[spend ${raw} strength 2]].`;
+    return sys(`${def.name}${effectName ? `:${effectName}` : ""} needs a trait, e.g. [[spend ${raw} strength 2]].`);
   }
   const applications = Math.max(1, parseInt(cmd.positional[needsTarget ? 2 : 1] ?? "1", 10) || 1);
 
   const r = await applyEffectSpec(char, def, effectName ?? "", e, { targetArg, applications, rng: ctx.rng });
-  if (r.insufficient) return `[SYSTEM]: ${disp(char.name)} has no ${def.name} to spend - ${r.insufficient}.`;
-  if (r.refuse) return `[SYSTEM]: ${r.refuse}.`;
+  if (r.insufficient) return sys(`${disp(char.name)} has no ${def.name} to spend - ${r.insufficient}.`);
+  if (r.refuse) return sys(`${r.refuse}.`);
   const now = await CharacterResources.current(char, def);
   const rollOnly = r.extra !== undefined && e.apply.every(isRollOp) && e.apply.length > 0;
   const tail = rollOnly ? " (roll modifiers apply only inside a roll - use [[roll ... spend=...]])" : "";
-  return `[SYSTEM]: ${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}`;
+  return sys(`${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}`);
 }
 
 async function cmdResetUses(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   await EffectUses.resetAll(char);
-  return `[SYSTEM]: ${disp(char.name)}'s effect-use counters reset (new scene/turn).`;
+  return sys(`${disp(char.name)}'s effect-use counters reset (new scene/turn).`);
 }
 
 async function cmdDamage(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const severity = (cmd.positional[0] ?? "").trim().toLowerCase();
   if (severity !== "bashing" && severity !== "lethal" && severity !== "aggravated") {
-    return `[SYSTEM]: damage needs a severity (bashing, lethal or aggravated), e.g. [[damage lethal 2]].`;
+    return sys(`damage needs a severity (bashing, lethal or aggravated), e.g. [[damage lethal 2]].`);
   }
   const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
   const summary = await CharacterHealth.damage(char, severity, amount);
-  return `[SYSTEM]: ${disp(char.name)} takes ${amount} ${severity}. Health: ${healthLine(summary)}.`;
+  return sys(`${disp(char.name)} takes ${amount} ${severity}. Health: ${healthLine(summary)}.`);
 }
 
 async function cmdHealth(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const summary = await CharacterHealth.summary(char);
   const boosts = await CharacterBoosts.all(char);
   const boostBits = Object.entries(boosts).map(([k, v]) => `${StringUtil.toTitleCase(k)} +${v}`).join(", ");
-  return `[SYSTEM]: ${disp(char.name)} - ${healthLine(summary)}${boostBits ? `. Boosts: ${boostBits}` : ""}.`;
+  return sys(`${disp(char.name)} - ${healthLine(summary)}${boostBits ? `. Boosts: ${boostBits}` : ""}.`);
 }
 
 async function cmdClearBoosts(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   await CharacterBoosts.clear(char);
-  return `[SYSTEM]: ${disp(char.name)}'s attribute boosts fade.`;
+  return sys(`${disp(char.name)}'s attribute boosts fade.`);
 }
 
 async function cmdConfigureResources(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]] first - the wizard configures the resources your templates grant.`;
-  if (await WizardSession.get()) return `[SYSTEM]: A wizard is already running - answer it, or [[cancel-wizard]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]] first - the wizard configures the resources your templates grant.`);
+  if (await WizardSession.get()) return sys(`A wizard is already running - answer it, or [[cancel-wizard]].`);
   const defs = CharacterResources.defsFor(char);
   const r = await RESOURCES_WIZARD.start({ charName: char.name, defs });
-  if (r.done || !r.prompt || !r.state) return `[SYSTEM]: ${r.summary ?? "Nothing to configure."}`;
+  if (r.done || !r.prompt || !r.state) return sys(`${r.summary ?? "Nothing to configure."}`);
   await WizardSession.set({ def: RESOURCES_WIZARD.id, state: r.state, prompt: r.prompt });
-  return `[SYSTEM]: ${RESOURCES_WIZARD.title} - your next plain messages answer the wizard. ${renderPromptText(r.prompt)}`;
+  return sys(`${RESOURCES_WIZARD.title} - your next plain messages answer the wizard. ${renderPromptText(r.prompt)}`);
 }
 
 async function cmdCancelWizard(): Promise<string> {
-  if (!(await WizardSession.get())) return `[SYSTEM]: No wizard is running.`;
+  if (!(await WizardSession.get())) return sys(`No wizard is running.`);
   await WizardSession.clear();
-  return `[SYSTEM]: Wizard cancelled - nothing saved.`;
+  return sys(`Wizard cancelled - nothing saved.`);
 }
 
 async function cmdGain(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const which = cmd.positional[0]?.trim();
-  if (!which) return `[SYSTEM]: gain needs a resource, e.g. [[gain willpower]].`;
+  if (!which) return sys(`gain needs a resource, e.g. [[gain willpower]].`);
   const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
   const def = CharacterResources.resolveDef(char, which);
-  if (!def) return `[SYSTEM]: ${disp(char.name)} has no resource "${which}".`;
+  if (!def) return sys(`${disp(char.name)} has no resource "${which}".`);
   const { value } = await CharacterResources.gain(char, which, amount);
-  return `[SYSTEM]: ${disp(char.name)} regains ${def.name}. Now ${value}/${def.max}.`;
+  return sys(`${disp(char.name)} regains ${def.name}. Now ${value}/${def.max}.`);
 }
 
 // =============================================================================
@@ -5616,17 +5628,17 @@ function contestTableInput(o: ContestOutcome): { outcome: RollOutcomeKind; succe
 
 async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const me = await CharacterStore.getCurrent();
-  if (!me) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!me) return sys(`No active character. Select one with [[play name="..."]].`);
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   const verb = mode === "resisted" ? "resist" : "contest";
   if (!myPool || !theirPool) {
-    return `[SYSTEM]: ${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].`;
+    return sys(`${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].`);
   }
   let oppArg = cmd.named["vs"]?.trim();
   if (oppArg?.startsWith("@")) {
     const ref = await resolveCharacterRef(oppArg);
-    if (ref.error) return `[SYSTEM]: ${ref.error}`;
+    if (ref.error) return sys(`${ref.error}`);
     oppArg = ref.name!;
   }
   const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
@@ -5639,7 +5651,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   // The actor may spend on their own roll (fuel / roll-op effects only), exactly
   // like [[roll spend=...]]; standalone effects refuse with the [[spend]] pointer.
   const spend = await applySpend(me, cmd, ctx, mySpec.tags, poolTraitsOf(me, mySpec.pool));
-  if (spend.refuse) return `[SYSTEM]: ${disp(me.name)} can't: ${spend.refuse}.`;
+  if (spend.refuse) return sys(`${disp(me.name)} can't: ${spend.refuse}.`);
 
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
   const myEnv = await characterRollEnv(me);
@@ -5650,7 +5662,7 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
   const notes = [outcome.note, await tableNote(cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
-  return `[SYSTEM]: ${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}`;
+  return sys(`${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}`);
 }
 
 const cmdResist: CommandHandler = (cmd, ctx) => cmdVersus("resisted", cmd, ctx);
@@ -5661,25 +5673,25 @@ const cmdContest: CommandHandler = (cmd, ctx) => cmdVersus("contested", cmd, ctx
 // =============================================================================
 async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const me = await CharacterStore.getCurrent();
-  if (!me) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!me) return sys(`No active character. Select one with [[play name="..."]].`);
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   if (!myPool || !theirPool) {
-    return `[SYSTEM]: extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].`;
+    return sys(`extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].`);
   }
   let oppArg = cmd.named["vs"]?.trim();
   if (oppArg?.startsWith("@")) {
     const ref = await resolveCharacterRef(oppArg);
-    if (ref.error) return `[SYSTEM]: ${ref.error}`;
+    if (ref.error) return sys(`${ref.error}`);
     oppArg = ref.name!;
   }
   const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
   const oppName = oppChar ? oppChar.name : (oppArg || "the-opposition");
 
   const target = intOrUndef(cmd.named["target"] ?? cmd.named["requires"]) ?? 0;
-  if (target < 1) return `[SYSTEM]: extended-contest needs target=<successes> (the goal both race to).`;
+  if (target < 1) return sys(`extended-contest needs target=<successes> (the goal both race to).`);
   const maxRounds = intOrUndef(cmd.named["rounds"] ?? cmd.named["intervals"]) ?? 0;
-  if (maxRounds < 1) return `[SYSTEM]: extended-contest needs rounds=<max> (at least 1).`;
+  if (maxRounds < 1) return sys(`extended-contest needs rounds=<max> (at least 1).`);
 
   const aSpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), requires: 1 });
   const bSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]), requires: 1 });
@@ -5699,15 +5711,15 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   await ExtendedContestStore.save(after);
   if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
   const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
-  return `[SYSTEM]: ${disp(me.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}`;
+  return sys(`${disp(me.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}`);
 }
 
 async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
-  if (!contest) return `[SYSTEM]: No open contest. Start one with [[extended-contest ...]] or name its id.`;
+  if (!contest) return sys(`No open contest. Start one with [[extended-contest ...]] or name its id.`);
   if (contest.status !== "open") {
     const who = contest.status === "draw" ? "a draw" : `won by ${contest.status === "a" ? contest.a.name : contest.b.name}`;
-    return `[SYSTEM]: That contest is already ${who}.`;
+    return sys(`That contest is already ${who}.`);
   }
   const aSpec = overrideSpec(contest.a.base, rollOverridesFromNamed(cmd));
   const vDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
@@ -5717,23 +5729,23 @@ async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   const { contest: after, note } = applyContestRound(contest, aExec, bExec);
   await ExtendedContestStore.save(after);
   if (after.status !== "open" && (await ExtendedContestStore.currentId()) === after.id) await ExtendedContestStore.clearCurrent();
-  return `[SYSTEM]: ${describeContest(after)}. This round: ${note}.`;
+  return sys(`${describeContest(after)}. This round: ${note}.`);
 }
 
 async function cmdContestStatus(cmd: ParsedCommand): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
-  if (!contest) return `[SYSTEM]: No extended contest found. Start one with [[extended-contest ...]].`;
+  if (!contest) return sys(`No extended contest found. Start one with [[extended-contest ...]].`);
   const recent = contest.log.slice(-3).map(l => `r${l.round}: ${disp(contest.a.name)} +${l.aNet}/${disp(contest.b.name)} +${l.bNet}`).join(", ");
-  return `[SYSTEM]: ${describeContest(contest)}${recent ? ` | recent: ${recent}` : ""}.`;
+  return sys(`${describeContest(contest)}${recent ? ` | recent: ${recent}` : ""}.`);
 }
 
 async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
-  if (!contest) return `[SYSTEM]: No extended contest to cancel.`;
+  if (!contest) return sys(`No extended contest to cancel.`);
   await ExtendedContestStore.remove(contest.id);
   if ((await ExtendedContestStore.currentId()) === contest.id) await ExtendedContestStore.clearCurrent();
   const progress = `${disp(contest.a.name)} ${contest.a.accumulated}/${contest.target} vs ${disp(contest.b.name)} ${contest.b.accumulated}/${contest.target}`;
-  return `[SYSTEM]: Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`;
+  return sys(`Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`);
 }
 
 // List the success tables, or lay one out in full. A table interprets a number
@@ -5742,17 +5754,17 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
   const arg = cmd.positional[0]?.trim();
   if (arg) {
     const ref = await resolveTableRef(arg);
-    if (ref.error) return `[SYSTEM]: ${ref.error}`;
+    if (ref.error) return sys(`${ref.error}`);
     const t = SuccessTableRegistry.get(ref.key!);
-    if (t) return `[SYSTEM]: ${describeTable(t)}.`;
+    if (t) return sys(`${describeTable(t)}.`);
     // Not a table - maybe a subcategory: list its contents.
     const subs = await TableLibrary.subcategories();
     if (subs.includes(ref.key!)) {
       const items = SuccessTableRegistry.all().filter(x => x.name.startsWith(`${ref.key}:`))
         .map(x => x.name.slice(ref.key!.length + 1));
-      return `[SYSTEM]: Tables in "${ref.key}": ${items.length ? items.join(", ") : "(none yet)"}. Address them as ${ref.key}::<name>.`;
+      return sys(`Tables in "${ref.key}": ${items.length ? items.join(", ") : "(none yet)"}. Address them as ${ref.key}::<name>.`);
     }
-    return `[SYSTEM]: No success table "${ref.key}". See [[tables]].`;
+    return sys(`No success table "${ref.key}". See [[tables]].`);
   }
   const all = SuccessTableRegistry.all();
   const label = (t: SuccessTable): string => t.description ? `${t.name} (${t.description})` : t.name;
@@ -5764,7 +5776,7 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
   const aliases = await TableAliases.all();
   const aliasBit = Object.keys(aliases).length
     ? ` Aliases: ${Object.entries(aliases).map(([a, k]) => `@${a} -> ${k}`).join(", ")}.` : "";
-  return `[SYSTEM]: Success tables - ${groups.join(" | ")}.${aliasBit} [[tables <name|sub|sub::name>]] for detail; add table=<key|@alias> to a roll/resist/contest.`;
+  return sys(`Success tables - ${groups.join(" | ")}.${aliasBit} [[tables <name|sub|sub::name>]] for detail; add table=<key|@alias> to a roll/resist/contest.`);
 }
 
 // Author a success table from the command line (or the win-table window): the
@@ -5773,14 +5785,14 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
 // ride the backtick-literal channel, so their case survives.
 async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
   const rawName = cmd.named["name"]?.trim();
-  if (!rawName) return `[SYSTEM]: define-table needs name="..". See [[help define-table]].`;
+  if (!rawName) return sys(`define-table needs name="..". See [[help define-table]].`);
   const segs = StringUtil.normalize(rawName).split(":").filter(Boolean);
-  if (segs.length === 0) return `[SYSTEM]: define-table needs name="..". See [[help define-table]].`;
-  if (segs.length > 2) return `[SYSTEM]: Table paths go one level deep for now (name="sub::name").`;
+  if (segs.length === 0) return sys(`define-table needs name="..". See [[help define-table]].`);
+  if (segs.length > 2) return sys(`Table paths go one level deep for now (name="sub::name").`);
   const sub = segs.length === 2 ? segs[0] : undefined;
   const name = segs[segs.length - 1];
   const rows = parseTableRows(cmd.named["rows"]);
-  if ("error" in rows) return `[SYSTEM]: ${rows.error}`;
+  if ("error" in rows) return sys(`${rows.error}`);
   // Only supplied fields land in the def; a supplied-but-unreadable number is
   // refused rather than silently dropped.
   const num = (key: string): number | undefined | { error: string } => {
@@ -5792,18 +5804,18 @@ async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
   const t: SuccessTable = { name: StringUtil.normalize(name) };
   if (rows.length) t.rows = rows;
   const vps = num("value-per-success");
-  if (typeof vps === "object") return `[SYSTEM]: ${vps.error}`;
+  if (typeof vps === "object") return sys(`${vps.error}`);
   if (vps !== undefined) t.valuePerSuccess = vps;
   const cap = num("cap");
-  if (typeof cap === "object") return `[SYSTEM]: ${cap.error}`;
+  if (typeof cap === "object") return sys(`${cap.error}`);
   if (cap !== undefined) t.cap = cap;
   const per = num("overflow-per");
   const value = num("overflow-value");
-  if (typeof per === "object") return `[SYSTEM]: ${per.error}`;
-  if (typeof value === "object") return `[SYSTEM]: ${value.error}`;
+  if (typeof per === "object") return sys(`${per.error}`);
+  if (typeof value === "object") return sys(`${value.error}`);
   const overflowLabel = cmd.named["overflow-label"]?.trim();
   if ((value !== undefined || overflowLabel) && per === undefined) {
-    return `[SYSTEM]: overflow needs overflow-per=N (the batch size beyond the last row).`;
+    return sys(`overflow needs overflow-per=N (the batch size beyond the last row).`);
   }
   if (per !== undefined) {
     t.overflow = { per };
@@ -5815,7 +5827,7 @@ async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
     if (v) t[key] = v;
   }
   if (!t.rows && t.valuePerSuccess === undefined && !t.botch && !t.failure) {
-    return `[SYSTEM]: A table needs something to read - give it rows=, value-per-success=, botch= or failure=.`;
+    return sys(`A table needs something to read - give it rows=, value-per-success=, botch= or failure=.`);
   }
   const key = sub ? `${sub}:${t.name}` : t.name;
   const shadows = !sub && DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === t.name);
@@ -5831,45 +5843,45 @@ async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
           return `Created "${sub}" and defined ${describeTable({ ...t, name: key })}.${r.shadowed ? " (currently shadowed by another card)" : ""}`;
         },
       }]);
-    return `[SYSTEM]: Table category "${sub}" doesn't exist yet - answer the modal to create it and define ${t.name}.`;
+    return sys(`Table category "${sub}" doesn't exist yet - answer the modal to create it and define ${t.name}.`);
   }
   const r = await TableLibrary.put(t, sub);
   const note = shadows ? ` (shadows the built-in - [[forget-table ${t.name}]] restores it)`
     : r.shadowed ? ` (note: another card in the category shadows this name right now)` : "";
-  return `[SYSTEM]: Defined table ${describeTable({ ...t, name: key })}.${note} Attach with table=${sub ? `${sub}::${t.name}` : t.name}.`;
+  return sys(`Defined table ${describeTable({ ...t, name: key })}.${note} Attach with table=${sub ? `${sub}::${t.name}` : t.name}.`);
 }
 
 // Create a table subcategory outright (the modal-less path).
 async function cmdDefineTableCategory(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["name"] ?? cmd.positional[0])?.trim();
-  if (!raw) return `[SYSTEM]: define-table-category needs name="..".`;
+  if (!raw) return sys(`define-table-category needs name="..".`);
   const sub = StringUtil.normalize(raw);
   if (sub.includes(":") || sub.startsWith("@")) {
-    return `[SYSTEM]: A table category is a single name (no "::" and no "@") - subcategories go one level deep for now.`;
+    return sys(`A table category is a single name (no "::" and no "@") - subcategories go one level deep for now.`);
   }
   const existed = await LorebookManager.categoryIdByName(`${TABLES_CATEGORY}:${sub}`) !== undefined;
   await ensurePath(`config:success-tables:${sub}`, TABLE_GENERAL_HEADER);
   return existed
-    ? `[SYSTEM]: Table category "${sub}" already exists.`
-    : `[SYSTEM]: Created table category "${sub}" (lorebook category "${TABLES_CATEGORY}:${sub}", card "general"). Define into it with [[define-table name="${sub}::<name>" ...]].`;
+    ? sys(`Table category "${sub}" already exists.`)
+    : sys(`Created table category "${sub}" (lorebook category "${TABLES_CATEGORY}:${sub}", card "general"). Define into it with [[define-table name="${sub}::<name>" ...]].`);
 }
 
 async function cmdForgetTable(cmd: ParsedCommand): Promise<string> {
   const raw = cmd.positional[0]?.trim();
-  if (!raw) return `[SYSTEM]: forget-table needs a name.`;
+  if (!raw) return sys(`forget-table needs a name.`);
   const ref = await resolveTableRef(raw);
-  if (ref.error) return `[SYSTEM]: ${ref.error}`;
+  if (ref.error) return sys(`${ref.error}`);
   const key = ref.key!;
   const { removed, still } = await TableLibrary.remove(key);
   if (!removed) {
-    if (!SuccessTableRegistry.get(key)) return `[SYSTEM]: No table "${key}".`;
+    if (!SuccessTableRegistry.get(key)) return sys(`No table "${key}".`);
     return DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === key)
-      ? `[SYSTEM]: "${key}" is a built-in table - it can be shadowed with [[define-table]] but not deleted.`
-      : `[SYSTEM]: "${key}" isn't in its category's general card - it lives in another card; edit that card in creator mode.`;
+      ? sys(`"${key}" is a built-in table - it can be shadowed with [[define-table]] but not deleted.`)
+      : sys(`"${key}" isn't in its category's general card - it lives in another card; edit that card in creator mode.`);
   }
   const note = still === "built-in" ? ` The built-in "${key}" resurfaces.`
     : still === "another-card" ? ` Another card in the category still defines "${key}".` : "";
-  return `[SYSTEM]: Forgot table "${key}".${note}`;
+  return sys(`Forgot table "${key}".${note}`);
 }
 
 // --- TABLE ALIASES ------------------------------------------------------------
@@ -5879,26 +5891,26 @@ async function cmdTableAlias(cmd: ParsedCommand): Promise<string> {
     const all = await TableAliases.all();
     const items = Object.entries(all).map(([a, k]) => `@${a} -> ${k}`);
     return items.length
-      ? `[SYSTEM]: Table aliases: ${items.join(", ")}. [[table-alias @a "<[sub::]name>"]] defines one.`
-      : `[SYSTEM]: No table aliases yet. [[table-alias @a "<[sub::]name>"]] defines one.`;
+      ? sys(`Table aliases: ${items.join(", ")}. [[table-alias @a "<[sub::]name>"]] defines one.`)
+      : sys(`No table aliases yet. [[table-alias @a "<[sub::]name>"]] defines one.`);
   }
-  if (!token.startsWith("@")) return `[SYSTEM]: Table aliases start with "@", e.g. [[table-alias @qk "combat::quick-kill"]].`;
+  if (!token.startsWith("@")) return sys(`Table aliases start with "@", e.g. [[table-alias @qk "combat::quick-kill"]].`);
   const target = cmd.positional[1]?.trim();
-  if (!target) return `[SYSTEM]: table-alias needs a target table, e.g. [[table-alias ${token} "combat::quick-kill"]].`;
+  if (!target) return sys(`table-alias needs a target table, e.g. [[table-alias ${token} "combat::quick-kill"]].`);
   const ref = await resolveTableRef(target);
-  if (ref.error) return `[SYSTEM]: ${ref.error}`;
+  if (ref.error) return sys(`${ref.error}`);
   await TableAliases.set(token, ref.key!);
   const advisory = SuccessTableRegistry.get(ref.key!) ? "" : ` (no table "${ref.key}" exists yet - the alias waits for it)`;
-  return `[SYSTEM]: ${token} now means table ${ref.key}.${advisory}`;
+  return sys(`${token} now means table ${ref.key}.${advisory}`);
 }
 
 async function cmdForgetTableAlias(cmd: ParsedCommand): Promise<string> {
   const token = cmd.positional[0]?.trim();
-  if (!token || !token.startsWith("@")) return `[SYSTEM]: forget-table-alias needs an @alias.`;
+  if (!token || !token.startsWith("@")) return sys(`forget-table-alias needs an @alias.`);
   const removed = await TableAliases.remove(token);
   return removed
-    ? `[SYSTEM]: Forgot table alias ${token}.`
-    : `[SYSTEM]: No table alias ${token}. [[table-alias]] lists them.`;
+    ? sys(`Forgot table alias ${token}.`)
+    : sys(`No table alias ${token}. [[table-alias]] lists them.`);
 }
 
 // =============================================================================
@@ -6038,7 +6050,7 @@ function ownedTraitsOf(char: PlayableCharacter): OwnedTraits {
 
 async function cmdDefineConstraint(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
-  if (!name) return `[SYSTEM]: define-constraint needs name="...", e.g. [[define-constraint name="clan-only-backgrounds" relation=restricted domain=background members="cappadocian-lore" scope="cappadocian"]].`;
+  if (!name) return sys(`define-constraint needs name="...", e.g. [[define-constraint name="clan-only-backgrounds" relation=restricted domain=background members="cappadocian-lore" scope="cappadocian"]].`);
   const members = (cmd.named["members"] ?? "").split(",").map(s => s.trim()).filter(Boolean);
   const scope = (cmd.named["scope"] ?? "").split(",").map(s => s.trim()).filter(Boolean);
   const maxRaw = cmd.named["max"];
@@ -6052,47 +6064,47 @@ async function cmdDefineConstraint(cmd: ParsedCommand): Promise<string> {
     note: cmd.named["note"],
   });
   await ConstraintRegistry.put(group);
-  return `[SYSTEM]: Defined constraint ${describeConstraint(group)}.`;
+  return sys(`Defined constraint ${describeConstraint(group)}.`);
 }
 
 async function cmdConstraints(): Promise<string> {
   const all = ConstraintRegistry.all();
-  if (!all.length) return `[SYSTEM]: No constraint groups defined. Add one with [[define-constraint ...]] or [[win-constraint]].`;
+  if (!all.length) return sys(`No constraint groups defined. Add one with [[define-constraint ...]] or [[win-constraint]].`);
   const items = all.map(g => `${g.name} (${g.relation}/${g.domain}, ${g.members.length} member${g.members.length === 1 ? "" : "s"})`).join("; ");
-  return `[SYSTEM]: Constraint groups: ${items}. [[constraint <name>]] for detail.`;
+  return sys(`Constraint groups: ${items}. [[constraint <name>]] for detail.`);
 }
 
 async function cmdConstraint(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: constraint needs a name, e.g. [[constraint clan-only-backgrounds]]. [[constraints]] lists them.`;
+  if (!name) return sys(`constraint needs a name, e.g. [[constraint clan-only-backgrounds]]. [[constraints]] lists them.`);
   const g = ConstraintRegistry.get(name);
-  if (!g) return `[SYSTEM]: No constraint group "${StringUtil.normalize(name)}". See [[constraints]].`;
-  return `[SYSTEM]: ${describeConstraint(g)}.`;
+  if (!g) return sys(`No constraint group "${StringUtil.normalize(name)}". See [[constraints]].`);
+  return sys(`${describeConstraint(g)}.`);
 }
 
 async function cmdForgetConstraint(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: forget-constraint needs a name, e.g. [[forget-constraint clan-only-backgrounds]].`;
+  if (!name) return sys(`forget-constraint needs a name, e.g. [[forget-constraint clan-only-backgrounds]].`);
   const key = StringUtil.normalize(name);
   return (await ConstraintRegistry.remove(key))
-    ? `[SYSTEM]: Forgot constraint group "${key}".`
-    : `[SYSTEM]: No constraint group "${key}".`;
+    ? sys(`Forgot constraint group "${key}".`)
+    : sys(`No constraint group "${key}".`);
 }
 
 async function cmdCheckConstraints(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const groups = ConstraintRegistry.all();
   const violations = groups.length ? checkConstraints(groups, ownedTraitsOf(char)) : [];
   const meritIssues = meritInstanceFindings(char);
   const total = violations.length + meritIssues.length;
   if (!total) {
     return groups.length
-      ? `[SYSTEM]: ${disp(char.name)} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.`
-      : `[SYSTEM]: No constraint groups defined and ${disp(char.name)}'s merits/flaws check out - nothing to flag.`;
+      ? sys(`${disp(char.name)} satisfies all ${groups.length} constraint group${groups.length === 1 ? "" : "s"}.`)
+      : sys(`No constraint groups defined and ${disp(char.name)}'s merits/flaws check out - nothing to flag.`);
   }
   const lines = [...violations.map(v => v.detail), ...meritIssues].join("; ");
-  return `[SYSTEM]: ${disp(char.name)} - ${total} constraint issue${total === 1 ? "" : "s"} (ST-enforced): ${lines}.`;
+  return sys(`${disp(char.name)} - ${total} constraint issue${total === 1 ? "" : "s"} (ST-enforced): ${lines}.`);
 }
 
 // Advisory merit-instance findings: unknown/malformed keys and atMostOneAt
@@ -6143,50 +6155,50 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
 
 async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const raw = cmd.positional[0]?.trim();
-  if (!raw) return `[SYSTEM]: take-merit needs a name, e.g. [[take-merit trait-affinity::melee 2]].`;
+  if (!raw) return sys(`take-merit needs a name, e.g. [[take-merit trait-affinity::melee 2]].`);
   const key = StringUtil.normalize(raw);
   const hit = resolveMeritInstance(key, n => MeritFlawRegistry.get(n));
   if (!hit) {
     const bare = MeritFlawRegistry.get(key);
     return bare?.param
-      ? `[SYSTEM]: "${key}" is parameterized - name its ${bare.param}: [[take-merit ${key}::<${bare.param}>]].`
-      : `[SYSTEM]: Unknown merit/flaw "${key}". Custom definitions go in the srd:merits-flaws lorebook category.`;
+      ? sys(`"${key}" is parameterized - name its ${bare.param}: [[take-merit ${key}::<${bare.param}>]].`)
+      : sys(`Unknown merit/flaw "${key}". Custom definitions go in the srd:merits-flaws lorebook category.`);
   }
   const allowed = Array.isArray(hit.def.points) ? hit.def.points : [hit.def.points];
   const points = intOrUndef(cmd.positional[1] ?? "") ?? allowed[0];
   if (!allowed.includes(points)) {
-    return `[SYSTEM]: ${hit.def.name} must be taken at one of [${allowed.join(", ")}] points (got ${points}).`;
+    return sys(`${hit.def.name} must be taken at one of [${allowed.join(", ")}] points (got ${points}).`);
   }
   const missing = unmetRequirements(char, hit.def.requires);
   if (missing.length && cmd.named["waive"] !== "true") {
-    return `[SYSTEM]: ${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.`;
+    return sys(`${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.`);
   }
   char.meritsFlaws[key] = points;
   await CharacterStore.save(char);
   const passiveBits = passiveOpsOf(hit.def, hit.param, points)
     .map(o => `${o.op}${o.trait ? ` [${o.trait}]` : o.target ? ` [${o.target}]` : ""} ${(o.amount ?? 1) > 0 ? "+" : ""}${o.amount ?? 1}`);
-  return `[SYSTEM]: ${disp(char.name)} takes ${key} (${points} pt${points === 1 ? "" : "s"})${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}.`;
+  return sys(`${disp(char.name)} takes ${key} (${points} pt${points === 1 ? "" : "s"})${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}.`);
 }
 
 async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const key = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
-  if (!key) return `[SYSTEM]: drop-merit needs a name.`;
-  if (!(key in char.meritsFlaws)) return `[SYSTEM]: ${disp(char.name)} does not have "${key}". [[merits]] lists them.`;
+  if (!key) return sys(`drop-merit needs a name.`);
+  if (!(key in char.meritsFlaws)) return sys(`${disp(char.name)} does not have "${key}". [[merits]] lists them.`);
   delete char.meritsFlaws[key];
   await CharacterStore.save(char);
-  return `[SYSTEM]: ${disp(char.name)} drops ${key}.`;
+  return sys(`${disp(char.name)} drops ${key}.`);
 }
 
 async function cmdMerits(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const insts = ownedMeritInstances(char);
   if (!insts.length && !Object.keys(char.meritsFlaws).length) {
-    return `[SYSTEM]: ${disp(char.name)} has no merits or flaws. [[take-merit <name[::param]> [points]]] takes one.`;
+    return sys(`${disp(char.name)} has no merits or flaws. [[take-merit <name[::param]> [points]]] takes one.`);
   }
   const items = insts.map(i => `${i.key} (${i.points}${i.def.kind === "flaw" ? ", flaw" : ""})`);
   const enh = enhancementsFor(char);
@@ -6198,54 +6210,54 @@ async function cmdMerits(): Promise<string> {
   const parts = [`Merits/Flaws: ${items.join("; ")}`];
   if (enhBits.length) parts.push(`Enhancements - ${enhBits.join("; ")}`);
   if (issues.length) parts.push(`Issues (ST-enforced): ${issues.join("; ")}`);
-  return `[SYSTEM]: ${parts.join(". ")}.`;
+  return sys(`${parts.join(". ")}.`);
 }
 
 async function cmdSpecialty(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
   const label = cmd.positional[1]?.trim();   // backtick literal keeps its case
-  if (!trait || !label) return `[SYSTEM]: specialty needs a trait and a label, e.g. [[specialty melee \`Swords\`]].`;
+  if (!trait || !label) return sys(`specialty needs a trait and a label, e.g. [[specialty melee \`Swords\`]].`);
   char.specialties ??= {};
   const list = (char.specialties[trait] ??= []);
   if (list.some(l => StringUtil.normalize(l) === StringUtil.normalize(label))) {
-    return `[SYSTEM]: ${disp(char.name)} already has specialty ${label} (${trait}).`;
+    return sys(`${disp(char.name)} already has specialty ${label} (${trait}).`);
   }
   list.push(label);
   await CharacterStore.save(char);
-  return `[SYSTEM]: ${disp(char.name)} gains specialty ${label} (${trait}). Apply it with specialty=${trait} on a roll.`;
+  return sys(`${disp(char.name)} gains specialty ${label} (${trait}). Apply it with specialty=${trait} on a roll.`);
 }
 
 async function cmdForgetSpecialty(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
   const label = cmd.positional[1]?.trim();
   const list = char.specialties?.[trait];
-  if (!trait || !list?.length) return `[SYSTEM]: No specialties under "${trait}". [[specialties]] lists them.`;
+  if (!trait || !list?.length) return sys(`No specialties under "${trait}". [[specialties]] lists them.`);
   let removed: string;
   if (label) {
     const i = list.findIndex(l => StringUtil.normalize(l) === StringUtil.normalize(label));
-    if (i < 0) return `[SYSTEM]: No specialty "${label}" under ${trait}.`;
+    if (i < 0) return sys(`No specialty "${label}" under ${trait}.`);
     removed = list.splice(i, 1)[0];
   } else if (list.length === 1) {
     removed = list.splice(0, 1)[0];
   } else {
-    return `[SYSTEM]: ${trait} has several specialties (${list.join(", ")}) - name the one to forget.`;
+    return sys(`${trait} has several specialties (${list.join(", ")}) - name the one to forget.`);
   }
   if (!list.length) delete char.specialties![trait];
   await CharacterStore.save(char);
-  return `[SYSTEM]: ${disp(char.name)} forgets specialty ${removed} (${trait}).`;
+  return sys(`${disp(char.name)} forgets specialty ${removed} (${trait}).`);
 }
 
 async function cmdSpecialties(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const entries = Object.entries(char.specialties ?? {}).filter(([, l]) => l.length);
-  if (!entries.length) return `[SYSTEM]: ${disp(char.name)} has no specialties. [[specialty <trait> \`<Label>\`]] adds one.`;
+  if (!entries.length) return sys(`${disp(char.name)} has no specialties. [[specialty <trait> \`<Label>\`]] adds one.`);
   const items = entries.map(([t, labels]) => `${t}: ${labels.join(", ")}`);
-  return `[SYSTEM]: Specialties - ${items.join("; ")}. One applies per roll via specialty=.`;
+  return sys(`Specialties - ${items.join("; ")}. One applies per roll via specialty=.`);
 }
 
 // --- AFFLICTIONS --------------------------------------------------------------
@@ -6332,10 +6344,10 @@ async function removeAffliction(subject: string, defName: string): Promise<{ rem
 
 async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
-  if (!name) return `[SYSTEM]: define-affliction needs name="...", e.g. [[define-affliction name="dazed" tags="off-hand" duration="1 scene"]].`;
+  if (!name) return sys(`define-affliction needs name="...", e.g. [[define-affliction name="dazed" tags="off-hand" duration="1 scene"]].`);
   const durationRaw = cmd.named["duration"];
   const duration = parseAfflictionDuration(durationRaw);
-  if (durationRaw && !duration) return `[SYSTEM]: Can't read duration "${durationRaw}" - use "1 turn", "2 scenes", "until <x>" or "instant".`;
+  if (durationRaw && !duration) return sys(`Can't read duration "${durationRaw}" - use "1 turn", "2 scenes", "until <x>" or "instant".`);
   const def = makeAfflictionDef({
     name,
     description: cmd.named["description"],
@@ -6347,83 +6359,83 @@ async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
     note: cmd.named["note"],
   });
   await AfflictionRegistry.put(def);
-  return `[SYSTEM]: Defined affliction ${describeAfflictionDef(def)}.`;
+  return sys(`Defined affliction ${describeAfflictionDef(def)}.`);
 }
 
 async function cmdAfflictionInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) {
     const items = AfflictionRegistry.all().map(d => d.name).join(", ");
-    return `[SYSTEM]: Defined afflictions: ${items}. [[affliction <name>]] for detail; [[afflictions]] shows who has what.`;
+    return sys(`Defined afflictions: ${items}. [[affliction <name>]] for detail; [[afflictions]] shows who has what.`);
   }
   const def = AfflictionRegistry.get(name);
-  if (!def) return `[SYSTEM]: No affliction "${StringUtil.normalize(name)}". [[affliction]] lists them.`;
-  return `[SYSTEM]: ${describeAfflictionDef(def)}.`;
+  if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". [[affliction]] lists them.`);
+  return sys(`${describeAfflictionDef(def)}.`);
 }
 
 async function cmdForgetAffliction(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: forget-affliction needs a name.`;
+  if (!name) return sys(`forget-affliction needs a name.`);
   const key = StringUtil.normalize(name);
   const removed = await AfflictionRegistry.remove(key);
   if (!removed) {
     return AfflictionRegistry.get(key)
-      ? `[SYSTEM]: "${key}" is a built-in affliction - it can be shadowed with [[define-affliction]] but not deleted.`
-      : `[SYSTEM]: No affliction "${key}".`;
+      ? sys(`"${key}" is a built-in affliction - it can be shadowed with [[define-affliction]] but not deleted.`)
+      : sys(`No affliction "${key}".`);
   }
   const shipped = AfflictionRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
-  return `[SYSTEM]: Forgot affliction "${key}".${shipped}`;
+  return sys(`Forgot affliction "${key}".${shipped}`);
 }
 
 async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: afflict needs an affliction, e.g. [[afflict concentrating-on target="Wolf"]]. [[affliction]] lists them.`;
+  if (!name) return sys(`afflict needs an affliction, e.g. [[afflict concentrating-on target="Wolf"]]. [[affliction]] lists them.`);
   const def = AfflictionRegistry.get(name);
-  if (!def) return `[SYSTEM]: No affliction "${StringUtil.normalize(name)}". Define it with [[define-affliction]].`;
+  if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". Define it with [[define-affliction]].`);
   const subject = await afflictionSubject(cmd);
-  if (subject.error) return `[SYSTEM]: ${subject.error}`;
+  if (subject.error) return sys(`${subject.error}`);
   const r = await applyAffliction(subject.name!, def, cmd.named);
-  if (r.error) return `[SYSTEM]: ${r.error}`;
-  return `[SYSTEM]: ${r.lines!.join("; ")}.`;
+  if (r.error) return sys(`${r.error}`);
+  return sys(`${r.lines!.join("; ")}.`);
 }
 
 // The manual chain trigger (the turn system will automate it): end the
 // affliction now and apply its `then` successor, carrying the bindings forward.
 async function cmdAdvance(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: advance needs an affliction, e.g. [[advance concentrating-on]].`;
+  if (!name) return sys(`advance needs an affliction, e.g. [[advance concentrating-on]].`);
   const subject = await afflictionSubject(cmd);
-  if (subject.error) return `[SYSTEM]: ${subject.error}`;
+  if (subject.error) return sys(`${subject.error}`);
   const current = (await CharacterAfflictions.list(subject.name!)).find(c => c.def === StringUtil.normalize(name));
-  if (!current) return `[SYSTEM]: ${disp(subject.name!)} does not have "${StringUtil.normalize(name)}".`;
+  if (!current) return sys(`${disp(subject.name!)} does not have "${StringUtil.normalize(name)}".`);
   const def = AfflictionRegistry.get(current.def);
-  if (!def?.then) return `[SYSTEM]: "${current.def}" has no successor to advance into - [[lift ${current.def}]] to end it.`;
+  if (!def?.then) return sys(`"${current.def}" has no successor to advance into - [[lift ${current.def}]] to end it.`);
   const next = AfflictionRegistry.get(def.then);
-  if (!next) return `[SYSTEM]: Successor "${def.then}" is not defined.`;
+  if (!next) return sys(`Successor "${def.then}" is not defined.`);
   await removeAffliction(subject.name!, current.def);
   const r = await applyAffliction(subject.name!, next, current.bindings);
-  if (r.error) return `[SYSTEM]: ${current.def} ended, but ${def.then} could not begin: ${r.error}`;
-  return `[SYSTEM]: ${current.def} ends; ${r.lines!.join("; ")}.`;
+  if (r.error) return sys(`${current.def} ended, but ${def.then} could not begin: ${r.error}`);
+  return sys(`${current.def} ends; ${r.lines!.join("; ")}.`);
 }
 
 async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return `[SYSTEM]: lift needs an affliction, e.g. [[lift feral-whispers]].`;
+  if (!name) return sys(`lift needs an affliction, e.g. [[lift feral-whispers]].`);
   const subject = await afflictionSubject(cmd);
-  if (subject.error) return `[SYSTEM]: ${subject.error}`;
+  if (subject.error) return sys(`${subject.error}`);
   let spendNote = "";
   if (cmd.named["spend"]) {
     // The shrug-off: pay to end it. Only someone with a sheet can spend.
     const char = await CharacterStore.load(subject.name!);
-    if (!char) return `[SYSTEM]: ${disp(subject.name!)} has no sheet to spend from.`;
+    if (!char) return sys(`${disp(subject.name!)} has no sheet to spend from.`);
     const spend = await applySpend(char, cmd, ctx, [], []);
-    if (spend.refuse) return `[SYSTEM]: ${disp(char.name)} can't: ${spend.refuse}.`;
+    if (spend.refuse) return sys(`${disp(char.name)} can't: ${spend.refuse}.`);
     spendNote = spend.note ? ` (${spend.note})` : "";
   }
   const r = await removeAffliction(subject.name!, name);
-  if (r.error) return `[SYSTEM]: ${r.error}`;
+  if (r.error) return sys(`${r.error}`);
   const also = r.alsoLifted ? `; ${r.alsoLifted}` : "";
-  return `[SYSTEM]: ${disp(subject.name!)} shakes off ${r.removed!.def}${spendNote}${also}.`;
+  return sys(`${disp(subject.name!)} shakes off ${r.removed!.def}${spendNote}${also}.`);
 }
 
 async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
@@ -6431,16 +6443,16 @@ async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
   const arg = cmd.positional[0]?.trim();
   if (arg) {
     const r = await resolveBindingValue(arg);
-    if (r.error) return `[SYSTEM]: ${r.error}`;
+    if (r.error) return sys(`${r.error}`);
     subject = r.value!;
   } else {
     const cur = await CharacterStore.getCurrent();
-    if (!cur) return `[SYSTEM]: No active character. Select one with [[play name="..."]] or name someone: [[afflictions "Wolf"]].`;
+    if (!cur) return sys(`No active character. Select one with [[play name="..."]] or name someone: [[afflictions "Wolf"]].`);
     subject = StringUtil.normalize(cur.name);
   }
   const list = await CharacterAfflictions.list(subject);
-  if (!list.length) return `[SYSTEM]: ${disp(subject)} has no afflictions.`;
-  return `[SYSTEM]: ${disp(subject)} - ${list.map(afflictionLine).join("; ")}.`;
+  if (!list.length) return sys(`${disp(subject)} has no afflictions.`);
+  return sys(`${disp(subject)} - ${list.map(afflictionLine).join("; ")}.`);
 }
 
 // --- ALIASES & PLAYERS ------------------------------------------------------
@@ -6482,17 +6494,17 @@ async function cmdAlias(cmd: ParsedCommand): Promise<string> {
   const token = cmd.positional[0]?.trim();
   const target = (cmd.named["to"] ?? cmd.positional[1])?.trim();
   if (!token || !token.startsWith("@") || !target) {
-    return `[SYSTEM]: alias needs an @token and a target, e.g. [[alias @kat "Katarina"]] or [[alias @char::erik::sire "Katarina"]].`;
+    return sys(`alias needs an @token and a target, e.g. [[alias @kat "Katarina"]] or [[alias @char::erik::sire "Katarina"]].`);
   }
-  if (target.startsWith("@")) return `[SYSTEM]: An alias must point at a character name, not another alias.`;
+  if (target.startsWith("@")) return sys(`An alias must point at a character name, not another alias.`);
   const ref = parseAliasToken(StringUtil.normalize(token));
-  if (!ref) return `[SYSTEM]: Malformed alias "${token}" - use @alias, @global::a, @player::<id>::a or @char::<name>::a.`;
+  if (!ref) return sys(`Malformed alias "${token}" - use @alias, @global::a, @player::<id>::a or @char::<name>::a.`);
   const scope: AliasScope = ref.scope ?? "global";
   const owner = ref.scope ? await resolveAliasOwner(ref) : undefined;
-  if (scope !== "global" && !owner) return `[SYSTEM]: Alias "${token}" names no ${scope} to define it for.`;
+  if (scope !== "global" && !owner) return sys(`Alias "${token}" names no ${scope} to define it for.`);
   await AliasRegistry.set(scope, owner, ref.alias, target);
   const where = scope === "global" ? "globally" : `for ${scope} ${disp(owner!)}`;
-  return `[SYSTEM]: @${ref.alias} now means ${disp(StringUtil.normalize(target))} ${where}.`;
+  return sys(`@${ref.alias} now means ${disp(StringUtil.normalize(target))} ${where}.`);
 }
 
 async function cmdAliases(): Promise<string> {
@@ -6502,21 +6514,21 @@ async function cmdAliases(): Promise<string> {
   if (Object.keys(m.global).length) bits.push(`global: ${fmt(m.global)}`);
   for (const [p, map] of Object.entries(m.players)) if (Object.keys(map).length) bits.push(`player ${disp(p)}: ${fmt(map)}`);
   for (const [c, map] of Object.entries(m.characters)) if (Object.keys(map).length) bits.push(`character ${disp(c)}: ${fmt(map)}`);
-  if (!bits.length) return `[SYSTEM]: No aliases defined. Add one with [[alias @kat "Katarina"]].`;
-  return `[SYSTEM]: Aliases - ${bits.join(" | ")}.`;
+  if (!bits.length) return sys(`No aliases defined. Add one with [[alias @kat "Katarina"]].`);
+  return sys(`Aliases - ${bits.join(" | ")}.`);
 }
 
 async function cmdForgetAlias(cmd: ParsedCommand): Promise<string> {
   const token = cmd.positional[0]?.trim();
-  if (!token || !token.startsWith("@")) return `[SYSTEM]: forget-alias needs an @token, e.g. [[forget-alias @kat]] or [[forget-alias @char::erik::sire]].`;
+  if (!token || !token.startsWith("@")) return sys(`forget-alias needs an @token, e.g. [[forget-alias @kat]] or [[forget-alias @char::erik::sire]].`);
   const ref = parseAliasToken(StringUtil.normalize(token));
-  if (!ref) return `[SYSTEM]: Malformed alias "${token}".`;
+  if (!ref) return sys(`Malformed alias "${token}".`);
   const scope: AliasScope = ref.scope ?? "global";
   const owner = ref.scope ? await resolveAliasOwner(ref) : undefined;
-  if (scope !== "global" && !owner) return `[SYSTEM]: Alias "${token}" names no ${scope} to forget it from.`;
+  if (scope !== "global" && !owner) return sys(`Alias "${token}" names no ${scope} to forget it from.`);
   return (await AliasRegistry.remove(scope, owner, ref.alias))
-    ? `[SYSTEM]: Forgot @${ref.alias}${scope === "global" ? "" : ` (${scope} ${disp(owner!)})`}.`
-    : `[SYSTEM]: No such alias @${ref.alias}${scope === "global" ? "" : ` for ${scope} ${disp(owner!)}`}.`;
+    ? sys(`Forgot @${ref.alias}${scope === "global" ? "" : ` (${scope} ${disp(owner!)})`}.`)
+    : sys(`No such alias @${ref.alias}${scope === "global" ? "" : ` for ${scope} ${disp(owner!)}`}.`);
 }
 
 // The current player is whoever is issuing commands; the default player is what
@@ -6526,12 +6538,12 @@ async function cmdPlayer(cmd: ParsedCommand): Promise<string> {
   if (!name) {
     const cur = await PlayerStore.current();
     const def = await PlayerStore.getDefault();
-    return `[SYSTEM]: Current player: ${disp(cur)}; default player: ${disp(def)}. [[player name="..."]] switches.`;
+    return sys(`Current player: ${disp(cur)}; default player: ${disp(def)}. [[player name="..."]] switches.`);
   }
   await PlayerStore.setCurrent(name);
   let note = "";
   if ((cmd.named["default"] ?? "") === "true") { await PlayerStore.setDefault(name); note = " (also the default player now)"; }
-  return `[SYSTEM]: Current player is now ${disp(StringUtil.normalize(name))}${note}.`;
+  return sys(`Current player is now ${disp(StringUtil.normalize(name))}${note}.`);
 }
 
 // --- DISCOVERABILITY -------------------------------------------------------
@@ -6542,16 +6554,16 @@ async function cmdHelp(cmd: ParsedCommand): Promise<string> {
   if (verb) {
     const help = CommandRouter.helpFor(verb);
     return help
-      ? `[SYSTEM]: ${verb} - ${help}`
-      : `[SYSTEM]: No command "${verb}". [[help]] lists them all.`;
+      ? sys(`${verb} - ${help}`)
+      : sys(`No command "${verb}". [[help]] lists them all.`);
   }
   const verbs = CommandRouter.verbs();
-  return `[SYSTEM]: ${verbs.length} commands: ${verbs.join(", ")}. [[help <verb>]] for one's usage.`;
+  return sys(`${verbs.length} commands: ${verbs.join(", ")}. [[help <verb>]] for one's usage.`);
 }
 
 async function cmdCharacters(): Promise<string> {
   const names = await CharacterStore.listNames();
-  if (!names.length) return `[SYSTEM]: No characters yet. Make one with [[create-playable name="..." templates="..."]].`;
+  if (!names.length) return sys(`No characters yet. Make one with [[create-playable name="..." templates="..."]].`);
   const currentName = (await CharacterStore.getCurrent())?.name;
   const currentKey = currentName ? StringUtil.normalize(currentName) : undefined;
   const defKey = await CharacterStore.getDefaultName();
@@ -6563,7 +6575,7 @@ async function cmdCharacters(): Promise<string> {
     if (key === defKey) marks.push("default");
     items.push(marks.length ? `${disp(c?.name ?? key)} (${marks.join(", ")})` : disp(c?.name ?? key));
   }
-  return `[SYSTEM]: Characters: ${items.join("; ")}. [[play name="..."]] to switch.`;
+  return sys(`Characters: ${items.join("; ")}. [[play name="..."]] to switch.`);
 }
 
 // The record as the ENGINE reads it: every numeric bucket, with the effective
@@ -6575,12 +6587,12 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   let char: PlayableCharacter | undefined;
   if (raw) {
     const ref = await resolveCharacterRef(raw);
-    if (ref.error) return `[SYSTEM]: ${ref.error}`;
+    if (ref.error) return sys(`${ref.error}`);
     char = await CharacterStore.load(ref.name!);
-    if (!char) return `[SYSTEM]: No character named "${ref.name}".`;
+    if (!char) return sys(`No character named "${ref.name}".`);
   } else {
     char = await CharacterStore.getCurrent();
-    if (!char) return `[SYSTEM]: No active character. Select one with [[play name="..."]].`;
+    if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   }
   const { resolver } = await characterRollEnv(char);
   const fmt = (bucket: Record<string, number>, skipZeros: boolean): string => {
@@ -6612,18 +6624,18 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
   if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
   parts.push(`Live pools via [[resources]], damage via [[health]]`);
-  return `[SYSTEM]: ${parts.join(". ")}.`;
+  return sys(`${parts.join(". ")}.`);
 }
 
 async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
   const name = (cmd.named["name"] ?? cmd.positional[0])?.trim();
-  if (!name) return `[SYSTEM]: set-default needs a name, e.g. [[set-default name="Rok"]].`;
+  if (!name) return sys(`set-default needs a name, e.g. [[set-default name="Rok"]].`);
   const ref = await resolveCharacterRef(name);
-  if (ref.error) return `[SYSTEM]: ${ref.error}`;
+  if (ref.error) return sys(`${ref.error}`);
   const c = await CharacterStore.load(ref.name!);
-  if (!c) return `[SYSTEM]: No character named "${ref.name}". [[characters]] lists them.`;
+  if (!c) return sys(`No character named "${ref.name}". [[characters]] lists them.`);
   await CharacterStore.setDefault(c.name);
-  return `[SYSTEM]: ${disp(c.name)} is now the default character ([[play]] with no name selects it).`;
+  return sys(`${disp(c.name)} is now the default character ([[play]] with no name selects it).`);
 }
 
 
@@ -7184,7 +7196,7 @@ async function openConstraintWindow(): Promise<void> {
 // [[win-constraint]] - a UI over [[define-constraint]], derived from its spec.
 async function cmdWinConstraint(): Promise<string> {
   await openConstraintWindow();
-  return `[SYSTEM]: Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).`;
+  return sys(`Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).`);
 }
 
 CommandRouter.register("win-constraint", cmdWinConstraint, {
@@ -7197,7 +7209,7 @@ async function cmdWinTable(): Promise<string> {
     title: "Define success table",
     blurb: "**Define a success table** (ladder rows, numeric output, or both)",
   });
-  return `[SYSTEM]: Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).`;
+  return sys(`Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).`);
 }
 
 CommandRouter.register("win-table", cmdWinTable, {
@@ -7217,7 +7229,7 @@ async function cmdWinAffliction(): Promise<string> {
     blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
     pickers: { then: afflictionOptions, mirror: afflictionOptions },
   });
-  return `[SYSTEM]: Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).`;
+  return sys(`Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).`);
 }
 
 // [[win-afflict]] - the first DOMAIN-driven window: pick an affliction and its
@@ -7274,7 +7286,7 @@ async function openAfflictWindow(): Promise<void> {
 
 async function cmdWinAfflict(): Promise<string> {
   await openAfflictWindow();
-  return `[SYSTEM]: Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).`;
+  return sys(`Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).`);
 }
 
 CommandRouter.register("win-affliction", cmdWinAffliction, {
@@ -7392,7 +7404,7 @@ async function openRollWindow(): Promise<void> {
 
 async function cmdWinRoll(): Promise<string> {
   await openRollWindow();
-  return `[SYSTEM]: Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).`;
+  return sys(`Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).`);
 }
 
 CommandRouter.register("win-roll", cmdWinRoll, {

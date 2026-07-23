@@ -13,6 +13,18 @@
 import { StringUtil } from "./core/traits";
 import { Rng } from "./core/dice";
 
+// --- OUTPUT VOICE ------------------------------------------------------------
+// The engine's ONE reply formatter. Every command reply is the SYSTEM speaker
+// in the player's wider scheme (Player / OOC-Player / ST / OOC-ST /
+// <character-name>). Centralized here so re-tagging or re-wrapping the engine's
+// output is a one-line change - never a find-and-replace across the handlers.
+// If a general `speak(speaker, body)` lands later, `sys` becomes its SYSTEM
+// specialization. Callers pass the already-composed body (interpolated string).
+export const SYSTEM_PREFIX = "[SYSTEM]: ";
+export function sys(body: string): string {
+  return `${SYSTEM_PREFIX}${body}`;
+}
+
 // --- PARSER ------------------------------------------------------------------
 // A command body -> { name, positional[], named{}, raw }. Pure and
 // dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -167,7 +179,7 @@ export class CommandRouter {
     const cmd = CommandParser.parse(body);
     for (const hook of CommandRouter._beforeRoute) await hook();
     const def = CommandRouter._registry.get(cmd.name);
-    if (!def) return `[SYSTEM]: Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`;
+    if (!def) return sys(`Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`);
     return def.handler(cmd, ctx);
   }
 }

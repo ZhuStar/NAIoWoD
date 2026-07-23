@@ -32,7 +32,7 @@ import {
   ALL_CONFIG_STORES, parseConfigBody, parseNamedConfigList,
   writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
 } from "./services";
-import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, ExtendedRoll, ExtendedContest, BotchPolicy } from "./rolls";
+import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, ExtendedRoll, ExtendedContest, BotchPolicy, ContestMode } from "./rolls";
 import { WizardPrompt, WizardStateData } from "./wizard";
 
 // --- LIVE CHARACTER SHEET ---
@@ -688,15 +688,41 @@ export interface ExtendedSavedConfig {
   onBotch?: BotchPolicy; // default botch policy
 }
 
+// An OPPOSED saved roll: invoking it launches a resisted/contested action - or an
+// extended contest (a race like Pursuit) - instead of a single roll, reusing the
+// contest machinery. Like an extended roll's target, the OPPONENT is play-time
+// input (vs=); the save only holds the shape. `pool` omitted => the opposition
+// rolls the SAME pool (a symmetric contest, e.g. Str+Intimidation both sides).
+export interface OpposedSavedConfig {
+  mode: ContestMode;               // "resisted" (your margin over theirs) | "contested" (higher wins)
+  pool?: string;                   // the opposition's pool (default: the actor's own pool)
+  vsDifficulty?: number;           // default difficulty for the opposition's roll
+  extended?: ExtendedSavedConfig;  // present => an extended contest (both race to a target)
+}
+
+// A multi-stage procedure: the saved roll's OWN spec is step 1 (the entry); each
+// step here is a FOLLOW-UP that applies when the entry's outcome matches `when`.
+// Advisory (the "everything is data" pattern): invoking runs the entry and
+// surfaces the matching next command(s); the Storyteller/player picks the branch.
+// Auto-running the branches is a later pass, gated on the turn/flow system.
+export type ProcedureCondition = "always" | "on-success" | "on-fail" | "on-botch";
+export interface ProcedureStep {
+  when: ProcedureCondition;
+  roll: string;                    // "@savedname" - the follow-up roll to run
+  note?: string;                   // what this step is, in fiction / ST guidance
+}
+
 // A saved roll is a RollSpec plus optional game-layer sidecars: `spend` (the
 // resource/role token to pay), `specialty` (applied to the roll), `table` (read
 // against the outcome), plus - for a "named procedure" - `extended` (invoking it
-// launches an extended action) and a `description` (rules prose). Sidecars stay
-// OUT of the pure RollSpec - the roll pipeline never sees them - and are stored
-// raw (resolved at invoke time, like every command argument).
+// launches an extended action), `opposed` (launches a contest), `steps` (a
+// multi-stage sequence) and a `description` (rules prose). Sidecars stay OUT of
+// the pure RollSpec - the roll pipeline never sees them - and are stored raw
+// (resolved at invoke time, like every command argument).
 export type SavedRoll = RollSpec & {
   spend?: string; specialty?: string; table?: string;
   extended?: ExtendedSavedConfig; description?: string;
+  opposed?: OpposedSavedConfig; steps?: ProcedureStep[];
 };
 
 // Pre-saved rolls seeded into a fresh chronicle's library (create-if-missing;

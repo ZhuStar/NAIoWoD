@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `95ac0fc`** ("named procedures:
-> saved rolls that can be extended + carry a table & description; ship the
-> climbing Drama default"). Prior: `50be872` ([SYSTEM: ...] format + QUIET_VERBS
+> **Last synced with the code as of commit `23917a9`** ("contested saved
+> rolls + multi-stage advisory procedures - the Drama 'real arena' primitives").
+> Prior: `95ac0fc` (named procedures: saved rolls that extend + carry a table &
+> description; climbing default); `50be872` ([SYSTEM: ...] format + QUIET_VERBS
 > stop generation for query commands); `a1f9997` (central sys() formatter);
-> `db53ac7` (reply prefix → [SYSTEM]:); `cb5b4c3` (vendor NovelAI's
-> script-types.d.ts as ambient truth).
+> `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient truth).
 
 ---
 
@@ -556,7 +556,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1461) — the character model + every persistent store
+### src/state.ts (1487) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -709,7 +709,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2590) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2760) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -990,7 +990,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3552 + 34 lines, 323 tests, 83 describes)
+### test/ (3607 + 34 lines, 327 tests, 85 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1353,6 +1353,52 @@ cards are all tracked (id map + backups above).
     `{op:"difficulty", amount:-2, target:"climb"}`); and the **`generateWithStory`
     ask for the play-time ft-per-success / target** (the user: "which distance per
     success is where we enter with the Generation API" — asks the AI off-screen).
+29. **The "real arena": contested saved rolls + multi-stage advisory procedures**
+    (user, pasting the Dark Ages *Drama* chapter: "there are contested rolls,
+    activities that require one roll and then another. Can we do this? Just make
+    them possible — don't implement the actual named rolls"). Two confirmed forks
+    via questions: multi-stage = **advisory sequence** (not a full auto-branching
+    flow engine — that stays gated on the turn system); scope = **the two flagged
+    primitives** (not the smaller trait-indexed-table / variable-pool sugar). Both
+    slot onto the same seam §7.28 built — *a saved roll launches a richer action*:
+    - **Contested saved rolls** — `SavedRoll.opposed?: OpposedSavedConfig`
+      (`{mode: "resisted"|"contested"; pool?; vsDifficulty?; extended?}`). Invoking
+      launches the EXISTING contest machinery instead of a single roll; the
+      OPPONENT is play-time input (`vs=`), like an extended roll's target. `pool`
+      omitted ⇒ the opposition rolls the actor's OWN pool (symmetric, e.g.
+      Str+Intimidation both sides). **opposed + extended = an extended contest**
+      (a race like Pursuit): the extended cfg rides on `opposed.extended` so the
+      top-level branch stays clean, and it needs a play-time `requires=<target>`
+      (refused if absent). `cmdVersus` was refactored into `resolveOpponent` +
+      `runSingleContest` (returns a BODY string, not sys-wrapped, so a procedure
+      can append its next-steps); `launchOpposedFromSaved` / `launchOpposedExtended`
+      reuse them. Actor-side rolls keep cmdVersus's existing manual spend+env path
+      (no owned-passive fold on side A — a pre-existing gap, deliberately not
+      changed here).
+    - **Multi-stage procedures** — `SavedRoll.steps?: ProcedureStep[]`
+      (`{when: "always"|"on-success"|"on-fail"|"on-botch"; roll: "@ref"; note?}`).
+      The saved roll's OWN spec is step 1 (the entry); steps are FOLLOW-UPS that
+      compose OTHER named rolls. Invoking the entry runs it, then `surfaceSteps`
+      appends the matching branch as ready-to-run `[[roll @ref]]` command(s) —
+      **advisory**: the ST/player picks and runs it, no flow engine (auto-running
+      branches / handling per-turn drains is a later pass, roadmap #1). Authored
+      with **`add-step <proc> roll=@<follow-up> when=<cond> note=\`…\``** +
+      **`clear-steps`** (dedicated commands, not crammed into name-roll's flat
+      grammar — structured data, window-friendly; the library JSON stays
+      hand-editable). Composition is the whole story: Bribery = a procedure whose
+      step 2 (`@bribery-convince`) is itself a CONTESTED saved roll.
+    Display: `describeSidecars` gains `[opposed: …]` + `[N-step procedure]`;
+    `name-roll` accepts `opposed=`/`vs-pool=`/`vs-difficulty=`; `invokeHint`
+    centralizes the "needs vs= / requires=" suffix; `roll-info` prints the step
+    list (`describeSteps`). NO actual Drama rolls shipped — only the primitives
+    (the user builds the named rolls themselves; DEFAULT_NAMED_ROLLS stays just
+    climbing). Recorded follow-ups (the smaller Drama needs, deferred): **trait-
+    indexed tables** (Feats of Strength: Strength → lift capacity; Throwing:
+    Strength → range — our SuccessTable keys on successes, not a trait value),
+    **variable-pool sugar** (Jump = Str | Str+Ath), escalating per-interval
+    difficulty (Swimming), two-axis value tables (Jump's vert/horiz), the full
+    **auto-branching flow engine** for procedures, and **win-roll window support**
+    for the opposed/steps knobs (part of the §7.28 window follow-up).
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

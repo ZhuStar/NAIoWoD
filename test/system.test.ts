@@ -3352,6 +3352,61 @@ describe("named procedures: extended saved rolls, table + description, defaults"
 });
 
 // =============================================================================
+// CONTESTED SAVED ROLLS + MULTI-STAGE PROCEDURES - the "real arena" primitives
+// =============================================================================
+describe("contested saved rolls + multi-stage procedures", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("an opposed saved roll round-trips and invoking it launches a contest (not a single roll)", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');   // dexterity 1
+    await CommandRouter.route("name-roll intimidate dexterity+brawl 6 opposed=contested vs-pool=stamina+brawl vs-difficulty=6");
+    const saved = (await NamedRollStore.get("intimidate"))!;
+    expect(saved.opposed).toEqual({ mode: "contested", pool: "stamina+brawl", vsDifficulty: 6 });
+    // Invoke: the opponent is play-time input; an ad-hoc "the-thug" rolls only literals (0).
+    const out = await CommandRouter.route('roll @intimidate vs="the-thug"', { rng: seqRng([6]) });   // 1 die -> 1 success beats 0
+    expect(out).toContain("contested -");     // a contest report, not "Kvar - (...)" single-roll form
+    expect(out).toContain("Kvar");
+  });
+
+  test("opposed + extended = an extended contest (Pursuit shape); the target is play-time and refused if absent", async () => {
+    await CommandRouter.route("name-roll pursuit dexterity+athletics 6 opposed=contested extended=true intervals=6");
+    const p = (await NamedRollStore.get("pursuit"))!;
+    expect(p.opposed).toEqual({ mode: "contested", extended: { intervals: 6 } });
+    expect(p.extended).toBeUndefined();       // the extended cfg rode onto opposed, keeping the top-level branch clean
+    await CommandRouter.route('create-playable name="Runner" templates=vampire');
+    expect(await CommandRouter.route('roll @pursuit vs="Erik"')).toContain("give it a target");
+    const open = await CommandRouter.route('roll @pursuit requires=3 vs="Erik"', { rng: seqRng([6]) });
+    expect(open).toContain("opens");
+    expect(open).toContain("contest");
+  });
+
+  test("a procedure composes named rolls: add-step, the entry surfaces the matching branch, clear-steps removes", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');   // strength 1
+    await CommandRouter.route("name-roll jump strength 3");                         // 1 die, difficulty 3 (entry / step 1)
+    await CommandRouter.route("name-roll grab-ledge dexterity+athletics 6");        // the on-fail follow-up
+    const add = await CommandRouter.route("add-step jump when=on-fail roll=@grab-ledge note=`grab a ledge to avoid injury`");
+    expect(add).toContain("1-step procedure");
+    const info = await CommandRouter.route("roll-info jump");
+    expect(info).toContain("Steps:");
+    expect(info).toContain("on-fail");
+    expect(info).toContain("@grab-ledge");
+    // A failing entry surfaces the on-fail branch as a ready-to-run command...
+    const failRoll = await CommandRouter.route("roll @jump", { rng: seqRng([2]) });   // 2 < diff 3 -> failure
+    expect(failRoll).toContain("Next: on-fail -> [[roll @grab-ledge]]");
+    // ...a success does not (no matching step).
+    const okRoll = await CommandRouter.route("roll @jump", { rng: seqRng([6]) });      // 6 >= diff 3 -> success
+    expect(okRoll).not.toContain("Next:");
+    // clear-steps drops the follow-ups; the entry roll stays.
+    expect(await CommandRouter.route("clear-steps jump")).toContain("Cleared 1 step");
+    expect(await CommandRouter.route("roll-info jump")).not.toContain("Steps:");
+  });
+
+  test("add-step refuses when the procedure's entry roll doesn't exist yet", async () => {
+    expect(await CommandRouter.route("add-step ghost when=always roll=@x")).toContain("save its entry first");
+  });
+});
+
+// =============================================================================
 // SHEET - the record as the engine reads it + the creator-mode hand-edit loop
 // =============================================================================
 describe("sheet: engine view of the record + creator-mode manual fill", () => {

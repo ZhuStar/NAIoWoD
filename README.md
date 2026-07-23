@@ -524,6 +524,56 @@ so your edits and deletions stick):
 - Author your own with `[[name-roll <name> <pool> … extended=true intervals=<n>
   description=\`…\`]]`, or hand-edit the `wod:named-rolls` entry.
 
+### Contested saved rolls — two-party actions you can name
+
+Resisted and contested rolls (`[[resist]]` / `[[contest]]` / `[[extended-contest]]`)
+can be **saved**, so a two-party action like Shadowing, Intimidation or Haggling
+becomes a named roll. The save holds *your* side and the opposition's shape; the
+**opponent is play-time input** (`vs=`), exactly like an extended roll's target.
+
+```
+[[name-roll shadowing dexterity+stealth 6 opposed=resisted vs-pool=perception+alertness]]
+[[roll @shadowing vs="the guard"]]        # launches the resisted contest
+[[name-roll pursuit dexterity+athletics opposed=contested extended=true intervals=6]]
+[[roll @pursuit requires=4 vs="Adolphus"]]  # an extended contest (a race)
+```
+
+- **`opposed=resisted`** (your winning margin over theirs counts; a tie fails) or
+  **`opposed=contested`** (higher total wins; a tie draws). **`vs-pool=`** is the
+  opposition's pool — omit it for a *symmetric* contest where they roll your pool
+  (e.g. Strength + Intimidation both sides). **`vs-difficulty=`** sets their
+  default difficulty.
+- Invoking runs the contest as the current character against **`vs=`** (a
+  character, an `@alias`, or a bare label that rolls only literal numbers). Add
+  **`opposed=… extended=true`** and the extended knobs to make it an **extended
+  contest** — both sides race to a play-time `requires=<target>` (Pursuit's
+  head-start-and-chase). Any `table=` reads what your winning margin *means*.
+
+### Multi-stage procedures — one roll, then another
+
+Some activities are a *sequence*: Bribery (identify the official → convince him),
+Jumping (jump → on a failure, grab a ledge), Lifting (a Willpower push → consult
+Feats of Strength). A saved roll's own spec is **step 1** (the entry); **steps**
+are follow-ups that compose *other* named rolls, each firing on a branch of the
+entry's outcome.
+
+```
+[[name-roll bribery-identify intelligence+politics 5]]
+[[name-roll bribery-convince manipulation+commerce 6 opposed=contested vs-pool=willpower]]
+[[name-roll bribery intelligence+politics 5]]
+[[add-step bribery when=on-success roll=@bribery-convince note=`convince the official`]]
+[[roll @bribery]]     # runs step 1, then surfaces: "Next: on-success -> [[roll @bribery-convince]]"
+```
+
+- **`add-step <procedure> roll=@<follow-up> when=<always|on-success|on-fail|on-botch>
+  note=\`…\`]]`** appends a step; **`clear-steps <procedure>`** drops them (the
+  entry roll stays). Steps compose **named rolls** — a follow-up can itself be
+  contested or extended.
+- Invoking the entry rolls it, then **hands you the exact next command(s)** for
+  the branch that fired — the Storyteller or player chooses and runs it. This is
+  **advisory** by design (no auto-branching engine yet); `[[roll-info <name>]]`
+  lists the whole sequence.
+
 ### Success tables — what a number of successes *means*
 
 A roll never interprets its own result. It produces a **count** and hands it to

@@ -46,6 +46,7 @@ import {
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
   resolveTraitFromRecord, ownedMeritInstances, enhancementsFor, SavedRoll, ExtendedSavedConfig,
+  OpposedSavedConfig, ProcedureStep, ProcedureCondition,
   ResourceOverrides, RESOURCE_CONFIG_ENTRY, TableLibrary, TableAliases, TABLES_CATEGORY,
   ConstraintRegistry, AfflictionRegistry,
   ActiveAffliction, CharacterAfflictions,
@@ -691,7 +692,7 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
 // `base.requires` is forced to 1 by callers (each interval is a plain roll; the
 // accumulated `target` is the extended goal). Reads `table` against the
 // interval's net so each report shows what the successes MEAN (10 ft/success).
-async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { target: number; maxRolls: number; interval: string; onBotch: BotchPolicy; label: string; table?: string }, ctx: CommandContext): Promise<string> {
+async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { target: number; maxRolls: number; interval: string; onBotch: BotchPolicy; label: string; table?: string; stepsTail?: string }, ctx: CommandContext): Promise<string> {
   const action: ExtendedRoll = {
     id: api.v1.uuid(), label: opts.label,
     base, target: opts.target, maxRolls: opts.maxRolls,
@@ -704,7 +705,7 @@ async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { t
   if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
   const extras = [...notes, await extendedTableNote(after.table, exec.outcome, exec.result?.net ?? 0, after.accumulated)].filter(Boolean).join("; ");
   const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
-  return sys(`${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}${extras ? ` (${extras})` : ""}.${tail}`);
+  return sys(`${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}${extras ? ` (${extras})` : ""}.${tail}${opts.stepsTail ?? ""}`);
 }
 
 // Invoke a saved EXTENDED roll: the save holds the shape (pool, difficulty,
@@ -724,6 +725,7 @@ async function launchExtendedFromSaved(char: PlayableCharacter, name: string, sa
   return launchExtended(char, base, {
     target, maxRolls, interval: cmd.named["interval"] ?? cfg.interval ?? "",
     onBotch, label: cmd.named["label"] ?? name, table: saved.table,
+    stepsTail: surfaceSteps(saved.steps, undefined),
   }, ctx);
 }
 
@@ -734,6 +736,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   let savedSpend: string | undefined;
   let savedSpecialty: string | undefined;
   let savedTable: string | undefined;
+  let savedSteps: ProcedureStep[] | undefined;
   if (args.pool.startsWith("@")) {
     // Saved roll: load the base spec, then apply the supplied overrides (pool is
     // never overridden, so passing `args` straight through to overrideSpec is safe).
@@ -742,10 +745,14 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     if (!base) return sys(`No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].`);
     // A saved EXTENDED roll (a "named procedure") launches an extended action
     // instead of a single roll - the target is play-time input, not baked in.
+    // An OPPOSED saved roll launches a contest; an EXTENDED one an extended
+    // action. Both take play-time input (vs= / requires=) the save never bakes.
+    if (base.opposed) return launchOpposedFromSaved(char, name, base, cmd, args, ctx);
     if (base.extended) return launchExtendedFromSaved(char, name, base, cmd, args, ctx);
     savedSpend = base.spend;         // auto-paid unless the command overrides spend=
     savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
     savedTable = base.table;         // read against the outcome unless table= overrides
+    savedSteps = base.steps;         // a procedure's follow-ups, surfaced after the entry roll
     spec = overrideSpec(base, args);
   } else {
     spec = makeRollSpec({ ...args, pool: args.pool });
@@ -779,7 +786,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
     await tableNote(cmd.named["table"] ?? savedTable, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
-  return sys(`${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}`);
+  return sys(`${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}${surfaceSteps(savedSteps, exec.outcome)}`);
 }
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -801,7 +808,9 @@ async function cmdRollFor(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
 // The sidecars a saved roll carries beyond its spec, as "k=v" display pairs.
 function describeSidecars(saved: SavedRoll): string {
   return [
+    saved.opposed ? describeOpposedSaved(saved.opposed) : "",
     saved.extended ? describeExtendedSaved(saved.extended) : "",
+    saved.steps && saved.steps.length ? `[${saved.steps.length}-step procedure]` : "",
     saved.spend ? `spend=${saved.spend}` : "",
     saved.specialty ? `specialty=${saved.specialty}` : "",
     saved.table ? `table=${saved.table}` : "",
@@ -815,6 +824,37 @@ function describeExtendedSaved(cfg: ExtendedSavedConfig): string {
   if (cfg.interval) bits.push(`every ${cfg.interval}`);
   if (cfg.onBotch) bits.push(`botch ${cfg.onBotch}`);
   return `[${bits.join(", ")}]`;
+}
+
+// The opposed shape of a saved roll (the opponent is play-time input via vs=).
+function describeOpposedSaved(cfg: OpposedSavedConfig): string {
+  const bits = [cfg.extended ? `extended-${cfg.mode}` : cfg.mode];
+  bits.push(`vs ${cfg.pool ?? "same pool"}`);
+  if (cfg.vsDifficulty !== undefined) bits.push(`their diff ${cfg.vsDifficulty}`);
+  if (cfg.extended?.intervals !== undefined) bits.push(`≤${cfg.extended.intervals} rounds`);
+  return `[opposed: ${bits.join(", ")}]`;
+}
+
+// A procedure's follow-up steps, surfaced after the entry roll as runnable next
+// command(s). Advisory: only the steps whose `when` matches the entry's outcome
+// are shown (all of them when the outcome is unknown, e.g. an extended entry);
+// the Storyteller/player picks and runs the branch.
+function surfaceSteps(steps: ProcedureStep[] | undefined, outcome: RollOutcomeKind | undefined): string {
+  if (!steps || !steps.length) return "";
+  const matches = (w: ProcedureCondition): boolean =>
+    w === "always" || outcome === undefined ||
+    (w === "on-success" && outcome === "success") ||
+    (w === "on-fail" && outcome === "failure") ||
+    (w === "on-botch" && outcome === "botch");
+  const shown = steps.filter(s => matches(s.when));
+  if (!shown.length) return "";
+  const items = shown.map(s => `${s.when} -> [[roll ${s.roll}]]${s.note ? ` (${s.note})` : ""}`).join("; ");
+  return ` Next: ${items}.`;
+}
+
+// A procedure's full step list (for [[roll-info]]) - every step, condition first.
+function describeSteps(steps: ProcedureStep[]): string {
+  return steps.map((s, i) => `${i + 1}. ${s.when}: [[roll ${s.roll}]]${s.note ? ` - ${s.note}` : ""}`).join("; ");
 }
 
 // Save a reusable roll: name is positional[0], then the roll grammar at offset 1.
@@ -850,11 +890,33 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
     if (onBotchRaw) cfg.onBotch = parseBotchPolicy(onBotchRaw);
     saved.extended = cfg;
   }
+  // An OPPOSED saved roll: invoking launches a contest (the opponent is play-time
+  // vs=). opposed + the extended knobs above = an extended contest (a race, e.g.
+  // Pursuit) - the extended cfg rides on opposed so the top-level branch is clean.
+  const opposedRaw = cmd.named["opposed"]?.trim().toLowerCase();
+  if (opposedRaw === "resisted" || opposedRaw === "contested") {
+    const opp: OpposedSavedConfig = { mode: opposedRaw };
+    const vsPool = cmd.named["vs-pool"]?.trim();
+    const vsDiff = intOf(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+    if (vsPool) opp.pool = vsPool;
+    if (vsDiff !== undefined) opp.vsDifficulty = vsDiff;
+    if (saved.extended) { opp.extended = saved.extended; delete saved.extended; }
+    saved.opposed = opp;
+  }
   await NamedRollStore.save(name, saved);
   const key = StringUtil.normalize(name);
   const sidecars = describeSidecars(saved);
   const descBit = saved.description ? " (+description)" : "";
-  return sys(`Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}${descBit}. Use it with [[roll @${key}${saved.extended ? " requires=<target>" : ""}]].`);
+  return sys(`Saved roll "${key}" = ${describeSpec(spec)}${sidecars ? `, ${sidecars}` : ""}${descBit}. Use it with ${invokeHint(key, saved)}.`);
+}
+
+// The invocation hint for a saved roll: opposed rolls need vs=<opponent>; extended
+// rolls (and extended contests) need requires=<target>; a plain roll needs neither.
+function invokeHint(key: string, saved: SavedRoll): string {
+  const bits: string[] = [];
+  if (saved.opposed) bits.push(`vs="<opponent>"`);
+  if (saved.extended || saved.opposed?.extended) bits.push(`requires=<target>`);
+  return `[[roll @${key}${bits.length ? ` ${bits.join(" ")}` : ""}]]`;
 }
 
 async function cmdListRolls(): Promise<string> {
@@ -876,13 +938,48 @@ async function cmdRollInfo(cmd: ParsedCommand): Promise<string> {
   const saved = await NamedRollStore.get(key);
   if (!saved) return sys(`No saved roll named "${key}". See [[list-rolls]].`);
   const sidecars = describeSidecars(saved);
-  const invoke = saved.extended ? `[[roll @${key} requires=<target>]]` : `[[roll @${key}]]`;
   const parts = [`${key} = ${describeSpec(saved)}${sidecars ? `, ${sidecars}` : ""}`];
   if (saved.description) parts.push(saved.description);
-  parts.push(`Invoke: ${invoke}`);
+  if (saved.steps && saved.steps.length) parts.push(`Steps: ${describeSteps(saved.steps)}`);
+  parts.push(`Invoke: ${invokeHint(key, saved)}`);
   // Join as sentences without doubling a period a part already ends with
   // (the description is verbatim prose and usually ends in one).
   return sys(parts.map(p => p.replace(/\.\s*$/, "")).join(". "));
+}
+
+// Append a follow-up step to a saved procedure (its entry must already exist as a
+// saved roll). Steps compose named rolls: each is [when -> @follow-up (note)].
+async function cmdAddStep(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`add-step needs a procedure name, e.g. [[add-step bribery when=on-success roll=@bribery-convince note=\`convince the official\`]].`);
+  const key = StringUtil.normalize(name);
+  const saved = await NamedRollStore.get(key);
+  if (!saved) return sys(`No saved roll named "${key}" to add a step to - save its entry first with [[name-roll ${key} <pool> ...]].`);
+  const whenRaw = (cmd.named["when"] ?? "always").trim().toLowerCase();
+  const when = (["always", "on-success", "on-fail", "on-botch"].includes(whenRaw) ? whenRaw : "always") as ProcedureCondition;
+  let roll = cmd.named["roll"]?.trim();
+  if (!roll) return sys(`add-step needs roll=@<saved-roll> (the follow-up to run), e.g. [[add-step ${key} when=${when} roll=@grab-ledge]].`);
+  if (!roll.startsWith("@")) roll = `@${StringUtil.normalize(roll)}`;
+  const note = cmd.named["note"]?.trim();
+  const step: ProcedureStep = { when, roll };
+  if (note) step.note = note;
+  saved.steps = [...(saved.steps ?? []), step];
+  await NamedRollStore.save(key, saved);
+  return sys(`Added step ${saved.steps.length} to "${key}": ${when} -> [[roll ${roll}]]${note ? ` (${note})` : ""}. Now a ${saved.steps.length}-step procedure - [[roll-info ${key}]] for the whole sequence.`);
+}
+
+// Drop all follow-up steps from a saved procedure (its entry roll is untouched).
+async function cmdClearSteps(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`clear-steps needs a procedure name, e.g. [[clear-steps bribery]].`);
+  const key = StringUtil.normalize(name);
+  const saved = await NamedRollStore.get(key);
+  if (!saved) return sys(`No saved roll named "${key}".`);
+  const had = saved.steps?.length ?? 0;
+  if (!had) return sys(`"${key}" has no steps to clear.`);
+  delete saved.steps;
+  await NamedRollStore.save(key, saved);
+  return sys(`Cleared ${had} step${had === 1 ? "" : "s"} from "${key}".`);
 }
 
 async function cmdForgetRoll(cmd: ParsedCommand): Promise<string> {
@@ -1150,6 +1247,39 @@ function contestTableInput(o: ContestOutcome): { outcome: RollOutcomeKind; succe
   return { outcome: "success", successes: o.margin };
 }
 
+// Resolve the opposition named by vs= (a character, an @alias, or a bare label).
+// No vs= => an ad-hoc "the-resistance"/"the-opposition" that rolls only literals.
+async function resolveOpponent(cmd: ParsedCommand, mode: ContestMode): Promise<{ error?: string; oppChar?: PlayableCharacter; oppName: string }> {
+  let oppArg = cmd.named["vs"]?.trim();
+  if (oppArg?.startsWith("@")) {
+    const ref = await resolveCharacterRef(oppArg);
+    if (ref.error) return { error: ref.error, oppName: "" };
+    oppArg = ref.name!;
+  }
+  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
+  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
+  return { oppChar, oppName };
+}
+
+// Run ONE resisted/contested round: the actor rolls mySpec through the live env
+// (spend + wound penalty, exactly like [[roll spend=...]]), the opposition rolls
+// theirSpec, compareRolls adjudicates, and a table (override or a saved sidecar)
+// reads the actor's winning margin. Returns a BODY string (the caller wraps it in
+// sys - so a procedure can append its next-steps inside the same reply).
+async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec: RollSpec, theirSpec: RollSpec, oppName: string, oppChar: PlayableCharacter | undefined, cmd: ParsedCommand, ctx: CommandContext, tableOverride?: string): Promise<string> {
+  const spend = await applySpend(me, cmd, ctx, mySpec.tags, poolTraitsOf(me, mySpec.pool));
+  if (spend.refuse) return `${disp(me.name)} can't: ${spend.refuse}.`;
+  const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
+  const myEnv = await characterRollEnv(me);
+  if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
+  const myExec = executeRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
+  const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
+  const outcome = compareRolls(mode, myExec, theirExec);
+  const t = contestTableInput(outcome);
+  const notes = [outcome.note, await tableNote(tableOverride ?? cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  return `${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}`;
+}
+
 async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const me = await CharacterStore.getCurrent();
   if (!me) return sys(`No active character. Select one with [[play name="..."]].`);
@@ -1159,34 +1289,59 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   if (!myPool || !theirPool) {
     return sys(`${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].`);
   }
-  let oppArg = cmd.named["vs"]?.trim();
-  if (oppArg?.startsWith("@")) {
-    const ref = await resolveCharacterRef(oppArg);
-    if (ref.error) return sys(`${ref.error}`);
-    oppArg = ref.name!;
-  }
-  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
-  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
-
+  const opp = await resolveOpponent(cmd, mode);
+  if (opp.error) return sys(`${opp.error}`);
   const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
   const mySpec = await withAfflictionTags(me.name, makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags }));
   const theirSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) });
+  return sys(await runSingleContest(mode, me, mySpec, theirSpec, opp.oppName, opp.oppChar, cmd, ctx));
+}
 
-  // The actor may spend on their own roll (fuel / roll-op effects only), exactly
-  // like [[roll spend=...]]; standalone effects refuse with the [[spend]] pointer.
-  const spend = await applySpend(me, cmd, ctx, mySpec.tags, poolTraitsOf(me, mySpec.pool));
-  if (spend.refuse) return sys(`${disp(me.name)} can't: ${spend.refuse}.`);
+// Invoke a saved OPPOSED roll: the save holds the actor's shape + the opposition
+// descriptor (mode, opposing pool, default vs-difficulty); the OPPONENT is play-
+// time input (vs=). opposed+extended launches an extended contest instead. Any
+// `steps` are surfaced after the round (procedure composition).
+async function launchOpposedFromSaved(char: PlayableCharacter, name: string, saved: SavedRoll, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
+  const opp = saved.opposed!;
+  const mySpec = await withAfflictionTags(char.name, overrideSpec(saved, args));
+  const oppRes = await resolveOpponent(cmd, opp.mode);
+  if (oppRes.error) return sys(`${oppRes.error}`);
+  const theirPool = cmd.named["vs-pool"]?.trim() || opp.pool || mySpec.pool;
+  const theirDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) ?? opp.vsDifficulty;
+  if (opp.extended) return launchOpposedExtended(char, name, saved, opp, mySpec, theirPool, theirDiff, oppRes, cmd, args, ctx);
+  const theirSpec = makeRollSpec({ pool: theirPool, difficulty: theirDiff });
+  const body = await runSingleContest(opp.mode, char, mySpec, theirSpec, oppRes.oppName, oppRes.oppChar, cmd, ctx, saved.table);
+  return sys(`${body}${surfaceSteps(saved.steps, undefined)}`);
+}
 
-  const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
-  const myEnv = await characterRollEnv(me);
-  if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
-  const myExec = executeRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
-  const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
-
-  const outcome = compareRolls(mode, myExec, theirExec);
-  const t = contestTableInput(outcome);
-  const notes = [outcome.note, await tableNote(cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
-  return sys(`${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}`);
+// opposed + extended = an extended contest (a race like Pursuit). Both race to a
+// play-time `target`; `rounds`/`intervals` cap it (falling back to the save).
+async function launchOpposedExtended(char: PlayableCharacter, name: string, saved: SavedRoll, opp: OpposedSavedConfig, mySpec: RollSpec, theirPool: string, theirDiff: number | undefined, oppRes: { oppChar?: PlayableCharacter; oppName: string }, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
+  const cfg = opp.extended!;
+  const target = args.requires ?? intOrUndef(cmd.named["target"]);
+  if (target === undefined || target < 1) {
+    return sys(`"${name}" is an extended contest - give it a target, e.g. [[roll @${name} requires=5 vs="Erik"]] (the successes = winning the race).`);
+  }
+  const maxRounds = intOrUndef(cmd.named["rounds"] ?? cmd.named["intervals"]) ?? cfg.intervals;
+  if (maxRounds === undefined || maxRounds < 1) return sys(`"${name}" needs rounds=<max> (its save defines none), e.g. [[roll @${name} requires=${target} rounds=5 vs="Erik"]].`);
+  const aSpec = makeRollSpec({ ...mySpec, requires: 1 });
+  const bSpec = makeRollSpec({ pool: theirPool, difficulty: theirDiff, requires: 1 });
+  const contest: ExtendedContest = {
+    id: api.v1.uuid(), label: cmd.named["label"] ?? name,
+    a: { name: char.name, base: aSpec, accumulated: 0, char: char.name },
+    b: { name: oppRes.oppName, base: bSpec, accumulated: 0, char: oppRes.oppChar?.name },
+    target, maxRounds,
+    interval: cmd.named["interval"] ?? cfg.interval ?? "",
+    onBotch: cmd.named["on-botch"] ? parseBotchPolicy(cmd.named["on-botch"]) : (cfg.onBotch ?? "fail"),
+    rounds: 0, status: "open", log: [],
+  };
+  const aExec = await execContestSide(aSpec, char.name, ctx.rng);
+  const bExec = await execContestSide(bSpec, oppRes.oppChar?.name, ctx.rng);
+  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
+  await ExtendedContestStore.save(after);
+  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
+  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  return sys(`${disp(char.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}${surfaceSteps(saved.steps, undefined)}`);
 }
 
 const cmdResist: CommandHandler = (cmd, ctx) => cmdVersus("resisted", cmd, ctx);
@@ -2236,7 +2391,7 @@ CommandRouter.register("roll-for", cmdRollFor, {
     { key: "table", kind: "named", desc: "Success table to read the outcome" }],
 });
 CommandRouter.register("name-roll", cmdNameRoll, {
-  summary: "save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure)",
+  summary: "save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest)",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>" },
     { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS,
@@ -2245,12 +2400,27 @@ CommandRouter.register("name-roll", cmdNameRoll, {
     { key: "intervals", kind: "named", type: "int", desc: "Extended: default max rolls" },
     { key: "interval", kind: "named", desc: "Extended: advisory spacing (e.g. 1 turn)" },
     { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"], desc: "Extended: botch policy" },
+    { key: "opposed", kind: "named", type: "enum", options: ["resisted", "contested"], desc: "Make it a contest (opponent supplied at invoke via vs=); with extended=, a race" },
+    { key: "vs-pool", kind: "named", desc: "Opposed: the opposition's pool (default: your own pool)" },
+    { key: "vs-difficulty", kind: "named", type: "int", desc: "Opposed: default difficulty for the opposition's roll" },
     { key: "description", kind: "named", type: "literal", desc: "Rules prose (verbatim)" }],
 });
 CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
 CommandRouter.register("roll-info", cmdRollInfo, {
-  summary: "show a saved roll's full spec, sidecars, and description",
+  summary: "show a saved roll's full spec, sidecars, procedure steps, and description",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("add-step", cmdAddStep, {
+  summary: "append a follow-up step to a saved procedure (composes named rolls)",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<procedure>" },
+    { key: "roll", kind: "named", required: true, hint: "@<saved-roll>", desc: "The follow-up roll to run" },
+    { key: "when", kind: "named", type: "enum", options: ["always", "on-success", "on-fail", "on-botch"], desc: "When this step applies, by the entry's outcome" },
+    { key: "note", kind: "named", type: "literal", desc: "What this step is, in fiction" }],
+});
+CommandRouter.register("clear-steps", cmdClearSteps, {
+  summary: "drop all follow-up steps from a saved procedure (its entry roll stays)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<procedure>" }],
 });
 CommandRouter.register("forget-roll", cmdForgetRoll, {
   summary: "delete a saved roll",

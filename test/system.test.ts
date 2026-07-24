@@ -3271,6 +3271,35 @@ describe("roll window: win-roll + the table sidecar", () => {
     expect(await __uiClickButton("Roll")).toBe(true);
     expect(texts().some(t => t.includes("specialty: Swords (+1 die)"))).toBe(true);
   });
+
+  test("Save bakes an OPPOSED saved roll: choose a mode + vs-pool, and [[name-roll]] stores the contest", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("win-roll");
+    await set("pool", "dexterity+stealth");
+    await set("difficulty", "6");
+    expect(await __uiClickButton("contested")).toBe(true);              // the contest fields appear on pick
+    await set("vs-pool", "perception+alertness");
+    await set("vs-difficulty", "6");
+    await set("save-as", "shadow");
+    expect(await __uiClickButton("Save")).toBe(true);
+    const saved = (await NamedRollStore.get("shadow"))!;
+    expect(saved.pool).toBe("dexterity+stealth");
+    expect(saved.opposed).toEqual({ mode: "contested", pool: "perception+alertness", vsDifficulty: 6 });
+    // ...and invoking it launches a contest, not a single roll.
+    const out = await CommandRouter.route('roll @shadow vs="a-guard"', { rng: seqRng([6]) });
+    expect(out).toContain("contested -");
+  });
+
+  test("choosing 'none' collapses the contest knobs and clears vs-pool/vs-difficulty", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("win-roll");
+    expect(await __uiClickButton("contested")).toBe(true);
+    await set("vs-pool", "perception+alertness");
+    expect(texts().some(t => t.includes("vs-pool"))).toBe(true);        // the field is shown while opposed
+    expect(await __uiClickButton("none")).toBe(true);                   // collapse back to a plain roll
+    expect(await api.v1.tempStorage.get("win:roll:vs-pool")).toBe("");  // its value is cleared
+    expect(texts().some(t => t.includes("vs-pool"))).toBe(false);       // and the field is hidden again
+  });
 });
 
 // =============================================================================

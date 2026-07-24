@@ -7761,6 +7761,26 @@ async function openRollWindow(): Promise<void> {
         content.push(part.textInput({ storageKey: RKEY(p.key), placeholder: p.example ?? p.hint }));
       }
     }
+    // Contest knobs - Save bakes these into [[name-roll]] as an OPPOSED saved roll
+    // (the opponent is play-time vs=); Roll ignores them. These are name-roll's own
+    // params, so submit("name-roll") reads them straight from these fields by key.
+    // vs-pool / vs-difficulty only show once a mode is chosen (collapse when off).
+    const opposedNow = await field("opposed");
+    content.push(part.text({ text: "Opposed (Save bakes a contest; opponent supplied at play via vs=)" }));
+    content.push(part.row({ content: (["", "resisted", "contested"] as const).map(o => part.button({
+      text: `${o === opposedNow ? "• " : ""}${o === "" ? "none" : o}`,
+      callback: async () => {
+        await temp.set(RKEY("opposed"), o);
+        if (o === "") { await temp.set(RKEY("vs-pool"), ""); await temp.set(RKEY("vs-difficulty"), ""); }
+        await render();
+      },
+    })) }));
+    if (opposedNow === "resisted" || opposedNow === "contested") {
+      content.push(part.text({ text: "vs-pool (opposition's pool; blank = your own pool)" }));
+      content.push(part.textInput({ storageKey: RKEY("vs-pool"), placeholder: "e.g. perception+alertness" }));
+      content.push(part.text({ text: "vs-difficulty (opposition's difficulty; optional)" }));
+      content.push(part.numberInput({ storageKey: RKEY("vs-difficulty") }));
+    }
     content.push(part.text({ text: "Save as (optional - Save stores the roll under this name)" }));
     content.push(part.textInput({ storageKey: RKEY("save-as"), placeholder: "e.g. strike" }));
     content.push(part.row({ content: [

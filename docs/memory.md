@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `23917a9`** ("contested saved
-> rolls + multi-stage advisory procedures - the Drama 'real arena' primitives").
-> Prior: `95ac0fc` (named procedures: saved rolls that extend + carry a table &
-> description; climbing default); `50be872` ([SYSTEM: ...] format + QUIET_VERBS
-> stop generation for query commands); `a1f9997` (central sys() formatter);
-> `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient truth).
+> **Last synced with the code as of commit `c20d0df`** ("win-roll bakes
+> contests: the Opposed knob in the roll builder"). Prior: `23917a9` (contested
+> saved rolls + multi-stage advisory procedures — the Drama 'real arena'
+> primitives); `95ac0fc` (named procedures: saved rolls that extend + carry a
+> table & description; climbing default); `50be872` ([SYSTEM: ...] format +
+> QUIET_VERBS); `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient truth).
 
 ---
 
@@ -927,7 +927,7 @@ zero resolver so only literals count; a deleted char degrades to ad-hoc.
 → botch, any non-win → failure). `extended-contest`/`continue-contest` reuse
 `execContestSide` each round (re-resolving both pools live) + `applyContestRound`.
 
-### src/window.ts (375) — api.v1.ui windows that EMIT commands, DERIVED from specs
+### src/window.ts (395) — api.v1.ui windows that EMIT commands, DERIVED from specs
 Imports host + **command** + **rolls** (SuccessTableRegistry for the table
 picker) + **state** (registries feed domain windows and picker options; still
 NOT game — the split's dependency win).
@@ -990,7 +990,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3607 + 34 lines, 327 tests, 85 describes)
+### test/ (3636 + 34 lines, 329 tests, 85 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1396,9 +1396,16 @@ cards are all tracked (id map + backups above).
     indexed tables** (Feats of Strength: Strength → lift capacity; Throwing:
     Strength → range — our SuccessTable keys on successes, not a trait value),
     **variable-pool sugar** (Jump = Str | Str+Ath), escalating per-interval
-    difficulty (Swimming), two-axis value tables (Jump's vert/horiz), the full
-    **auto-branching flow engine** for procedures, and **win-roll window support**
-    for the opposed/steps knobs (part of the §7.28 window follow-up).
+    difficulty (Swimming), two-axis value tables (Jump's vert/horiz), and the full
+    **auto-branching flow engine** for procedures. *Addendum (window pass):*
+    **win-roll now bakes contests** — `openRollWindow` renders an Opposed knob
+    (none / resisted / contested) that, on pick, reveals vs-pool + vs-difficulty
+    fields; because Save's `submit("name-roll", …)` already reads every name-roll
+    param from its form field by key, rendering the fields was the whole job (the
+    contract the §7.28/§7.29 window teaching walked the user through). LEFT: the
+    `steps`/`extended` knobs in win-roll (procedures are built with `add-step`,
+    which — like every registered spec — gets a free window via
+    `openCommandWindow`), and the `win-add-step`/`win-clear-steps` wrappers.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1518,10 +1525,13 @@ Ordered roughly by unlock value:
     walked from roll's spec; For-aware spend/specialty pickers; Save bakes
     the spend/specialty/**table** sidecars — `SavedRoll.table` added with it;
     **difficulty-as-expression DONE** in `RollSpec.difficultyExpr`).
-    Remaining: **win-roll fields for the named-procedure knobs**
-    (extended toggle + intervals/interval/on-botch, a description input) and the
-    two live-play UX fixes — "Choose pool…" → "Choose saved roll…", collapse the
-    advanced knobs so name + buttons stay visible (§7.28); the **advisory**
+    The **Opposed knob is DONE** (§7.29 addendum): a none/resisted/contested row
+    that reveals vs-pool + vs-difficulty, so Save bakes a contest. Remaining:
+    **win-roll fields for the extended/steps knobs** (extended toggle +
+    intervals/interval/on-botch, a description input; procedures via a
+    `win-add-step` free window) and the two live-play UX fixes — "Choose pool…" →
+    "Choose saved roll…", collapse the advanced knobs so name + buttons stay
+    visible (§7.28); the **advisory**
     `self:`/`ally:`/`target:`/`opposition:` prefixes - in the "Design notes"
     section of `docs/ui-parts.md`; migrating the TEXT wizards
     (`RESOURCES_WIZARD`) to render as windows; and a template-definer window

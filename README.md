@@ -847,7 +847,10 @@ windows use it:
   when the **For** field names someone else (its picker lists characters; the
   resource/specialty pickers follow it). **Save** stores it under the *Save
   as* name via `[[name-roll]]`, sidecars included (For is ignored — saved
-  rolls are chronicle-global).
+  rolls are chronicle-global). The **Opposed** knob (none / resisted /
+  contested) turns Save into a **contest** save — picking a mode reveals
+  *vs-pool* and *vs-difficulty* fields, so `[[win-roll]]` can bake a Shadowing
+  or Intimidation as easily as a plain roll (the opponent stays play-time `vs=`).
 
 The ambient host types (`types/novelai/script-types.d.ts`), the off-host mock
 (`src/host-mock.ts`), and the spec-driven forms (`src/window.ts`) are the shared

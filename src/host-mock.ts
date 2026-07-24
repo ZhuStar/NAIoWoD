@@ -34,8 +34,35 @@ const __makeMockStore = (m: Map<string, unknown>) => ({
 
 // Test/off-host helper: wipe the mock lorebook back to a fresh (empty) story.
 export function __resetLorebookMock(): void { __mockCategories = []; __mockEntries = []; }
-// Test/off-host helper: wipe the mock storage stores (story, history, temp).
-export function __resetStorageMock(): void { __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); }
+// Test/off-host helper: wipe the mock storage stores (story, history, temp) and
+// the generation-side story fields (author's note, system prompt, prefill).
+export function __resetStorageMock(): void {
+  __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear();
+  __mockAuthorNote = ""; __mockSystemPrompt = ""; __mockPrefill = "";
+}
+
+// --- GENERATION MOCK (author's note / system prompt / prefill / hooks) --------
+// In-memory story fields the Storyteller loop reads and writes, plus a registry
+// of the generation hooks the engine registers, so tests can FIRE them off-host
+// (there is no real generator here). `authorNote.set` etc. never throw - on-host
+// they need the storyEdit permission, which the engine treats as best-effort.
+let __mockAuthorNote = "";
+let __mockSystemPrompt = "";
+let __mockPrefill = "";
+const __mockHooks = new Map<string, (params: unknown) => unknown>();
+
+// Test/off-host helpers: read the mock author's note / system prompt / prefill.
+export function __authorNote(): string { return __mockAuthorNote; }
+export function __systemPrompt(): string { return __mockSystemPrompt; }
+export function __prefill(): string { return __mockPrefill; }
+// Fire the engine's onResponse hook with a fake generation and return its result
+// (the modified text the host would insert). No-op if nothing is registered.
+export async function __fireOnResponse(text: string[], final = true): Promise<{ text?: string[] } | undefined> {
+  const h = __mockHooks.get("onResponse");
+  if (!h) return undefined;
+  const r = await h({ continuityId: "test", text, logprobs: [], tokenIds: [], final });
+  return (r ?? undefined) as { text?: string[] } | undefined;
+}
 
 // --- UI MOCK -----------------------------------------------------------------
 // Records every opened window/modal and its current UIPart tree, and lets tests
@@ -125,9 +152,25 @@ if (!__g.api) {
         },
         removeEntry: async (id: string) => { __mockEntries = __mockEntries.filter(e => e["id"] !== id); },
       },
-      // Off-host there is no engine to fire hooks; registering just records that
-      // a handler exists (and keeps `hooks.register(...)` from throwing).
-      hooks: { register: (event: string, _handler: unknown) => { log(`[HOOK REGISTER] ${event}`); } },
+      // Off-host there is no engine to fire hooks; registering records the
+      // handler so tests can fire it (see __fireOnResponse) and logs it.
+      hooks: { register: (event: string, handler: (params: unknown) => unknown) => { __mockHooks.set(event, handler); log(`[HOOK REGISTER] ${event}`); } },
+      // Generation-side story fields. an (author's note) / systemPrompt / prefill
+      // mirror the real get/set surface; the set methods never throw off-host.
+      an: {
+        get: async () => __mockAuthorNote,
+        set: async (text: string) => { __mockAuthorNote = text ?? ""; },
+      },
+      systemPrompt: {
+        get: async () => __mockSystemPrompt,
+        set: async (text: string) => { __mockSystemPrompt = text ?? ""; },
+        getDefault: async () => "",
+      },
+      prefill: {
+        get: async () => __mockPrefill,
+        set: async (text: string) => { __mockPrefill = text ?? ""; },
+        getDefault: async () => "",
+      },
       ui: {
         window: { open: async (options: Record<string, unknown>) => __openMockWindow("window", options) },
         modal: { open: async (options: Record<string, unknown>) => __openMockWindow("modal", options) },

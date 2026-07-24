@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `25c6a9a`** ("scenes: the named
-> unit of play on the story clock — scene/turn/end-scene/downtime"). Prior:
-> `65c67f8` (time: the story clock — real Gregorian calendar); `c20d0df`
-> (win-roll bakes contests: the Opposed knob); `23917a9` (contested saved rolls +
-> multi-stage advisory procedures); `cb5b4c3` (vendor NovelAI's
-> script-types.d.ts as ambient truth).
+> **Last synced with the code as of commit `baa8252`** ("storyteller output:
+> the AI's <hide> plans → scene plan → Author's Note (onResponse)"). Prior:
+> `25c6a9a` (scenes: the named unit of play on the story clock); `65c67f8` (time:
+> the story clock — real Gregorian calendar); `c20d0df` (win-roll bakes contests:
+> the Opposed knob); `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient
+> truth).
 
 ---
 
@@ -193,7 +193,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - Declares NO NovelAI type and NO `const api`. This is all of host.ts that
   reaches the release.
 
-### src/host-mock.ts (139 lines) — off-host mock + test hooks, TEST-ONLY
+### src/host-mock.ts (182 lines) — off-host mock + test hooks, TEST-ONLY
 - NOT in `MODULES`, so it never enters dist. Installs `globalThis.api = {...}`
   when absent (3 Map-backed storages, empty lorebook, uuid fallback,
   `hooks.register` that logs, `log`/`error`→console). Typed loosely (assigned
@@ -723,7 +723,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (3041) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (3139) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -1004,7 +1004,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3763 + 34 lines, 339 tests, 88 describes)
+### test/ (3828 + 34 lines, 344 tests, 89 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1056,6 +1056,12 @@ affliction-def overlay — each array or `name → def` map) ·
 subcategory is the real category `wod:config:success-tables:<sub>` (own
 `general` + extra cards), tables addressed `<sub>::name`. Engine-written
 cards are all tracked (id map + backups above).
+
+**Generation-side (not storage):** the engine also WRITES the **Author's Note**
+(`api.v1.an.set`, needs `storyEdit`) — an engine-owned marked block
+`<!--wod:scene-plan-->…<!--/wod:scene-plan-->` mirroring the active scene's
+`plan`, left alongside any player-authored note (§7.31 Pass B). `systemPrompt`
+and `prefill` are mocked/available but not yet written.
 
 ## 7. Design decisions and their WHY (chronological-ish)
 
@@ -1475,6 +1481,25 @@ cards are all tracked (id map + backups above).
     contract + the off-host mock, mirroring the api.v1.ui buildout (§7.24). The
     system-prompt rewrite (engine owns the speaker scheme + injects current
     scene/date via onContextBuilt) is the pass after that.
+    *Addendum (Pass B — SHIPPED):* the hide→Author's-Note loop is live. NO
+    host.ts change was needed (the generation surface is already ambient in the
+    vendored d.ts; Author's Note is **`api.v1.an`**, not `authorNote`). host-mock.ts
+    gained `an`/`systemPrompt`/`prefill` + a hooks registry + `__fireOnResponse`/
+    `__authorNote` helpers. game.ts: pure `extractHideBlocks` (regex over
+    `<hide [op=append|overwrite]>…</hide>`, default append), `applyHideDirectives`
+    (append/overwrite the CURRENT scene's `plan`), `syncSceneToAuthorNote`
+    (writes an engine-owned marked block `<!--wod:scene-plan-->…` into the AN,
+    leaving player-authored AN intact; `try/catch` swallows the missing-storyEdit
+    error — the plan still lives in the scene record), `processGeneratedText`
+    (the onResponse body: strip + route, returns cleaned text or undefined when
+    there is no `<hide>`), and a manual **`[[hide text=\`…\` op=]]`** command.
+    index.ts registers `onResponse`. Scene open/switch/close re-sync the AN block.
+    Chosen: keep the AI's `<hide>` TAG syntax (what the user's prompt already
+    teaches) intercepted by onResponse — NOT the `[[...]]` command syntax (the
+    AI's output isn't input, so onTextAdventureInput never sees it). Streaming
+    caveat: a `<hide>` split across onResponse chunks isn't stripped (first
+    version handles complete blocks per call — buffer-across-chunks is a later
+    refinement). The system-prompt/`onContextBuilt` injection pass is next.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1618,9 +1643,17 @@ Ordered roughly by unlock value:
     scopes resolve in `play`/`roll-for`/`set-default`/`vs=`; `[[player]]`
     switches the current player. Remaining niche: aliases inside pool
     expressions (pool `@` still means saved rolls).
-15. **The Storyteller loop itself** — `api.v1.generate` narration, UI panels
-    (`ui-extensions`/`ui-parts`/`modals` docs already mirrored), token budget
-    handling. The reason the project exists; everything above serves it.
+15. **The Storyteller loop itself** — its FIRST piece now exists (§7.31 Pass B):
+    the engine registers an **`onResponse`** hook that strips the AI's `<hide>`
+    blocks from generated narration and mirrors the active scene's plan into the
+    **Author's Note** (`api.v1.an`) — the first time the engine reads/writes the
+    generation surface (`an`/`systemPrompt`/`prefill` + the generation hooks, all
+    mocked in host-mock.ts). LEFT: `api.v1.generate`/`generateWithStory` narration
+    (the `generateWithStory` specialty/distance asks §7.23/§7.28 wait on this),
+    **`systemPrompt.set` + `onContextBuilt` injection** of the speaker scheme +
+    current scene/date (the "engine owns the system prompt" pass — the user's
+    prompt shrinks to the creative parts), `prefill`, UI panels, token budgets.
+    The reason the project exists; everything above serves it.
 16. Old `RulesetConfig` XP/freebie numbers → replaced by the real cost engine
     (5); creation-cap enforcement in `Stat` is partially unused until then.
 

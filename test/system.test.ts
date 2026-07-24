@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote } from "../src/host-mock";
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -43,6 +43,7 @@ import {
   CharacterFactory,
   parseStoryDate, formatStoryDate, parseDuration, addDuration, diffCalendar, formatCalendarSpan,
   StoryClock, DateBook, DEFAULT_STORY_START,
+  extractHideBlocks, processGeneratedText, init,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -3559,6 +3560,70 @@ describe("scenes: named units of play on the story clock", () => {
     expect(await CommandRouter.route("forget-scene the-parapet")).toContain("Forgot scene");
     expect(await CommandRouter.route("scenes")).toContain("No scenes yet");
     expect(await CommandRouter.route("scene-info")).toContain("No open scene");
+  });
+});
+
+describe("storyteller output: <hide> -> scene plan -> Author's Note", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("extractHideBlocks pulls append/overwrite/bare blocks and cleans the text (pure)", () => {
+    const t = `Narration.\n<hide op="append">plan one</hide>\nMore.\n<hide>plan two</hide>\n<hide op="overwrite">final</hide>End.`;
+    const { cleaned, directives } = extractHideBlocks(t);
+    expect(directives).toEqual([
+      { op: "append", content: "plan one" },
+      { op: "append", content: "plan two" },
+      { op: "overwrite", content: "final" },
+    ]);
+    expect(cleaned).not.toContain("<hide");
+    expect(cleaned).toContain("Narration.");
+    expect(cleaned).toContain("End.");
+    expect(extractHideBlocks("no tags here").directives).toEqual([]);
+  });
+
+  test("processGeneratedText strips the block, records the plan on the open scene, and mirrors it to the Author's Note", async () => {
+    await CommandRouter.route("story-start 1230-06-01-20");
+    await CommandRouter.route('scene "The Parapet" ');
+    const out = await processGeneratedText([`ST: Cold eyes.\n<hide op="append">The baron is a spy.</hide>\nBaron: "Late."`]);
+    expect(out![0]).not.toContain("<hide");
+    expect(out![0]).toContain("Cold eyes");
+    expect(out![0]).toContain(`Baron: "Late."`);
+    expect(await CommandRouter.route("scene-info")).toContain("The baron is a spy");   // recorded on the scene
+    expect(__authorNote()).toContain("The baron is a spy");                            // and mirrored to the AN
+    expect(__authorNote()).toContain("[Scene: The Parapet]");
+    // overwrite replaces; text with no <hide> passes through untouched (undefined).
+    await processGeneratedText([`<hide op="overwrite">New plan.</hide>`]);
+    expect(__authorNote()).toContain("New plan");
+    expect(__authorNote()).not.toContain("The baron is a spy");
+    expect(await processGeneratedText(["just narration"])).toBeUndefined();
+  });
+
+  test("the [[hide]] command writes the plan; switching or ending a scene clears the AN block", async () => {
+    await CommandRouter.route("story-start 1230-06-01-20");
+    await CommandRouter.route('scene "The Parapet" ');
+    expect(await CommandRouter.route("hide text=`the ghoul can be bribed`")).toContain("Noted (append)");
+    expect(__authorNote()).toContain("the ghoul can be bribed");
+    await CommandRouter.route('scene "The Crypt" ');    // a new scene clears the prior plan block
+    expect(__authorNote()).toBe("");
+    await CommandRouter.route("hide text=`a Cappadocian lurks`");
+    expect(__authorNote()).toContain("a Cappadocian lurks");
+    await CommandRouter.route("end-scene");
+    expect(__authorNote()).toBe("");
+  });
+
+  test("a <hide> with no open scene is still stripped, but has nowhere to record", async () => {
+    const out = await processGeneratedText([`ST: Nothing open.\n<hide>orphan plan</hide>`]);
+    expect(out![0]).not.toContain("<hide");
+    expect(out![0]).not.toContain("orphan plan");
+    expect(__authorNote()).toBe("");
+  });
+
+  test("init registers onResponse so a live generation is intercepted", async () => {
+    await init();
+    await CommandRouter.route("story-start 1230-06-01-20");
+    await CommandRouter.route('scene "The Parapet" ');
+    const r = await __fireOnResponse([`ST: A line.\n<hide>secret</hide>`]);
+    expect(r!.text![0]).not.toContain("secret");
+    expect(__authorNote()).toContain("secret");
   });
 });
 

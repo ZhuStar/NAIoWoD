@@ -25,7 +25,7 @@ import {
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,
 } from "./services";
 import { NamedRollStore, StoryClock } from "./state";
-import { processAdventureInput, reconcileLorebook } from "./game";
+import { processAdventureInput, processGeneratedText, reconcileLorebook } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
 // Wire the engine to the host: input hook, lorebook seed, the base virtual
@@ -35,6 +35,12 @@ import { processAdventureInput, reconcileLorebook } from "./game";
 export async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onTextAdventureInput", async (params: Parameters<OnTextAdventureInput>[0]) => {
     return processAdventureInput(params.rawInputText);
+  });
+  // The Storyteller's private plans: strip the AI's <hide> blocks from the
+  // narration before it's inserted, routing them to the scene plan + Author's Note.
+  api.v1.hooks.register("onResponse", async (params: Parameters<OnResponse>[0]) => {
+    const text = await processGeneratedText(params.text);
+    return text ? { text } : undefined;
   });
   const boot = await LorebookManager.bootstrap();
   await ensurePath("config", CONFIG_GENERAL_HEADER);

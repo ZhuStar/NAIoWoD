@@ -733,10 +733,30 @@ glosses the clock forward between them.
 - **`scenes`** lists them (the open one marked); **`scene-info [name]`** shows one
   in full; **`forget-scene <name>`** deletes a record.
 
-Scenes carry a private **`plan`** field — the Storyteller's outline for the scene.
-Wiring that to the AI (a `<hide>` directive the engine strips from the story and
-mirrors into the Author's Note) is the next step, using NovelAI's generation
-hooks; for now the clock and scene bookkeeping are a manual Storyteller aid.
+### The Storyteller's hidden plans
+
+Each scene carries a private **`plan`** — the AI's outline for what's *really*
+going on. The Storyteller writes it inline while narrating, wrapped in a **`<hide>`**
+directive, and the engine (via NovelAI's `onResponse` generation hook) **strips
+it out of the story** and folds it into the current scene's plan, then **mirrors
+that plan into the Author's Note** — semi-hidden: the AI re-reads it every turn,
+you can peek at the Author's Note panel, but it never lands in the prose.
+
+```
+ST: The baron eyes you across the parapet.
+<hide op="append">The baron is a Tremere spy; he betrays the prince at dawn.</hide>
+Baron: "You are late, childe."
+```
+
+- `<hide op="append">…</hide>` adds to the plan; `<hide op="overwrite">…</hide>`
+  replaces it; a bare `<hide>…</hide>` appends. The block is removed from what the
+  player sees.
+- **`[[hide text=\`…\` op=append|overwrite]]`** is the manual counterpart — you (not
+  the AI) can edit the current scene's plan directly.
+- Opening a new scene clears the previous plan from the Author's Note; ending a
+  scene clears it entirely. `[[scene-info]]` always shows the current plan.
+- The Author's Note write needs the script's **`storyEdit`** permission; without
+  it the plan still lives in the scene record (best-effort, never errors).
 
 ### Resources
 

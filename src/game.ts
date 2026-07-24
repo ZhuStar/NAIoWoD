@@ -1569,6 +1569,7 @@ async function cmdScene(cmd: ParsedCommand): Promise<string> {
   if (turnLength) scene.turnLength = turnLength;
   await SceneStore.save(scene);
   await SceneStore.setCurrent(scene.name);
+  await syncSceneToAuthorNote(scene);   // a fresh scene has no plan yet -> clears any prior plan block
   return sys(`Scene "${scene.name}" opens${location ? ` at ${location}` : ""} (${formatStoryDate(clock.now)}; turns: ${describeTurnLength(turnLength)})${closedNote}.`);
 }
 
@@ -1597,6 +1598,7 @@ async function cmdEndScene(): Promise<string> {
   if (clock) scene.endedAt = clock.now;
   await SceneStore.save(scene);
   await SceneStore.clearCurrent();
+  await syncSceneToAuthorNote(undefined);   // no open scene -> clear the plan block from the Author's Note
   const span = clock && scene.startedAt !== clock.now ? diffCalendar(scene.startedAt, clock.now) : undefined;
   const spanBit = span && span.totalSeconds ? `, ${formatCalendarSpan(span)} of story time` : "";
   return sys(`Scene "${scene.name}" ends after ${scene.turnsElapsed} turn${scene.turnsElapsed === 1 ? "" : "s"}${spanBit}.`);
@@ -1613,6 +1615,7 @@ async function cmdDowntime(cmd: ParsedCommand): Promise<string> {
     scene.status = "closed"; scene.endedAt = before.now;
     await SceneStore.save(scene);
     await SceneStore.clearCurrent();
+    await syncSceneToAuthorNote(undefined);
     sceneNote = ` (closed "${scene.name}")`;
   }
   const after = (await StoryClock.advance(dur))!;
@@ -1649,8 +1652,96 @@ async function cmdForgetScene(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) return sys(`forget-scene needs a name, e.g. [[forget-scene the-parapet]].`);
   const key = StringUtil.normalize(name);
-  if ((await SceneStore.currentName()) === key) await SceneStore.clearCurrent();
+  if ((await SceneStore.currentName()) === key) { await SceneStore.clearCurrent(); await syncSceneToAuthorNote(undefined); }
   return (await SceneStore.remove(name)) ? sys(`Forgot scene "${key}".`) : sys(`No scene named "${key}".`);
+}
+
+// =============================================================================
+// STORYTELLER OUTPUT - the AI's private plans (§7.31, Pass B). The AI writes
+// <hide op="append|overwrite">...</hide> in its narration; an onResponse hook
+// strips those blocks from the story and folds them into the CURRENT scene's
+// `plan`, which is mirrored into the Author's Note - semi-hidden: the AI re-reads
+// it every turn, the player can peek at the AN panel, but it never lands in the
+// prose. The Author's Note write is best-effort (needs the storyEdit permission);
+// without it the plan still lives in the scene store (visible via scene-info).
+// =============================================================================
+export interface HideDirective { op: "append" | "overwrite"; content: string }
+
+// Pull every <hide [op=...]>...</hide> block out of text. Returns the text with
+// them removed and the directives in order (default op = append). PURE.
+export function extractHideBlocks(text: string): { cleaned: string; directives: HideDirective[] } {
+  const directives: HideDirective[] = [];
+  const re = /<hide(?:\s+op\s*=\s*"?(append|overwrite)"?)?\s*>([\s\S]*?)<\/hide>/gi;
+  const cleaned = text.replace(re, (_m, op: string | undefined, content: string) => {
+    directives.push({ op: op === "overwrite" ? "overwrite" : "append", content: content.trim() });
+    return "";
+  });
+  return { cleaned, directives };
+}
+
+const AN_PLAN_START = "<!--wod:scene-plan-->";
+const AN_PLAN_END = "<!--/wod:scene-plan-->";
+
+// Remove the engine-owned marked block from a text, leaving any player-authored
+// Author's Note around it intact.
+function stripMarkedBlock(text: string, start: string, end: string): string {
+  const s = text.indexOf(start);
+  if (s === -1) return text;
+  const e = text.indexOf(end, s);
+  const cut = e === -1 ? text.slice(0, s) : text.slice(0, s) + text.slice(e + end.length);
+  return cut.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Mirror the active scene's plan into the Author's Note as an engine-owned block
+// (leaving the player's own note intact). Best-effort: swallow the storyEdit-
+// permission error so the plan simply stays in the scene store.
+async function syncSceneToAuthorNote(scene: Scene | undefined): Promise<void> {
+  const plan = scene?.plan?.trim() ?? "";
+  const block = plan ? `${AN_PLAN_START}\n[Scene: ${disp(scene!.name)}] ${plan}\n${AN_PLAN_END}` : "";
+  try {
+    const current = String((await api.v1.an.get()) ?? "");
+    const base = stripMarkedBlock(current, AN_PLAN_START, AN_PLAN_END);
+    await api.v1.an.set(block ? (base ? `${base}\n${block}` : block) : base);
+  } catch { /* no storyEdit permission - the plan still lives in the scene store */ }
+}
+
+// Apply hide directives to the current scene's plan, then re-sync the Author's
+// Note. Returns whether a scene received them (a directive with no open scene is
+// still stripped from the story, but has nowhere to be recorded).
+async function applyHideDirectives(directives: HideDirective[]): Promise<boolean> {
+  if (!directives.length) return false;
+  const scene = await SceneStore.current();
+  if (!scene) return false;
+  let plan = scene.plan ?? "";
+  for (const d of directives) plan = d.op === "overwrite" ? d.content : (plan ? `${plan}\n${d.content}` : d.content);
+  scene.plan = plan.trim() || undefined;
+  await SceneStore.save(scene);
+  await syncSceneToAuthorNote(scene);
+  return true;
+}
+
+// The onResponse handler: strip <hide> blocks from the AI's generated text and
+// route them to the scene plan / Author's Note. Returns the cleaned text array
+// for the host to insert, or undefined when there was nothing to change.
+export async function processGeneratedText(text: string[]): Promise<string[] | undefined> {
+  const joined = text.join("");
+  if (!joined.toLowerCase().includes("<hide")) return undefined;
+  const { cleaned, directives } = extractHideBlocks(joined);
+  await applyHideDirectives(directives);
+  return [cleaned];
+}
+
+// [[hide `text`]] / [[hide op=overwrite `text`]] - the manual counterpart: the ST
+// or player writes to the current scene's plan directly (same routing).
+async function cmdHide(cmd: ParsedCommand): Promise<string> {
+  const scene = await SceneStore.current();
+  if (!scene) return sys(`No open scene to note. Start one with [[scene "name"]] first.`);
+  const content = (cmd.named["text"] ?? cmd.positional.join(" ")).trim();
+  if (!content) return sys(`hide needs text, e.g. [[hide text=\`the baron is the killer\`]] or [[hide op=overwrite text=\`...\`]].`);
+  const op = (cmd.named["op"] ?? "append").toLowerCase() === "overwrite" ? "overwrite" : "append";
+  await applyHideDirectives([{ op, content }]);
+  const s = (await SceneStore.current())!;
+  return sys(`Noted (${op}) to "${s.name}"'s plan. It rides the Author's Note now (${(s.plan ?? "").length} chars).`);
 }
 
 // List the success tables, or lay one out in full. A table interprets a number
@@ -2827,6 +2918,13 @@ CommandRouter.register("scene-info", cmdSceneInfo, {
 CommandRouter.register("forget-scene", cmdForgetScene, {
   summary: "delete a scene record",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("hide", cmdHide, {
+  summary: "write to the current scene's private plan (mirrored into the Author's Note)",
+  note: "the AI does this automatically via <hide op=append|overwrite>...</hide> in its narration",
+  params: [
+    { key: "text", kind: "named", type: "literal", desc: "The plan text (verbatim)" },
+    { key: "op", kind: "named", type: "enum", options: ["append", "overwrite"], desc: "Append (default) or overwrite the plan" }],
 });
 CommandRouter.register("tables", cmdTables, {
   summary: "list success tables (grouped by category), or lay one out in full",

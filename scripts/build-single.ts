@@ -20,6 +20,7 @@ const MODULES = [
   "src/core/traits.ts",
   "src/core/dice.ts",
   "src/core/damage.ts",
+  "src/core/time.ts",
   "src/wizard.ts",
   "src/rolls.ts",
   "src/rules.ts",
@@ -66,9 +67,9 @@ export async function buildSingleFile(): Promise<string> {
     "//",
     "// Paste this TypeScript into NovelAI's script editor as-is - no header needed.",
     "//",
-    "// Order: host -> core/traits -> core/dice -> core/damage -> wizard ->",
-    "//        rolls -> rules -> command -> services -> state -> game ->",
-    "//        window -> init (index.ts) -> bootstrap (main.ts)",
+    "// Order: host -> core/traits -> core/dice -> core/damage -> core/time ->",
+    "//        wizard -> rolls -> rules -> command -> services -> state ->",
+    "//        game -> window -> init (index.ts) -> bootstrap (main.ts)",
   ].join("\n");
 
   const sections = [header];

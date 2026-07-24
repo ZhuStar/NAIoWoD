@@ -12,7 +12,7 @@ damage, soak, resource pools and morality. UI and game loop come later.
 | `CLAUDE.md` + `docs/memory.md` | **The project's externalized memory** — session bootstrap + the fine-grained map of everything (files/classes/functions, state, decisions & rationale, roadmap). Updated in the same commit as any change it describes. |
 | `src/host.ts` | Release-safe glue over the host API: the project logger + two aliases over ambient types. Declares **no** NovelAI types (those are ambient, below). |
 | `src/host-mock.ts` | The off-host in-memory `api` + test hooks (`__reset*`/`__ui*`). Installs `globalThis.api` when no real host exists. **Test-only — never in the release.** |
-| `src/core/` | Pure mechanics (`traits`, `dice`, `damage`) — no host imports. |
+| `src/core/` | Pure mechanics (`traits`, `dice`, `damage`, `time`) — no host imports. |
 | `src/wizard.ts` | Medium-agnostic wizard engine (structured prompts; text renderer now, modals later). |
 | `src/rolls.ts` | Pure roll machinery: specs, pool expressions, tag modifiers, extended-roll state machine. |
 | `src/rules.ts` | The Dark Ages **data**: templates, resources + the effect grammar, roads, disciplines, merits, SRD seeds. |
@@ -666,6 +666,44 @@ Both sides **accumulate** toward a shared target across rounds; whoever reaches 
 - **`continue-contest [id] …`**, **`contest-status [id]`**, **`cancel-contest [id]`**
   mirror the extended-roll family; state persists across turns and defaults to the
   contest in progress.
+
+### Time — the story clock
+
+The chronicle runs on a **real Gregorian clock**, so historical Dark Ages dates
+work and durations roll over months and years correctly. Dates are written
+**`yyyy-mm-dd-hh`** (the hour is optional); the clock is second-granular under the
+hood, so the future combat system's 3-second turns will fit. It lives in story
+storage (so a later UNDO-rewind migration reaches it) and is seeded with a
+default start (`1197-01-01-00`) you override once.
+
+```
+[[story-start 1197-03-15-08]]     # when the chronicle begins
+[[advance-time 2d 6h]]            # move the clock forward
+[[advance-time 1mo]]              # calendar months/years roll over correctly
+[[story-date]]                    # "1197-04-17 14:00 — 1 month, 2 days, 6 hours since it began"
+[[save-date siege-began]]         # bookmark the current moment...
+[[save-date yuletide 1197-12-25-00]]   # ...or an explicit date
+[[dates]]                         # list the bookmarks
+[[time-between start now]]        # measure any two dates
+[[time-between siege-began 1197-12-25-00]]
+```
+
+- **`story-start <yyyy-mm-dd-hh>`** sets (or resets) when the story begins; the
+  current moment snaps to it.
+- **`advance-time <duration>`** moves the clock forward (or back, with a negative).
+  Durations are `s`/`m`/`h`/`d`/`w`/`mo`/`y` tokens, combinable: `2w 4h`, `1mo`,
+  `90s`, `3 days`. Months and years are calendar-relative (Jan 31 + 1 month =
+  Feb 28); the rest are fixed-length. *(The affliction stepper is a separate
+  `[[advance]]`; the two will merge once the turn system lands.)*
+- **`story-date`** shows the current date and how long since the story began.
+- **`save-date <name> [<yyyy-mm-dd-hh>]`** bookmarks the current moment (or a given
+  date) under a name; **`forget-date <name>`** drops it; **`dates`** lists them.
+- **`time-between <a> <b>`** reports the span between two dates — each a saved
+  bookmark, **`now`**, **`start`**, or an ad-hoc `yyyy-mm-dd-hh` — as a natural
+  breakdown plus a day total, and says "before" when `b` precedes `a`.
+
+Scenes and turn-length (combat's 3-second turns) build on this clock later; for
+now advancing time is a manual Storyteller action.
 
 ### Resources
 

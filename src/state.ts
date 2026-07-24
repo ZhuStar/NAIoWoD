@@ -33,6 +33,7 @@ import {
   writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
 } from "./services";
 import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, ExtendedRoll, ExtendedContest, BotchPolicy, ContestMode } from "./rolls";
+import { Duration, addDuration, parseStoryDate } from "./core/time";
 import { WizardPrompt, WizardStateData } from "./wizard";
 
 // --- LIVE CHARACTER SHEET ---
@@ -872,6 +873,82 @@ export class ExtendedContestStore {
     }
     return open.length === 1 ? open[0] : undefined;
   }
+}
+
+// =============================================================================
+// STORY CLOCK - when the story is, on a real (Gregorian) calendar
+// -----------------------------------------------------------------------------
+// One instant pair in storyStorage: `start` (when the chronicle begins, set by
+// [[story-start]]) and `now` (the current story moment, moved by [[advance]]).
+// Both are epoch SECONDS (UTC); the pure math lives in core/time.ts. In story
+// storage so a future historyStorage migration (roadmap #11) makes UNDO rewind
+// time too. Seeded create-if-missing with a Dark Ages default so the clock
+// always exists; the player re-sets it once.
+// =============================================================================
+export const DEFAULT_STORY_START = "1197-01-01-00";   // a canonical Dark Ages year; override with [[story-start]]
+
+export interface StoryClockState { start: number; now: number }
+
+export class StoryClock {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "time:clock";
+
+  static async get(): Promise<StoryClockState | undefined> {
+    return (await StoryClock._storage.get(StoryClock.KEY)) as StoryClockState | undefined;
+  }
+  // Set (or reset) when the story begins; `now` snaps to the new start.
+  static async setStart(epoch: number): Promise<StoryClockState> {
+    const s: StoryClockState = { start: epoch, now: epoch };
+    await StoryClock._storage.set(StoryClock.KEY, s);
+    return s;
+  }
+  // Move the current moment by a duration (calendar-aware). Undefined if no clock.
+  static async advance(dur: Duration): Promise<StoryClockState | undefined> {
+    const c = await StoryClock.get();
+    if (!c) return undefined;
+    const s: StoryClockState = { start: c.start, now: addDuration(c.now, dur) };
+    await StoryClock._storage.set(StoryClock.KEY, s);
+    return s;
+  }
+  // Create the clock with the built-in default only if it is missing. Returns
+  // whether it wrote (for the init log).
+  static async seedDefault(): Promise<boolean> {
+    const epoch = parseStoryDate(DEFAULT_STORY_START) as number;   // the constant is always valid
+    return StoryClock._storage.setIfAbsent(StoryClock.KEY, { start: epoch, now: epoch });
+  }
+}
+
+// =============================================================================
+// DATE BOOK - named bookmarks in story time (storyStorage JSON map)
+// -----------------------------------------------------------------------------
+// A hand-namable set of instants ("siege-began", "yuletide"): save the current
+// moment or an explicit date, forget one, list them, and measure between any two
+// (see [[time-between]]). Keyed by normalized name; values are epoch seconds.
+// =============================================================================
+export class DateBook {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "time:dates";
+
+  static async all(): Promise<Record<string, number>> {
+    return await DateBook._storage.getOrDefault<Record<string, number>>(DateBook.KEY, {});
+  }
+  static async get(name: string): Promise<number | undefined> {
+    return (await DateBook.all())[StringUtil.normalize(name)];
+  }
+  static async save(name: string, epoch: number): Promise<void> {
+    const map = await DateBook.all();
+    map[StringUtil.normalize(name)] = epoch;
+    await DateBook._storage.set(DateBook.KEY, map);
+  }
+  static async remove(name: string): Promise<boolean> {
+    const map = await DateBook.all();
+    const key = StringUtil.normalize(name);
+    if (!(key in map)) return false;
+    delete map[key];
+    await DateBook._storage.set(DateBook.KEY, map);
+    return true;
+  }
+  static async names(): Promise<string[]> { return Object.keys(await DateBook.all()); }
 }
 
 // =============================================================================

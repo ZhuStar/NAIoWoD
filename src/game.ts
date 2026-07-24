@@ -13,6 +13,7 @@
 import { StringUtil } from "./core/traits";
 import { Rng } from "./core/dice";
 import { SeverityName, HealthSummary } from "./core/damage";
+import { parseStoryDate, formatStoryDate, parseDuration, diffCalendar, formatCalendarSpan } from "./core/time";
 import {
   TEMPLATES, ResourceDef, resourceEffect,
   EffectSpec, EffectOp, describeEffect,
@@ -44,6 +45,7 @@ import {
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
+  StoryClock, DateBook,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
   resolveTraitFromRecord, ownedMeritInstances, enhancementsFor, SavedRoll, ExtendedSavedConfig,
   OpposedSavedConfig, ProcedureStep, ProcedureCondition,
@@ -1427,6 +1429,103 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   return sys(`Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`);
 }
 
+// =============================================================================
+// TIME - the story clock: set when it begins, advance it, read it, bookmark &
+// measure. Real Gregorian dates (core/time.ts); the clock lives in storyStorage.
+// =============================================================================
+const NO_CLOCK = `No story clock yet - set when the story begins with [[story-start 1197-03-15-08]] (yyyy-mm-dd-hh).`;
+
+// Resolve a date token for [[time-between]]: a saved bookmark, "now", "start",
+// or an ad-hoc yyyy-mm-dd-hh literal.
+async function resolveDateToken(tok: string): Promise<{ epoch?: number; label: string; error?: string }> {
+  const t = tok.trim();
+  const lc = t.toLowerCase();
+  if (lc === "now" || lc === "start") {
+    const c = await StoryClock.get();
+    if (!c) return { label: t, error: NO_CLOCK };
+    return { epoch: lc === "now" ? c.now : c.start, label: lc };
+  }
+  const saved = await DateBook.get(t);
+  if (saved !== undefined) return { epoch: saved, label: StringUtil.normalize(t) };
+  const parsed = parseStoryDate(t);
+  if (typeof parsed === "number") return { epoch: parsed, label: formatStoryDate(parsed) };
+  return { label: t, error: `"${t}" is not a saved date, "now"/"start", or a yyyy-mm-dd-hh date.` };
+}
+
+async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
+  const parsed = parseStoryDate(cmd.positional[0]);
+  if (typeof parsed !== "number") return sys(parsed.error);
+  const s = await StoryClock.setStart(parsed);
+  return sys(`The story begins ${formatStoryDate(s.start)}. Move time with [[advance-time 1d]]; read it with [[story-date]].`);
+}
+
+async function cmdAdvanceTime(cmd: ParsedCommand): Promise<string> {
+  const before = await StoryClock.get();
+  if (!before) return sys(NO_CLOCK);
+  const dur = parseDuration(cmd.positional.join(" ").trim());
+  if ("error" in dur) return sys(dur.error);
+  const after = (await StoryClock.advance(dur))!;
+  const span = diffCalendar(after.start, after.now);
+  const since = after.now === after.start ? "back to the very beginning" : `${formatCalendarSpan(span)} since it began`;
+  return sys(`Time advances: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)} (${since}).`);
+}
+
+async function cmdStoryDate(): Promise<string> {
+  const c = await StoryClock.get();
+  if (!c) return sys(NO_CLOCK);
+  if (c.now === c.start) return sys(`Story date: ${formatStoryDate(c.now)} - the story has just begun.`);
+  const span = diffCalendar(c.start, c.now);
+  return sys(`Story date: ${formatStoryDate(c.now)} - ${formatCalendarSpan(span)} since it began (${formatStoryDate(c.start)}).`);
+}
+
+async function cmdSaveDate(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`save-date needs a name, e.g. [[save-date siege-began]] (saves the current date) or [[save-date yuletide 1197-12-25-00]].`);
+  let epoch: number;
+  const dateArg = cmd.positional[1]?.trim();
+  if (dateArg) {
+    const p = parseStoryDate(dateArg);
+    if (typeof p !== "number") return sys(p.error);
+    epoch = p;
+  } else {
+    const c = await StoryClock.get();
+    if (!c) return sys(`No story clock yet - [[story-start ...]] first, or pass a date: [[save-date ${StringUtil.normalize(name)} 1197-06-01-00]].`);
+    epoch = c.now;
+  }
+  await DateBook.save(name, epoch);
+  return sys(`Saved date "${StringUtil.normalize(name)}" = ${formatStoryDate(epoch)}.`);
+}
+
+async function cmdForgetDate(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`forget-date needs a name, e.g. [[forget-date siege-began]].`);
+  const key = StringUtil.normalize(name);
+  return (await DateBook.remove(name)) ? sys(`Forgot date "${key}".`) : sys(`No saved date named "${key}".`);
+}
+
+async function cmdDates(): Promise<string> {
+  const map = await DateBook.all();
+  const names = Object.keys(map);
+  if (!names.length) return sys(`No saved dates yet. Save one with [[save-date <name>]] (or [[save-date <name> yyyy-mm-dd-hh]]).`);
+  const items = names.map(n => `${n} (${formatStoryDate(map[n])})`).join("; ");
+  return sys(`Saved dates: ${items}. [[time-between <a> <b>]] measures any two.`);
+}
+
+async function cmdTimeBetween(cmd: ParsedCommand): Promise<string> {
+  const a = cmd.positional[0]?.trim(), b = cmd.positional[1]?.trim();
+  if (!a || !b) return sys(`time-between needs two dates, e.g. [[time-between start now]] or [[time-between siege-began 1197-12-25-00]] (each: a saved name, "now", "start", or yyyy-mm-dd-hh).`);
+  const ra = await resolveDateToken(a);
+  if (ra.error) return sys(ra.error);
+  const rb = await resolveDateToken(b);
+  if (rb.error) return sys(rb.error);
+  const span = diffCalendar(ra.epoch!, rb.epoch!);
+  if (span.totalSeconds === 0) return sys(`${ra.label} and ${rb.label} are the same moment (${formatStoryDate(ra.epoch!)}).`);
+  const totalDays = Math.floor(span.totalSeconds / 86400);
+  const totalBit = totalDays >= 1 ? ` (${totalDays} day${totalDays === 1 ? "" : "s"} total)` : "";
+  const dir = span.negative ? "before" : "after";
+  return sys(`${rb.label} is ${formatCalendarSpan(span)} ${dir} ${ra.label}${totalBit}. [${formatStoryDate(ra.epoch!)} -> ${formatStoryDate(rb.epoch!)}]`);
+}
+
 // List the success tables, or lay one out in full. A table interprets a number
 // of successes; attach table=<name> to a roll/resist/contest to read it.
 async function cmdTables(cmd: ParsedCommand): Promise<string> {
@@ -2548,6 +2647,34 @@ CommandRouter.register("cancel-contest", cmdCancelContest, {
   summary: "cancel an extended contest",
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
 });
+CommandRouter.register("story-start", cmdStoryStart, {
+  summary: "set when the story begins (yyyy-mm-dd-hh)",
+  params: [{ key: "date", kind: "positional", required: true, hint: "yyyy-mm-dd-hh", example: "1197-03-15-08" }],
+});
+CommandRouter.register("advance-time", cmdAdvanceTime, {
+  summary: "move the story clock forward (s/m/h/d/w/mo/y)",
+  params: [{ key: "duration", kind: "positional", required: true, hint: "<duration>", example: "2d 6h" }],
+});
+CommandRouter.register("story-date", cmdStoryDate, {
+  summary: "show the current story date and how long since it began",
+});
+CommandRouter.register("save-date", cmdSaveDate, {
+  summary: "bookmark the current moment (or a given date) under a name",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>" },
+    { key: "date", kind: "positional", hint: "[yyyy-mm-dd-hh]", example: "1197-12-25-00" }],
+});
+CommandRouter.register("forget-date", cmdForgetDate, {
+  summary: "delete a saved date bookmark",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("dates", cmdDates, { summary: "list the saved date bookmarks" });
+CommandRouter.register("time-between", cmdTimeBetween, {
+  summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)",
+  params: [
+    { key: "a", kind: "positional", required: true, hint: "<date>", example: "start" },
+    { key: "b", kind: "positional", required: true, hint: "<date>", example: "now" }],
+});
 CommandRouter.register("tables", cmdTables, {
   summary: "list success tables (grouped by category), or lay one out in full",
   params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
@@ -2724,6 +2851,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
+  "story-date", "dates", "time-between",
 ]);
 
 // Replace every [[command]] in the player's adventure-mode input with its

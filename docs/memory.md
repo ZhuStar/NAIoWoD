@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `c20d0df`** ("win-roll bakes
-> contests: the Opposed knob in the roll builder"). Prior: `23917a9` (contested
-> saved rolls + multi-stage advisory procedures — the Drama 'real arena'
-> primitives); `95ac0fc` (named procedures: saved rolls that extend + carry a
-> table & description; climbing default); `50be872` ([SYSTEM: ...] format +
-> QUIET_VERBS); `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient truth).
+> **Last synced with the code as of commit `65c67f8`** ("time: the story
+> clock — real Gregorian calendar, advance/date/bookmarks/spans"). Prior:
+> `c20d0df` (win-roll bakes contests: the Opposed knob); `23917a9` (contested
+> saved rolls + multi-stage advisory procedures); `95ac0fc` (named procedures:
+> saved rolls that extend + carry a table & description); `cb5b4c3` (vendor
+> NovelAI's script-types.d.ts as ambient truth).
 
 ---
 
@@ -267,6 +267,20 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   fork once and deliberately restored — keep the simple API working on top.
 - `SoakTypeRule {soakable, pool: traitNames[]}`, `SoakSpec {bashing, lethal,
   aggravated, difficulty}`.
+
+### src/core/time.ts (151) — pure calendar/clock math (§7.30)
+- Real (proleptic Gregorian) time, epoch-SECONDS in/out, no host. Surface syntax
+  is `yyyy-mm-dd-hh` (hour optional, `:mm:ss` allowed); durations are
+  `s/m/h/d/w/mo/y` tokens ("2w 4h", "1mo"). `daysInMonth`/date construction use
+  `setUTCFullYear` so historical years < 100 don't hit Date's 1900 remap.
+- `parseStoryDate` (→ epoch | {error}, range-checked), `formatStoryDate`
+  (`yyyy-mm-dd hh:mm`, `:ss` only when nonzero). `Duration {months, seconds}` —
+  months/years kept apart (calendar-relative) from fixed units; `parseDuration`,
+  `addDuration` (month part clamps the day: Jan 31 + 1mo = Feb 28, then adds
+  seconds). `diffCalendar(a,b)` → `CalendarSpan` (years/months/days/h:m:s +
+  `negative` + `totalSeconds`), computed by counting whole months from the
+  earlier endpoint then a fixed remainder (exact + reversible; handles the
+  Jan 31→Mar 01 = 1mo 1d borrow case); `formatCalendarSpan` → prose.
 
 ### src/wizard.ts (83) — medium-agnostic wizard engine
 - `WizardPrompt {step, title, body, kind: choice|number|text|confirm,
@@ -556,7 +570,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1487) — the character model + every persistent store
+### src/state.ts (1564) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -709,7 +723,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (2760) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (2888) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -990,7 +1004,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3636 + 34 lines, 329 tests, 85 describes)
+### test/ (3725 + 34 lines, 336 tests, 87 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1019,7 +1033,10 @@ without records carry them too) · **`lb:ids`** (tracked lorebook uuids:
 (tracked-card text backups) · **`table-aliases`** (alias→table-key map) ·
 `wizard:active` wizard session · **`aliases`** (the whole 3-scope alias map) ·
 **`current-player`** / **`default-player`** pointers (default "storyteller") ·
-`char_<name>` (legacy LiveCharacter serialization). **tempStorage**
+**`time:clock`** (the story clock `{start, now}`, epoch seconds — seeded
+create-if-missing with `1197-01-01-00`, §7.30) · **`time:dates`** (named date
+bookmarks, `name → epoch` map) · `char_<name>` (legacy LiveCharacter
+serialization). **tempStorage**
 (session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
 live form fields, e.g. `win:define-constraint:relation` - the documented home
 for UI storageKey state) · `recon:<category>/<entry>:<kind>:<hash>` (the
@@ -1406,15 +1423,44 @@ cards are all tracked (id map + backups above).
     `steps`/`extended` knobs in win-roll (procedures are built with `add-step`,
     which — like every registered spec — gets a free window via
     `openCommandWindow`), and the `win-add-step`/`win-clear-steps` wrappers.
+30. **Time — the story clock** (user: "the thing we've been avoiding: time. Start
+    with a config value for when the story begins (yyyy-mm-dd-hh); commands to
+    pass time forward, check elapsed-since-start and the current date, save/forget
+    dates, and measure between any two — later Scenes and turn-length; combat's
+    3-second turns"). This pass is the CLOCK/CALENDAR only (Scenes/turns are
+    deferred). Decisions: **real proleptic Gregorian time** (Dark Ages is
+    historical Europe; 3-second combat = real seconds → correct month/year
+    rollover, not a fantasy fixed-length calendar — flagged to the user as the
+    one load-bearing choice, swappable in `core/time.ts` if ever wanted);
+    **second-granular epoch** internally so future 3-second turns fit; **one clock
+    in storyStorage** `{start, now}` (UNDO-rewindable once roadmap #11 lands) plus
+    a **bookmark map**; **diffs report an exact calendar breakdown + a day total**
+    from the real endpoints (never the ambiguous "how long IS a month"). Pure math
+    in `core/time.ts` (§5); stores `StoryClock` (setStart/advance/seedDefault) +
+    `DateBook` in state.ts; commands in game.ts: **`story-start`** (seeded default
+    `1197-01-01-00` create-if-missing in init, so a clock always exists), 
+    **`advance-time`** (NOT `advance` — that verb is the affliction chain-stepper
+    §7.19; the two MERGE when the turn system makes advancing time process
+    affliction/effect durations), **`story-date`**, **`save-date`**/`forget-date`/
+    `dates`, **`time-between`** (each endpoint a saved name / `now` / `start` /
+    ad-hoc `yyyy-mm-dd-hh`). The query verbs join `QUIET_VERBS`. This is the
+    substrate roadmap #1 (the turn/time system) will build Scenes and turn-length
+    on; advancing is a manual ST action until then.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
 
-1. **Turn/time system** — the biggest unlock. Makes real: effect durations,
-   cooldowns, uses-per-scene (enforce from the existing `EffectUses` ledger),
-   boost expiry, `Pool.perTurnLimit` (e.g. blood per turn — field exists,
-   unenforced), extended-roll interval enforcement, willpower-per-turn rules.
+1. **Turn/time system** — the biggest unlock. The **story clock is now built**
+   (§7.30: `core/time.ts` + `StoryClock`/`DateBook` + `story-start`/`advance-time`/
+   `story-date`/`save-date`/`time-between`) — the real-calendar substrate this
+   sits on. LEFT: **Scenes** and **turn-length** ("how long is a Turn in this
+   scene?"; combat = 3-second turns — the user's explicit next step), then making
+   advancing time ENFORCE what is advisory today: effect durations, cooldowns,
+   uses-per-scene (from the existing `EffectUses` ledger), boost expiry,
+   `Pool.perTurnLimit` (blood per turn — field exists, unenforced), extended-roll
+   interval spacing, willpower-per-turn, and auto-`advance` of affliction chains
+   (merging the affliction stepper `[[advance]]` with `[[advance-time]]`).
 2. **Roll-system residuals** — resisted / contested / extended contests and
    success tables **shipped** (§5, §7.16). Left: **auto-applying a table's
    numeric output** (damage/soak currently read the count for display but don't

@@ -9,6 +9,7 @@ export * from "./host";
 export * from "./core/traits";
 export * from "./core/dice";
 export * from "./core/damage";
+export * from "./core/time";
 export * from "./wizard";
 export * from "./rolls";
 export * from "./rules";
@@ -23,7 +24,7 @@ import {
   LorebookManager, MeritFlawRegistry, reloadAllConfigStores,
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,
 } from "./services";
-import { NamedRollStore } from "./state";
+import { NamedRollStore, StoryClock } from "./state";
 import { processAdventureInput, reconcileLorebook } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
@@ -42,7 +43,8 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
   const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
+  const seededClock = await StoryClock.seedDefault();        // the story clock (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
   return { setupMessage: boot.message };
 }

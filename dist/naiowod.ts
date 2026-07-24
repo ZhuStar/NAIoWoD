@@ -11,9 +11,9 @@
 //
 // Paste this TypeScript into NovelAI's script editor as-is - no header needed.
 //
-// Order: host -> core/traits -> core/dice -> core/damage -> wizard ->
-//        rolls -> rules -> command -> services -> state -> game ->
-//        window -> init (index.ts) -> bootstrap (main.ts)
+// Order: host -> core/traits -> core/dice -> core/damage -> core/time ->
+//        wizard -> rolls -> rules -> command -> services -> state ->
+//        game -> window -> init (index.ts) -> bootstrap (main.ts)
 
 //#region src/host.ts
 // =============================================================================
@@ -864,6 +864,160 @@ interface SoakSpec {
   difficulty: number;
 }
 //#endregion src/core/damage.ts
+
+//#region src/core/time.ts
+// =============================================================================
+// TIME - pure calendar/clock math (no host)
+// -----------------------------------------------------------------------------
+// The story runs on a real (proleptic Gregorian) clock: historical Dark Ages
+// dates work, durations roll over months/years correctly, and the cursor is
+// second-granular so combat's future 3-second turns fit. Everything here is
+// PURE - epoch SECONDS (UTC) in and out. The surface syntax is "yyyy-mm-dd-hh"
+// (hour optional); durations are "s/m/h/d/w/mo/y" tokens ("2w 4h", "1mo").
+// Adding a duration is calendar-aware (Jan 31 + 1mo = Feb 28); the span between
+// two instants is reported as a natural breakdown, computed from the real
+// endpoints so it is never the ambiguous "how many days IS a month" guess.
+// =============================================================================
+
+const padNum = (n: number, w = 2): string => String(Math.trunc(Math.abs(n))).padStart(w, "0");
+
+// Days in a 1-based month of a (possibly historical) year - leap-aware, and safe
+// for years < 100 (which Date.UTC would otherwise remap to 1900-1999).
+function daysInMonth(year: number, month1to12: number): number {
+  const d = new Date(0);
+  d.setUTCFullYear(year, month1to12, 0);   // month index `month1to12` = the NEXT month; day 0 = its last previous day
+  return d.getUTCDate();
+}
+
+function secondsOfDay(d: Date): number {
+  return d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
+}
+
+// --- Instants: "yyyy-mm-dd[-hh[:mm[:ss]]]" <-> epoch seconds ------------------
+
+// Parse a story date. Accepts yyyy-mm-dd, yyyy-mm-dd-hh, yyyy-mm-dd-hh:mm, and
+// yyyy-mm-dd-hh:mm:ss (the hour may also be space-separated). Returns epoch
+// SECONDS (UTC) or a citing error.
+function parseStoryDate(raw: string | undefined): number | { error: string } {
+  const s = (raw ?? "").trim();
+  const m = s.match(/^(\d{1,6})-(\d{1,2})-(\d{1,2})(?:[-\s]+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?$/);
+  if (!m) return { error: `Can't read date "${s}" - use yyyy-mm-dd-hh (e.g. 1197-03-15-08).` };
+  const [year, month, day, hour, minute, second] = m.slice(1).map(x => (x === undefined ? 0 : parseInt(x, 10)));
+  if (month < 1 || month > 12) return { error: `Month must be 1-12 in "${s}".` };
+  const dim = daysInMonth(year, month);
+  if (day < 1 || day > dim) return { error: `Day must be 1-${dim} for ${year}-${padNum(month)} in "${s}".` };
+  if (hour > 23 || minute > 59 || second > 59) return { error: `Time out of range in "${s}" (hh:mm:ss up to 23:59:59).` };
+  const d = new Date(0);
+  d.setUTCFullYear(year, month - 1, day);
+  d.setUTCHours(hour, minute, second, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+// Format epoch seconds as "yyyy-mm-dd hh:mm" (with ":ss" only when nonzero).
+function formatStoryDate(epochSeconds: number): string {
+  const d = new Date(epochSeconds * 1000);
+  const base = `${d.getUTCFullYear()}-${padNum(d.getUTCMonth() + 1)}-${padNum(d.getUTCDate())} ${padNum(d.getUTCHours())}:${padNum(d.getUTCMinutes())}`;
+  return d.getUTCSeconds() ? `${base}:${padNum(d.getUTCSeconds())}` : base;
+}
+
+// --- Durations: fixed part (seconds) + calendar part (months) ----------------
+
+// Months and years are calendar-relative (variable length) so they are kept
+// apart from the fixed units and applied by walking the calendar.
+interface Duration { months: number; seconds: number }
+
+const UNIT_SECONDS: Record<string, number> = {
+  s: 1, sec: 1, secs: 1, second: 1, seconds: 1,
+  m: 60, min: 60, mins: 60, minute: 60, minutes: 60,
+  h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600,
+  d: 86400, day: 86400, days: 86400,
+  w: 604800, wk: 604800, wks: 604800, week: 604800, weeks: 604800,
+};
+const UNIT_MONTHS: Record<string, number> = {
+  mo: 1, mon: 1, mons: 1, month: 1, months: 1,
+  y: 12, yr: 12, yrs: 12, year: 12, years: 12,
+};
+
+// Parse "2w 4h", "1mo", "90s", "3 days" (tokens may be space-separated or not;
+// negatives rewind). Returns a Duration or a citing error.
+function parseDuration(raw: string | undefined): Duration | { error: string } {
+  const s = (raw ?? "").trim().toLowerCase();
+  if (!s) return { error: `Needs a duration, e.g. "3d", "2w 4h", "1mo", "90s".` };
+  let months = 0, seconds = 0, matched = false;
+  const re = /(-?\d+)\s*([a-z]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) {
+    const n = parseInt(m[1], 10);
+    const unit = m[2];
+    if (unit in UNIT_MONTHS) months += n * UNIT_MONTHS[unit];
+    else if (unit in UNIT_SECONDS) seconds += n * UNIT_SECONDS[unit];
+    else return { error: `Unknown time unit "${unit}" in "${s}" - use s/m/h/d/w/mo/y.` };
+    matched = true;
+  }
+  if (!matched) return { error: `Can't read duration "${s}" - use e.g. "3d", "2w 4h", "1mo", "90s".` };
+  return { months, seconds };
+}
+
+// Add a duration to an instant. The month/year part is applied first, clamping
+// the day to the target month's length (Jan 31 + 1mo -> Feb 28), then the fixed
+// seconds are added.
+function addDuration(epochSeconds: number, dur: Duration): number {
+  const d = new Date(epochSeconds * 1000);
+  if (dur.months) {
+    const targetIndex = d.getUTCMonth() + dur.months;
+    const targetYear = d.getUTCFullYear() + Math.floor(targetIndex / 12);
+    const targetMonth = ((targetIndex % 12) + 12) % 12;   // 0-11
+    const day = Math.min(d.getUTCDate(), daysInMonth(targetYear, targetMonth + 1));
+    d.setUTCFullYear(targetYear, targetMonth, day);
+  }
+  return Math.floor(d.getTime() / 1000) + dur.seconds;
+}
+
+// --- Spans between two instants ----------------------------------------------
+
+interface CalendarSpan {
+  negative: boolean;                 // b is before a
+  years: number; months: number; days: number;
+  hours: number; minutes: number; seconds: number;
+  totalSeconds: number;              // absolute magnitude
+}
+
+// The exact span from a to b, as a natural years/months/days/h:m:s breakdown.
+// Whole calendar months are counted from the earlier endpoint (backing off if
+// they would overshoot); the remainder is a plain fixed-time difference - so the
+// answer is unambiguous and reversible with addDuration.
+function diffCalendar(aEpoch: number, bEpoch: number): CalendarSpan {
+  const negative = bEpoch < aEpoch;
+  const lo = negative ? bEpoch : aEpoch;
+  const hi = negative ? aEpoch : bEpoch;
+  const totalSeconds = hi - lo;
+  const loD = new Date(lo * 1000), hiD = new Date(hi * 1000);
+
+  let months = (hiD.getUTCFullYear() - loD.getUTCFullYear()) * 12 + (hiD.getUTCMonth() - loD.getUTCMonth());
+  if (loD.getUTCDate() > hiD.getUTCDate() ||
+     (loD.getUTCDate() === hiD.getUTCDate() && secondsOfDay(loD) > secondsOfDay(hiD))) {
+    months -= 1;   // the final month has not fully elapsed
+  }
+  if (months < 0) months = 0;
+
+  let rem = hi - addDuration(lo, { months, seconds: 0 });   // leftover seconds, >= 0
+  const years = Math.floor(months / 12);
+  const remMonths = months % 12;
+  const days = Math.floor(rem / 86400); rem -= days * 86400;
+  const hours = Math.floor(rem / 3600); rem -= hours * 3600;
+  const minutes = Math.floor(rem / 60); rem -= minutes * 60;
+  return { negative, years, months: remMonths, days, hours, minutes, seconds: rem, totalSeconds };
+}
+
+// A span as prose: "1 year, 2 months, 14 days, 12 hours" (empty units dropped).
+function formatCalendarSpan(span: CalendarSpan): string {
+  const parts: string[] = [];
+  const push = (n: number, unit: string): void => { if (n) parts.push(`${n} ${unit}${n === 1 ? "" : "s"}`); };
+  push(span.years, "year"); push(span.months, "month"); push(span.days, "day");
+  push(span.hours, "hour"); push(span.minutes, "minute"); push(span.seconds, "second");
+  return parts.length ? parts.join(", ") : "no time";
+}
+//#endregion src/core/time.ts
 
 //#region src/wizard.ts
 // =============================================================================
@@ -4092,6 +4246,82 @@ class ExtendedContestStore {
 }
 
 // =============================================================================
+// STORY CLOCK - when the story is, on a real (Gregorian) calendar
+// -----------------------------------------------------------------------------
+// One instant pair in storyStorage: `start` (when the chronicle begins, set by
+// [[story-start]]) and `now` (the current story moment, moved by [[advance]]).
+// Both are epoch SECONDS (UTC); the pure math lives in core/time.ts. In story
+// storage so a future historyStorage migration (roadmap #11) makes UNDO rewind
+// time too. Seeded create-if-missing with a Dark Ages default so the clock
+// always exists; the player re-sets it once.
+// =============================================================================
+const DEFAULT_STORY_START = "1197-01-01-00";   // a canonical Dark Ages year; override with [[story-start]]
+
+interface StoryClockState { start: number; now: number }
+
+class StoryClock {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "time:clock";
+
+  static async get(): Promise<StoryClockState | undefined> {
+    return (await StoryClock._storage.get(StoryClock.KEY)) as StoryClockState | undefined;
+  }
+  // Set (or reset) when the story begins; `now` snaps to the new start.
+  static async setStart(epoch: number): Promise<StoryClockState> {
+    const s: StoryClockState = { start: epoch, now: epoch };
+    await StoryClock._storage.set(StoryClock.KEY, s);
+    return s;
+  }
+  // Move the current moment by a duration (calendar-aware). Undefined if no clock.
+  static async advance(dur: Duration): Promise<StoryClockState | undefined> {
+    const c = await StoryClock.get();
+    if (!c) return undefined;
+    const s: StoryClockState = { start: c.start, now: addDuration(c.now, dur) };
+    await StoryClock._storage.set(StoryClock.KEY, s);
+    return s;
+  }
+  // Create the clock with the built-in default only if it is missing. Returns
+  // whether it wrote (for the init log).
+  static async seedDefault(): Promise<boolean> {
+    const epoch = parseStoryDate(DEFAULT_STORY_START) as number;   // the constant is always valid
+    return StoryClock._storage.setIfAbsent(StoryClock.KEY, { start: epoch, now: epoch });
+  }
+}
+
+// =============================================================================
+// DATE BOOK - named bookmarks in story time (storyStorage JSON map)
+// -----------------------------------------------------------------------------
+// A hand-namable set of instants ("siege-began", "yuletide"): save the current
+// moment or an explicit date, forget one, list them, and measure between any two
+// (see [[time-between]]). Keyed by normalized name; values are epoch seconds.
+// =============================================================================
+class DateBook {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "time:dates";
+
+  static async all(): Promise<Record<string, number>> {
+    return await DateBook._storage.getOrDefault<Record<string, number>>(DateBook.KEY, {});
+  }
+  static async get(name: string): Promise<number | undefined> {
+    return (await DateBook.all())[StringUtil.normalize(name)];
+  }
+  static async save(name: string, epoch: number): Promise<void> {
+    const map = await DateBook.all();
+    map[StringUtil.normalize(name)] = epoch;
+    await DateBook._storage.set(DateBook.KEY, map);
+  }
+  static async remove(name: string): Promise<boolean> {
+    const map = await DateBook.all();
+    const key = StringUtil.normalize(name);
+    if (!(key in map)) return false;
+    delete map[key];
+    await DateBook._storage.set(DateBook.KEY, map);
+    return true;
+  }
+  static async names(): Promise<string[]> { return Object.keys(await DateBook.all()); }
+}
+
+// =============================================================================
 // PLAYERS - the engine's first identity concept
 // -----------------------------------------------------------------------------
 // A player is just a normalized id string (no record): "storyteller" always
@@ -6090,6 +6320,103 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   return sys(`Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`);
 }
 
+// =============================================================================
+// TIME - the story clock: set when it begins, advance it, read it, bookmark &
+// measure. Real Gregorian dates (core/time.ts); the clock lives in storyStorage.
+// =============================================================================
+const NO_CLOCK = `No story clock yet - set when the story begins with [[story-start 1197-03-15-08]] (yyyy-mm-dd-hh).`;
+
+// Resolve a date token for [[time-between]]: a saved bookmark, "now", "start",
+// or an ad-hoc yyyy-mm-dd-hh literal.
+async function resolveDateToken(tok: string): Promise<{ epoch?: number; label: string; error?: string }> {
+  const t = tok.trim();
+  const lc = t.toLowerCase();
+  if (lc === "now" || lc === "start") {
+    const c = await StoryClock.get();
+    if (!c) return { label: t, error: NO_CLOCK };
+    return { epoch: lc === "now" ? c.now : c.start, label: lc };
+  }
+  const saved = await DateBook.get(t);
+  if (saved !== undefined) return { epoch: saved, label: StringUtil.normalize(t) };
+  const parsed = parseStoryDate(t);
+  if (typeof parsed === "number") return { epoch: parsed, label: formatStoryDate(parsed) };
+  return { label: t, error: `"${t}" is not a saved date, "now"/"start", or a yyyy-mm-dd-hh date.` };
+}
+
+async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
+  const parsed = parseStoryDate(cmd.positional[0]);
+  if (typeof parsed !== "number") return sys(parsed.error);
+  const s = await StoryClock.setStart(parsed);
+  return sys(`The story begins ${formatStoryDate(s.start)}. Move time with [[advance-time 1d]]; read it with [[story-date]].`);
+}
+
+async function cmdAdvanceTime(cmd: ParsedCommand): Promise<string> {
+  const before = await StoryClock.get();
+  if (!before) return sys(NO_CLOCK);
+  const dur = parseDuration(cmd.positional.join(" ").trim());
+  if ("error" in dur) return sys(dur.error);
+  const after = (await StoryClock.advance(dur))!;
+  const span = diffCalendar(after.start, after.now);
+  const since = after.now === after.start ? "back to the very beginning" : `${formatCalendarSpan(span)} since it began`;
+  return sys(`Time advances: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)} (${since}).`);
+}
+
+async function cmdStoryDate(): Promise<string> {
+  const c = await StoryClock.get();
+  if (!c) return sys(NO_CLOCK);
+  if (c.now === c.start) return sys(`Story date: ${formatStoryDate(c.now)} - the story has just begun.`);
+  const span = diffCalendar(c.start, c.now);
+  return sys(`Story date: ${formatStoryDate(c.now)} - ${formatCalendarSpan(span)} since it began (${formatStoryDate(c.start)}).`);
+}
+
+async function cmdSaveDate(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`save-date needs a name, e.g. [[save-date siege-began]] (saves the current date) or [[save-date yuletide 1197-12-25-00]].`);
+  let epoch: number;
+  const dateArg = cmd.positional[1]?.trim();
+  if (dateArg) {
+    const p = parseStoryDate(dateArg);
+    if (typeof p !== "number") return sys(p.error);
+    epoch = p;
+  } else {
+    const c = await StoryClock.get();
+    if (!c) return sys(`No story clock yet - [[story-start ...]] first, or pass a date: [[save-date ${StringUtil.normalize(name)} 1197-06-01-00]].`);
+    epoch = c.now;
+  }
+  await DateBook.save(name, epoch);
+  return sys(`Saved date "${StringUtil.normalize(name)}" = ${formatStoryDate(epoch)}.`);
+}
+
+async function cmdForgetDate(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`forget-date needs a name, e.g. [[forget-date siege-began]].`);
+  const key = StringUtil.normalize(name);
+  return (await DateBook.remove(name)) ? sys(`Forgot date "${key}".`) : sys(`No saved date named "${key}".`);
+}
+
+async function cmdDates(): Promise<string> {
+  const map = await DateBook.all();
+  const names = Object.keys(map);
+  if (!names.length) return sys(`No saved dates yet. Save one with [[save-date <name>]] (or [[save-date <name> yyyy-mm-dd-hh]]).`);
+  const items = names.map(n => `${n} (${formatStoryDate(map[n])})`).join("; ");
+  return sys(`Saved dates: ${items}. [[time-between <a> <b>]] measures any two.`);
+}
+
+async function cmdTimeBetween(cmd: ParsedCommand): Promise<string> {
+  const a = cmd.positional[0]?.trim(), b = cmd.positional[1]?.trim();
+  if (!a || !b) return sys(`time-between needs two dates, e.g. [[time-between start now]] or [[time-between siege-began 1197-12-25-00]] (each: a saved name, "now", "start", or yyyy-mm-dd-hh).`);
+  const ra = await resolveDateToken(a);
+  if (ra.error) return sys(ra.error);
+  const rb = await resolveDateToken(b);
+  if (rb.error) return sys(rb.error);
+  const span = diffCalendar(ra.epoch!, rb.epoch!);
+  if (span.totalSeconds === 0) return sys(`${ra.label} and ${rb.label} are the same moment (${formatStoryDate(ra.epoch!)}).`);
+  const totalDays = Math.floor(span.totalSeconds / 86400);
+  const totalBit = totalDays >= 1 ? ` (${totalDays} day${totalDays === 1 ? "" : "s"} total)` : "";
+  const dir = span.negative ? "before" : "after";
+  return sys(`${rb.label} is ${formatCalendarSpan(span)} ${dir} ${ra.label}${totalBit}. [${formatStoryDate(ra.epoch!)} -> ${formatStoryDate(rb.epoch!)}]`);
+}
+
 // List the success tables, or lay one out in full. A table interprets a number
 // of successes; attach table=<name> to a roll/resist/contest to read it.
 async function cmdTables(cmd: ParsedCommand): Promise<string> {
@@ -7211,6 +7538,34 @@ CommandRouter.register("cancel-contest", cmdCancelContest, {
   summary: "cancel an extended contest",
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
 });
+CommandRouter.register("story-start", cmdStoryStart, {
+  summary: "set when the story begins (yyyy-mm-dd-hh)",
+  params: [{ key: "date", kind: "positional", required: true, hint: "yyyy-mm-dd-hh", example: "1197-03-15-08" }],
+});
+CommandRouter.register("advance-time", cmdAdvanceTime, {
+  summary: "move the story clock forward (s/m/h/d/w/mo/y)",
+  params: [{ key: "duration", kind: "positional", required: true, hint: "<duration>", example: "2d 6h" }],
+});
+CommandRouter.register("story-date", cmdStoryDate, {
+  summary: "show the current story date and how long since it began",
+});
+CommandRouter.register("save-date", cmdSaveDate, {
+  summary: "bookmark the current moment (or a given date) under a name",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>" },
+    { key: "date", kind: "positional", hint: "[yyyy-mm-dd-hh]", example: "1197-12-25-00" }],
+});
+CommandRouter.register("forget-date", cmdForgetDate, {
+  summary: "delete a saved date bookmark",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("dates", cmdDates, { summary: "list the saved date bookmarks" });
+CommandRouter.register("time-between", cmdTimeBetween, {
+  summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)",
+  params: [
+    { key: "a", kind: "positional", required: true, hint: "<date>", example: "start" },
+    { key: "b", kind: "positional", required: true, hint: "<date>", example: "now" }],
+});
 CommandRouter.register("tables", cmdTables, {
   summary: "list success tables (grouped by category), or lay one out in full",
   params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
@@ -7387,6 +7742,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
+  "story-date", "dates", "time-between",
 ]);
 
 // Replace every [[command]] in the player's adventure-mode input with its
@@ -7840,8 +8196,9 @@ async function init(): Promise<{ setupMessage: string | null }> {
   const merits = await MeritFlawRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
   const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
+  const seededClock = await StoryClock.seedDefault();        // the story clock (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

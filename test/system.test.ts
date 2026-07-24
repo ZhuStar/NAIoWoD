@@ -41,6 +41,8 @@ import {
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
   CharacterFactory,
+  parseStoryDate, formatStoryDate, parseDuration, addDuration, diffCalendar, formatCalendarSpan,
+  StoryClock, DateBook, DEFAULT_STORY_START,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -3432,6 +3434,93 @@ describe("contested saved rolls + multi-stage procedures", () => {
 
   test("add-step refuses when the procedure's entry roll doesn't exist yet", async () => {
     expect(await CommandRouter.route("add-step ghost when=always roll=@x")).toContain("save its entry first");
+  });
+});
+
+// =============================================================================
+// TIME - the pure calendar/clock math + the story-clock commands
+// =============================================================================
+describe("time: pure calendar/clock math (core/time)", () => {
+  const ep = (s: string): number => parseStoryDate(s) as number;
+
+  test("parseStoryDate accepts yyyy-mm-dd[-hh[:mm[:ss]]] and rejects out-of-range", () => {
+    expect(formatStoryDate(ep("1197-03-15-08"))).toBe("1197-03-15 08:00");
+    expect(formatStoryDate(ep("1197-03-15"))).toBe("1197-03-15 00:00");
+    expect(formatStoryDate(ep("1197-03-15-08:30:45"))).toBe("1197-03-15 08:30:45");
+    expect(parseStoryDate("1197-13-01")).toHaveProperty("error");   // month > 12
+    expect(parseStoryDate("1197-02-30")).toHaveProperty("error");   // Feb 30
+    expect(parseStoryDate("nope")).toHaveProperty("error");
+    expect(DEFAULT_STORY_START).toBe("1197-01-01-00");
+  });
+
+  test("parseDuration reads fixed + calendar units; addDuration is calendar-aware", () => {
+    expect(parseDuration("2w 4h")).toEqual({ months: 0, seconds: 2 * 604800 + 4 * 3600 });
+    expect(parseDuration("1mo")).toEqual({ months: 1, seconds: 0 });
+    expect(parseDuration("1y 3d")).toEqual({ months: 12, seconds: 3 * 86400 });
+    expect(parseDuration("5x")).toHaveProperty("error");
+    // Jan 31 + 1 month clamps to Feb 28 (1197 is not a leap year).
+    expect(formatStoryDate(addDuration(ep("1197-01-31-00"), { months: 1, seconds: 0 }))).toBe("1197-02-28 00:00");
+    // + 90 seconds crosses the minute boundary.
+    expect(formatStoryDate(addDuration(ep("1197-01-01-00"), { months: 0, seconds: 90 }))).toBe("1197-01-01 00:01:30");
+  });
+
+  test("diffCalendar reports an exact, reversible span (incl. the borrow edge case)", () => {
+    const a = ep("1197-03-15-08"), b = ep("1198-05-29-20:30");
+    const s = diffCalendar(a, b);
+    expect(formatCalendarSpan(s)).toBe("1 year, 2 months, 14 days, 12 hours, 30 minutes");
+    expect(s.negative).toBe(false);
+    // Jan 31 -> Mar 01 is 1 month 1 day, NOT 2 months (the classic borrow case).
+    expect(formatCalendarSpan(diffCalendar(ep("1197-01-31-00"), ep("1197-03-01-00")))).toBe("1 month, 1 day");
+    // Reversed reads negative with the same magnitude.
+    const back = diffCalendar(b, a);
+    expect(back.negative).toBe(true);
+    expect(formatCalendarSpan(back)).toBe(formatCalendarSpan(s));
+    expect(formatCalendarSpan(diffCalendar(a, a))).toBe("no time");   // same moment
+  });
+});
+
+describe("time commands: story clock, advance, bookmarks, spans", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("story-start sets the clock; advance-time moves it; story-date reports the span", async () => {
+    expect(await CommandRouter.route("story-date")).toContain("No story clock yet");   // unset (init not called)
+    await CommandRouter.route("story-start 1197-03-15-08");
+    expect(await CommandRouter.route("story-date")).toContain("the story has just begun");
+    expect(await CommandRouter.route("advance-time 2d 6h")).toContain("1197-03-17 14:00");
+    expect(await CommandRouter.route("story-date")).toContain("2 days, 6 hours since it began");
+  });
+
+  test("save-date / dates / forget-date bookmark moments; time-between measures any two", async () => {
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route("advance-time 1mo");
+    await CommandRouter.route("save-date siege-began");                 // saves current (now)
+    await CommandRouter.route("save-date yuletide 1197-12-25-00");      // saves an explicit date
+    expect(await CommandRouter.route("dates")).toContain("siege-began");
+    expect(await CommandRouter.route("time-between start now")).toContain("1 month");
+    expect(await CommandRouter.route("time-between siege-began yuletide")).toContain("after siege-began");
+    expect(await CommandRouter.route("time-between now 1197-01-01-00")).toContain("before");   // ad-hoc earlier date
+    expect(await CommandRouter.route("forget-date siege-began")).toContain("Forgot date");
+    expect(await CommandRouter.route("dates")).not.toContain("siege-began");
+    // A query stops generation for the turn.
+    expect((await processAdventureInput("Later. [[story-date]] Onward."))!.stopGeneration).toBe(true);
+  });
+
+  test("StoryClock.seedDefault creates the clock once with the Dark Ages default, never clobbering", async () => {
+    expect(await StoryClock.get()).toBeUndefined();
+    expect(await StoryClock.seedDefault()).toBe(true);
+    expect(formatStoryDate((await StoryClock.get())!.start)).toBe("1197-01-01 00:00");
+    expect(await StoryClock.seedDefault()).toBe(false);                 // second call: no-op
+    await CommandRouter.route("story-start 1230-06-01-12");             // a player's set-start...
+    expect(await StoryClock.seedDefault()).toBe(false);                 // ...survives a later seed
+    expect(formatStoryDate((await StoryClock.get())!.now)).toBe("1230-06-01 12:00");
+    expect(await DateBook.names()).toEqual([]);
+  });
+
+  test("bad input is refused with guidance", async () => {
+    await CommandRouter.route("story-start 1197-03-15-08");
+    expect(await CommandRouter.route("advance-time 5x")).toContain("Unknown time unit");
+    expect(await CommandRouter.route("story-start 1197-99-99")).toContain("Month must be 1-12");
+    expect(await CommandRouter.route("time-between now nope")).toContain("not a saved date");
   });
 });
 

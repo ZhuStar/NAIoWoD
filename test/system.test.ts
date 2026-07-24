@@ -3524,6 +3524,44 @@ describe("time commands: story clock, advance, bookmarks, spans", () => {
   });
 });
 
+describe("scenes: named units of play on the story clock", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a scene opens at the current instant; a 3s combat turn moves the clock; freeform turns don't", async () => {
+    expect(await CommandRouter.route('scene "The Parapet" turn=3s')).toContain("No story clock yet");   // scenes anchor to the clock
+    await CommandRouter.route("story-start 1230-06-01-20");
+    expect(await CommandRouter.route('scene "The Parapet" location=`Buda ramparts` turn=3s')).toContain("opens at Buda ramparts");
+    await CommandRouter.route("turn");
+    expect(await CommandRouter.route("turn 3")).toContain("turn 4");
+    expect(await CommandRouter.route("story-date")).toContain("20:00:12");   // 4 x 3s marched the clock
+    // A freeform scene (no turn=) doesn't move the clock.
+    await CommandRouter.route('scene "Council" ');
+    expect(await CommandRouter.route("turn")).toContain("no clock move");
+    expect(await CommandRouter.route("story-date")).toContain("20:00:12");   // unchanged by freeform turns
+  });
+
+  test("opening a scene auto-closes the previous; downtime closes + glosses the clock; scenes/scene-info report", async () => {
+    await CommandRouter.route("story-start 1230-06-01-20");
+    await CommandRouter.route('scene "The Parapet" turn=3s');
+    await CommandRouter.route("turn 2");
+    expect(await CommandRouter.route('scene "Council" ')).toContain(`closed "the-parapet"`);
+    expect(await CommandRouter.route("scenes")).toContain("Council (open)");
+    expect(await CommandRouter.route("downtime 2d")).toContain(`closed "council"`);
+    expect(await CommandRouter.route("story-date")).toContain("1230-06-03");   // glossed forward 2 days
+    expect(await CommandRouter.route("end-scene")).toContain("No open scene");
+    expect(await CommandRouter.route("scene-info the-parapet")).toContain("[closed]");
+    expect((await processAdventureInput("Hm. [[scenes]] Right."))!.stopGeneration).toBe(true);   // a query stops generation
+  });
+
+  test("forget-scene removes a record and clears the current pointer", async () => {
+    await CommandRouter.route("story-start 1230-06-01-20");
+    await CommandRouter.route('scene "The Parapet" ');
+    expect(await CommandRouter.route("forget-scene the-parapet")).toContain("Forgot scene");
+    expect(await CommandRouter.route("scenes")).toContain("No scenes yet");
+    expect(await CommandRouter.route("scene-info")).toContain("No open scene");
+  });
+});
+
 // =============================================================================
 // SHEET - the record as the engine reads it + the creator-mode hand-edit loop
 // =============================================================================

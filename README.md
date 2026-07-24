@@ -702,8 +702,41 @@ default start (`1197-01-01-00`) you override once.
   bookmark, **`now`**, **`start`**, or an ad-hoc `yyyy-mm-dd-hh` — as a natural
   breakdown plus a day total, and says "before" when `b` precedes `a`.
 
-Scenes and turn-length (combat's 3-second turns) build on this clock later; for
-now advancing time is a manual Storyteller action.
+Scenes (below) build on this clock; combat's 3-second turns march it in beats.
+
+### Scenes — the named unit of play
+
+A **scene** is the book's basic unit: one location, and as many turns as it
+needs. Each is **named**, opens at the current story time, and can declare **how
+long a Turn is** here — `3s` for combat, or nothing for a freeform dialogue scene
+that doesn't move the clock. This makes the six time units concrete on top of the
+clock: a **Turn** is `turnLength`, a **Scene** is a clocked span, and **downtime**
+glosses the clock forward between them.
+
+```
+[[scene "The Parapet" location=`Buda ramparts` turn=3s]]   # open a combat scene
+[[turn]]        [[turn 3]]        # march the clock 3s per turn
+[[scene "Council of Ashes" location=`the crypt-court`]]    # freeform; auto-closes the parapet
+[[turn]]                          # freeform turn — counts, but doesn't move the clock
+[[scenes]]      [[scene-info]]    # list / detail (defaults to the open scene)
+[[downtime 2d]]                   # close the scene and gloss 2 days forward
+```
+
+- **`scene "<name>" [location=\`…\`] [turn=<len>] [chapter=\`…\`]`** opens a named
+  scene at the current story instant (it needs the clock set first). A new scene
+  **auto-closes** the previous open one. `turn=` takes any duration (`3s`, `1m`);
+  omit it for a freeform scene.
+- **`turn [n]`** advances the open scene by one turn (or `n`), moving the clock by
+  its turn length; a freeform scene just counts the turn.
+- **`end-scene`** closes the open scene; **`downtime <duration>`** closes it *and*
+  advances the clock (the Storyteller's "you wait three days…").
+- **`scenes`** lists them (the open one marked); **`scene-info [name]`** shows one
+  in full; **`forget-scene <name>`** deletes a record.
+
+Scenes carry a private **`plan`** field — the Storyteller's outline for the scene.
+Wiring that to the AI (a `<hide>` directive the engine strips from the story and
+mirrors into the Author's Note) is the next step, using NovelAI's generation
+hooks; for now the clock and scene bookkeeping are a manual Storyteller aid.
 
 ### Resources
 

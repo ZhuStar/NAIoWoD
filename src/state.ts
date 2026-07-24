@@ -952,6 +952,56 @@ export class DateBook {
 }
 
 // =============================================================================
+// SCENES - the named unit of play, anchored to the story clock (§7.31)
+// -----------------------------------------------------------------------------
+// A scene (the book's basic unit: one location, as many turns as it needs) is
+// NAMED, opens at the current story instant, and may declare a `turnLength`
+// ("how long is a Turn here?" - 3s in combat, absent for a freeform dialogue
+// scene that doesn't move the clock). `[[turn]]` advances by that length;
+// downtime glosses the clock forward between scenes. `plan` is the ST's private
+// outline (Pass B routes the AI's <hide> directives here + into Author's Note).
+// Records are keyed by normalized name in storyStorage; `current-scene` points
+// at the open one (mirrors ExtendedRollStore's id + current pattern).
+// =============================================================================
+export type SceneStatus = "open" | "closed";
+
+export interface Scene {
+  name: string;              // normalized key; rendered via disp()
+  location?: string;         // the single location of the scene (verbatim display)
+  chapter?: string;          // optional grouping label (Chapter/Story stay light for now)
+  startedAt: number;         // story-clock instant when it opened (epoch seconds)
+  endedAt?: number;          // when it closed
+  turnLength?: Duration;     // a Turn's length here; absent = freeform (no clock move)
+  turnsElapsed: number;
+  status: SceneStatus;
+  plan?: string;             // the ST's private outline (Pass B: <hide> -> here + Author's Note)
+}
+
+export class SceneStore {
+  private static _storage = new ScopedStorage();
+  private static readonly CURRENT_KEY = "current-scene";
+  private static _key(name: string): string { return `scene:${StringUtil.normalize(name)}`; }
+
+  static async save(s: Scene): Promise<void> { await SceneStore._storage.set(SceneStore._key(s.name), s); }
+  static async get(name: string): Promise<Scene | undefined> {
+    return (await SceneStore._storage.get(SceneStore._key(name))) as Scene | undefined;
+  }
+  static async remove(name: string): Promise<boolean> { return SceneStore._storage.delete(SceneStore._key(name)); }
+  static async names(): Promise<string[]> {
+    return (await SceneStore._storage.list()).filter(k => k.startsWith("scene:")).map(k => k.slice(6));
+  }
+  static async currentName(): Promise<string | undefined> {
+    return (await SceneStore._storage.get(SceneStore.CURRENT_KEY)) as string | undefined;
+  }
+  static async current(): Promise<Scene | undefined> {
+    const n = await SceneStore.currentName();
+    return n ? SceneStore.get(n) : undefined;
+  }
+  static async setCurrent(name: string): Promise<void> { await SceneStore._storage.set(SceneStore.CURRENT_KEY, StringUtil.normalize(name)); }
+  static async clearCurrent(): Promise<void> { await SceneStore._storage.delete(SceneStore.CURRENT_KEY); }
+}
+
+// =============================================================================
 // PLAYERS - the engine's first identity concept
 // -----------------------------------------------------------------------------
 // A player is just a normalized id string (no record): "storyteller" always

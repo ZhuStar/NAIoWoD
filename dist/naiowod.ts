@@ -4322,6 +4322,56 @@ class DateBook {
 }
 
 // =============================================================================
+// SCENES - the named unit of play, anchored to the story clock (§7.31)
+// -----------------------------------------------------------------------------
+// A scene (the book's basic unit: one location, as many turns as it needs) is
+// NAMED, opens at the current story instant, and may declare a `turnLength`
+// ("how long is a Turn here?" - 3s in combat, absent for a freeform dialogue
+// scene that doesn't move the clock). `[[turn]]` advances by that length;
+// downtime glosses the clock forward between scenes. `plan` is the ST's private
+// outline (Pass B routes the AI's <hide> directives here + into Author's Note).
+// Records are keyed by normalized name in storyStorage; `current-scene` points
+// at the open one (mirrors ExtendedRollStore's id + current pattern).
+// =============================================================================
+type SceneStatus = "open" | "closed";
+
+interface Scene {
+  name: string;              // normalized key; rendered via disp()
+  location?: string;         // the single location of the scene (verbatim display)
+  chapter?: string;          // optional grouping label (Chapter/Story stay light for now)
+  startedAt: number;         // story-clock instant when it opened (epoch seconds)
+  endedAt?: number;          // when it closed
+  turnLength?: Duration;     // a Turn's length here; absent = freeform (no clock move)
+  turnsElapsed: number;
+  status: SceneStatus;
+  plan?: string;             // the ST's private outline (Pass B: <hide> -> here + Author's Note)
+}
+
+class SceneStore {
+  private static _storage = new ScopedStorage();
+  private static readonly CURRENT_KEY = "current-scene";
+  private static _key(name: string): string { return `scene:${StringUtil.normalize(name)}`; }
+
+  static async save(s: Scene): Promise<void> { await SceneStore._storage.set(SceneStore._key(s.name), s); }
+  static async get(name: string): Promise<Scene | undefined> {
+    return (await SceneStore._storage.get(SceneStore._key(name))) as Scene | undefined;
+  }
+  static async remove(name: string): Promise<boolean> { return SceneStore._storage.delete(SceneStore._key(name)); }
+  static async names(): Promise<string[]> {
+    return (await SceneStore._storage.list()).filter(k => k.startsWith("scene:")).map(k => k.slice(6));
+  }
+  static async currentName(): Promise<string | undefined> {
+    return (await SceneStore._storage.get(SceneStore.CURRENT_KEY)) as string | undefined;
+  }
+  static async current(): Promise<Scene | undefined> {
+    const n = await SceneStore.currentName();
+    return n ? SceneStore.get(n) : undefined;
+  }
+  static async setCurrent(name: string): Promise<void> { await SceneStore._storage.set(SceneStore.CURRENT_KEY, StringUtil.normalize(name)); }
+  static async clearCurrent(): Promise<void> { await SceneStore._storage.delete(SceneStore.CURRENT_KEY); }
+}
+
+// =============================================================================
 // PLAYERS - the engine's first identity concept
 // -----------------------------------------------------------------------------
 // A player is just a normalized id string (no record): "storyteller" always
@@ -6417,6 +6467,133 @@ async function cmdTimeBetween(cmd: ParsedCommand): Promise<string> {
   return sys(`${rb.label} is ${formatCalendarSpan(span)} ${dir} ${ra.label}${totalBit}. [${formatStoryDate(ra.epoch!)} -> ${formatStoryDate(rb.epoch!)}]`);
 }
 
+// =============================================================================
+// SCENES - the named unit of play on the story clock (§7.31). A scene has one
+// location and as many turns as it needs; [[turn]] advances by its turnLength.
+// =============================================================================
+function describeTurnLength(d: Duration | undefined): string {
+  if (!d) return "freeform";
+  const parts: string[] = [];
+  if (d.months) parts.push(`${d.months} month${d.months === 1 ? "" : "s"}`);
+  if (d.seconds) parts.push(formatCalendarSpan(diffCalendar(0, d.seconds)));   // fixed part as a span
+  return parts.join(", ") || "freeform";
+}
+
+async function cmdScene(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`scene needs a name, e.g. [[scene "The Parapet" location=\`Buda ramparts\` turn=3s]].`);
+  const clock = await StoryClock.get();
+  if (!clock) return sys(NO_CLOCK);
+  let turnLength: Duration | undefined;
+  const turnRaw = cmd.named["turn"]?.trim();
+  if (turnRaw) {
+    const d = parseDuration(turnRaw);
+    if ("error" in d) return sys(d.error);
+    turnLength = d;
+  }
+  // Auto-close any other open scene at the current instant (a new scene = a new place).
+  const prev = await SceneStore.current();
+  let closedNote = "";
+  if (prev && StringUtil.normalize(prev.name) !== StringUtil.normalize(name)) {
+    prev.status = "closed"; prev.endedAt = clock.now;
+    await SceneStore.save(prev);
+    closedNote = ` (closed "${prev.name}")`;
+  }
+  const scene: Scene = {
+    name: StringUtil.normalize(name),
+    startedAt: clock.now, turnsElapsed: 0, status: "open",
+  };
+  const location = cmd.named["location"]?.trim();
+  const chapter = cmd.named["chapter"]?.trim();
+  if (location) scene.location = location;
+  if (chapter) scene.chapter = chapter;
+  if (turnLength) scene.turnLength = turnLength;
+  await SceneStore.save(scene);
+  await SceneStore.setCurrent(scene.name);
+  return sys(`Scene "${scene.name}" opens${location ? ` at ${location}` : ""} (${formatStoryDate(clock.now)}; turns: ${describeTurnLength(turnLength)})${closedNote}.`);
+}
+
+async function cmdTurn(cmd: ParsedCommand): Promise<string> {
+  const scene = await SceneStore.current();
+  if (!scene) return sys(`No open scene. Start one with [[scene "name" turn=3s]].`);
+  const n = intOrUndef(cmd.positional[0]) ?? 1;
+  if (n < 1) return sys(`turn count must be at least 1.`);
+  let clockNote = "";
+  if (scene.turnLength) {
+    const total: Duration = { months: scene.turnLength.months * n, seconds: scene.turnLength.seconds * n };
+    const after = await StoryClock.advance(total);
+    if (after) clockNote = ` -> ${formatStoryDate(after.now)}`;
+  }
+  scene.turnsElapsed += n;
+  await SceneStore.save(scene);
+  const tag = scene.turnLength ? `${describeTurnLength(scene.turnLength)}/turn${clockNote}` : "freeform - no clock move";
+  return sys(`${disp(scene.name)}: turn ${scene.turnsElapsed}${n > 1 ? ` (+${n})` : ""} (${tag}).`);
+}
+
+async function cmdEndScene(): Promise<string> {
+  const scene = await SceneStore.current();
+  if (!scene) return sys(`No open scene to end.`);
+  const clock = await StoryClock.get();
+  scene.status = "closed";
+  if (clock) scene.endedAt = clock.now;
+  await SceneStore.save(scene);
+  await SceneStore.clearCurrent();
+  const span = clock && scene.startedAt !== clock.now ? diffCalendar(scene.startedAt, clock.now) : undefined;
+  const spanBit = span && span.totalSeconds ? `, ${formatCalendarSpan(span)} of story time` : "";
+  return sys(`Scene "${scene.name}" ends after ${scene.turnsElapsed} turn${scene.turnsElapsed === 1 ? "" : "s"}${spanBit}.`);
+}
+
+async function cmdDowntime(cmd: ParsedCommand): Promise<string> {
+  const before = await StoryClock.get();
+  if (!before) return sys(NO_CLOCK);
+  const dur = parseDuration(cmd.positional.join(" ").trim());
+  if ("error" in dur) return sys(dur.error);
+  const scene = await SceneStore.current();
+  let sceneNote = "";
+  if (scene) {
+    scene.status = "closed"; scene.endedAt = before.now;
+    await SceneStore.save(scene);
+    await SceneStore.clearCurrent();
+    sceneNote = ` (closed "${scene.name}")`;
+  }
+  const after = (await StoryClock.advance(dur))!;
+  return sys(`Downtime: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)}${sceneNote}.`);
+}
+
+async function cmdScenes(): Promise<string> {
+  const names = await SceneStore.names();
+  if (!names.length) return sys(`No scenes yet. Start one with [[scene "name"]].`);
+  const cur = await SceneStore.currentName();
+  const items: string[] = [];
+  for (const n of names) {
+    const s = await SceneStore.get(n);
+    if (s) items.push(`${disp(s.name)}${s.name === cur ? " (open)" : ""} [${formatStoryDate(s.startedAt)}, ${s.turnsElapsed} turn${s.turnsElapsed === 1 ? "" : "s"}]`);
+  }
+  return sys(`Scenes: ${items.join("; ")}. [[scene-info <name>]] for detail.`);
+}
+
+async function cmdSceneInfo(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  const scene = name ? await SceneStore.get(name) : await SceneStore.current();
+  if (!scene) return sys(name ? `No scene named "${StringUtil.normalize(name)}".` : `No open scene. Name one, or start with [[scene "name"]].`);
+  const bits = [`${disp(scene.name)} [${scene.status}]`];
+  if (scene.location) bits.push(`at ${scene.location}`);
+  if (scene.chapter) bits.push(`chapter ${scene.chapter}`);
+  bits.push(`began ${formatStoryDate(scene.startedAt)}`);
+  if (scene.endedAt) bits.push(`ended ${formatStoryDate(scene.endedAt)}`);
+  bits.push(`${scene.turnsElapsed} turn${scene.turnsElapsed === 1 ? "" : "s"} of ${describeTurnLength(scene.turnLength)}`);
+  const planBit = scene.plan ? ` Plan: ${scene.plan}` : "";
+  return sys(`${bits.join(", ")}.${planBit}`);
+}
+
+async function cmdForgetScene(cmd: ParsedCommand): Promise<string> {
+  const name = cmd.positional[0]?.trim();
+  if (!name) return sys(`forget-scene needs a name, e.g. [[forget-scene the-parapet]].`);
+  const key = StringUtil.normalize(name);
+  if ((await SceneStore.currentName()) === key) await SceneStore.clearCurrent();
+  return (await SceneStore.remove(name)) ? sys(`Forgot scene "${key}".`) : sys(`No scene named "${key}".`);
+}
+
 // List the success tables, or lay one out in full. A table interprets a number
 // of successes; attach table=<name> to a roll/resist/contest to read it.
 async function cmdTables(cmd: ParsedCommand): Promise<string> {
@@ -7566,6 +7743,32 @@ CommandRouter.register("time-between", cmdTimeBetween, {
     { key: "a", kind: "positional", required: true, hint: "<date>", example: "start" },
     { key: "b", kind: "positional", required: true, hint: "<date>", example: "now" }],
 });
+CommandRouter.register("scene", cmdScene, {
+  summary: "open a named scene at the current story time (one location; turn=<len> sets a Turn's length)",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>" },
+    { key: "location", kind: "named", type: "literal", desc: "The scene's single location" },
+    { key: "turn", kind: "named", desc: "A Turn's length here (e.g. 3s for combat); omit for freeform", example: "3s" },
+    { key: "chapter", kind: "named", type: "literal", desc: "Optional grouping label" }],
+});
+CommandRouter.register("turn", cmdTurn, {
+  summary: "advance the current scene by one turn (moves the clock by its turn length)",
+  params: [{ key: "count", kind: "positional", type: "int", hint: "[n]", desc: "How many turns (default 1)" }],
+});
+CommandRouter.register("end-scene", cmdEndScene, { summary: "close the current scene" });
+CommandRouter.register("downtime", cmdDowntime, {
+  summary: "close the current scene and gloss the clock forward",
+  params: [{ key: "duration", kind: "positional", required: true, hint: "<duration>", example: "3d" }],
+});
+CommandRouter.register("scenes", cmdScenes, { summary: "list the chronicle's scenes" });
+CommandRouter.register("scene-info", cmdSceneInfo, {
+  summary: "show a scene in full (defaults to the open one)",
+  params: [{ key: "name", kind: "positional", hint: "[name]" }],
+});
+CommandRouter.register("forget-scene", cmdForgetScene, {
+  summary: "delete a scene record",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
 CommandRouter.register("tables", cmdTables, {
   summary: "list success tables (grouped by category), or lay one out in full",
   params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
@@ -7742,7 +7945,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
-  "story-date", "dates", "time-between",
+  "story-date", "dates", "time-between", "scenes", "scene-info",
 ]);
 
 // Replace every [[command]] in the player's adventure-mode input with its

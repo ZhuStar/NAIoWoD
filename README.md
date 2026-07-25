@@ -169,7 +169,7 @@ soakable and which traits form the dice pool. Out of the box:
 | --- | --- | --- | --- |
 | Mortal / Thrall / Mage | Stamina | — | — |
 | Vampire | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
-| Ghoul / Revenant | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
+| Ghoul / Revenant / Ouroboros | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
 | Demon / Werewolf | Stamina | Stamina | Stamina |
 
 > Ghouls and revenants, though alive, **soak lethal with Stamina + Fortitude** —
@@ -199,6 +199,9 @@ per-template starting-value constraints. Examples baked in:
 - **Revenant** — born ghouled: same soak and Disciplines, but the Blood pool
   starts **full** and **brews itself back — 1/day on the story clock** (a
   `recovery` rule; see *Recovery and the moon*).
+- **Ouroboros** — a **unique** template (one creature in the world): revenant +
+  *laham* + Awakened Hermetic, whose four fuels are fused into **Living
+  Resolve**. See *The Ouroboros & Living Resolve*.
 
 ```ts
 import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src";
@@ -716,10 +719,12 @@ Scenes (below) build on this clock; combat's 3-second turns march it in beats.
 
 Resources can carry **`recovery` rules** (`RecoveryRule` in `src/rules.ts`):
 so-much **per day**, or **per full moon**, optionally gated on an active
-affliction. When `[[advance-time]]` crosses **UTC midnights** or **full-moon
-instants**, it credits every character's recovery-bearing resources and reports
-exactly what it granted — split advances accumulate correctly (each midnight is
-counted once, whichever hop crossed it), and rewinds recover nothing.
+affliction — or on **several at once** (`requires: ["full-rested",
+"in-sanctum"]` fires only while *both* are on the character). When
+`[[advance-time]]` crosses **UTC midnights** or **full-moon instants**, it
+credits every character's recovery-bearing resources and reports exactly what it
+granted — split advances accumulate correctly (each midnight is counted once,
+whichever hop crossed it), and rewinds recover nothing.
 
 ```
 [[advance-time 3d]]
@@ -731,11 +736,14 @@ counted once, whichever hop crossed it), and rewinds recover nothing.
 - The **moon is real**: full moons ride the mean synodic cycle (29.530588853
   days, anchored to the 2000-01-06 new moon), which works proleptically in 1197
   and stays within hours of the true phase. `[[story-date]]` shows the next one.
-- A rule with **`requires`** fires only while the matching **affliction** is
-  active: Living Resolve's `+1/day if in-umbra` turns on when the character is
-  `[[afflict in-umbra]]`-ed (the shipped `in-umbra` affliction is exactly this
-  encoded flag — nothing grants passage to the spirit world *yet*).
-- The revenant's `1/day` vitae uses the same machinery.
+- A rule with **`requires`** fires only while the matching **affliction(s)** are
+  active. Three ship as exactly these encoded flags: **`in-umbra`** (nothing
+  grants passage to the spirit world *yet* — the gate is ready for when it
+  does), **`full-rested`** (eight hours of sleep) and **`in-sanctum`**. Both
+  Living Resolve and a mage's Quintessence gain +1/day in the Umbra, and +1/day
+  for `full-rested` **and** `in-sanctum` together.
+- `[[afflict in-sanctum]]` when he settles in, `[[lift in-sanctum]]` when he
+  leaves. The revenant's `1/day` vitae uses the same machinery.
 
 ### Scenes — the named unit of play
 
@@ -860,23 +868,23 @@ Storyteller-adjudicated until their interpreter lands — nothing is hardcoded.
 - Current values persist per character (story storage) and default to the
   template start until changed — nothing needs allocating to start playing.
 
-### Living Resolve — a preset resource, and how presets work
+### The Ouroboros & Living Resolve — a unique template
 
-**Resource presets** are complete `ResourceDef`s kept in the engine
-(`RESOURCE_PRESETS` in `src/rules.ts`) that a story adopts with one command —
-the lorebook override entry stays a tiny `{"preset": true}` reference you can
-still layer field overrides onto. Adoption is **story-level** (the overrides
-layer applies to every character), which suits a lone protagonist.
+A resource that exactly one creature in the world possesses belongs to a
+**unique template**, not to the story-wide overrides layer. **Ouroboros** is
+that template: revenant + *laham* + Awakened mage of the **Order of Hermes**,
+made by a powerful witch in a ritual involving Belial, the Great Beast. Still
+alive and human-souled (Road/Humanity + Virtues), ghoul soak, and exactly one
+pool — the fusion itself.
 
 ```
-[[adopt-resource]]                  # list what's on the shelf
-[[adopt-resource living-resolve]]   # adopt it; [[resources]] shows the result
+[[create-playable name="..." templates=ouroboros]]
 ```
 
-**Living Resolve** is the flagship: one character's ritual-born fusion of
-revenant vitae, Awakened Quintessence, Resolve and Willpower into a single
-substance — a 30-point pool, starting full, spend up to 6/turn (ST-enforced).
-Spending 1 point spends 1 of *each* component:
+**Living Resolve** is that pool: revenant vitae, *laham* Resolve, Awakened
+Quintessence and Willpower as one metaphysical substance — 30 points, starting
+full, spend up to 6/turn (ST-enforced). Spending 1 point spends 1 of *each*
+component:
 
 - It **replaces** blood/willpower/resolve/quintessence and answers to their
   names and roles — every vitae trick (heal, `boost` a Physical), every power
@@ -889,25 +897,38 @@ Spending 1 point spends 1 of *each* component:
 - **Rolls that pool it** (Willpower/Resolve rolls) roll **min(10, current)** —
   and every point above 10 **shields a die of penalties** (wound penalties,
   negative dice mods) on that roll (`rollAs` in the def).
-- **Recovery**: 1/day, +1/day in the Umbra (`in-umbra` gate), **20 every full
-  moon** — all on the story clock; drinking vampiric vitae (bond-immune) and
-  consuming Tass are `[[gain living-resolve N]]` moments.
+- **Recovery**: 1/day (the revenant vitae brewing), +1/day in the Umbra, +1/day
+  **rested in the sanctum** (`full-rested` *and* `in-sanctum` together), **20
+  every full moon** — all on the story clock; drinking vampiric vitae
+  (bond-immune) and consuming Tass are `[[gain living-resolve N]]` moments.
+
+An ordinary mage's **Quintessence** recovers on those same two gates (Umbra,
+and rested-in-sanctum) — it just has no daily brew of its own.
 
 ### Casting magic — Dark Ages: Mage
 
 The whole *How Magic Works* chapter is executable. Foundation and Pillar
 **ratings** live on the character (the free `traits` bucket — e.g.
-`"sensitivity": 3, "trickster": 4`); the **required levels** are what the
-desired effect needs — play-time input, per pillar, never baked anywhere. Every
-number is a knob (`DEFAULT_MAGIC_RULES`, overridable per-knob in the
-`wod:config:magic` lorebook entry).
+`"modus": 3, "corona": 4`); the **required levels** are what the desired effect
+needs — play-time input, per pillar, never baked anywhere. Every number is a
+knob (`DEFAULT_MAGIC_RULES`, overridable per-knob in the `wod:config:magic`
+lorebook entry).
+
+**Fellowships** name a society's Foundation and Pillars as data (`FELLOWSHIPS`
+in `src/rules.ts`). Shipped: the **Order of Hermes** — Foundation **Modus** (the
+Ouroboros: knowledge begets discipline and focus, which begets more knowledge),
+Pillars **Anima** (life), **Corona** (mind), **Primus** (magic itself) and
+**Vires** (forces). `[[fellowships]]` lists them; `[[cast]]` **finds the
+Foundation on its own** — an explicit `foundation=` wins, then a literal
+`foundation` trait, then the first fellowship whose Foundation the caster
+actually has.
 
 ```
-[[cast pillars="trickster:2" foundation=sensitivity]]              # simple: diff 4+2
-[[cast pillars="warrior:4,chieftain:2" foundation=sensitivity quintessence=2]]
-                                                                   # complex: diff 5+4+1, −2
-[[cast pillars="warrior:4" foundation=sensitivity requires=6 extended=true interval="one hour"]]
-[[cast pillars="trickster:2" foundation=sensitivity requires=2 ongoing=true]]
+[[fellowships order-of-hermes]]                       # Foundation & Pillars
+[[cast pillars="corona:2"]]                           # simple: diff 4+2, Modus found for you
+[[cast pillars="corona:4,vires:2" quintessence=2]]    # complex: diff 5+4+1, −2
+[[cast pillars="vires:4" requires=6 extended=true interval="one hour"]]
+[[cast pillars="corona:2" requires=2 ongoing=true]]
 [[seal-spell pillar=3]]            [[seal-spell pillar=3 pay=true]]
 ```
 

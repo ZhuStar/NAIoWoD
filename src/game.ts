@@ -25,7 +25,7 @@ import {
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
-  magicRulesFrom, RESOURCE_PRESETS,
+  magicRulesFrom, FELLOWSHIPS,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
@@ -1133,7 +1133,7 @@ async function cmdResources(): Promise<string> {
       roles.length ? `roles: ${roles.join("/")}` : "",
       v.def.perTurnLimit !== undefined && Number.isFinite(v.def.perTurnLimit) ? `${v.def.perTurnLimit}/turn (ST)` : "",
       v.def.rollAs ? `pools as min(${v.def.rollAs.cap ?? "∞"}, current)${v.def.rollAs.negatesPenaltiesAbove !== undefined ? `; points over ${v.def.rollAs.negatesPenaltiesAbove} shield penalties` : ""}` : "",
-      v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${r.requires}` : ""}`).join(", ")}` : "",
+      v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${(Array.isArray(r.requires) ? r.requires : [r.requires]).join("+")}` : ""}`).join(", ")}` : "",
       v.def.effect ? describeEffect(v.def.effect) : "",
       named.length ? `spend:${named.join("/")}` : "",
     ].filter(Boolean).join("; ");
@@ -1175,6 +1175,19 @@ function grantsUncancelableOnSpend(def: ResourceDef): boolean {
   return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable" && o.once === true));
 }
 
+// Which trait is this caster's Foundation? An explicit foundation= wins; else a
+// literal "foundation" trait; else the first FELLOWSHIPS entry whose Foundation
+// trait the caster actually has (Order of Hermes -> Modus). Returns the trait
+// name plus the fellowship it came from, when that's how it was found.
+function resolveFoundation(arg: string | undefined, resolve: (n: string) => number): { trait: string; fellowship?: string } {
+  if (arg?.trim()) return { trait: StringUtil.normalize(arg) };
+  if (resolve("foundation") > 0) return { trait: "foundation" };
+  for (const f of Object.values(FELLOWSHIPS)) {
+    if (resolve(f.foundation) > 0) return { trait: StringUtil.normalize(f.foundation), fellowship: f.name };
+  }
+  return { trait: "foundation" };
+}
+
 async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
@@ -1194,11 +1207,14 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   for (const p of pillars) {
     if (p.own < p.required) return sys(`${disp(char.name)} has ${disp(p.name)} ${p.own} - the effect needs ${p.required}. The spell is beyond their teaching.`);
   }
-  // ...and have a Foundation to channel it through.
-  const foundationTrait = StringUtil.normalize(cmd.named["foundation"] ?? "foundation");
+  // ...and have a Foundation to channel it through (their fellowship's, when
+  // the sheet carries it - Order of Hermes casts on Modus).
+  const found = resolveFoundation(cmd.named["foundation"], env.resolver);
+  const foundationTrait = found.trait;
   const foundationRating = env.resolver(foundationTrait);
   if (foundationRating <= 0) {
-    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket (e.g. "foundation": 3) or name it with foundation=<trait>.`);
+    const known = Object.values(FELLOWSHIPS).map(f => `${disp(f.foundation)} (${f.name})`).join(", ");
+    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket (e.g. "modus": 3) or name it with foundation=<trait>. Known fellowships: ${known}.`);
   }
 
   // The primary Pillar is the highest REQUIRED one (ties: the caster adds their
@@ -1359,25 +1375,22 @@ async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
   return sys(`${disp(char.name)} seals the spell (highest Pillar ${level}; ${price}): ${linesOut.join("; ")}.`);
 }
 
-// Adopt a ready-made resource preset into the story's resource overrides (the
-// canonical definition stays in the engine; the lorebook entry stays a tiny,
-// still-overridable reference). Bare invocation lists what's on the shelf.
-async function cmdAdoptResource(cmd: ParsedCommand): Promise<string> {
+// The fellowships the engine knows: their Foundation and Pillars, so a caster
+// can see what [[cast]] expects in the sheet's traits bucket.
+async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   const which = cmd.positional[0]?.trim();
-  if (!which) {
-    const items = Object.entries(RESOURCE_PRESETS)
-      .map(([k, d]) => `${k} (${d.kind} ${d.start}/${d.max}${d.replaces?.length ? `; replaces ${d.replaces.join("/")}` : ""})`)
-      .join("; ");
-    return sys(`Resource presets: ${items}. Adopt one with [[adopt-resource <name>]].`);
+  const entries = Object.entries(FELLOWSHIPS);
+  if (which) {
+    const key = StringUtil.normalize(which);
+    const hit = entries.find(([k, f]) => k === key || StringUtil.normalize(f.name) === key)?.[1];
+    if (!hit) return sys(`No fellowship "${which}". Known: ${entries.map(([k]) => k).join(", ")}.`);
+    const pillars = Object.entries(hit.pillars).map(([p, gloss]) => `${disp(p)} (${gloss})`).join(", ");
+    return sys(`${hit.name} - Foundation: ${disp(hit.foundation)}${hit.foundationGloss ? ` (${hit.foundationGloss})` : ""}. `
+      + `Pillars: ${pillars}. Rate them in the sheet's traits bucket; [[cast]] finds the Foundation on its own.`);
   }
-  const key = StringUtil.normalize(which);
-  const preset = RESOURCE_PRESETS[key];
-  if (!preset) return sys(`No resource preset "${which}". ${Object.keys(RESOURCE_PRESETS).length ? `Available: ${Object.keys(RESOURCE_PRESETS).join(", ")}.` : ""}`);
-  const map = { ...ResourceOverrides.current() };
-  map[key] = { ...(map[key] ?? {}), preset: true };
-  await ResourceOverrides.save(map);
-  const replaces = preset.replaces?.length ? ` It replaces ${preset.replaces.join("/")} - their names now resolve to it.` : "";
-  return sys(`Adopted ${preset.name} (${preset.start}/${preset.max}).${replaces} Every character now carries it - see [[resources]]; tweak it in the ${RESOURCE_CONFIG_ENTRY} entry.`);
+  if (!entries.length) return sys(`No fellowships defined.`);
+  const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
+  return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
 }
 
 // One line of health state for OOC replies.
@@ -1773,7 +1786,10 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
       let credit = 0;
       const parts: string[] = [];
       for (const rule of def.recovery) {
-        if (rule.requires && !gates.has(StringUtil.normalize(rule.requires))) continue;
+        // A single gate, or several that must ALL be active at once
+        // (full-rested AND in-sanctum).
+        const needs = rule.requires === undefined ? [] : Array.isArray(rule.requires) ? rule.requires : [rule.requires];
+        if (!needs.every(n => gates.has(StringUtil.normalize(n)))) continue;
         const times = rule.per === "day" ? days : moons;
         if (times <= 0) continue;
         credit += rule.amount * times;
@@ -3227,9 +3243,9 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
-CommandRouter.register("adopt-resource", cmdAdoptResource, {
-  summary: "adopt a ready-made resource preset (bare: list presets)",
-  params: [{ key: "preset", kind: "positional", hint: "[preset]", example: "living-resolve" }],
+CommandRouter.register("fellowships", cmdFellowships, {
+  summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
 });
 CommandRouter.register("story-date", cmdStoryDate, {
   summary: "show the current story date and how long since it began",
@@ -3460,7 +3476,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
-  "story-date", "dates", "time-between", "scenes", "scene-info", "adopt-resource",
+  "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships",
 ]);
 
 // =============================================================================

@@ -1959,12 +1959,13 @@ interface EffectSpec {
 
 // A scheduled way a resource refills itself as story time passes. [[advance-time]]
 // counts the day boundaries and full moons it crossed and credits every rule
-// whose gate (if any) is open. `requires` names an active affliction (def name
-// or tag) that must be on the character - e.g. "in-umbra" for Umbral communion.
+// whose gate (if any) is open. `requires` names active afflictions (def name
+// or tag) that must be on the character - a single string, or an ARRAY that
+// must ALL be active at once (full-rested AND in-sanctum, simultaneously).
 interface RecoveryRule {
   amount: number;
   per: "day" | "full-moon";
-  requires?: string;
+  requires?: string | string[];
   note?: string;            // shown beside the credit ("Umbral communion")
 }
 
@@ -2139,7 +2140,14 @@ const TEMPLATE_MAGE = new TemplateConfig(
         label: "Quintessence: -1 casting difficulty per point (min diff 4; >2/turn needs the Fount Background)",
         apply: [{ op: "difficulty", amount: -1 }],
         limits: { maxPerUse: 3 },
-      } },
+      },
+      // Quintessence doesn't brew itself, but communion refills it: an extra
+      // point per day in the Umbra, and one for a full night's sleep taken in
+      // the mage's own sanctum (both afflictions at once).
+      recovery: [
+        { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
+        { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
+      ] },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues
@@ -2224,44 +2232,26 @@ const TEMPLATE_SORCERER = new TemplateConfig(
   HUMANITY_MORALITY, true
 );
 
-const TEMPLATES: Record<string, TemplateConfig> = {
-  mortal: TEMPLATE_MORTAL,
-  thrall: TEMPLATE_THRALL,
-  vampire: TEMPLATE_VAMPIRE,
-  mage: TEMPLATE_MAGE,
-  demon: TEMPLATE_DEMON,
-  werewolf: TEMPLATE_WEREWOLF,
-  ghoul: TEMPLATE_GHOUL,
-  revenant: TEMPLATE_REVENANT,
-  sorcerer: TEMPLATE_SORCERER,
-};
-
-// =============================================================================
-// RESOURCE PRESETS - ready-made custom resources the overrides layer can adopt
-// -----------------------------------------------------------------------------
-// A preset is a complete ResourceDef kept HERE (canonical, engine-updated); the
-// story adopts it with a tiny override patch ({"living-resolve": {"preset":
-// true}} - [[adopt-resource]] writes it), and may still override any field on
-// top. This keeps the lorebook entry small without giving up hand-editability.
-// =============================================================================
-
-// LIVING RESOLVE - one player character's ritual-born fusion: revenant vitae,
-// Awakened Quintessence, Resolve and Willpower as ONE metaphysical substance.
-// Spending 1 point spends 1 of each; the Willpower component grants ONE
-// un-cancelable success per roll when it isn't consumed by an activation cost
-// (`fuel` when it is; `fuel-surge` pays 1 extra to have it anyway). Rolls that
-// POOL it (Willpower/Resolve rolls) use min(10, current), and every point above
-// 10 shields a die of penalties. Recovers 1/day (+1 in the Umbra - the in-umbra
-// affliction is the gate), 20 each full moon; drinking vampiric vitae (immune
-// to the bond) and consuming Tass are [[gain living-resolve N]] moments.
+// LIVING RESOLVE - the unique fusion carried by ONE creature in the world (the
+// Ouroboros template below): revenant vitae, laham Resolve, Awakened
+// Quintessence and Willpower as ONE metaphysical substance. Spending 1 point
+// spends 1 of each; the Willpower component grants ONE un-cancelable success
+// per roll when it isn't consumed by an activation cost (`fuel` when it is;
+// `fuel-surge` pays 1 extra to have it anyway). Rolls that POOL it (Willpower/
+// Resolve rolls) use min(10, current), and every point above 10 shields a die
+// of penalties. Recovers 1/day (the revenant vitae brewing), +1 in the Umbra,
+// +1 rested in the sanctum (full-rested AND in-sanctum, simultaneously), 20
+// each full moon; drinking vampiric vitae (immune to the bond) and consuming
+// Tass are [[gain living-resolve N]] moments.
 const LIVING_RESOLVE: ResourceDef = {
   name: "living-resolve", kind: "pool", start: 30, max: 30, perTurnLimit: 6,
   roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
   replaces: ["blood", "willpower", "resolve", "quintessence"],
   rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
   recovery: [
-    { amount: 1, per: "day" },
+    { amount: 1, per: "day", note: "revenant vitae" },
     { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
+    { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
     { amount: 20, per: "full-moon" },
   ],
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
@@ -2299,23 +2289,44 @@ const LIVING_RESOLVE: ResourceDef = {
   },
 };
 
-const RESOURCE_PRESETS: Record<string, ResourceDef> = {
-  "living-resolve": LIVING_RESOLVE,
-};
+// THE OUROBOROS - a UNIQUE template: the one creature in the world carrying
+// Living Resolve. Revenant + laham (Devil's Due demon-blooded, whence the
+// Resolve) + Awakened mage (Order of Hermes), created by a powerful witch in a
+// ritual involving Belial, the Great Beast. Still alive and human-souled
+// (Road/Humanity + Virtues), ghoul soak, and ONE pool - the fusion itself,
+// which answers to blood/willpower/resolve/quintessence by name and role.
+// His Foundation is Modus (see FELLOWSHIPS); Pillars: Anima/Corona/Primus/Vires.
+const TEMPLATE_OUROBOROS = new TemplateConfig(
+  "Ouroboros (unique: revenant + laham + Awakened)",
+  RulesetConfig.MAGE,
+  [LIVING_RESOLVE],
+  GHOUL_SOAK,
+  HUMANITY_MORALITY, true
+);
 
-// An override patch may additionally say `preset: true` (or name one) to start
-// from a RESOURCE_PRESETS definition and merge the rest of the patch on top.
-type ResourceOverridePatch = Partial<ResourceDef> & { preset?: boolean | string };
+const TEMPLATES: Record<string, TemplateConfig> = {
+  mortal: TEMPLATE_MORTAL,
+  thrall: TEMPLATE_THRALL,
+  vampire: TEMPLATE_VAMPIRE,
+  mage: TEMPLATE_MAGE,
+  demon: TEMPLATE_DEMON,
+  werewolf: TEMPLATE_WEREWOLF,
+  ghoul: TEMPLATE_GHOUL,
+  revenant: TEMPLATE_REVENANT,
+  ouroboros: TEMPLATE_OUROBOROS,
+  sorcerer: TEMPLATE_SORCERER,
+};
 
 // The resources a character has = the union of its templates' resources, deduped
 // by name (first template wins for numbers; roles are merged). Unknown or zero
 // templates yield the mortal baseline (just Willpower). Story-level `overrides`
 // (the house-rule layer, e.g. from the configuration wizard or a hand-edited
 // lorebook entry) are applied last: a patch merges onto its resource by
-// normalized name; a patch with `preset` adopts the named preset (or the one
-// matching its key) as the base; and a patch naming a NEW resource (with
-// kind/start/max) adds a custom one.
-function resourcesForTemplates(keys: string[], overrides?: Record<string, ResourceOverridePatch>): ResourceDef[] {
+// normalized name, and a patch naming a NEW resource (with kind/start/max) adds
+// a custom one. (A short-lived `preset` patch mechanism was removed - a unique
+// resource belongs to a unique TEMPLATE, not to the story-wide overrides layer;
+// stale `{"preset": true}` entries are simply ignored here.)
+function resourcesForTemplates(keys: string[], overrides?: Record<string, Partial<ResourceDef>>): ResourceDef[] {
   const byName = new Map<string, ResourceDef>();
   const out: ResourceDef[] = [];
   const add = (def: ResourceDef): void => {
@@ -2333,20 +2344,10 @@ function resourcesForTemplates(keys: string[], overrides?: Record<string, Resour
   const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
   for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
 
-  for (const [name, rawPatch] of Object.entries(overrides ?? {})) {
+  for (const [name, patch] of Object.entries(overrides ?? {})) {
     const key = StringUtil.normalize(name);
-    const { preset, ...patch } = rawPatch;
-    const base = preset ? RESOURCE_PRESETS[StringUtil.normalize(typeof preset === "string" ? preset : key)] : undefined;
     const existing = byName.get(key);
-    if (base) {
-      const adopted: ResourceDef = { ...base, ...patch, name: base.name };
-      if (existing) {
-        Object.assign(existing, adopted);
-      } else {
-        byName.set(key, adopted);
-        out.push(adopted);
-      }
-    } else if (existing) {
+    if (existing) {
       Object.assign(existing, patch, { name: existing.name }); // a patch never renames
     } else if (patch.kind && patch.start !== undefined && patch.max !== undefined) {
       const custom: ResourceDef = { ...(patch as ResourceDef), name: key };
@@ -2363,6 +2364,31 @@ function healthLevelsForTemplates(keys: string[]): HealthLevelDef[] {
   const t = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).find((x): x is TemplateConfig => !!x);
   return (t ?? TEMPLATE_MORTAL).HealthLevels;
 }
+
+// =============================================================================
+// FELLOWSHIPS - a mystic society's Foundation & Pillars, as data
+// -----------------------------------------------------------------------------
+// Ratings are ordinary `traits`-bucket entries on the character; a fellowship
+// record just names them (and glosses them for the Storyteller). [[cast]] uses
+// this to AUTO-DETECT the Foundation: with no foundation= argument and no
+// literal "foundation" trait, the first fellowship whose Foundation trait the
+// caster actually has (> 0) supplies it.
+// =============================================================================
+interface Fellowship {
+  name: string;
+  foundation: string;                 // the Foundation TRAIT name
+  foundationGloss?: string;
+  pillars: Record<string, string>;    // pillar trait name -> gloss
+}
+
+const FELLOWSHIPS: Record<string, Fellowship> = {
+  "order-of-hermes": {
+    name: "Order of Hermes",
+    foundation: "modus",
+    foundationGloss: "the Ouroboros - knowledge begets discipline and focus, which begets more knowledge",
+    pillars: { anima: "life", corona: "mind", primus: "magic itself", vires: "forces" },
+  },
+};
 
 // =============================================================================
 // MAGIC RULES - the Dark Ages: Mage "How Magic Works" numbers, as data
@@ -2756,13 +2782,25 @@ const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
     mirror: "feral-whispers",
   }),
   // The spirit-world flag: nothing grants passage yet, but the gate exists -
-  // recovery rules with `requires: "in-umbra"` (Living Resolve's extra point
-  // per day) check for this affliction. [[afflict <name> in-umbra]] when the
-  // character crosses; [[lift]] when they return.
+  // recovery rules with `requires: "in-umbra"` (an extra Living Resolve /
+  // Quintessence point per day) check for this affliction. [[afflict in-umbra]]
+  // when the character crosses; [[lift]] when they return.
   makeAfflictionDef({
     name: "in-umbra",
     description: "Walking the spirit world, flesh and all",
     tags: ["in-umbra"],
+  }),
+  // The rest gates: recovery rules requiring BOTH at once ("full-rested" AND
+  // "in-sanctum") grant the extra daily point of Living Resolve / Quintessence.
+  makeAfflictionDef({
+    name: "full-rested",
+    description: "Eight full hours of sleep behind them",
+    tags: ["full-rested"],
+  }),
+  makeAfflictionDef({
+    name: "in-sanctum",
+    description: "Within their warded sanctum",
+    tags: ["in-sanctum"],
   }),
 ];
 
@@ -4779,16 +4817,14 @@ const AFFLICTIONS_ENTRY = "wod:config:afflictions";
 const TABLES_CATEGORY = "wod:config:success-tables";
 
 // The house-rule layer for resources: a map resourceName -> partial def.
-const ResourceOverrides = new MapConfigStore<ResourceOverridePatch>({
+const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
   entry: RESOURCE_CONFIG_ENTRY,
   header: [
     "Story overrides for resources (the house-rule layer). The JSON below the",
     "marker maps a resource name to the fields you want to change (start, max,",
     "roles, effect, effects, ...). A name that matches no template resource and",
-    "carries kind/start/max adds a custom resource; {\"preset\": true} adopts",
-    "the engine preset of the same name ([[adopt-resource]] writes this).",
-    "[[configure-resources]] edits this for you; you may also edit it by hand",
-    "in creator mode.",
+    "carries kind/start/max adds a custom resource. [[configure-resources]]",
+    "edits this for you; you may also edit it by hand in creator mode.",
   ],
 });
 
@@ -6400,7 +6436,7 @@ async function cmdResources(): Promise<string> {
       roles.length ? `roles: ${roles.join("/")}` : "",
       v.def.perTurnLimit !== undefined && Number.isFinite(v.def.perTurnLimit) ? `${v.def.perTurnLimit}/turn (ST)` : "",
       v.def.rollAs ? `pools as min(${v.def.rollAs.cap ?? "∞"}, current)${v.def.rollAs.negatesPenaltiesAbove !== undefined ? `; points over ${v.def.rollAs.negatesPenaltiesAbove} shield penalties` : ""}` : "",
-      v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${r.requires}` : ""}`).join(", ")}` : "",
+      v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${(Array.isArray(r.requires) ? r.requires : [r.requires]).join("+")}` : ""}`).join(", ")}` : "",
       v.def.effect ? describeEffect(v.def.effect) : "",
       named.length ? `spend:${named.join("/")}` : "",
     ].filter(Boolean).join("; ");
@@ -6442,6 +6478,19 @@ function grantsUncancelableOnSpend(def: ResourceDef): boolean {
   return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable" && o.once === true));
 }
 
+// Which trait is this caster's Foundation? An explicit foundation= wins; else a
+// literal "foundation" trait; else the first FELLOWSHIPS entry whose Foundation
+// trait the caster actually has (Order of Hermes -> Modus). Returns the trait
+// name plus the fellowship it came from, when that's how it was found.
+function resolveFoundation(arg: string | undefined, resolve: (n: string) => number): { trait: string; fellowship?: string } {
+  if (arg?.trim()) return { trait: StringUtil.normalize(arg) };
+  if (resolve("foundation") > 0) return { trait: "foundation" };
+  for (const f of Object.values(FELLOWSHIPS)) {
+    if (resolve(f.foundation) > 0) return { trait: StringUtil.normalize(f.foundation), fellowship: f.name };
+  }
+  return { trait: "foundation" };
+}
+
 async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
@@ -6461,11 +6510,14 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   for (const p of pillars) {
     if (p.own < p.required) return sys(`${disp(char.name)} has ${disp(p.name)} ${p.own} - the effect needs ${p.required}. The spell is beyond their teaching.`);
   }
-  // ...and have a Foundation to channel it through.
-  const foundationTrait = StringUtil.normalize(cmd.named["foundation"] ?? "foundation");
+  // ...and have a Foundation to channel it through (their fellowship's, when
+  // the sheet carries it - Order of Hermes casts on Modus).
+  const found = resolveFoundation(cmd.named["foundation"], env.resolver);
+  const foundationTrait = found.trait;
   const foundationRating = env.resolver(foundationTrait);
   if (foundationRating <= 0) {
-    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket (e.g. "foundation": 3) or name it with foundation=<trait>.`);
+    const known = Object.values(FELLOWSHIPS).map(f => `${disp(f.foundation)} (${f.name})`).join(", ");
+    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket (e.g. "modus": 3) or name it with foundation=<trait>. Known fellowships: ${known}.`);
   }
 
   // The primary Pillar is the highest REQUIRED one (ties: the caster adds their
@@ -6626,25 +6678,22 @@ async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
   return sys(`${disp(char.name)} seals the spell (highest Pillar ${level}; ${price}): ${linesOut.join("; ")}.`);
 }
 
-// Adopt a ready-made resource preset into the story's resource overrides (the
-// canonical definition stays in the engine; the lorebook entry stays a tiny,
-// still-overridable reference). Bare invocation lists what's on the shelf.
-async function cmdAdoptResource(cmd: ParsedCommand): Promise<string> {
+// The fellowships the engine knows: their Foundation and Pillars, so a caster
+// can see what [[cast]] expects in the sheet's traits bucket.
+async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   const which = cmd.positional[0]?.trim();
-  if (!which) {
-    const items = Object.entries(RESOURCE_PRESETS)
-      .map(([k, d]) => `${k} (${d.kind} ${d.start}/${d.max}${d.replaces?.length ? `; replaces ${d.replaces.join("/")}` : ""})`)
-      .join("; ");
-    return sys(`Resource presets: ${items}. Adopt one with [[adopt-resource <name>]].`);
+  const entries = Object.entries(FELLOWSHIPS);
+  if (which) {
+    const key = StringUtil.normalize(which);
+    const hit = entries.find(([k, f]) => k === key || StringUtil.normalize(f.name) === key)?.[1];
+    if (!hit) return sys(`No fellowship "${which}". Known: ${entries.map(([k]) => k).join(", ")}.`);
+    const pillars = Object.entries(hit.pillars).map(([p, gloss]) => `${disp(p)} (${gloss})`).join(", ");
+    return sys(`${hit.name} - Foundation: ${disp(hit.foundation)}${hit.foundationGloss ? ` (${hit.foundationGloss})` : ""}. `
+      + `Pillars: ${pillars}. Rate them in the sheet's traits bucket; [[cast]] finds the Foundation on its own.`);
   }
-  const key = StringUtil.normalize(which);
-  const preset = RESOURCE_PRESETS[key];
-  if (!preset) return sys(`No resource preset "${which}". ${Object.keys(RESOURCE_PRESETS).length ? `Available: ${Object.keys(RESOURCE_PRESETS).join(", ")}.` : ""}`);
-  const map = { ...ResourceOverrides.current() };
-  map[key] = { ...(map[key] ?? {}), preset: true };
-  await ResourceOverrides.save(map);
-  const replaces = preset.replaces?.length ? ` It replaces ${preset.replaces.join("/")} - their names now resolve to it.` : "";
-  return sys(`Adopted ${preset.name} (${preset.start}/${preset.max}).${replaces} Every character now carries it - see [[resources]]; tweak it in the ${RESOURCE_CONFIG_ENTRY} entry.`);
+  if (!entries.length) return sys(`No fellowships defined.`);
+  const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
+  return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
 }
 
 // One line of health state for OOC replies.
@@ -7040,7 +7089,10 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
       let credit = 0;
       const parts: string[] = [];
       for (const rule of def.recovery) {
-        if (rule.requires && !gates.has(StringUtil.normalize(rule.requires))) continue;
+        // A single gate, or several that must ALL be active at once
+        // (full-rested AND in-sanctum).
+        const needs = rule.requires === undefined ? [] : Array.isArray(rule.requires) ? rule.requires : [rule.requires];
+        if (!needs.every(n => gates.has(StringUtil.normalize(n)))) continue;
         const times = rule.per === "day" ? days : moons;
         if (times <= 0) continue;
         credit += rule.amount * times;
@@ -8494,9 +8546,9 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
-CommandRouter.register("adopt-resource", cmdAdoptResource, {
-  summary: "adopt a ready-made resource preset (bare: list presets)",
-  params: [{ key: "preset", kind: "positional", hint: "[preset]", example: "living-resolve" }],
+CommandRouter.register("fellowships", cmdFellowships, {
+  summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
 });
 CommandRouter.register("story-date", cmdStoryDate, {
   summary: "show the current story date and how long since it began",
@@ -8727,7 +8779,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
-  "story-date", "dates", "time-between", "scenes", "scene-info", "adopt-resource",
+  "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships",
 ]);
 
 // =============================================================================

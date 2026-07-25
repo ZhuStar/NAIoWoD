@@ -24,7 +24,7 @@ import {
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
-  EffectOp, resolveMeritInstance, passiveOpsOf, ResourceOverridePatch,
+  EffectOp, resolveMeritInstance, passiveOpsOf,
 } from "./rules";
 import {
   ScopedStorage, LorebookManager, MeritFlawRegistry,
@@ -1155,16 +1155,14 @@ export const AFFLICTIONS_ENTRY = "wod:config:afflictions";
 export const TABLES_CATEGORY = "wod:config:success-tables";
 
 // The house-rule layer for resources: a map resourceName -> partial def.
-export const ResourceOverrides = new MapConfigStore<ResourceOverridePatch>({
+export const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
   entry: RESOURCE_CONFIG_ENTRY,
   header: [
     "Story overrides for resources (the house-rule layer). The JSON below the",
     "marker maps a resource name to the fields you want to change (start, max,",
     "roles, effect, effects, ...). A name that matches no template resource and",
-    "carries kind/start/max adds a custom resource; {\"preset\": true} adopts",
-    "the engine preset of the same name ([[adopt-resource]] writes this).",
-    "[[configure-resources]] edits this for you; you may also edit it by hand",
-    "in creator mode.",
+    "carries kind/start/max adds a custom resource. [[configure-resources]]",
+    "edits this for you; you may also edit it by hand in creator mode.",
   ],
 });
 

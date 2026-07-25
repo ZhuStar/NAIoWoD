@@ -37,7 +37,7 @@ import {
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, CONFIG_CATEGORY,
   MAGIC_CONFIG_ENTRY, MagicRulesConfig, CastAttempts, magicRulesFrom, DEFAULT_MAGIC_RULES,
-  LIVING_RESOLVE, RESOURCE_PRESETS, GHOUL_SOAK, TEMPLATE_REVENANT,
+  LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, TEMPLATE_OUROBOROS, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
@@ -363,7 +363,7 @@ describe("Templates: starting-value constraints", () => {
   });
 
   test("the TEMPLATES registry exposes all splats", () => {
-    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "revenant", "sorcerer", "thrall", "vampire", "werewolf"]);
+    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "ouroboros", "revenant", "sorcerer", "thrall", "vampire", "werewolf"]);
   });
 });
 
@@ -3968,22 +3968,25 @@ describe("difficulty cap: over-cap surcharge + the buy-off ordering", () => {
   });
 });
 
-describe("Living Resolve: the preset, adoption, and the fused-substance spends", () => {
+describe("Living Resolve: the unique template and its fused-substance spends", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   async function marius(): Promise<PlayableCharacter> {
-    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
-    await CommandRouter.route("adopt-resource living-resolve");
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     return (await CharacterStore.getCurrent())!;
   }
 
-  test("adopt-resource lists presets bare, adopts by name, and the lorebook patch stays tiny", async () => {
-    expect(await CommandRouter.route("adopt-resource")).toContain("living-resolve");
-    expect(await CommandRouter.route("adopt-resource nope")).toContain('No resource preset "nope"');
-    const reply = await CommandRouter.route("adopt-resource living-resolve");
-    expect(reply).toContain("Adopted living-resolve (30/30)");
-    expect(reply).toContain("replaces blood/willpower/resolve/quintessence");
-    expect(ResourceOverrides.current()["living-resolve"]).toEqual({ preset: true });
+  test("the pool belongs to the UNIQUE template - nobody else in the world has it", async () => {
+    expect(TEMPLATE_OUROBOROS.Pools).toEqual([LIVING_RESOLVE]);
+    expect(TEMPLATE_OUROBOROS.Soak).toBe(GHOUL_SOAK);
+    expect(TEMPLATES["ouroboros"]).toBe(TEMPLATE_OUROBOROS);
+    await marius();
+    await CommandRouter.route('create-playable name="Someone Else" templates="revenant, mage"');
+    const other = (await CharacterStore.load("Someone Else"))!;   // create doesn't re-select
+    const names = CharacterResources.defsFor(other).map(d => d.name);
+    expect(names).not.toContain("living-resolve");
+    expect(names).toContain("blood");
+    expect(names).toContain("quintessence");
   });
 
   test("the fused pool replaces all four components; their names resolve to it", async () => {
@@ -3996,7 +3999,7 @@ describe("Living Resolve: the preset, adoption, and the fused-substance spends",
     const listing = await CommandRouter.route("resources");
     expect(listing).toContain("living-resolve 30/30");
     expect(listing).toContain("6/turn (ST)");
-    expect(listing).toContain("recovers 1/day, 1/day if in-umbra, 20/full-moon");
+    expect(listing).toContain("recovers 1/day, 1/day if in-umbra, 1/day if full-rested+in-sanctum, 20/full-moon");
   });
 
   test("spending it inside a roll grants ONE un-cancelable success, however it is spent", async () => {
@@ -4076,13 +4079,12 @@ describe("recovery on the story clock: days, the Umbra gate, full moons", () => 
   test("advance-time credits recovery per midnight crossed; the Umbra affliction opens the +1/day gate", async () => {
     __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
     await CommandRouter.route("story-start 1197-03-15-08");
-    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
-    await CommandRouter.route("adopt-resource living-resolve");
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     const char = (await CharacterStore.getCurrent())!;
     await CharacterResources.spend(char, "living-resolve", 25);            // down to 5
     const r1 = await CommandRouter.route("advance-time 3d");
     expect(r1).toContain("Recovery:");
-    expect(r1).toContain("Marius +3 living-resolve -> 8/30 (1/day×3)");
+    expect(r1).toContain("Marius +3 living-resolve -> 8/30 (1/day×3 (revenant vitae))");
     // In the Umbra the communion doubles the daily point.
     await CommandRouter.route("afflict in-umbra");
     const r2 = await CommandRouter.route("advance-time 1d");
@@ -4106,8 +4108,7 @@ describe("recovery on the story clock: days, the Umbra gate, full moons", () => 
   test("a full moon refills Living Resolve (adoption is story-level: it replaces blood everywhere)", async () => {
     __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
     await CommandRouter.route("story-start 2000-01-15-00");                // 🌕 due Jan 21
-    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
-    await CommandRouter.route("adopt-resource living-resolve");
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     const marius = (await CharacterStore.load("Marius"))!;
     await CharacterResources.spend(marius, "living-resolve", 25);          // down to 5
     const reply = await CommandRouter.route("advance-time 8d");
@@ -4247,8 +4248,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
   });
 
   test("a Living Resolve caster: the fused substance fuels the spell and the sure success rides free", async () => {
-    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
-    await CommandRouter.route("adopt-resource living-resolve");
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { vis: 2, incantation: 3 };
     await CharacterStore.save(c);
@@ -4261,5 +4261,88 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     const seal = await CommandRouter.route("seal-spell pillar=3 pay=true");
     expect(seal).toContain("15/15 living-resolve (the fused substance covers both components)");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(13);
+  });
+});
+
+describe("the rest gates: full-rested AND in-sanctum, on both fuels", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a multi-gate rule needs EVERY affliction at once", async () => {
+    await CommandRouter.route("story-start 1197-03-15-00");
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const char = (await CharacterStore.getCurrent())!;
+    await CharacterResources.spend(char, "living-resolve", 25);        // 30 -> 5
+    // Rested, but not in the sanctum: only the base vitae point lands.
+    await CommandRouter.route("afflict full-rested");
+    const half = await CommandRouter.route("advance-time 1d");
+    expect(half).toContain("+1 living-resolve");
+    expect(half).not.toContain("rested in the sanctum");
+    // Both at once: the extra point joins in.
+    await CommandRouter.route("afflict in-sanctum");
+    const both = await CommandRouter.route("advance-time 1d");
+    expect(both).toContain("+2 living-resolve");
+    expect(both).toContain("rested in the sanctum");
+    // Leaving the sanctum closes the gate again.
+    await CommandRouter.route("lift in-sanctum");
+    expect(await CommandRouter.route("advance-time 1d")).not.toContain("rested in the sanctum");
+  });
+
+  test("an ordinary mage's Quintessence recovers on the same two gates (but doesn't brew)", async () => {
+    await CommandRouter.route("story-start 1197-03-15-00");
+    await CommandRouter.route('create-playable name="Hermetic" templates=mage');
+    // No gates: Quintessence has no daily brew of its own.
+    expect(await CommandRouter.route("advance-time 1d")).not.toContain("quintessence");
+    await CommandRouter.route("afflict full-rested");
+    await CommandRouter.route("afflict in-sanctum");
+    const rested = await CommandRouter.route("advance-time 2d");
+    expect(rested).toContain("Hermetic +2 quintessence -> 2/20");
+    await CommandRouter.route("afflict in-umbra");
+    expect(await CommandRouter.route("advance-time 1d")).toContain("+2 quintessence");   // both gates now
+  });
+});
+
+describe("fellowships: the Order of Hermes, and finding a caster's Foundation", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the Order of Hermes ships with Modus + Anima/Corona/Primus/Vires", () => {
+    const hermes = FELLOWSHIPS["order-of-hermes"];
+    expect(hermes.foundation).toBe("modus");
+    expect(Object.keys(hermes.pillars).sort()).toEqual(["anima", "corona", "primus", "vires"]);
+    expect(hermes.pillars.anima).toBe("life");
+    expect(hermes.pillars.corona).toBe("mind");
+    expect(hermes.pillars.primus).toBe("magic itself");
+    expect(hermes.pillars.vires).toBe("forces");
+  });
+
+  test("[[fellowships]] lists and details them (and is quiet)", async () => {
+    expect(await CommandRouter.route("fellowships")).toContain("order-of-hermes");
+    const detail = await CommandRouter.route("fellowships order-of-hermes");
+    expect(detail).toContain("Foundation: Modus");
+    expect(detail).toContain("Ouroboros");
+    expect(detail).toContain("Anima (life)");
+    expect(await CommandRouter.route("fellowships nope")).toContain('No fellowship "nope"');
+    expect((await processAdventureInput("[[fellowships]]"))!.stopGeneration).toBe(true);
+  });
+
+  test("cast finds Modus without being told, and says which Foundations it knows when it can't", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 3, anima: 2, corona: 4, primus: 3, vires: 2 };
+    await CharacterStore.save(c);
+    const r = await CommandRouter.route('cast pillars="corona:4,vires:2"', { rng: allTens });
+    expect(r).toContain("Modus + Corona + 1 (8)");                    // auto-detected Foundation
+    expect(r).toContain("complex spell: diff 5+4+1 = 10");
+    expect(r).toContain("1 to stabilize (Corona 4 > Modus 3)");       // the fused pool pays
+    expect(r).toContain("+1 sure");
+    // A caster who knows a Pillar but has no Foundation at all gets pointed at
+    // the fellowship list.
+    await CommandRouter.route('create-playable name="Lost" templates=mage');
+    await CommandRouter.route('play name="Lost"');
+    const lostChar = (await CharacterStore.getCurrent())!;
+    lostChar.traits = { anima: 2 };
+    await CharacterStore.save(lostChar);
+    const lost = await CommandRouter.route('cast pillars="anima:1"');
+    expect(lost).toContain("has no Foundation rating");
+    expect(lost).toContain("Modus (Order of Hermes)");
   });
 });

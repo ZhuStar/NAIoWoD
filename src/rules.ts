@@ -215,12 +215,13 @@ export interface EffectSpec {
 
 // A scheduled way a resource refills itself as story time passes. [[advance-time]]
 // counts the day boundaries and full moons it crossed and credits every rule
-// whose gate (if any) is open. `requires` names an active affliction (def name
-// or tag) that must be on the character - e.g. "in-umbra" for Umbral communion.
+// whose gate (if any) is open. `requires` names active afflictions (def name
+// or tag) that must be on the character - a single string, or an ARRAY that
+// must ALL be active at once (full-rested AND in-sanctum, simultaneously).
 export interface RecoveryRule {
   amount: number;
   per: "day" | "full-moon";
-  requires?: string;
+  requires?: string | string[];
   note?: string;            // shown beside the credit ("Umbral communion")
 }
 
@@ -395,7 +396,14 @@ export const TEMPLATE_MAGE = new TemplateConfig(
         label: "Quintessence: -1 casting difficulty per point (min diff 4; >2/turn needs the Fount Background)",
         apply: [{ op: "difficulty", amount: -1 }],
         limits: { maxPerUse: 3 },
-      } },
+      },
+      // Quintessence doesn't brew itself, but communion refills it: an extra
+      // point per day in the Umbra, and one for a full night's sleep taken in
+      // the mage's own sanctum (both afflictions at once).
+      recovery: [
+        { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
+        { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
+      ] },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues
@@ -480,44 +488,26 @@ export const TEMPLATE_SORCERER = new TemplateConfig(
   HUMANITY_MORALITY, true
 );
 
-export const TEMPLATES: Record<string, TemplateConfig> = {
-  mortal: TEMPLATE_MORTAL,
-  thrall: TEMPLATE_THRALL,
-  vampire: TEMPLATE_VAMPIRE,
-  mage: TEMPLATE_MAGE,
-  demon: TEMPLATE_DEMON,
-  werewolf: TEMPLATE_WEREWOLF,
-  ghoul: TEMPLATE_GHOUL,
-  revenant: TEMPLATE_REVENANT,
-  sorcerer: TEMPLATE_SORCERER,
-};
-
-// =============================================================================
-// RESOURCE PRESETS - ready-made custom resources the overrides layer can adopt
-// -----------------------------------------------------------------------------
-// A preset is a complete ResourceDef kept HERE (canonical, engine-updated); the
-// story adopts it with a tiny override patch ({"living-resolve": {"preset":
-// true}} - [[adopt-resource]] writes it), and may still override any field on
-// top. This keeps the lorebook entry small without giving up hand-editability.
-// =============================================================================
-
-// LIVING RESOLVE - one player character's ritual-born fusion: revenant vitae,
-// Awakened Quintessence, Resolve and Willpower as ONE metaphysical substance.
-// Spending 1 point spends 1 of each; the Willpower component grants ONE
-// un-cancelable success per roll when it isn't consumed by an activation cost
-// (`fuel` when it is; `fuel-surge` pays 1 extra to have it anyway). Rolls that
-// POOL it (Willpower/Resolve rolls) use min(10, current), and every point above
-// 10 shields a die of penalties. Recovers 1/day (+1 in the Umbra - the in-umbra
-// affliction is the gate), 20 each full moon; drinking vampiric vitae (immune
-// to the bond) and consuming Tass are [[gain living-resolve N]] moments.
+// LIVING RESOLVE - the unique fusion carried by ONE creature in the world (the
+// Ouroboros template below): revenant vitae, laham Resolve, Awakened
+// Quintessence and Willpower as ONE metaphysical substance. Spending 1 point
+// spends 1 of each; the Willpower component grants ONE un-cancelable success
+// per roll when it isn't consumed by an activation cost (`fuel` when it is;
+// `fuel-surge` pays 1 extra to have it anyway). Rolls that POOL it (Willpower/
+// Resolve rolls) use min(10, current), and every point above 10 shields a die
+// of penalties. Recovers 1/day (the revenant vitae brewing), +1 in the Umbra,
+// +1 rested in the sanctum (full-rested AND in-sanctum, simultaneously), 20
+// each full moon; drinking vampiric vitae (immune to the bond) and consuming
+// Tass are [[gain living-resolve N]] moments.
 export const LIVING_RESOLVE: ResourceDef = {
   name: "living-resolve", kind: "pool", start: 30, max: 30, perTurnLimit: 6,
   roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
   replaces: ["blood", "willpower", "resolve", "quintessence"],
   rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
   recovery: [
-    { amount: 1, per: "day" },
+    { amount: 1, per: "day", note: "revenant vitae" },
     { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
+    { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
     { amount: 20, per: "full-moon" },
   ],
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
@@ -555,23 +545,44 @@ export const LIVING_RESOLVE: ResourceDef = {
   },
 };
 
-export const RESOURCE_PRESETS: Record<string, ResourceDef> = {
-  "living-resolve": LIVING_RESOLVE,
-};
+// THE OUROBOROS - a UNIQUE template: the one creature in the world carrying
+// Living Resolve. Revenant + laham (Devil's Due demon-blooded, whence the
+// Resolve) + Awakened mage (Order of Hermes), created by a powerful witch in a
+// ritual involving Belial, the Great Beast. Still alive and human-souled
+// (Road/Humanity + Virtues), ghoul soak, and ONE pool - the fusion itself,
+// which answers to blood/willpower/resolve/quintessence by name and role.
+// His Foundation is Modus (see FELLOWSHIPS); Pillars: Anima/Corona/Primus/Vires.
+export const TEMPLATE_OUROBOROS = new TemplateConfig(
+  "Ouroboros (unique: revenant + laham + Awakened)",
+  RulesetConfig.MAGE,
+  [LIVING_RESOLVE],
+  GHOUL_SOAK,
+  HUMANITY_MORALITY, true
+);
 
-// An override patch may additionally say `preset: true` (or name one) to start
-// from a RESOURCE_PRESETS definition and merge the rest of the patch on top.
-export type ResourceOverridePatch = Partial<ResourceDef> & { preset?: boolean | string };
+export const TEMPLATES: Record<string, TemplateConfig> = {
+  mortal: TEMPLATE_MORTAL,
+  thrall: TEMPLATE_THRALL,
+  vampire: TEMPLATE_VAMPIRE,
+  mage: TEMPLATE_MAGE,
+  demon: TEMPLATE_DEMON,
+  werewolf: TEMPLATE_WEREWOLF,
+  ghoul: TEMPLATE_GHOUL,
+  revenant: TEMPLATE_REVENANT,
+  ouroboros: TEMPLATE_OUROBOROS,
+  sorcerer: TEMPLATE_SORCERER,
+};
 
 // The resources a character has = the union of its templates' resources, deduped
 // by name (first template wins for numbers; roles are merged). Unknown or zero
 // templates yield the mortal baseline (just Willpower). Story-level `overrides`
 // (the house-rule layer, e.g. from the configuration wizard or a hand-edited
 // lorebook entry) are applied last: a patch merges onto its resource by
-// normalized name; a patch with `preset` adopts the named preset (or the one
-// matching its key) as the base; and a patch naming a NEW resource (with
-// kind/start/max) adds a custom one.
-export function resourcesForTemplates(keys: string[], overrides?: Record<string, ResourceOverridePatch>): ResourceDef[] {
+// normalized name, and a patch naming a NEW resource (with kind/start/max) adds
+// a custom one. (A short-lived `preset` patch mechanism was removed - a unique
+// resource belongs to a unique TEMPLATE, not to the story-wide overrides layer;
+// stale `{"preset": true}` entries are simply ignored here.)
+export function resourcesForTemplates(keys: string[], overrides?: Record<string, Partial<ResourceDef>>): ResourceDef[] {
   const byName = new Map<string, ResourceDef>();
   const out: ResourceDef[] = [];
   const add = (def: ResourceDef): void => {
@@ -589,20 +600,10 @@ export function resourcesForTemplates(keys: string[], overrides?: Record<string,
   const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
   for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
 
-  for (const [name, rawPatch] of Object.entries(overrides ?? {})) {
+  for (const [name, patch] of Object.entries(overrides ?? {})) {
     const key = StringUtil.normalize(name);
-    const { preset, ...patch } = rawPatch;
-    const base = preset ? RESOURCE_PRESETS[StringUtil.normalize(typeof preset === "string" ? preset : key)] : undefined;
     const existing = byName.get(key);
-    if (base) {
-      const adopted: ResourceDef = { ...base, ...patch, name: base.name };
-      if (existing) {
-        Object.assign(existing, adopted);
-      } else {
-        byName.set(key, adopted);
-        out.push(adopted);
-      }
-    } else if (existing) {
+    if (existing) {
       Object.assign(existing, patch, { name: existing.name }); // a patch never renames
     } else if (patch.kind && patch.start !== undefined && patch.max !== undefined) {
       const custom: ResourceDef = { ...(patch as ResourceDef), name: key };
@@ -619,6 +620,31 @@ export function healthLevelsForTemplates(keys: string[]): HealthLevelDef[] {
   const t = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).find((x): x is TemplateConfig => !!x);
   return (t ?? TEMPLATE_MORTAL).HealthLevels;
 }
+
+// =============================================================================
+// FELLOWSHIPS - a mystic society's Foundation & Pillars, as data
+// -----------------------------------------------------------------------------
+// Ratings are ordinary `traits`-bucket entries on the character; a fellowship
+// record just names them (and glosses them for the Storyteller). [[cast]] uses
+// this to AUTO-DETECT the Foundation: with no foundation= argument and no
+// literal "foundation" trait, the first fellowship whose Foundation trait the
+// caster actually has (> 0) supplies it.
+// =============================================================================
+export interface Fellowship {
+  name: string;
+  foundation: string;                 // the Foundation TRAIT name
+  foundationGloss?: string;
+  pillars: Record<string, string>;    // pillar trait name -> gloss
+}
+
+export const FELLOWSHIPS: Record<string, Fellowship> = {
+  "order-of-hermes": {
+    name: "Order of Hermes",
+    foundation: "modus",
+    foundationGloss: "the Ouroboros - knowledge begets discipline and focus, which begets more knowledge",
+    pillars: { anima: "life", corona: "mind", primus: "magic itself", vires: "forces" },
+  },
+};
 
 // =============================================================================
 // MAGIC RULES - the Dark Ages: Mage "How Magic Works" numbers, as data
@@ -1012,13 +1038,25 @@ export const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
     mirror: "feral-whispers",
   }),
   // The spirit-world flag: nothing grants passage yet, but the gate exists -
-  // recovery rules with `requires: "in-umbra"` (Living Resolve's extra point
-  // per day) check for this affliction. [[afflict <name> in-umbra]] when the
-  // character crosses; [[lift]] when they return.
+  // recovery rules with `requires: "in-umbra"` (an extra Living Resolve /
+  // Quintessence point per day) check for this affliction. [[afflict in-umbra]]
+  // when the character crosses; [[lift]] when they return.
   makeAfflictionDef({
     name: "in-umbra",
     description: "Walking the spirit world, flesh and all",
     tags: ["in-umbra"],
+  }),
+  // The rest gates: recovery rules requiring BOTH at once ("full-rested" AND
+  // "in-sanctum") grant the extra daily point of Living Resolve / Quintessence.
+  makeAfflictionDef({
+    name: "full-rested",
+    description: "Eight full hours of sleep behind them",
+    tags: ["full-rested"],
+  }),
+  makeAfflictionDef({
+    name: "in-sanctum",
+    description: "Within their warded sanctum",
+    tags: ["in-sanctum"],
   }),
 ];
 

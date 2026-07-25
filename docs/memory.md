@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `cc85f35`** ("Living Resolve,
-> recovery on the clock, ghoul/revenant soak, and the Dark Ages: Mage casting
-> engine"). Prior: `d3a13fd` (document cleanup: the streaming-<hide> backstop +
-> noise age-out via onGenerationEnd); `f537584` (context hygiene); `baa8252`
-> (storyteller output: <hide> plans → Author's Note); `25c6a9a` (scenes);
-> `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient truth).
+> **Last synced with the code as of commit `1f5e7f2`** ("the Ouroboros:
+> Living Resolve becomes a unique template; Hermetic fellowship; the rest
+> gates"). Prior: `cc85f35` (Living Resolve, recovery on the clock,
+> ghoul/revenant soak, the Dark Ages: Mage casting engine); `d3a13fd` (document
+> cleanup); `f537584` (context hygiene); `baa8252` (<hide> plans → Author's
+> Note); `25c6a9a` (scenes); `cb5b4c3` (vendor script-types.d.ts).
 
 ---
 
@@ -393,9 +393,12 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   silver/fire handled by reaction instead).
 - **§7.33 additions**: `EffectOp.once` (fire once per spend);
   `ResourceDef.description?/recovery?: RecoveryRule[]/rollAs?: {cap?,
-  negatesPenaltiesAbove?}`; `RESOURCE_PRESETS` + `LIVING_RESOLVE` +
-  `ResourceOverridePatch {preset?}` resolved in `resourcesForTemplates`;
-  `TEMPLATE_REVENANT` (+ `revenant` key); the `in-umbra` DEFAULT_AFFLICTION;
+  negatesPenaltiesAbove?}` (`RecoveryRule.requires` = one gate or an ARRAY that
+  must ALL be active); `LIVING_RESOLVE` owned by **`TEMPLATE_OUROBOROS`**
+  (unique) + `TEMPLATE_REVENANT` (+ `revenant`/`ouroboros` keys); `FELLOWSHIPS`
+  (Order of Hermes: Modus + Anima/Corona/Primus/Vires); the `in-umbra` /
+  `full-rested` / `in-sanctum` DEFAULT_AFFLICTIONS; mage Quintessence gained
+  the umbra + rested-in-sanctum recovery rules;
   `MagicRules`/`DEFAULT_MAGIC_RULES`/`MAGIC_KNOB_NAMES`/`magicRulesFrom`
   (knob overlay, unknown/non-numeric ignored); Mage Quintessence effect
   gained `limits.maxPerUse 3` + Fount/min-diff label.
@@ -598,9 +601,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 **§7.33 additions**: `MagicRulesConfig` (MapConfigStore<number>,
 `wod:config:magic`, self-registers in ALL_CONFIG_STORES); `CastAttempts`
 (`cast:<char>` scene-scoped spell-retry ledger — `get`/`record`, lazy reset on
-scene change, success deletes the spell's entry); `ResourceOverrides` retyped
-to `ResourceOverridePatch` (preset adoption); `CharacterResources.defsFor`
-unchanged but now sees preset-resolved defs.
+scene change, success deletes the spell's entry).
 
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
@@ -766,9 +767,12 @@ specDiceMod, extra)` (mutating; returns the note) called from BOTH
 `rollAndReport`. `launchExtended` opts gained `firstExtra`/`preNotes`.
 `applyRecovery(from, to)` + wiring in `cmdAdvanceTime`; `cmdStoryDate` shows
 `nextFullMoon`. **MAGIC section** after `cmdResources`: `parsePillars`,
-`grantsUncancelableOnSpend`, `cmdCast`, `cmdSealSpell`, `cmdAdoptResource`
-(QUIET). `cmdResources` lines gained perTurn/rollAs/recovery/description.
-Registrations: `cast`, `seal-spell`, `adopt-resource`.
+`grantsUncancelableOnSpend`, `cmdCast`, `cmdSealSpell`, `resolveFoundation`
+(explicit foundation= → a literal `foundation` trait → the first FELLOWSHIPS
+Foundation the caster actually has), `cmdFellowships` (QUIET). `applyRecovery`
+gates accept an array (ALL must be active). `cmdResources` lines gained
+perTurn/rollAs/recovery/description. Registrations: `cast`, `seal-spell`,
+`fellowships`.
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -1098,8 +1102,7 @@ once-per-session reconciliation-modal guard).
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
 (`wod:named-rolls:library` JSON map) · `wod:config` (entries: `general`
 seeded global-config card, unread for now; `wod:config:resources` overrides
-map — a patch may carry `preset: true` to adopt a `RESOURCE_PRESETS` def, §7.33;
-**`wod:config:magic`** spellcasting knob map, kebab-case name → number overlaid
+map; **`wod:config:magic`** spellcasting knob map, kebab-case name → number overlaid
 on `DEFAULT_MAGIC_RULES`; `wod:config:constraints` constraint groups;
 `wod:config:afflictions` affliction-def overlay — each array or `name → def`
 map) ·
@@ -1628,12 +1631,11 @@ and `prefill` are mocked/available but not yet written.
     fortitude — the user's erratum "they are alive... but the rules say so");
     TEMPLATE_GHOUL switched from MORTAL_SOAK; new **TEMPLATE_REVENANT**
     (ghoul-like, blood 10/10 START FULL + `recovery 1/day`, key `revenant`).
-    *Living Resolve as data:* `RESOURCE_PRESETS` + `LIVING_RESOLVE` in rules.ts;
-    an override patch `{preset: true}` (or naming one) starts from the preset
-    and merges the rest on top — `resourcesForTemplates` resolves it;
-    **`[[adopt-resource]]`** (QUIET) writes the tiny patch; adoption is
-    STORY-LEVEL (overrides apply to every character — fine for the lone
-    protagonist; a per-character scope would need new machinery). The def:
+    *Living Resolve as data:* `LIVING_RESOLVE` in rules.ts, owned by the unique
+    `TEMPLATE_OUROBOROS` (§7.34 — it FIRST shipped as a story-wide "resource
+    preset" adopted via `[[adopt-resource]]`; the user corrected that same day:
+    he is the only creature in the world with it, so it belongs to a template).
+    The def:
     pool 30/30, perTurnLimit 6 (surfaced ST), roles blood/willpower/resolve/
     magic-fuel/quintessence, replaces all four, rollAs {10, 10}, recovery
     [1/day; 1/day requires in-umbra; 20/full-moon], effects: default = +1
@@ -1673,6 +1675,43 @@ and `prefill` are mocked/available but not yet written.
     5×N magic-fuel + ceil(that/10) Willpower; a FUSED payer (one def fills
     both roles) pays max(the two) once and says so; partial payment = "owed,
     payable over time (ST tracks)".
+34. **The Ouroboros: a UNIQUE template, the Hermetic fellowship, and the rest
+    gates** (user, correcting §7.33 the same day: "every character should not
+    get this pool. He's actually the only creature in the world with this pool.
+    You could make him a unique template").
+    *Why it matters:* the resource-overrides layer is STORY-WIDE, so adopting a
+    one-of-a-kind resource there gave it to everyone. A unique creature is a
+    unique TEMPLATE — that's what templates are for, and the union-of-templates
+    resource rule (§7.18) then does the work for free.
+    **`TEMPLATE_OUROBOROS`** ("Ouroboros (unique: revenant + laham + Awakened)",
+    key `ouroboros`): revenant + laham (whence the Resolve) + Awakened Hermetic,
+    made by a powerful witch in a ritual involving Belial, the Great Beast.
+    RulesetConfig.MAGE, GHOUL_SOAK, Road/Humanity + Virtues (still alive), and
+    exactly ONE pool — `LIVING_RESOLVE`, moved above the templates so it can be
+    referenced there. **REMOVED**: `RESOURCE_PRESETS`,
+    `ResourceOverridePatch`/`preset`, and `[[adopt-resource]]` — a stale
+    `{"preset": true}` patch in an existing story is now simply inert (it names
+    no template resource and lacks kind/start/max, so `resourcesForTemplates`
+    ignores it — no migration needed).
+    **`FELLOWSHIPS`** (rules.ts): a mystic society's Foundation + Pillars as
+    data. Shipped: **Order of Hermes** — Foundation **Modus** (*the Ouroboros*:
+    knowledge begets discipline and focus, which begets more knowledge), Pillars
+    **Anima** (life), **Corona** (mind), **Primus** (magic itself), **Vires**
+    (forces) — the user picked Pillars-as-Spheres deliberately, "so as to not
+    have to learn complicated weird spheres". Ratings stay ordinary `traits`
+    entries; `resolveFoundation` makes `foundation=` OPTIONAL (explicit → a
+    literal `foundation` trait → the first fellowship Foundation the caster has
+    > 0), and the no-Foundation refusal now lists the known ones.
+    **`[[fellowships]]`** (QUIET) lists/details them.
+    **The rest gates**: `RecoveryRule.requires` accepts `string | string[]` — an
+    array must ALL be active SIMULTANEOUSLY (`applyRecovery` checks every gate).
+    New afflictions **`full-rested`** (eight hours of sleep) and
+    **`in-sanctum`**; both Living Resolve AND the mage's Quintessence gained
+    `+1/day if in-umbra` and `+1/day if full-rested+in-sanctum` (Quintessence
+    still has no daily brew of its own — only the gated rules). Living
+    Resolve's base 1/day is now labelled "revenant vitae" (it IS the revenant
+    daily point, per the user), and `[[resources]]` renders multi-gates as
+    "if full-rested+in-sanctum".
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

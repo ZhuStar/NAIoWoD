@@ -24,7 +24,7 @@ import {
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
-  EffectOp, resolveMeritInstance, passiveOpsOf,
+  EffectOp, resolveMeritInstance, passiveOpsOf, ResourceOverridePatch,
 } from "./rules";
 import {
   ScopedStorage, LorebookManager, MeritFlawRegistry,
@@ -1155,14 +1155,31 @@ export const AFFLICTIONS_ENTRY = "wod:config:afflictions";
 export const TABLES_CATEGORY = "wod:config:success-tables";
 
 // The house-rule layer for resources: a map resourceName -> partial def.
-export const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
+export const ResourceOverrides = new MapConfigStore<ResourceOverridePatch>({
   entry: RESOURCE_CONFIG_ENTRY,
   header: [
     "Story overrides for resources (the house-rule layer). The JSON below the",
     "marker maps a resource name to the fields you want to change (start, max,",
     "roles, effect, effects, ...). A name that matches no template resource and",
-    "carries kind/start/max adds a custom resource. [[configure-resources]]",
-    "edits this for you; you may also edit it by hand in creator mode.",
+    "carries kind/start/max adds a custom resource; {\"preset\": true} adopts",
+    "the engine preset of the same name ([[adopt-resource]] writes this).",
+    "[[configure-resources]] edits this for you; you may also edit it by hand",
+    "in creator mode.",
+  ],
+});
+
+// The magic-rules knob layer: kebab-case knob name -> number, overlaid on
+// DEFAULT_MAGIC_RULES by rules.ts' magicRulesFrom (see MAGIC_KNOB_NAMES).
+export const MAGIC_CONFIG_ENTRY = "wod:config:magic";
+export const MagicRulesConfig = new MapConfigStore<number>({
+  entry: MAGIC_CONFIG_ENTRY,
+  header: [
+    "Spellcasting knob overrides (Dark Ages: Mage). The JSON below the marker",
+    "maps a knob name to a number; unset knobs keep their defaults. Knobs:",
+    "simple-base (4), complex-base (5), difficulty-cap (10; the book plays 9),",
+    "min-difficulty (4), quintessence-per-turn (3), quintessence-free-limit (2),",
+    "retry-penalty (1), botch-retry-penalty (2), ongoing-multiplier (10),",
+    "ongoing-fuel-per-success (1), seal-per-pillar-dot (5), seal-willpower-per (10).",
   ],
 });
 
@@ -1608,6 +1625,48 @@ export class EffectUses {
   }
   static async resetAll(char: PlayableCharacter): Promise<void> {
     await EffectUses._storage.delete(EffectUses._key(char.name));
+  }
+}
+
+// =============================================================================
+// CAST ATTEMPTS - the same-scene spell-retry ledger (Dark Ages: Mage)
+// -----------------------------------------------------------------------------
+// Retrying a failed spell in the same scene costs +1 difficulty per prior
+// unsuccessful attempt - or +2 per prior attempt once any of them BOTCHED. The
+// ledger (cast:<char>) keys spells by label (else the pillar signature) and is
+// scoped to ONE scene: reads from a different scene than the one stored see an
+// empty ledger (lazy reset - no scene-change hook needed). A successful casting
+// clears its spell's entry.
+// =============================================================================
+export interface CastRecord { unsuccessful: number; botched: boolean; }
+interface CastLedger { scene: string; spells: Record<string, CastRecord>; }
+
+export class CastAttempts {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `cast:${StringUtil.normalize(name)}`; }
+
+  private static async _ledger(char: PlayableCharacter, scene: string): Promise<CastLedger> {
+    const raw = (await CastAttempts._storage.get(CastAttempts._key(char.name))) as CastLedger | undefined;
+    return raw && raw.scene === scene ? raw : { scene, spells: {} };
+  }
+
+  static async get(char: PlayableCharacter, scene: string, spell: string): Promise<CastRecord> {
+    const ledger = await CastAttempts._ledger(char, scene);
+    return ledger.spells[StringUtil.normalize(spell)] ?? { unsuccessful: 0, botched: false };
+  }
+  // Record one attempt's outcome. Success clears the spell's entry; a failure
+  // increments it (marking `botched` when it was one).
+  static async record(char: PlayableCharacter, scene: string, spell: string, outcome: "success" | "failure" | "botch"): Promise<void> {
+    const ledger = await CastAttempts._ledger(char, scene);
+    const key = StringUtil.normalize(spell);
+    if (outcome === "success") delete ledger.spells[key];
+    else {
+      const rec = ledger.spells[key] ?? { unsuccessful: 0, botched: false };
+      rec.unsuccessful += 1;
+      if (outcome === "botch") rec.botched = true;
+      ledger.spells[key] = rec;
+    }
+    await CastAttempts._storage.set(CastAttempts._key(char.name), ledger);
   }
 }
 

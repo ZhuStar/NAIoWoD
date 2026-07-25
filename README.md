@@ -167,9 +167,13 @@ soakable and which traits form the dice pool. Out of the box:
 
 | Template | Bashing | Lethal | Aggravated |
 | --- | --- | --- | --- |
-| Mortal / Thrall / Mage / Ghoul | Stamina | — | — |
+| Mortal / Thrall / Mage | Stamina | — | — |
 | Vampire | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
+| Ghoul / Revenant | Stamina + Fortitude | Stamina + Fortitude | Fortitude only |
 | Demon / Werewolf | Stamina | Stamina | Stamina |
+
+> Ghouls and revenants, though alive, **soak lethal with Stamina + Fortitude** —
+> the rules just say so; the vitae in their veins does the knitting.
 
 > The **Werewolf** template is a modern-WoD illustration (not Dark Ages canon),
 > included so the kind/severity system has a regenerator — and a silver
@@ -188,9 +192,13 @@ per-template starting-value constraints. Examples baked in:
 - **Mage** — **no** Road/Humanity and **no** Virtues; has Quintessence (no
   Paradox in this line). Magic is **Foundation & Pillars** — traits, modelled
   with the other powers later.
-- **Ghoul** — a mortal (Road/Humanity + Virtues, mortal soak) plus a **Blood**
-  pool it doesn't generate (fed by a domitor, starts empty). Also 2 Discipline
-  dots incl. Potence at creation — pending the powers system, seed via `traits`.
+- **Ghoul** — a mortal (Road/Humanity + Virtues) with ghoul soak plus a
+  **Blood** pool it doesn't generate (fed by a domitor, starts empty). Also 2
+  Discipline dots incl. Potence at creation — pending the powers system, seed
+  via `traits`.
+- **Revenant** — born ghouled: same soak and Disciplines, but the Blood pool
+  starts **full** and **brews itself back — 1/day on the story clock** (a
+  `recovery` rule; see *Recovery and the moon*).
 
 ```ts
 import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src";
@@ -704,6 +712,31 @@ default start (`1197-01-01-00`) you override once.
 
 Scenes (below) build on this clock; combat's 3-second turns march it in beats.
 
+### Recovery and the moon
+
+Resources can carry **`recovery` rules** (`RecoveryRule` in `src/rules.ts`):
+so-much **per day**, or **per full moon**, optionally gated on an active
+affliction. When `[[advance-time]]` crosses **UTC midnights** or **full-moon
+instants**, it credits every character's recovery-bearing resources and reports
+exactly what it granted — split advances accumulate correctly (each midnight is
+counted once, whichever hop crossed it), and rewinds recover nothing.
+
+```
+[[advance-time 3d]]
+→ Time advances: … Recovery: Marius +3 living-resolve -> 8/30 (1/day×3).
+[[advance-time 8d]]          # crossing a full moon
+→ … Recovery: Marius +25 living-resolve -> 30/30 (1/day×8, 🌕 20/full-moon×1).
+```
+
+- The **moon is real**: full moons ride the mean synodic cycle (29.530588853
+  days, anchored to the 2000-01-06 new moon), which works proleptically in 1197
+  and stays within hours of the true phase. `[[story-date]]` shows the next one.
+- A rule with **`requires`** fires only while the matching **affliction** is
+  active: Living Resolve's `+1/day if in-umbra` turns on when the character is
+  `[[afflict in-umbra]]`-ed (the shipped `in-umbra` affliction is exactly this
+  encoded flag — nothing grants passage to the spirit world *yet*).
+- The revenant's `1/day` vitae uses the same machinery.
+
 ### Scenes — the named unit of play
 
 A **scene** is the book's basic unit: one location, and as many turns as it
@@ -800,12 +833,17 @@ Storyteller-adjudicated until their interpreter lands — nothing is hardcoded.
 ```
 
 - **Ops with interpreters today**: `difficulty` / `dice` / `successes` /
-  `nagain` (roll modifiers — an optional `target` names an **action tag** the
-  roll must carry, e.g. only `tags=melee` rolls); `increase` (raise a trait via
-  the boost layer — `target` is a constraint: a group like `physical`, a bucket
-  like `abilities`, or a specific trait; supports `fillToCap` and caps as **pool
-  expressions** like `"stamina+3"`); `heal` (`target` = `"bashing,lethal"` or
-  `"all"`, worst first). Anything else is preserved and noted for the ST.
+  `nagain` / `uncancelable` (roll modifiers — an optional `target` names an
+  **action tag** the roll must carry, e.g. only `tags=melee` rolls;
+  `uncancelable` grants successes **rolled 1s can never cancel** — the roll
+  always nets at least that many, a botch is impossible, and the dice line
+  shows `+N sure`); `increase` (raise a trait via the boost layer — `target`
+  is a constraint: a group like `physical`, a bucket like `abilities`, or a
+  specific trait; supports `fillToCap` and caps as **pool expressions** like
+  `"stamina+3"`); `heal` (`target` = `"bashing,lethal"` or `"all"`, worst
+  first). Anything else is preserved and noted for the ST. An op marked
+  **`once: true`** fires once per spend no matter how many points rode it
+  ("3 points of focus = −3 difficulty but still ONE sure success").
 - **Costs**: `units` per application, `buys` (one resource unit → several effect
   units), and `reducedBy` — a roll whose net successes cut the price, possibly
   to zero (Iron Will-style).
@@ -821,6 +859,87 @@ Storyteller-adjudicated until their interpreter lands — nothing is hardcoded.
   rolls, and boosted traits resolve higher until cleared.
 - Current values persist per character (story storage) and default to the
   template start until changed — nothing needs allocating to start playing.
+
+### Living Resolve — a preset resource, and how presets work
+
+**Resource presets** are complete `ResourceDef`s kept in the engine
+(`RESOURCE_PRESETS` in `src/rules.ts`) that a story adopts with one command —
+the lorebook override entry stays a tiny `{"preset": true}` reference you can
+still layer field overrides onto. Adoption is **story-level** (the overrides
+layer applies to every character), which suits a lone protagonist.
+
+```
+[[adopt-resource]]                  # list what's on the shelf
+[[adopt-resource living-resolve]]   # adopt it; [[resources]] shows the result
+```
+
+**Living Resolve** is the flagship: one character's ritual-born fusion of
+revenant vitae, Awakened Quintessence, Resolve and Willpower into a single
+substance — a 30-point pool, starting full, spend up to 6/turn (ST-enforced).
+Spending 1 point spends 1 of *each* component:
+
+- It **replaces** blood/willpower/resolve/quintessence and answers to their
+  names and roles — every vitae trick (heal, `boost` a Physical), every power
+  that burns Resolve or Willpower, all spell fuel.
+- **The fused Willpower grants ONE un-cancelable success per roll** whenever a
+  dice pool is involved — the default spend, and a `once`-op rider on `focus`
+  (casting) and `fuel-surge`. When a power *consumes* the Willpower as its
+  activation cost, use `fuel` (no free success) — or `fuel-surge` (1 extra
+  point buys it anyway).
+- **Rolls that pool it** (Willpower/Resolve rolls) roll **min(10, current)** —
+  and every point above 10 **shields a die of penalties** (wound penalties,
+  negative dice mods) on that roll (`rollAs` in the def).
+- **Recovery**: 1/day, +1/day in the Umbra (`in-umbra` gate), **20 every full
+  moon** — all on the story clock; drinking vampiric vitae (bond-immune) and
+  consuming Tass are `[[gain living-resolve N]]` moments.
+
+### Casting magic — Dark Ages: Mage
+
+The whole *How Magic Works* chapter is executable. Foundation and Pillar
+**ratings** live on the character (the free `traits` bucket — e.g.
+`"sensitivity": 3, "trickster": 4`); the **required levels** are what the
+desired effect needs — play-time input, per pillar, never baked anywhere. Every
+number is a knob (`DEFAULT_MAGIC_RULES`, overridable per-knob in the
+`wod:config:magic` lorebook entry).
+
+```
+[[cast pillars="trickster:2" foundation=sensitivity]]              # simple: diff 4+2
+[[cast pillars="warrior:4,chieftain:2" foundation=sensitivity quintessence=2]]
+                                                                   # complex: diff 5+4+1, −2
+[[cast pillars="warrior:4" foundation=sensitivity requires=6 extended=true interval="one hour"]]
+[[cast pillars="trickster:2" foundation=sensitivity requires=2 ongoing=true]]
+[[seal-spell pillar=3]]            [[seal-spell pillar=3 pay=true]]
+```
+
+- **Simple spell** (one pillar): roll Foundation + Pillar vs **4 + required
+  level**. **Complex** (several): Foundation + the highest-required Pillar + 1
+  die per extra, vs **5 + highest required + 1 per extra** (ties: your best
+  score rolls).
+- You must **know each Pillar at the required level**, and when the required
+  level **outstrips your Foundation** the casting *requires* a stabilizing
+  point of Quintessence (spent via the `magic-fuel` role — Living Resolve
+  qualifies, and being the fused substance, **grants its un-cancelable success
+  automatically** on any casting it fuels).
+- **`quintessence=N`** spends *extra* points at **−1 difficulty each** — max 3
+  per turn including the stabilizer (>2 flags the **Fount Background**), never
+  below **difficulty 4**.
+- **Over the cap** (default **10** — this chronicle's ruling; set
+  `difficulty-cap` to 9 for the book's rule), difficulty converts to **+1
+  required success per excess point**, and reductions **buy those off first**
+  before lowering the die target — the book's ordering, by arithmetic.
+- **Same-scene retries**: +1 difficulty per prior unsuccessful casting of the
+  same spell (keyed by `label=`, else the pillar signature) — or **+2 per prior
+  attempt once one botched**. A success clears the slate; so does a new scene.
+- **A botch is Backlash**: the spell fails utterly (extended castings end,
+  successes lost — `on-botch=` can soften it) and the Storyteller describes
+  the price (Backlash systems not yet modelled).
+- **Extended** spells accrue ST-set successes over intervals (`requires=N`,
+  `interval=…`) through the extended-roll machinery (`[[continue-roll]]`).
+  **Ongoing** spells need **×10 successes**, burn **1 magic-fuel per success**
+  as they land (ST-enforced), and end with **`[[seal-spell]]`**: 5 Quintessence
+  per dot of the highest Pillar + 1 Willpower per 10 of that (rounded up) —
+  quoted as a debt, `pay=true` to spend now, and a **fused payer covers both
+  components with the same points**.
 
 ### Configuration wizards & house rules
 

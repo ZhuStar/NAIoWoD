@@ -27,6 +27,9 @@ export interface RollSpec {
   requires: number;       // successes needed to count as a success (default 1)
   diceMod: number;        // +/- dice added to the resolved pool (default 0)
   tags: string[];         // contextual mechanic keys (normalized)
+  difficultyCap?: number; // ceiling the die target clamps to (default 10); anything
+                          // above it becomes +1 required success per point - Mage
+                          // spellcasting sets 10 (or the book's 9) here
 }
 
 // Fill defaults and normalize tags. `requires` is at least 1.
@@ -40,6 +43,7 @@ export function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollS
     tags: (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0),
   };
   if (parts.difficultyExpr && parts.difficultyExpr.trim()) spec.difficultyExpr = parts.difficultyExpr.trim();
+  if (parts.difficultyCap !== undefined) spec.difficultyCap = Math.max(2, Math.min(10, parts.difficultyCap));
   return spec;
 }
 
@@ -79,6 +83,7 @@ export interface RollModifier {
   difficultyMod?: number;
   diceMod?: number;
   autoSuccesses?: number;
+  uncancelableSuccesses?: number; // successes 1s can never cancel (fused Willpower)
   nAgain?: number;         // tighten n-again (e.g. 9 for 9-again); never loosens
 }
 
@@ -91,6 +96,11 @@ export const DEFAULT_ROLL_MODIFIERS: RollModifier[] = [
   { tag: "Ambidextrous", describe: "Ambidextrous: cancels the off-hand penalty.", difficultyMod: -1 },
   { tag: "Willpower", describe: "Spent Willpower: +1 automatic success.", autoSuccesses: 1 },
   { tag: "specialty", describe: "Relevant specialty: 9s count again (9-again).", nAgain: 9 },
+  // Identity tags [[cast]] stamps on every spell roll: no effect of their own,
+  // but magic-keyed powers/effects gate on them (target:"magic"), and they must
+  // not read as typos.
+  { tag: "magic", describe: "A spell roll." },
+  { tag: "cast", describe: "The casting action." },
 ];
 
 export class RollModifierRegistry {
@@ -118,13 +128,14 @@ export interface ResolvedRoll {
   spec: RollSpec;
   breakdown: PoolBreakdown;
   dice: number;               // pool after diceMod (>= 0)
-  dieDifficulty: number;      // clamped to [2, 10] - what the dice actually use
-  requires: number;           // successes needed (incl. any over-10 surcharge)
+  dieDifficulty: number;      // clamped to [2, cap] - what the dice actually use
+  requires: number;           // successes needed (incl. any over-cap surcharge)
   automaticSuccesses: number;
+  uncancelableSuccesses: number;
   nAgain: number;
-  rawDifficulty: number;      // pre-clamp difficulty (may exceed 10 or dip below 2)
-  overflow: number;           // max(0, rawDifficulty - 10)
-  impossible: boolean;        // over-10 under the "impossible" policy
+  rawDifficulty: number;      // pre-clamp difficulty (may exceed the cap or dip below 2)
+  overflow: number;           // max(0, rawDifficulty - cap)
+  impossible: boolean;        // over-cap under the "impossible" policy
   appliedTags: string[];
   unknownTags: string[];
   notes: string[];
@@ -138,6 +149,7 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
   let difficulty = baseDifficulty + spec.difficultyMod;
   let dice = breakdown.total + spec.diceMod;
   let automaticSuccesses = 0;
+  let uncancelableSuccesses = 0;
   let nAgain = 10;
   const appliedTags: string[] = [];
   const unknownTags: string[] = [];
@@ -148,6 +160,7 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
     difficulty += mod.difficultyMod ?? 0;
     dice += mod.diceMod ?? 0;
     automaticSuccesses += mod.autoSuccesses ?? 0;
+    uncancelableSuccesses += mod.uncancelableSuccesses ?? 0;
     if (mod.nAgain !== undefined) nAgain = Math.min(nAgain, mod.nAgain);
   }
 
@@ -156,26 +169,32 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
     difficulty += opts.extra.difficultyMod ?? 0;
     dice += opts.extra.diceMod ?? 0;
     automaticSuccesses += opts.extra.autoSuccesses ?? 0;
+    uncancelableSuccesses += opts.extra.uncancelableSuccesses ?? 0;
     if (opts.extra.nAgain !== undefined) nAgain = Math.min(nAgain, opts.extra.nAgain);
   }
 
+  // The cap is the ceiling the die target clamps to (default 10); every point of
+  // difficulty above it becomes a required success instead. Because reductions
+  // subtract from the RAW difficulty, they strip that surcharge first and only
+  // then lower the die target - the book's ordering, by arithmetic.
+  const cap = Math.max(2, Math.min(10, spec.difficultyCap ?? 10));
   const rawDifficulty = difficulty;
-  const dieDifficulty = Math.max(2, Math.min(10, rawDifficulty));
-  const overflow = Math.max(0, rawDifficulty - 10);
+  const dieDifficulty = Math.max(2, Math.min(cap, rawDifficulty));
+  const overflow = Math.max(0, rawDifficulty - cap);
   const policy = opts.overDifficulty ?? "extra-success";
   const impossible = overflow > 0 && policy === "impossible";
 
   let requires = Math.max(1, spec.requires);
   const notes: string[] = [];
   if (overflow > 0) {
-    if (impossible) notes.push(`difficulty ${rawDifficulty} exceeds 10 -> impossible`);
-    else { requires += overflow; notes.push(`difficulty ${rawDifficulty} > 10 -> +${overflow} required success${overflow === 1 ? "" : "es"}`); }
+    if (impossible) notes.push(`difficulty ${rawDifficulty} exceeds ${cap} -> impossible`);
+    else { requires += overflow; notes.push(`difficulty ${rawDifficulty} > ${cap} -> +${overflow} required success${overflow === 1 ? "" : "es"}`); }
   }
   if (unknownTags.length) notes.push(`unknown tag${unknownTags.length === 1 ? "" : "s"}: ${unknownTags.join(", ")}`);
 
   return {
     spec, breakdown, dice: Math.max(0, dice), dieDifficulty, requires,
-    automaticSuccesses, nAgain, rawDifficulty, overflow, impossible, appliedTags, unknownTags, notes,
+    automaticSuccesses, uncancelableSuccesses, nAgain, rawDifficulty, overflow, impossible, appliedTags, unknownTags, notes,
   };
 }
 
@@ -197,6 +216,7 @@ export function executeRoll(
     difficulty: resolved.dieDifficulty,
     nAgain: resolved.nAgain,
     automaticSuccesses: resolved.automaticSuccesses,
+    uncancelableSuccesses: resolved.uncancelableSuccesses,
     rng: opts.rng,
     label: prettyPool(spec.pool) || "Pool",
   });
@@ -233,6 +253,7 @@ export function overrideSpec(base: RollSpec, overrides: Partial<RollSpec>): Roll
   if (overrides.requires !== undefined) merged.requires = Math.max(1, overrides.requires);
   if (overrides.diceMod !== undefined) merged.diceMod = overrides.diceMod;
   if (overrides.tags !== undefined) merged.tags = overrides.tags.map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  if (overrides.difficultyCap !== undefined) merged.difficultyCap = overrides.difficultyCap;
   return merged;
 }
 
@@ -243,6 +264,7 @@ export function describeSpec(spec: RollSpec): string {
   if (spec.requires !== 1) parts.push(`requires ${spec.requires}`);
   if (spec.diceMod) parts.push(`dice ${spec.diceMod > 0 ? "+" : ""}${spec.diceMod}`);
   if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);
+  if (spec.difficultyCap !== undefined && spec.difficultyCap !== 10) parts.push(`cap ${spec.difficultyCap}`);
   return parts.join(", ");
 }
 

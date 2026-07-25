@@ -13,7 +13,10 @@
 import { StringUtil } from "./core/traits";
 import { Rng } from "./core/dice";
 import { SeverityName, HealthSummary } from "./core/damage";
-import { parseStoryDate, formatStoryDate, parseDuration, diffCalendar, formatCalendarSpan, Duration } from "./core/time";
+import {
+  parseStoryDate, formatStoryDate, parseDuration, diffCalendar, formatCalendarSpan, Duration,
+  countDayBoundaries, countFullMoons, nextFullMoon,
+} from "./core/time";
 import {
   TEMPLATES, ResourceDef, resourceEffect,
   EffectSpec, EffectOp, describeEffect,
@@ -22,6 +25,7 @@ import {
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
+  magicRulesFrom, RESOURCE_PRESETS,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
@@ -53,6 +57,7 @@ import {
   ConstraintRegistry, AfflictionRegistry,
   ActiveAffliction, CharacterAfflictions,
   CharacterResources, CharacterHealth, CharacterBoosts, EffectUses,
+  MagicRulesConfig, CastAttempts,
   ActiveWizard, WizardSession, CreatorMode,
 } from "./state";
 
@@ -360,7 +365,7 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
 }
 
 // Ops the roll pipeline executes directly (as the roll's `extra` modifier).
-const ROLL_OPS = new Set(["difficulty", "dice", "successes", "nagain"]);
+const ROLL_OPS = new Set(["difficulty", "dice", "successes", "nagain", "uncancelable"]);
 const isRollOp = (o: EffectOp): boolean => ROLL_OPS.has(o.op.toLowerCase());
 
 // =============================================================================
@@ -447,9 +452,14 @@ async function applyEffectSpec(
         if (!(opts.rollTraits ?? []).includes(wanted)) { notes.push(`${kind} needs a roll using "${wanted}" - skipped`); continue; }
       }
       anyRollOp = true;
-      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + (op.amount ?? 1) * effectUnits;
-      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + (op.amount ?? 1) * effectUnits;
-      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + (op.amount ?? 1) * effectUnits;
+      // An op marked `once` fires once per spend, however many units rode it
+      // (Living Resolve's "ONE un-cancelable success per roll, whatever else
+      // the points bought").
+      const mult = op.once ? 1 : effectUnits;
+      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + (op.amount ?? 1) * mult;
+      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + (op.amount ?? 1) * mult;
+      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + (op.amount ?? 1) * mult;
+      else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + (op.amount ?? 1) * mult;
       else if (kind === "nagain") extra.nAgain = Math.min(extra.nAgain ?? 10, op.amount ?? 10);
     } else if (kind === "increase") {
       const res = CharacterBoosts.resolveIncreaseTarget(char, op.target, opts.targetArg);
@@ -527,19 +537,54 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
   return { extra: r.extra, note: `${r.notes.join("; ")}: ${e.label}` };
 }
 
-// A character's live roll environment: traits + active boosts, and the wound
-// penalty to fold into the dice pool. Shared by rolls and contests.
-async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n: string) => number; penalty: number }> {
+// A resource the character ROLLS as a trait (def.rollAs): pooling its name (or
+// a name it replaces) resolves to min(cap, current). Living Resolve's Willpower/
+// Resolve rolls work this way - and its points above the shield threshold
+// negate dice of penalties (applyPenaltyShield).
+interface RollAsBinding { def: ResourceDef; current: number; names: string[] }
+
+// A character's live roll environment: traits + active boosts, the wound
+// penalty to fold into the dice pool, and any rollAs resource bindings.
+// Shared by rolls and contests.
+async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n: string) => number; penalty: number; rollAs: RollAsBinding[] }> {
   const boosts = await CharacterBoosts.all(char);
   const enh = enhancementsFor(char);   // Trait Enhancement: permanent, beside the temporary boosts
   const penalty = (await CharacterHealth.summary(char)).penalty;
+  const rollAs: RollAsBinding[] = [];
+  for (const view of await CharacterResources.all(char)) {
+    if (!view.def.rollAs) continue;
+    rollAs.push({
+      def: view.def, current: view.current,
+      names: [view.def.name, ...(view.def.replaces ?? [])].map(n => StringUtil.normalize(n)),
+    });
+  }
   return {
     resolver: (n: string): number => {
       const key = StringUtil.normalize(n);
+      const bound = rollAs.find(b => b.names.includes(key));
+      if (bound) return Math.max(0, Math.min(bound.def.rollAs?.cap ?? Infinity, bound.current));
       return resolveTraitFromRecord(char, key) + (enh[key] ?? 0) + (boosts[key] ?? 0);
     },
     penalty,
+    rollAs,
   };
+}
+
+// The penalty shield: when the roll's POOL used a rollAs resource with
+// `negatesPenaltiesAbove`, each point above that threshold negates 1 die of the
+// roll's reductions (the wound penalty + explicit negative dice mods already in
+// `extra`/the spec). Mutates `extra`; returns the note ("" when nothing
+// shielded). Tag-driven dice reductions inside resolveSpec are NOT seen here
+// (recorded limitation).
+function applyPenaltyShield(rollAs: RollAsBinding[], poolTraits: string[], specDiceMod: number, extra: Partial<RollModifier>): string {
+  const bound = rollAs.find(b => b.def.rollAs?.negatesPenaltiesAbove !== undefined && b.names.some(n => poolTraits.includes(n)));
+  if (!bound) return "";
+  const shield = Math.max(0, bound.current - (bound.def.rollAs?.negatesPenaltiesAbove ?? Infinity));
+  const reductions = Math.max(0, -(extra.diceMod ?? 0)) + Math.max(0, -specDiceMod);
+  const offset = Math.min(shield, reductions);
+  if (offset <= 0) return "";
+  extra.diceMod = (extra.diceMod ?? 0) + offset;
+  return `${bound.def.name} shields ${offset} ${offset === 1 ? "die" : "dice"} of penalties`;
 }
 
 // Which traits a POOL expression actually resolves (normalized). This is the
@@ -574,6 +619,7 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
       if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + amount;
       else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + amount;
       else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + amount;
+      else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + amount;
       else if (kind === "nagain") { extra.nAgain = Math.min(extra.nAgain ?? 10, amount); }
       const who = `${StringUtil.normalize(inst.def.name)}${inst.param ? ` (${inst.param})` : ""}`;
       notes.push(`${who}: ${kind} ${amount > 0 ? "+" : ""}${amount}`);
@@ -672,20 +718,22 @@ async function extendedTableNote(raw: string | undefined, outcome: RollOutcomeKi
 // the pool's traits AND the roll's tags - this is how a `climb` tag lets a
 // grip power's `-2 difficulty` reach an extended climb). No spend/specialty
 // here - those are single-roll concerns.
-async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: CommandContext): Promise<{ exec: RollExecution; notes: string[] }> {
+async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: CommandContext, seed?: Partial<RollModifier>): Promise<{ exec: RollExecution; notes: string[] }> {
   const tagged = await withAfflictionTags(char.name, spec);
   const poolTraits = poolTraitsOf(char, tagged.pool);
   const env = await characterRollEnv(char);
   const passive = passiveRollExtra(char, poolTraits, tagged.tags);
-  const extra: Partial<RollModifier> = {};
+  const extra: Partial<RollModifier> = { ...(seed ?? {}) };
   const p = passive.extra;
   if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
   if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
   if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
+  if (p.uncancelableSuccesses) extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
   if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
+  const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, tagged.diceMod, extra);
   const exec = executeRoll(tagged, env.resolver, { rng: ctx.rng, extra });
-  const notes = [...passive.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : ""].filter(Boolean);
+  const notes = [...passive.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : "", shieldNote].filter(Boolean);
   return { exec, notes };
 }
 
@@ -694,18 +742,18 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
 // `base.requires` is forced to 1 by callers (each interval is a plain roll; the
 // accumulated `target` is the extended goal). Reads `table` against the
 // interval's net so each report shows what the successes MEAN (10 ft/success).
-async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { target: number; maxRolls: number; interval: string; onBotch: BotchPolicy; label: string; table?: string; stepsTail?: string }, ctx: CommandContext): Promise<string> {
+async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { target: number; maxRolls: number; interval: string; onBotch: BotchPolicy; label: string; table?: string; stepsTail?: string; firstExtra?: Partial<RollModifier>; preNotes?: string[] }, ctx: CommandContext): Promise<string> {
   const action: ExtendedRoll = {
     id: api.v1.uuid(), label: opts.label,
     base, target: opts.target, maxRolls: opts.maxRolls,
     interval: opts.interval, onBotch: opts.onBotch, table: opts.table,
     accumulated: 0, rollsUsed: 0, status: "open", log: [],
   };
-  const { exec, notes } = await execCharacterRoll(char, base, ctx);
+  const { exec, notes } = await execCharacterRoll(char, base, ctx, opts.firstExtra);
   const { action: after, note } = applyInterval(action, exec, char.name);
   await ExtendedRollStore.save(after);
   if (after.status === "open") await ExtendedRollStore.setCurrent(after.id);
-  const extras = [...notes, await extendedTableNote(after.table, exec.outcome, exec.result?.net ?? 0, after.accumulated)].filter(Boolean).join("; ");
+  const extras = [...(opts.preNotes ?? []), ...notes, await extendedTableNote(after.table, exec.outcome, exec.result?.net ?? 0, after.accumulated)].filter(Boolean).join("; ");
   const tail = after.status === "open" ? ` Continue with [[continue-roll]] (id ${after.id}).` : "";
   return sys(`${disp(char.name)} starts extended ${describeExtended(after)}. Interval 1: ${note}${extras ? ` (${extras})` : ""}.${tail}${opts.stepsTail ?? ""}`);
 }
@@ -777,15 +825,18 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
     if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
     if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
+    if (p.uncancelableSuccesses) extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
     if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
   }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
+  const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, spec.diceMod, extra);
   const exec = executeRoll(spec, env.resolver, { rng: ctx.rng, extra });
   const notes = [
     spend.note,
     ...passive.notes,
     specialty.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
+    shieldNote,
     await tableNote(cmd.named["table"] ?? savedTable, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
   return sys(`${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}${surfaceSteps(savedSteps, exec.outcome)}`);
@@ -1080,12 +1131,253 @@ async function cmdResources(): Promise<string> {
     const meta = [
       v.def.replaces?.length ? `replaces: ${v.def.replaces.join("/")}` : "",
       roles.length ? `roles: ${roles.join("/")}` : "",
+      v.def.perTurnLimit !== undefined && Number.isFinite(v.def.perTurnLimit) ? `${v.def.perTurnLimit}/turn (ST)` : "",
+      v.def.rollAs ? `pools as min(${v.def.rollAs.cap ?? "∞"}, current)${v.def.rollAs.negatesPenaltiesAbove !== undefined ? `; points over ${v.def.rollAs.negatesPenaltiesAbove} shield penalties` : ""}` : "",
+      v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${r.requires}` : ""}`).join(", ")}` : "",
       v.def.effect ? describeEffect(v.def.effect) : "",
       named.length ? `spend:${named.join("/")}` : "",
     ].filter(Boolean).join("; ");
-    return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}`;
+    const blurb = v.def.description ? ` - ${v.def.description}` : "";
+    return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}${blurb}`;
   }).join("; ");
   return sys(`${disp(char.name)} resources - ${items}.`);
+}
+
+// =============================================================================
+// MAGIC - the Dark Ages: Mage casting procedure ([[cast]], [[seal-spell]])
+// -----------------------------------------------------------------------------
+// The numbers all come from MagicRules (rules.ts defaults overlaid with the
+// wod:config:magic knob entry). Foundation and Pillar RATINGS live on the
+// character (the free `traits` bucket; foundation= names the trait when the
+// fellowship calls it something else); the REQUIRED levels are what the desired
+// effect needs - play-time input, per pillar, never baked anywhere.
+// =============================================================================
+interface PillarReq { name: string; required: number; own: number }
+
+// "warrior:4,chieftain:2" -> requirements, with the caster's own ratings.
+function parsePillars(raw: string, resolve: (n: string) => number): PillarReq[] | { error: string } {
+  const out: PillarReq[] = [];
+  for (const item of raw.split(",").map(s => s.trim()).filter(s => s.length > 0)) {
+    const m = item.match(/^(.+?)[:=]\s*(\d+)$/);
+    if (!m) return { error: `Can't read pillar "${item}" - use name:required-level (e.g. incantation:3).` };
+    const name = StringUtil.normalize(m[1]);
+    const required = parseInt(m[2], 10);
+    if (required < 1) return { error: `Pillar level must be at least 1 in "${item}".` };
+    out.push({ name, required, own: resolve(name) });
+  }
+  return out;
+}
+
+// Does spending this resource carry the fused-Willpower rider? (Living Resolve:
+// any spend grants ONE un-cancelable success when a dice pool is involved.)
+function grantsUncancelableOnSpend(def: ResourceDef): boolean {
+  const specs = [def.effect, ...Object.values(def.effects ?? {})].filter((e): e is EffectSpec => !!e);
+  return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable" && o.once === true));
+}
+
+async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const rules = magicRulesFrom(MagicRulesConfig.current());
+  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
+
+  const pillarsRaw = (cmd.named["pillars"] ?? cmd.positional[0])?.trim();
+  if (!pillarsRaw) {
+    return sys(`cast needs the required pillars, e.g. [[cast pillars="incantation:3"]] (simple) or [[cast pillars="warrior:4,chieftain:2"]] (complex). `
+      + `Knobs: foundation=<trait> quintessence=N label=... requires=N extended=true interval="..." ongoing=true spend=...`);
+  }
+  const env = await characterRollEnv(char);
+  const pillars = parsePillars(pillarsRaw, env.resolver);
+  if ("error" in pillars) return sys(pillars.error);
+
+  // The caster must know each Pillar at the required level...
+  for (const p of pillars) {
+    if (p.own < p.required) return sys(`${disp(char.name)} has ${disp(p.name)} ${p.own} - the effect needs ${p.required}. The spell is beyond their teaching.`);
+  }
+  // ...and have a Foundation to channel it through.
+  const foundationTrait = StringUtil.normalize(cmd.named["foundation"] ?? "foundation");
+  const foundationRating = env.resolver(foundationTrait);
+  if (foundationRating <= 0) {
+    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket (e.g. "foundation": 3) or name it with foundation=<trait>.`);
+  }
+
+  // The primary Pillar is the highest REQUIRED one (ties: the caster adds their
+  // best score, per the book). Complex spells add 1 die and +1 difficulty per
+  // additional Pillar.
+  const sorted = [...pillars].sort((a, b) => b.required - a.required || b.own - a.own);
+  const primary = sorted[0];
+  const extras = pillars.length - 1;
+  const complex = extras > 0;
+  const pool = complex ? `${foundationTrait}+${primary.name}+${extras}` : `${foundationTrait}+${primary.name}`;
+  let difficulty = complex ? rules.complexBase + primary.required + extras : rules.simpleBase + primary.required;
+  const notes: string[] = [
+    complex
+      ? `complex spell: diff ${rules.complexBase}+${primary.required}+${extras} = ${difficulty}`
+      : `simple spell: diff ${rules.simpleBase}+${primary.required} = ${difficulty}`,
+  ];
+
+  // Same-scene retries pile difficulty on: +1 per prior unsuccessful casting,
+  // or +2 per prior attempt once one of them BOTCHED.
+  const sceneName = (await SceneStore.currentName()) ?? "";
+  const label = cmd.named["label"]?.trim() ?? "";
+  const spellKey = label || pillars.map(p => `${p.name}:${p.required}`).join(",");
+  const rec = await CastAttempts.get(char, sceneName, spellKey);
+  if (rec.unsuccessful > 0) {
+    const per = rec.botched ? rules.botchRetryPenalty : rules.retryPenalty;
+    const penalty = per * rec.unsuccessful;
+    difficulty += penalty;
+    notes.push(`retry this scene: +${penalty} difficulty (${rec.unsuccessful} prior attempt${rec.unsuccessful === 1 ? "" : "s"}${rec.botched ? ", one botched" : ""})`);
+  }
+
+  // Quintessence: MANDATORY point when the effect outstrips the Foundation
+  // (stabilization - no difficulty break), plus optional extra points at -1
+  // difficulty each, all within the per-turn cap and the difficulty floor.
+  const seed: Partial<RollModifier> = {};
+  const mandatory = primary.required > foundationRating ? 1 : 0;
+  const requested = Math.max(0, intOf(cmd.named["quintessence"] ?? cmd.named["quint"]) ?? 0);
+  let applied = Math.min(requested, Math.max(0, rules.quintPerTurn - mandatory), Math.max(0, difficulty - rules.minDifficulty));
+  const fuelDef = CharacterResources.resolveDef(char, "magic-fuel");
+  if (mandatory > 0 && !fuelDef) {
+    return sys(`${disp(char.name)} can't cast: the effect (${disp(primary.name)} ${primary.required}) outstrips ${disp(foundationTrait)} ${foundationRating}, and casting then REQUIRES a point of Quintessence - but they have no magic-fuel resource.`);
+  }
+  if (fuelDef && (mandatory > 0 || applied > 0)) {
+    const have = await CharacterResources.current(char, fuelDef);
+    if (have < mandatory) {
+      return sys(`${disp(char.name)} can't cast: ${disp(primary.name)} ${primary.required} outstrips ${disp(foundationTrait)} ${foundationRating}, so casting REQUIRES 1 ${fuelDef.name} - they have ${have}.`);
+    }
+    applied = Math.min(applied, have - mandatory);
+    const total = mandatory + applied;
+    if (total > 0) {
+      await CharacterResources.spend(char, fuelDef.name, total);
+      const bits: string[] = [];
+      if (mandatory) bits.push(`1 to stabilize (${disp(primary.name)} ${primary.required} > ${disp(foundationTrait)} ${foundationRating})`);
+      if (applied) bits.push(`${applied} for -${applied} difficulty`);
+      notes.push(`${fuelDef.name}: ${bits.join(" + ")}`);
+      if (applied < requested) notes.push(`only ${applied} of ${requested} reduction points could apply (cap ${rules.quintPerTurn}/turn, min diff ${rules.minDifficulty}, pool ${have})`);
+      if (total > rules.quintFreeLimit) notes.push(`spending >${rules.quintFreeLimit}/turn needs the Fount Background (ST)`);
+      if (grantsUncancelableOnSpend(fuelDef)) {
+        seed.uncancelableSuccesses = 1;
+        notes.push(`the fused Willpower grants an un-cancelable success`);
+      }
+      difficulty -= applied;
+    }
+  } else if (requested > 0 && !fuelDef) {
+    notes.push(`no magic-fuel resource - the requested Quintessence reduction is skipped`);
+  }
+
+  // The spell's roll: over the cap, difficulty converts to extra required
+  // successes (resolveSpec notes it); reductions buy those off first.
+  const requires = Math.max(1, intOf(cmd.named["requires"]) ?? 1);
+  const ongoing = (cmd.named["ongoing"] ?? "").toLowerCase() === "true";
+  const extended = ongoing || (cmd.named["extended"] ?? "").toLowerCase() === "true";
+  const spec = makeRollSpec({
+    pool, difficulty, requires: extended ? 1 : requires,
+    tags: ["magic", "cast"], difficultyCap: rules.difficultyCap,
+  });
+
+  // spend= rides along (Living Resolve's focus/fuel-surge, a plain Willpower...).
+  const poolTraits = poolTraitsOf(char, pool);
+  const spend = await applySpend(char, cmd, ctx, spec.tags, poolTraits);
+  if (spend.refuse) return sys(`${disp(char.name)} can't cast: ${spend.refuse}.`);
+  if (spend.extra) {
+    if (spend.extra.difficultyMod) seed.difficultyMod = (seed.difficultyMod ?? 0) + spend.extra.difficultyMod;
+    if (spend.extra.diceMod) seed.diceMod = (seed.diceMod ?? 0) + spend.extra.diceMod;
+    if (spend.extra.autoSuccesses) seed.autoSuccesses = (seed.autoSuccesses ?? 0) + spend.extra.autoSuccesses;
+    if (spend.extra.uncancelableSuccesses) seed.uncancelableSuccesses = Math.min(1, (seed.uncancelableSuccesses ?? 0) + spend.extra.uncancelableSuccesses);
+    if (spend.extra.nAgain !== undefined) seed.nAgain = Math.min(seed.nAgain ?? 10, spend.extra.nAgain);
+  }
+  if (spend.note) notes.push(spend.note);
+
+  const spellName = label ? `"${label}"` : `${pillars.map(p => `${disp(p.name)} ${p.required}`).join(" + ")}`;
+
+  if (extended) {
+    // Extended / ongoing: successes accrue over intervals; a botch ends the
+    // casting (Backlash + every accrued success lost) unless on-botch says
+    // otherwise. Ongoing spells need x10 successes and per-success fuel.
+    const target = ongoing ? requires * rules.ongoingMultiplier : requires;
+    if (!intOf(cmd.named["requires"])) return sys(`An ${ongoing ? "ongoing" : "extended"} casting needs requires=N (the Storyteller's success total${ongoing ? ` - it is then ×${rules.ongoingMultiplier}` : ""}).`);
+    if (ongoing) notes.push(`ongoing spell: ${requires}×${rules.ongoingMultiplier} = ${target} successes; fuel ${rules.ongoingFuelPerSuccess} magic-fuel per success as they land (ST-enforced); seal with [[seal-spell pillar=${primary.required}]] at the end`);
+    const maxRolls = intOf(cmd.named["intervals"]) ?? 20;
+    return launchExtended(char, spec, {
+      target, maxRolls,
+      interval: cmd.named["interval"] ?? "",
+      onBotch: parseBotchPolicy(cmd.named["on-botch"]),   // default "fail": a botch ends the casting
+      label: label ? `cast: ${label}` : `cast: ${spellKey}`,
+      firstExtra: seed, preNotes: notes,
+      stepsTail: ` A botch is Backlash: successes lost, the Storyteller describes the price.`,
+    }, ctx);
+  }
+
+  const { exec, notes: execNotes } = await execCharacterRoll(char, spec, ctx, seed);
+  await CastAttempts.record(char, sceneName, spellKey, exec.outcome === "botch" ? "botch" : exec.outcome === "success" ? "success" : "failure");
+  const backlash = exec.outcome === "botch" ? ` ⚡ BACKLASH - the spell fails utterly and the power turns on the caster (Storyteller describes; retrying this scene: +${rules.botchRetryPenalty}/attempt).` : "";
+  const allNotes = [...notes, ...execNotes].filter(Boolean).join("; ");
+  return sys(`${disp(char.name)} casts ${spellName} - ${formatExecution(exec)}${allNotes ? ` [${allNotes}]` : ""}.${backlash}`);
+}
+
+// The permanence seal on an ongoing spell: 5 Quintessence per dot of the
+// highest Pillar involved + 1 Willpower per 10 of that Quintessence (rounded
+// up). A fused payer (one resource filling both roles - Living Resolve) covers
+// both components with the same points. pay=true spends now; otherwise the
+// price is quoted, payable over time (ST tracks the debt).
+async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const rules = magicRulesFrom(MagicRulesConfig.current());
+  const level = parseInt(cmd.named["pillar"] ?? cmd.positional[0] ?? "", 10);
+  if (Number.isNaN(level) || level < 1) return sys(`seal-spell needs the highest Pillar level involved, e.g. [[seal-spell pillar=3]].`);
+  const sealQ = rules.sealPerPillarDot * level;
+  const sealW = Math.ceil(sealQ / rules.sealWillpowerPer);
+  const price = `${sealQ} Quintessence + ${sealW} Willpower (1 per ${rules.sealWillpowerPer}, rounded up)`;
+
+  const fuelDef = CharacterResources.resolveDef(char, "magic-fuel");
+  const willDef = CharacterResources.resolveDef(char, "willpower");
+  const fused = fuelDef && willDef && StringUtil.normalize(fuelDef.name) === StringUtil.normalize(willDef.name);
+
+  if ((cmd.named["pay"] ?? "").toLowerCase() !== "true") {
+    const how = fused ? ` ${fuelDef.name} is the fused substance - the same ${Math.max(sealQ, sealW)} points cover both components.` : "";
+    return sys(`Sealing (highest Pillar ${level}): ${price}.${how} Payable over time (ST tracks the debt) - [[seal-spell pillar=${level} pay=true]] to spend now.`);
+  }
+
+  const linesOut: string[] = [];
+  if (fused) {
+    const cost = Math.max(sealQ, sealW);
+    const { spent } = await CharacterResources.spend(char, fuelDef.name, cost);
+    const now = await CharacterResources.current(char, fuelDef);
+    linesOut.push(`${spent}/${cost} ${fuelDef.name} (the fused substance covers both components) -> ${now}/${fuelDef.max}`);
+    if (spent < cost) linesOut.push(`${cost - spent} still owed - payable over time (ST tracks the debt)`);
+  } else {
+    if (fuelDef) {
+      const { spent } = await CharacterResources.spend(char, fuelDef.name, sealQ);
+      linesOut.push(`${spent}/${sealQ} ${fuelDef.name}${spent < sealQ ? ` (${sealQ - spent} owed)` : ""}`);
+    } else linesOut.push(`no magic-fuel resource - ${sealQ} Quintessence owed (ST tracks)`);
+    if (willDef) {
+      const { spent } = await CharacterResources.spend(char, willDef.name, sealW);
+      linesOut.push(`${spent}/${sealW} ${willDef.name}${spent < sealW ? ` (${sealW - spent} owed)` : ""}`);
+    } else linesOut.push(`no willpower resource - ${sealW} Willpower owed (ST tracks)`);
+  }
+  return sys(`${disp(char.name)} seals the spell (highest Pillar ${level}; ${price}): ${linesOut.join("; ")}.`);
+}
+
+// Adopt a ready-made resource preset into the story's resource overrides (the
+// canonical definition stays in the engine; the lorebook entry stays a tiny,
+// still-overridable reference). Bare invocation lists what's on the shelf.
+async function cmdAdoptResource(cmd: ParsedCommand): Promise<string> {
+  const which = cmd.positional[0]?.trim();
+  if (!which) {
+    const items = Object.entries(RESOURCE_PRESETS)
+      .map(([k, d]) => `${k} (${d.kind} ${d.start}/${d.max}${d.replaces?.length ? `; replaces ${d.replaces.join("/")}` : ""})`)
+      .join("; ");
+    return sys(`Resource presets: ${items}. Adopt one with [[adopt-resource <name>]].`);
+  }
+  const key = StringUtil.normalize(which);
+  const preset = RESOURCE_PRESETS[key];
+  if (!preset) return sys(`No resource preset "${which}". ${Object.keys(RESOURCE_PRESETS).length ? `Available: ${Object.keys(RESOURCE_PRESETS).join(", ")}.` : ""}`);
+  const map = { ...ResourceOverrides.current() };
+  map[key] = { ...(map[key] ?? {}), preset: true };
+  await ResourceOverrides.save(map);
+  const replaces = preset.replaces?.length ? ` It replaces ${preset.replaces.join("/")} - their names now resolve to it.` : "";
+  return sys(`Adopted ${preset.name} (${preset.start}/${preset.max}).${replaces} Every character now carries it - see [[resources]]; tweak it in the ${RESOURCE_CONFIG_ENTRY} entry.`);
 }
 
 // One line of health state for OOC replies.
@@ -1459,6 +1751,43 @@ async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
   return sys(`The story begins ${formatStoryDate(s.start)}. Move time with [[advance-time 1d]]; read it with [[story-date]].`);
 }
 
+// Clock-driven recovery: credit every character's recovery-bearing resources
+// for the day boundaries and full moons crossed in (from, to]. Gated rules
+// (`requires`) check the character's ACTIVE afflictions (def names and tags -
+// "in-umbra" for Umbral communion). Returns "" when nothing was credited (a
+// short hop inside one day, or everyone already full).
+async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string> {
+  const days = countDayBoundaries(fromEpoch, toEpoch);
+  const moons = countFullMoons(fromEpoch, toEpoch);
+  if (days <= 0 && moons <= 0) return "";
+  const lines: string[] = [];
+  for (const name of await CharacterStore.listNames()) {
+    const char = await CharacterStore.load(name);
+    if (!char) continue;
+    const gates = new Set<string>([
+      ...(await CharacterAfflictions.tags(char.name)).map(t => StringUtil.normalize(t)),
+      ...(await CharacterAfflictions.list(char.name)).map(c => StringUtil.normalize(c.def)),
+    ]);
+    for (const def of CharacterResources.defsFor(char)) {
+      if (!def.recovery?.length) continue;
+      let credit = 0;
+      const parts: string[] = [];
+      for (const rule of def.recovery) {
+        if (rule.requires && !gates.has(StringUtil.normalize(rule.requires))) continue;
+        const times = rule.per === "day" ? days : moons;
+        if (times <= 0) continue;
+        credit += rule.amount * times;
+        parts.push(`${rule.per === "full-moon" ? "🌕 " : ""}${rule.amount}/${rule.per}×${times}${rule.note ? ` (${rule.note})` : ""}`);
+      }
+      if (credit <= 0) continue;
+      const had = await CharacterResources.current(char, def);
+      const { value } = await CharacterResources.gain(char, def.name, credit);
+      if (value > had) lines.push(`${disp(char.name)} +${value - had} ${def.name} -> ${value}/${def.max} (${parts.join(", ")})`);
+    }
+  }
+  return lines.length ? ` Recovery: ${lines.join("; ")}.` : "";
+}
+
 async function cmdAdvanceTime(cmd: ParsedCommand): Promise<string> {
   const before = await StoryClock.get();
   if (!before) return sys(NO_CLOCK);
@@ -1467,15 +1796,17 @@ async function cmdAdvanceTime(cmd: ParsedCommand): Promise<string> {
   const after = (await StoryClock.advance(dur))!;
   const span = diffCalendar(after.start, after.now);
   const since = after.now === after.start ? "back to the very beginning" : `${formatCalendarSpan(span)} since it began`;
-  return sys(`Time advances: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)} (${since}).`);
+  const recovery = await applyRecovery(before.now, after.now);
+  return sys(`Time advances: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)} (${since}).${recovery}`);
 }
 
 async function cmdStoryDate(): Promise<string> {
   const c = await StoryClock.get();
   if (!c) return sys(NO_CLOCK);
-  if (c.now === c.start) return sys(`Story date: ${formatStoryDate(c.now)} - the story has just begun.`);
+  const moon = ` Next full moon: ${formatStoryDate(nextFullMoon(c.now))} (mean cycle).`;
+  if (c.now === c.start) return sys(`Story date: ${formatStoryDate(c.now)} - the story has just begun.${moon}`);
   const span = diffCalendar(c.start, c.now);
-  return sys(`Story date: ${formatStoryDate(c.now)} - ${formatCalendarSpan(span)} since it began (${formatStoryDate(c.start)}).`);
+  return sys(`Story date: ${formatStoryDate(c.now)} - ${formatCalendarSpan(span)} since it began (${formatStoryDate(c.start)}).${moon}`);
 }
 
 async function cmdSaveDate(cmd: ParsedCommand): Promise<string> {
@@ -2870,8 +3201,35 @@ CommandRouter.register("story-start", cmdStoryStart, {
   params: [{ key: "date", kind: "positional", required: true, hint: "yyyy-mm-dd-hh", example: "1197-03-15-08" }],
 });
 CommandRouter.register("advance-time", cmdAdvanceTime, {
-  summary: "move the story clock forward (s/m/h/d/w/mo/y)",
+  summary: "move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery",
   params: [{ key: "duration", kind: "positional", required: true, hint: "<duration>", example: "2d 6h" }],
+});
+CommandRouter.register("cast", cmdCast, {
+  summary: "cast a spell (Dark Ages: Mage) - pillars carry the REQUIRED levels",
+  params: [
+    { key: "pillars", kind: "named", required: true, hint: '"name:level[,name:level...]"', example: 'e.g. "warrior:4,chieftain:2"' },
+    { key: "foundation", kind: "named", hint: "<trait>", desc: "Foundation trait name (default: foundation)" },
+    { key: "quintessence", kind: "named", type: "int", desc: "Extra points: -1 difficulty each (min 4; 3/turn cap)" },
+    { key: "label", kind: "named", desc: "Spell name (keys the same-scene retry ledger)" },
+    { key: "requires", kind: "named", type: "int", desc: "Successes needed (extended/ongoing: the ST's total)" },
+    { key: "extended", kind: "named", type: "enum", options: ["true"], desc: "Accrue successes over intervals" },
+    { key: "ongoing", kind: "named", type: "enum", options: ["true"], desc: "Indefinite-duration spell (successes ×10; per-success fuel; seal at the end)" },
+    { key: "interval", kind: "named", desc: "Time between extended rolls (advisory)" },
+    { key: "intervals", kind: "named", type: "int", desc: "Max rolls for an extended casting" },
+    { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"], desc: "Extended botch policy (default fail: Backlash ends it)" },
+    { key: "spend", kind: "named", hint: "<res[:effect][!]>", desc: "Resource to spend on the roll" },
+  ],
+});
+CommandRouter.register("seal-spell", cmdSealSpell, {
+  summary: "seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10",
+  params: [
+    { key: "pillar", kind: "named", type: "int", required: true, desc: "Highest Pillar level involved" },
+    { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
+  ],
+});
+CommandRouter.register("adopt-resource", cmdAdoptResource, {
+  summary: "adopt a ready-made resource preset (bare: list presets)",
+  params: [{ key: "preset", kind: "positional", hint: "[preset]", example: "living-resolve" }],
 });
 CommandRouter.register("story-date", cmdStoryDate, {
   summary: "show the current story date and how long since it began",
@@ -3102,7 +3460,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
-  "story-date", "dates", "time-between", "scenes", "scene-info",
+  "story-date", "dates", "time-between", "scenes", "scene-info", "adopt-resource",
 ]);
 
 // =============================================================================

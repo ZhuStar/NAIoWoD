@@ -54,6 +54,15 @@ export const VAMPIRE_SOAK: SoakSpec = {
   aggravated: { soakable: true, pool: ["fortitude"] },
   difficulty: 6,
 };
+// Ghouls and revenants, though alive, soak like the half-vampires they are:
+// bashing & lethal with Stamina (+Fortitude), aggravated with Fortitude alone.
+// The rules just say so - the vitae in their veins does the knitting.
+export const GHOUL_SOAK: SoakSpec = {
+  bashing: { soakable: true, pool: ["stamina", "fortitude"] },
+  lethal: { soakable: true, pool: ["stamina", "fortitude"] },
+  aggravated: { soakable: true, pool: ["fortitude"] },
+  difficulty: 6,
+};
 // Mages innately soak like mortals (their real defence is magic, not modelled).
 export const MAGE_SOAK: SoakSpec = {
   bashing: { soakable: true, pool: ["stamina"] },
@@ -157,11 +166,12 @@ export type PoolKind = "tracker" | "pool";
 // "majesty") is stored, shown, and adjudicated by the Storyteller until its
 // interpreter lands - nothing is hardcoded to today's mechanics.
 //
-// Ops with interpreters today: "difficulty" | "dice" | "successes" | "nagain"
-// (roll modifiers; an optional `target` names an action tag the roll must
-// carry), "increase" (raise a trait via the boost layer; `target` is a
-// constraint - an attribute group, a record bucket, or a specific trait),
-// "heal" (`target` = comma-separated severities or "all").
+// Ops with interpreters today: "difficulty" | "dice" | "successes" | "nagain" |
+// "uncancelable" (roll modifiers; an optional `target` names an action tag the
+// roll must carry; "uncancelable" grants successes rolled 1s can never cancel),
+// "increase" (raise a trait via the boost layer; `target` is a constraint - an
+// attribute group, a record bucket, or a specific trait), "heal" (`target` =
+// comma-separated severities or "all").
 export interface EffectOp {
   op: string;
   target?: string;
@@ -172,6 +182,10 @@ export interface EffectOp {
   // (the twin of the actionTag gate roll ops carry in `target`). A trait that
   // appears only in the difficulty expression does NOT count.
   trait?: string;
+  // The op fires ONCE per spend, however many points ride it - "spending Living
+  // Resolve for anything grants ONE un-cancelable success" without a 3-point
+  // spend granting three.
+  once?: boolean;
 }
 export interface EffectCost {
   units?: number;           // resource units per application (default 1)
@@ -199,6 +213,17 @@ export interface EffectSpec {
   targetMustBe?: string[];  // for effects on others; stored until targeting lands
 }
 
+// A scheduled way a resource refills itself as story time passes. [[advance-time]]
+// counts the day boundaries and full moons it crossed and credits every rule
+// whose gate (if any) is open. `requires` names an active affliction (def name
+// or tag) that must be on the character - e.g. "in-umbra" for Umbral communion.
+export interface RecoveryRule {
+  amount: number;
+  per: "day" | "full-moon";
+  requires?: string;
+  note?: string;            // shown beside the credit ("Umbral communion")
+}
+
 // A resource is a tracker/pool PLUS abstract `roles` it can fill and an optional
 // spend `effect`. Roles are how templates compose/share resources: Quintessence
 // carrying the "resolve" role IS "use Quintessence as Resolve" - pure data.
@@ -219,6 +244,13 @@ export interface ResourceDef {
   replaces?: string[];
   effect?: EffectSpec;      // the default (unnamed) spend effect
   effects?: Record<string, EffectSpec>; // named context effects (cast, heal, fuel, …)
+  description?: string;     // free-text rules note, shown by [[resources]]
+  recovery?: RecoveryRule[]; // clock-driven refills (see RecoveryRule)
+  // When a roll's POOL names this resource (or one it replaces), the trait
+  // resolves to min(cap, current) - a Willpower roll rolls CURRENT Willpower -
+  // and each point above `negatesPenaltiesAbove` shields 1 die of pool
+  // reductions (wound penalties, negative dice mods) on that roll.
+  rollAs?: { cap?: number; negatesPenaltiesAbove?: number };
 }
 // A resource's spend effect: a named context effect if `name` is given, else the
 // default. Named effects let one resource behave differently by situation (a
@@ -359,7 +391,11 @@ export const TEMPLATE_MAGE = new TemplateConfig(
   [
     willpowerResource(5),
     { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"],
-      effect: { label: "Quintessence: -1 casting difficulty per point", apply: [{ op: "difficulty", amount: -1 }] } },
+      effect: {
+        label: "Quintessence: -1 casting difficulty per point (min diff 4; >2/turn needs the Fount Background)",
+        apply: [{ op: "difficulty", amount: -1 }],
+        limits: { maxPerUse: 3 },
+      } },
   ],
   MAGE_SOAK,
   null, false   // Mages have no Road/Humanity and no Virtues
@@ -398,9 +434,10 @@ export const TEMPLATE_WEREWOLF = new TemplateConfig(
 );
 
 // A ghoul is a mortal sustained by vampire vitae. Mechanically they are a mortal
-// (still alive: Road/Humanity, Virtues, mortal soak) plus a Blood pool they do
-// NOT generate - it must be fed by their domitor, starting near-empty and
-// holding up to 10, spendable one point per turn.
+// (still alive: Road/Humanity, Virtues) with ghoul soak (bashing & lethal on
+// Stamina+Fortitude) plus a Blood pool they do NOT generate - it must be fed by
+// their domitor, starting near-empty and holding up to 10, spendable one point
+// per turn.
 //
 // At creation a ghoul also gets 2 dots of Disciplines, one of which must be
 // Potence: seed them via `disciplines: { potence: 1, ... }`. Potence and
@@ -413,8 +450,22 @@ export const TEMPLATE_GHOUL = new TemplateConfig(
     willpowerResource(3),
     bloodResource({ start: 0 }),
   ],
-  MORTAL_SOAK,
+  GHOUL_SOAK,
   HUMANITY_MORALITY, true   // still human: Road/Humanity + Virtues
+);
+
+// A revenant is BORN ghouled: one of the strange bloodlines whose bodies brew
+// their own vitae. Ghoul soak and disciplines, but the pool refills itself -
+// one point a day, on the story clock.
+export const TEMPLATE_REVENANT = new TemplateConfig(
+  "Revenant",
+  new RulesetConfig(5, 2, 4, 2, false),
+  [
+    willpowerResource(3),
+    bloodResource({ start: 10, recovery: [{ amount: 1, per: "day", note: "revenant vitae" }] }),
+  ],
+  GHOUL_SOAK,
+  HUMANITY_MORALITY, true   // still (technically) human: Road/Humanity + Virtues
 );
 
 // Sorcerers work static / linear (hedge) magic through Paths - rated traits that
@@ -437,17 +488,90 @@ export const TEMPLATES: Record<string, TemplateConfig> = {
   demon: TEMPLATE_DEMON,
   werewolf: TEMPLATE_WEREWOLF,
   ghoul: TEMPLATE_GHOUL,
+  revenant: TEMPLATE_REVENANT,
   sorcerer: TEMPLATE_SORCERER,
 };
+
+// =============================================================================
+// RESOURCE PRESETS - ready-made custom resources the overrides layer can adopt
+// -----------------------------------------------------------------------------
+// A preset is a complete ResourceDef kept HERE (canonical, engine-updated); the
+// story adopts it with a tiny override patch ({"living-resolve": {"preset":
+// true}} - [[adopt-resource]] writes it), and may still override any field on
+// top. This keeps the lorebook entry small without giving up hand-editability.
+// =============================================================================
+
+// LIVING RESOLVE - one player character's ritual-born fusion: revenant vitae,
+// Awakened Quintessence, Resolve and Willpower as ONE metaphysical substance.
+// Spending 1 point spends 1 of each; the Willpower component grants ONE
+// un-cancelable success per roll when it isn't consumed by an activation cost
+// (`fuel` when it is; `fuel-surge` pays 1 extra to have it anyway). Rolls that
+// POOL it (Willpower/Resolve rolls) use min(10, current), and every point above
+// 10 shields a die of penalties. Recovers 1/day (+1 in the Umbra - the in-umbra
+// affliction is the gate), 20 each full moon; drinking vampiric vitae (immune
+// to the bond) and consuming Tass are [[gain living-resolve N]] moments.
+export const LIVING_RESOLVE: ResourceDef = {
+  name: "living-resolve", kind: "pool", start: 30, max: 30, perTurnLimit: 6,
+  roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
+  replaces: ["blood", "willpower", "resolve", "quintessence"],
+  rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
+  recovery: [
+    { amount: 1, per: "day" },
+    { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
+    { amount: 20, per: "full-moon" },
+  ],
+  description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
+    + "Also regained by drinking vampiric vitae (immune to the bond) and consuming Tass - [[gain living-resolve N]]. "
+    + "Spend up to 6/turn (ST-enforced)",
+  effect: {
+    label: "Living Resolve: +1 un-cancelable success",
+    apply: [{ op: "uncancelable", amount: 1, once: true }],
+    limits: { maxPerUse: 1 },
+  },
+  effects: {
+    heal: {
+      label: "Living Resolve knits the body: heal 1 bashing/lethal per point",
+      apply: [{ op: "heal", target: "bashing,lethal", amount: 1 }],
+    },
+    boost: {
+      label: "Living Resolve surges a Physical Attribute: +1 per point",
+      apply: [{ op: "increase", target: "physical", amount: 1 }],
+      duration: { kind: "st", n: 1, unit: "scene" },
+    },
+    fuel: {
+      label: "Living Resolve pays a power's required Willpower/Resolve - consumed, no free success",
+      apply: [], cost: { units: 1 },
+    },
+    "fuel-surge": {
+      label: "Required cost + 1 extra point: the un-cancelable success rides along",
+      apply: [{ op: "uncancelable", amount: 1, once: true }],
+      cost: { units: 2 }, limits: { maxPerUse: 1 },
+    },
+    focus: {
+      label: "Living Resolve focuses the casting: -1 difficulty per point (min diff 4, ST) + the un-cancelable success",
+      apply: [{ op: "difficulty", amount: -1 }, { op: "uncancelable", amount: 1, once: true }],
+      limits: { maxPerUse: 3 },
+    },
+  },
+};
+
+export const RESOURCE_PRESETS: Record<string, ResourceDef> = {
+  "living-resolve": LIVING_RESOLVE,
+};
+
+// An override patch may additionally say `preset: true` (or name one) to start
+// from a RESOURCE_PRESETS definition and merge the rest of the patch on top.
+export type ResourceOverridePatch = Partial<ResourceDef> & { preset?: boolean | string };
 
 // The resources a character has = the union of its templates' resources, deduped
 // by name (first template wins for numbers; roles are merged). Unknown or zero
 // templates yield the mortal baseline (just Willpower). Story-level `overrides`
 // (the house-rule layer, e.g. from the configuration wizard or a hand-edited
 // lorebook entry) are applied last: a patch merges onto its resource by
-// normalized name, and a patch naming a NEW resource (with kind/start/max) adds
-// a custom one.
-export function resourcesForTemplates(keys: string[], overrides?: Record<string, Partial<ResourceDef>>): ResourceDef[] {
+// normalized name; a patch with `preset` adopts the named preset (or the one
+// matching its key) as the base; and a patch naming a NEW resource (with
+// kind/start/max) adds a custom one.
+export function resourcesForTemplates(keys: string[], overrides?: Record<string, ResourceOverridePatch>): ResourceDef[] {
   const byName = new Map<string, ResourceDef>();
   const out: ResourceDef[] = [];
   const add = (def: ResourceDef): void => {
@@ -465,10 +589,20 @@ export function resourcesForTemplates(keys: string[], overrides?: Record<string,
   const templates = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).filter((t): t is TemplateConfig => !!t);
   for (const t of (templates.length ? templates : [TEMPLATE_MORTAL])) for (const def of t.Pools) add(def);
 
-  for (const [name, patch] of Object.entries(overrides ?? {})) {
+  for (const [name, rawPatch] of Object.entries(overrides ?? {})) {
     const key = StringUtil.normalize(name);
+    const { preset, ...patch } = rawPatch;
+    const base = preset ? RESOURCE_PRESETS[StringUtil.normalize(typeof preset === "string" ? preset : key)] : undefined;
     const existing = byName.get(key);
-    if (existing) {
+    if (base) {
+      const adopted: ResourceDef = { ...base, ...patch, name: base.name };
+      if (existing) {
+        Object.assign(existing, adopted);
+      } else {
+        byName.set(key, adopted);
+        out.push(adopted);
+      }
+    } else if (existing) {
       Object.assign(existing, patch, { name: existing.name }); // a patch never renames
     } else if (patch.kind && patch.start !== undefined && patch.max !== undefined) {
       const custom: ResourceDef = { ...(patch as ResourceDef), name: key };
@@ -484,6 +618,55 @@ export function resourcesForTemplates(keys: string[], overrides?: Record<string,
 export function healthLevelsForTemplates(keys: string[]): HealthLevelDef[] {
   const t = keys.map(k => TEMPLATES[StringUtil.normalize(k)]).find((x): x is TemplateConfig => !!x);
   return (t ?? TEMPLATE_MORTAL).HealthLevels;
+}
+
+// =============================================================================
+// MAGIC RULES - the Dark Ages: Mage "How Magic Works" numbers, as data
+// -----------------------------------------------------------------------------
+// Every constant of the spellcasting procedure lives here and can be overridden
+// knob-by-knob from the wod:config:magic lorebook entry (kebab-case names,
+// numeric values). difficultyCap defaults to 10 (this chronicle's ruling); the
+// book's rule is 9 - flip the one knob to play it straight.
+// =============================================================================
+export interface MagicRules {
+  simpleBase: number;            // simple spell: difficulty = base + required level
+  complexBase: number;           // complex spell: difficulty = base + highest + extras
+  difficultyCap: number;         // above this, difficulty becomes +1 required success/pt
+  minDifficulty: number;         // Quintessence can't push the difficulty below this
+  quintPerTurn: number;          // max Quintessence spendable on a casting per turn
+  quintFreeLimit: number;        // spending above this needs the Fount Background
+  retryPenalty: number;          // +diff per prior same-scene failure
+  botchRetryPenalty: number;     // +diff per prior same-scene attempt once one botched
+  ongoingMultiplier: number;     // ongoing spells need x this many successes
+  ongoingFuelPerSuccess: number; // Quintessence per success while casting ongoing
+  sealPerPillarDot: number;      // seal: Quintessence per dot of the highest Pillar
+  sealWillpowerPer: number;      // seal: 1 Willpower per this many Quintessence (ceil)
+}
+export const DEFAULT_MAGIC_RULES: MagicRules = {
+  simpleBase: 4, complexBase: 5, difficultyCap: 10, minDifficulty: 4,
+  quintPerTurn: 3, quintFreeLimit: 2, retryPenalty: 1, botchRetryPenalty: 2,
+  ongoingMultiplier: 10, ongoingFuelPerSuccess: 1, sealPerPillarDot: 5, sealWillpowerPer: 10,
+};
+
+const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
+  "simple-base": "simpleBase", "complex-base": "complexBase",
+  "difficulty-cap": "difficultyCap", "min-difficulty": "minDifficulty",
+  "quintessence-per-turn": "quintPerTurn", "quintessence-free-limit": "quintFreeLimit",
+  "retry-penalty": "retryPenalty", "botch-retry-penalty": "botchRetryPenalty",
+  "ongoing-multiplier": "ongoingMultiplier", "ongoing-fuel-per-success": "ongoingFuelPerSuccess",
+  "seal-per-pillar-dot": "sealPerPillarDot", "seal-willpower-per": "sealWillpowerPer",
+};
+export const MAGIC_KNOB_NAMES: string[] = Object.keys(MAGIC_KNOBS);
+
+// Defaults overlaid with the story's knob overrides (unknown names and
+// non-numbers are ignored - a typo can't corrupt the rules).
+export function magicRulesFrom(overrides: Record<string, number>): MagicRules {
+  const rules: MagicRules = { ...DEFAULT_MAGIC_RULES };
+  for (const [k, v] of Object.entries(overrides ?? {})) {
+    const field = MAGIC_KNOBS[StringUtil.normalize(k)];
+    if (field && typeof v === "number" && Number.isFinite(v)) rules[field] = v;
+  }
+  return rules;
 }
 
 // =============================================================================
@@ -827,6 +1010,15 @@ export const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
     bindings: ["target"],
     duration: { kind: "st", n: 1, unit: "scene" },
     mirror: "feral-whispers",
+  }),
+  // The spirit-world flag: nothing grants passage yet, but the gate exists -
+  // recovery rules with `requires: "in-umbra"` (Living Resolve's extra point
+  // per day) check for this affliction. [[afflict <name> in-umbra]] when the
+  // character crosses; [[lift]] when they return.
+  makeAfflictionDef({
+    name: "in-umbra",
+    description: "Walking the spirit world, flesh and all",
+    tags: ["in-umbra"],
   }),
 ];
 

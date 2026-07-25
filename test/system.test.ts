@@ -36,6 +36,9 @@ import {
   resourcesForTemplates, resourceEffect, CharacterResources,
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, CONFIG_CATEGORY,
+  MAGIC_CONFIG_ENTRY, MagicRulesConfig, CastAttempts, magicRulesFrom, DEFAULT_MAGIC_RULES,
+  LIVING_RESOLVE, RESOURCE_PRESETS, GHOUL_SOAK, TEMPLATE_REVENANT,
+  countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
@@ -360,7 +363,7 @@ describe("Templates: starting-value constraints", () => {
   });
 
   test("the TEMPLATES registry exposes all splats", () => {
-    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "sorcerer", "thrall", "vampire", "werewolf"]);
+    expect(Object.keys(TEMPLATES).sort()).toEqual(["demon", "ghoul", "mage", "mortal", "revenant", "sorcerer", "thrall", "vampire", "werewolf"]);
   });
 });
 
@@ -2812,7 +2815,7 @@ describe("config stores: reload/reset-all", () => {
 
   test("every store self-registered into ALL_CONFIG_STORES", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
-      AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY,
+      AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY, MAGIC_CONFIG_ENTRY,
     ].sort());
   });
 
@@ -3906,5 +3909,357 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     const miss = await CommandRouter.route("roll strength spend=mana::edge", { rng: seqRng([6]) });
     expect(miss).toContain('needs a roll using "melee" - skipped');
     expect(miss).toContain("vs diff 6");
+  });
+});
+
+describe("un-cancelable successes: 1s can never eat them", () => {
+  test("a lone un-cancelable success survives a fistful of 1s and averts the botch", () => {
+    // 3 dice: 1, 1, 2 -> 0 successes, 2 ones. Without the rider this is a botch.
+    const plain = Dice.roll(3, { difficulty: 6, rng: seqRng([1, 1, 2]) });
+    expect(plain.net).toBe(-2);                      // historical negative net preserved
+    expect(plain.isBotch).toBe(true);
+    // With it: the cancelable tally floors at 0 and the sure success lands on top.
+    const sure = Dice.roll(3, { difficulty: 6, uncancelableSuccesses: 1, rng: seqRng([1, 1, 2]) });
+    expect(sure.net).toBe(1);
+    expect(sure.isBotch).toBe(false);
+    expect(sure.outcome).toBe("success");
+    expect(sure.message).toContain("+1 sure");
+  });
+
+  test("ones still cancel the ordinary tally before the sure successes stack", () => {
+    // 4 dice: 8, 7, 1, 1 -> 2 successes, 2 ones -> cancelable 0, +1 sure = 1.
+    const r = Dice.roll(4, { difficulty: 6, uncancelableSuccesses: 1, rng: seqRng([8, 7, 1, 1]) });
+    expect(r.net).toBe(1);
+    expect(r.uncancelableSuccesses).toBe(1);
+  });
+
+  test("resolveSpec folds uncancelable from the extra modifier into the executed roll", () => {
+    const spec = makeRollSpec({ pool: "3", difficulty: 6 });
+    const exec = executeRoll(spec, () => 0, { rng: seqRng([2, 3, 4]), extra: { uncancelableSuccesses: 2 } });
+    expect(exec.resolved.uncancelableSuccesses).toBe(2);
+    expect(exec.result!.net).toBe(2);                // all dice missed; the sure pair remains
+    expect(exec.outcome).toBe("success");
+  });
+});
+
+describe("difficulty cap: over-cap surcharge + the buy-off ordering", () => {
+  const resolve = (): number => 0;
+
+  test("above the cap, difficulty converts to +1 required success per point", () => {
+    const r = resolveSpec(makeRollSpec({ pool: "5", difficulty: 11, difficultyCap: 9 }), resolve);
+    expect(r.dieDifficulty).toBe(9);
+    expect(r.requires).toBe(3);                      // 1 base + 2 overflow
+    expect(r.notes.join("; ")).toContain("difficulty 11 > 9");
+  });
+
+  test("reductions strip the surcharge first, then lower the die target (Ladislav's ordering)", () => {
+    const at = (difficulty: number) => resolveSpec(makeRollSpec({ pool: "8", difficulty, difficultyCap: 9 }), resolve);
+    expect([at(10).dieDifficulty, at(10).requires]).toEqual([9, 2]);   // diff 10 -> 9, two successes
+    expect([at(9).dieDifficulty, at(9).requires]).toEqual([9, 1]);     // first point buys the success off
+    expect([at(8).dieDifficulty, at(8).requires]).toEqual([8, 1]);     // second finally lowers the target
+  });
+
+  test("the default cap stays 10 (generic engine behavior unchanged); the knob rides overrides & display", () => {
+    const r = resolveSpec(makeRollSpec({ pool: "5", difficulty: 11 }), resolve);
+    expect([r.dieDifficulty, r.requires]).toEqual([10, 2]);
+    const capped = overrideSpec(makeRollSpec({ pool: "5", difficulty: 6, difficultyCap: 9 }), { difficulty: 7 });
+    expect(capped.difficultyCap).toBe(9);
+    expect(describeSpec(capped)).toContain("cap 9");
+  });
+});
+
+describe("Living Resolve: the preset, adoption, and the fused-substance spends", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  async function marius(): Promise<PlayableCharacter> {
+    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
+    await CommandRouter.route("adopt-resource living-resolve");
+    return (await CharacterStore.getCurrent())!;
+  }
+
+  test("adopt-resource lists presets bare, adopts by name, and the lorebook patch stays tiny", async () => {
+    expect(await CommandRouter.route("adopt-resource")).toContain("living-resolve");
+    expect(await CommandRouter.route("adopt-resource nope")).toContain('No resource preset "nope"');
+    const reply = await CommandRouter.route("adopt-resource living-resolve");
+    expect(reply).toContain("Adopted living-resolve (30/30)");
+    expect(reply).toContain("replaces blood/willpower/resolve/quintessence");
+    expect(ResourceOverrides.current()["living-resolve"]).toEqual({ preset: true });
+  });
+
+  test("the fused pool replaces all four components; their names resolve to it", async () => {
+    const char = await marius();
+    const names = CharacterResources.defsFor(char).map(d => d.name);
+    expect(names).toContain("living-resolve");
+    for (const hidden of ["blood", "willpower", "quintessence"]) expect(names).not.toContain(hidden);
+    expect(CharacterResources.resolveDef(char, "willpower")!.name).toBe("living-resolve");
+    expect(CharacterResources.resolveDef(char, "magic-fuel")!.name).toBe("living-resolve");
+    const listing = await CommandRouter.route("resources");
+    expect(listing).toContain("living-resolve 30/30");
+    expect(listing).toContain("6/turn (ST)");
+    expect(listing).toContain("recovers 1/day, 1/day if in-umbra, 20/full-moon");
+  });
+
+  test("spending it inside a roll grants ONE un-cancelable success, however it is spent", async () => {
+    await marius();
+    // Default spend (the Willpower analog): 1 point, +1 sure.
+    const plain = await CommandRouter.route("roll 3 spend=living-resolve", { rng: seqRng([2, 2, 2]) });
+    expect(plain).toContain("+1 sure");
+    expect(plain).toContain("1 success");            // all dice missed; the sure one stands
+    // focus: 3 points -> -3 difficulty but STILL only one sure success (once-op).
+    const focus = await CommandRouter.route("roll 3 spend=living-resolve:focus spend-amount=3", { rng: seqRng([2, 2, 2]) });
+    expect(focus).toContain("vs diff 3");
+    expect(focus).toContain("+1 sure");
+    expect(focus).not.toContain("+3 sure");
+    // fuel!: the Willpower component is consumed by the activation - no free success.
+    const fuel = await CommandRouter.route("roll 3 spend=living-resolve:fuel!", { rng: seqRng([2, 2, 2]) });
+    expect(fuel).not.toContain("sure");
+    // fuel-surge: pay 1 extra to have it anyway (2 points total).
+    const surge = await CommandRouter.route("roll 3 spend=living-resolve:fuel-surge!", { rng: seqRng([2, 2, 2]) });
+    expect(surge).toContain("+1 sure");
+    const char = (await CharacterStore.getCurrent())!;
+    const lr = CharacterResources.resolveDef(char, "living-resolve")!;
+    expect(await CharacterResources.current(char, lr)).toBe(30 - 1 - 3 - 1 - 2);
+  });
+
+  test("rollAs: Willpower rolls pool min(10, current), and points above 10 shield penalties", async () => {
+    const char = await marius();
+    // Full pool (30): a Willpower roll still rolls 10 dice at most...
+    expect(await CommandRouter.route("roll willpower", { rng: allTens })).toContain("Willpower (10)");
+    // ...and the 20 points above the threshold shield dice reductions.
+    const shielded = await CommandRouter.route('roll willpower dice-modifier=-5', { rng: allTens });
+    expect(shielded).toContain("living-resolve shields 5 dice of penalties");
+    // Drained to 4: the pool follows the current value and the shield is gone.
+    await CharacterResources.spend(char, "living-resolve", 26);
+    const drained = await CommandRouter.route('roll willpower dice-modifier=-2', { rng: allTens });
+    expect(drained).toContain("Willpower (2)");   // 4-trait pool minus the unshielded -2
+    expect(drained).not.toContain("shields");
+  });
+});
+
+describe("ghouls & revenants: half-vampire soak + the revenant's daily vitae", () => {
+  test("bashing & lethal soak on Stamina+Fortitude, aggravated on Fortitude alone", () => {
+    expect(GHOUL_SOAK.lethal.soakable).toBe(true);
+    expect(GHOUL_SOAK.lethal.pool).toEqual(["stamina", "fortitude"]);
+    expect(GHOUL_SOAK.bashing.pool).toEqual(["stamina", "fortitude"]);
+    expect(GHOUL_SOAK.aggravated.pool).toEqual(["fortitude"]);
+    expect(TEMPLATE_GHOUL.Soak).toBe(GHOUL_SOAK);
+    expect(TEMPLATE_REVENANT.Soak).toBe(GHOUL_SOAK);
+    expect(TEMPLATES["revenant"]).toBe(TEMPLATE_REVENANT);
+  });
+
+  test("the revenant blood pool starts full and carries the 1/day recovery rule", () => {
+    const blood = TEMPLATE_REVENANT.GetPool("blood")!;
+    expect(blood.start).toBe(10);
+    expect(blood.recovery).toEqual([{ amount: 1, per: "day", note: "revenant vitae" }]);
+  });
+});
+
+describe("recovery on the story clock: days, the Umbra gate, full moons", () => {
+  const ep = (s: string): number => parseStoryDate(s) as number;
+
+  test("countDayBoundaries counts UTC midnights in (from, to] - split advances accumulate", () => {
+    expect(countDayBoundaries(ep("1197-03-15-08"), ep("1197-03-15-23"))).toBe(0);
+    expect(countDayBoundaries(ep("1197-03-15-23"), ep("1197-03-16-01"))).toBe(1);
+    expect(countDayBoundaries(ep("1197-03-15-08"), ep("1197-03-18-08"))).toBe(3);
+    expect(countDayBoundaries(ep("1197-03-16-01"), ep("1197-03-15-23"))).toBe(0);  // rewind: nothing
+  });
+
+  test("countFullMoons rides the mean synodic cycle (2000-01-21 was a full moon)", () => {
+    expect(countFullMoons(ep("2000-01-10"), ep("2000-01-25"))).toBe(1);
+    expect(countFullMoons(ep("2000-01-10"), ep("2000-03-09"))).toBe(2);   // 59 days = two moons
+    expect(countFullMoons(ep("1197-03-01"), ep("1197-03-31"))).toBe(1);   // proleptic: one per ~29.53d
+    const next = nextFullMoon(ep("2000-01-10"));
+    expect(next).toBeGreaterThan(ep("2000-01-20"));
+    expect(next).toBeLessThan(ep("2000-01-22"));
+  });
+
+  test("advance-time credits recovery per midnight crossed; the Umbra affliction opens the +1/day gate", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
+    await CommandRouter.route("adopt-resource living-resolve");
+    const char = (await CharacterStore.getCurrent())!;
+    await CharacterResources.spend(char, "living-resolve", 25);            // down to 5
+    const r1 = await CommandRouter.route("advance-time 3d");
+    expect(r1).toContain("Recovery:");
+    expect(r1).toContain("Marius +3 living-resolve -> 8/30 (1/day×3)");
+    // In the Umbra the communion doubles the daily point.
+    await CommandRouter.route("afflict in-umbra");
+    const r2 = await CommandRouter.route("advance-time 1d");
+    expect(r2).toContain("Marius +2 living-resolve -> 10/30");
+    expect(r2).toContain("Umbral communion");
+    // A short hop inside the same day credits nothing (and says nothing).
+    expect(await CommandRouter.route("advance-time 2h")).not.toContain("Recovery:");
+  });
+
+  test("a plain revenant regains vitae daily (no Living Resolve in this story)", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route("story-start 1197-03-15-00");
+    await CommandRouter.route('create-playable name="Ghil" templates=revenant');
+    const ghil = (await CharacterStore.getCurrent())!;
+    await CharacterResources.spend(ghil, "blood", 5);                      // 10 -> 5
+    const reply = await CommandRouter.route("advance-time 8d");
+    expect(reply).toContain("Ghil +5 blood -> 10/10");                     // +8/day, clamped at max
+    expect(reply).toContain("revenant vitae");
+  });
+
+  test("a full moon refills Living Resolve (adoption is story-level: it replaces blood everywhere)", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route("story-start 2000-01-15-00");                // 🌕 due Jan 21
+    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
+    await CommandRouter.route("adopt-resource living-resolve");
+    const marius = (await CharacterStore.load("Marius"))!;
+    await CharacterResources.spend(marius, "living-resolve", 25);          // down to 5
+    const reply = await CommandRouter.route("advance-time 8d");
+    expect(reply).toContain("🌕");
+    expect(reply).toContain("Marius +25 living-resolve -> 30/30");         // 8/day + 20/moon, clamped
+    expect(reply).toContain("20/full-moon×1");
+  });
+});
+
+describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  // The book's own example mage: Foundation Sensitivity 3; Chieftain 2,
+  // Trickster 4, Warrior 4, Wise One 3.
+  async function ladislav(quintessence = 5): Promise<PlayableCharacter> {
+    await CommandRouter.route('create-playable name="Ladislav" templates=mage');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { sensitivity: 3, chieftain: 2, trickster: 4, warrior: 4, "wise-one": 3 };
+    await CharacterStore.save(c);
+    await CharacterResources.gain(c, "willpower", 5);        // potentials seed Willpower at 0
+    if (quintessence > 0) await CharacterResources.gain(c, "quintessence", quintessence);
+    return c;
+  }
+
+  test("a simple spell within the Foundation: diff 4 + required level, no stabilization", async () => {
+    await ladislav();
+    const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity', { rng: allTens });
+    expect(r).toContain("simple spell: diff 4+2 = 6");
+    expect(r).toContain("Sensitivity + Trickster (7)");   // Foundation 3 + Pillar 4 dice
+    expect(r).toContain("vs diff 6");
+    expect(r).not.toContain("stabilize");
+    expect(r).not.toContain("unknown tag");               // magic/cast are identity tags, not typos
+  });
+
+  test("required level above the Foundation forces the stabilizing point (no difficulty break)", async () => {
+    const c = await ladislav();
+    const r = await CommandRouter.route('cast pillars="trickster:4" foundation=sensitivity', { rng: allTens });
+    expect(r).toContain("vs diff 8");                                     // 4+4, undiscounted
+    expect(r).toContain("1 to stabilize (Trickster 4 > Sensitivity 3)");
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(4);
+    // Without any Quintessence the same casting is refused (a fresh, dry mage).
+    await CommandRouter.route('create-playable name="Dry" templates=mage');
+    await CommandRouter.route('play name="Dry"');
+    const dryChar = (await CharacterStore.getCurrent())!;
+    expect(dryChar.name).toBe("dry");
+    dryChar.traits = { sensitivity: 3, trickster: 4 };
+    await CharacterStore.save(dryChar);
+    const dry = await CommandRouter.route('cast pillars="trickster:4" foundation=sensitivity');
+    expect(dry).toContain("REQUIRES 1 quintessence");
+  });
+
+  test("the caster cannot exceed their own Pillar; unknown Foundations refuse with guidance", async () => {
+    await ladislav();
+    expect(await CommandRouter.route('cast pillars="chieftain:3" foundation=sensitivity')).toContain("has Chieftain 2 - the effect needs 3");
+    expect(await CommandRouter.route('cast pillars="trickster:2"')).toContain("has no Foundation rating");
+  });
+
+  test("the battle-fury: complex pool, highest-required primary, mandatory + extra Quintessence", async () => {
+    const c = await ladislav();
+    const r = await CommandRouter.route('cast pillars="warrior:4,chieftain:2" foundation=sensitivity quintessence=2', { rng: allTens });
+    expect(r).toContain("complex spell: diff 5+4+1 = 10");
+    expect(r).toContain("Sensitivity + Warrior + 1 (8)");                 // 8 dice, the book's sum
+    expect(r).toContain("1 to stabilize (Warrior 4 > Sensitivity 3)");
+    expect(r).toContain("2 for -2 difficulty");
+    expect(r).toContain("vs diff 8");                                     // 10 - 2 (cap 10: no surcharge stage)
+    expect(r).toContain("needs the Fount Background");                    // 3 points in one turn
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(2);
+  });
+
+  test("the book's cap-9 knob restores the surcharge (one config edit)", async () => {
+    await ladislav();
+    await MagicRulesConfig.save({ "difficulty-cap": 9 });
+    const r = await CommandRouter.route('cast pillars="warrior:4,chieftain:2" foundation=sensitivity', { rng: allTens });
+    expect(r).toContain("difficulty 10 > 9");
+    expect(r).toContain("requirement (2)");                               // +1 required success
+  });
+
+  test("Quintessence cannot push the difficulty below 4", async () => {
+    await ladislav();
+    const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity quintessence=3', { rng: allTens });
+    expect(r).toContain("vs diff 4");
+    expect(r).toContain("only 2 of 3 reduction points could apply");
+  });
+
+  test("same-scene retries: +1 per failure, +2 per attempt after a botch, cleared by success or a new scene", async () => {
+    await ladislav();
+    // A botch: every die a 1.
+    const botch = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: () => 0.05 });
+    expect(botch).toContain("BACKLASH");
+    // Retrying now carries +2 per prior attempt.
+    const retry = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
+    expect(retry).toContain("retry this scene: +2 difficulty (1 prior attempt, one botched)");
+    // That cast SUCCEEDED (all tens) - the ledger clears.
+    const clean = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
+    expect(clean).not.toContain("retry this scene");
+    // A plain failure charges +1 - and a scene change wipes the slate.
+    const fail = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil requires=8', { rng: seqRng([7, 7, 7, 7, 7, 7, 7]) });
+    expect(fail).toContain("short of requirement");
+    const after = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
+    expect(after).toContain("retry this scene: +1 difficulty");
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route('scene "Elsewhere"');
+    const fresh = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil requires=8', { rng: seqRng([7, 7, 7, 7, 7, 7, 7]) });
+    expect(fresh).not.toContain("retry this scene");
+  });
+
+  test("extended casting: ST-set successes accrue; a botch is Backlash and ends it", async () => {
+    await ladislav();
+    expect(await CommandRouter.route('cast pillars="warrior:4" foundation=sensitivity extended=true')).toContain("needs requires=N");
+    const r = await CommandRouter.route('cast pillars="warrior:4" foundation=sensitivity requires=6 extended=true interval="one hour"', { rng: allTens });
+    expect(r).toContain("starts extended");
+    expect(r).toContain("/6");                                            // the target rides the action
+    const botched = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity requires=6 extended=true', { rng: () => 0.05 });
+    expect(botched).toContain("failed");                                  // onBotch "fail": the casting ends
+    expect(botched).toContain("Backlash");
+  });
+
+  test("ongoing spells: ×10 successes, per-success fuel, and the seal", async () => {
+    await ladislav();
+    const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity requires=2 ongoing=true', { rng: allTens });
+    expect(r).toContain("2×10 = 20 successes");
+    expect(r).toContain("1 magic-fuel per success");
+    expect(r).toContain("seal with [[seal-spell pillar=2]]");
+    expect(r).toContain("/20");
+  });
+
+  test("seal-spell: the price, the separate payers, and the fused shortcut", async () => {
+    const c = await ladislav(20);
+    const quote = await CommandRouter.route("seal-spell pillar=3");
+    expect(quote).toContain("15 Quintessence + 2 Willpower");
+    expect(quote).toContain("Payable over time");
+    const paid = await CommandRouter.route("seal-spell pillar=3 pay=true");
+    expect(paid).toContain("15/15 quintessence");
+    expect(paid).toContain("2/2 willpower");
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(5);
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "willpower")!)).toBe(3);
+  });
+
+  test("a Living Resolve caster: the fused substance fuels the spell and the sure success rides free", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates="revenant, mage"');
+    await CommandRouter.route("adopt-resource living-resolve");
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { vis: 2, incantation: 3 };
+    await CharacterStore.save(c);
+    const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
+    expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 for -1 difficulty");
+    expect(r).toContain("the fused Willpower grants an un-cancelable success");
+    expect(r).toContain("+1 sure");
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(28);
+    // Sealing with the fused substance: one payment covers both components.
+    const seal = await CommandRouter.route("seal-spell pillar=3 pay=true");
+    expect(seal).toContain("15/15 living-resolve (the fused substance covers both components)");
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(13);
   });
 });

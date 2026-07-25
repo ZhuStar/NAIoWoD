@@ -18,6 +18,7 @@ export interface RollOptions {
   difficulty?: number;        // default 6
   nAgain?: number;            // default 10 (10-again). 11 disables, 9 explodes 9s & 10s.
   automaticSuccesses?: number; // free successes (e.g. Potence, a spent Willpower)
+  uncancelableSuccesses?: number; // successes rolled 1s can NEVER cancel (fused Willpower)
   rng?: Rng;
   label?: string;             // header label when rolling a raw pool
 }
@@ -38,8 +39,9 @@ export interface RollResult {
   dice: RollDie[];
   successes: number;          // dice meeting difficulty (incl. explosions)
   automaticSuccesses: number; // free successes added to the tally
+  uncancelableSuccesses: number; // successes immune to cancellation by 1s
   ones: number;               // dice showing a 1 (incl. explosions)
-  net: number;                // successes + automaticSuccesses - ones
+  net: number;                // successes + automaticSuccesses - ones (+ uncancelable on top)
   isBotch: boolean;
   outcome: RollOutcome;
   message: string;
@@ -58,6 +60,7 @@ export class Dice {
     const difficulty = options.difficulty ?? 6;
     const nAgain = Math.max(2, options.nAgain ?? 10); // never explode on faces < 2
     const automaticSuccesses = Math.max(0, options.automaticSuccesses ?? 0);
+    const uncancelableSuccesses = Math.max(0, options.uncancelableSuccesses ?? 0);
     const rng = options.rng ?? __defaultRng;
 
     const traits: RollTrait[] = typeof input === "number"
@@ -91,19 +94,25 @@ export class Dice {
 
     const successes = dice.filter(d => d.isSuccess).length;
     const ones = dice.filter(d => d.isOne).length;
-    const net = successes + automaticSuccesses - ones;
+    // Uncancelable successes sit OUTSIDE the 1s-cancellation: ones eat the
+    // ordinary tally (never below 0) and the uncancelable ones land on top, so
+    // the roll always nets at least that many. With none, net keeps its exact
+    // historical form (it may go negative).
+    const cancelable = successes + automaticSuccesses - ones;
+    const net = uncancelableSuccesses > 0 ? Math.max(0, cancelable) + uncancelableSuccesses : cancelable;
 
     // A botch is judged on the INITIAL roll only: zero successes and >= 1 one.
     // (A cancelled success is a failure, not a botch; a free success also averts it.)
     const initial = dice.filter(d => !d.fromExplosion);
     const initialSuccesses = initial.filter(d => d.isSuccess).length;
     const initialOnes = initial.filter(d => d.isOne).length;
-    const isBotch = initialSuccesses === 0 && automaticSuccesses === 0 && initialOnes >= 1;
+    const isBotch = initialSuccesses === 0 && automaticSuccesses === 0 && uncancelableSuccesses === 0 && initialOnes >= 1;
 
     const outcome: RollOutcome = isBotch ? "botch" : (net > 0 ? "success" : "failure");
 
     const autoText = automaticSuccesses > 0 ? ` +${automaticSuccesses} auto` : "";
-    const header = traits.map(t => `${StringUtil.toTitleCase(t.name)} (${t.value})`).join(" + ") + autoText;
+    const sureText = uncancelableSuccesses > 0 ? ` +${uncancelableSuccesses} sure` : "";
+    const header = traits.map(t => `${StringUtil.toTitleCase(t.name)} (${t.value})`).join(" + ") + autoText + sureText;
     const faces = dice.map(d => `${d.symbol}${d.face}`).join(" ");
     let resultLine: string;
     if (isBotch) resultLine = `${DIE_BOMB} BOTCH!`;
@@ -111,6 +120,6 @@ export class Dice {
     else resultLine = `${DIE_MISS} Failure`;
     const message = `${header} vs diff ${difficulty} [${faces}] -> ${resultLine}`;
 
-    return { traits, pool, difficulty, nAgain, dice, successes, automaticSuccesses, ones, net, isBotch, outcome, message };
+    return { traits, pool, difficulty, nAgain, dice, successes, automaticSuccesses, uncancelableSuccesses, ones, net, isBotch, outcome, message };
   }
 }

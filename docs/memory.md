@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `d3a13fd`** ("document cleanup:
-> the streaming-<hide> backstop + noise age-out via onGenerationEnd"). Prior:
-> `f537584` (context hygiene: keep QUIET noise out of context; count generations);
-> `baa8252` (storyteller output: <hide> plans → scene plan → Author's Note);
-> `25c6a9a` (scenes: the named unit of play on the story clock); `cb5b4c3` (vendor
-> NovelAI's script-types.d.ts as ambient truth).
+> **Last synced with the code as of commit `cc85f35`** ("Living Resolve,
+> recovery on the clock, ghoul/revenant soak, and the Dark Ages: Mage casting
+> engine"). Prior: `d3a13fd` (document cleanup: the streaming-<hide> backstop +
+> noise age-out via onGenerationEnd); `f537584` (context hygiene); `baa8252`
+> (storyteller output: <hide> plans → Author's Note); `25c6a9a` (scenes);
+> `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient truth).
 
 ---
 
@@ -225,14 +225,18 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   `Degenerate/Improve` move WITH the polarity, `IsUnplayable` at 10-ascending /
   0-descending).
 
-### src/core/dice.ts (116)
+### src/core/dice.ts (~130)
 - `Rng` = () => number in [0,1); `Random(min,max,rng)`.
 - `Dice.roll(input: number | RollTrait[], options)` → `RollResult`: difficulty
   (default 6), `nAgain` (default 10; 11 disables), `automaticSuccesses` (free
-  successes — kept separate from their source by design), explosion chain
-  (MAX_DICE 200), botch = initial roll has ≥1 one, 0 successes AND 0 auto
-  (a cancelled success is a failure, not a botch). `message` is a full audit
-  line with emoji faces (💣 one, 💥 explode, ✅ hit, ❌ miss).
+  successes — kept separate from their source by design),
+  **`uncancelableSuccesses`** (§7.33: successes 1s can NEVER cancel — when any
+  exist, `net = max(0, successes+auto−ones) + uncancelable`, header `+N sure`;
+  when none, net keeps its exact historical form incl. negatives), explosion
+  chain (MAX_DICE 200), botch = initial roll has ≥1 one, 0 successes AND 0
+  auto AND 0 uncancelable (a cancelled success is a failure, not a botch).
+  `message` is a full audit line with emoji faces (💣 one, 💥 explode, ✅ hit,
+  ❌ miss).
 
 ### src/core/damage.ts (401)
 - `Severity` — **class** with singletons HARMLESS(0)/BASHING(1)/LETHAL(2)/
@@ -268,7 +272,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `SoakTypeRule {soakable, pool: traitNames[]}`, `SoakSpec {bashing, lethal,
   aggravated, difficulty}`.
 
-### src/core/time.ts (151) — pure calendar/clock math (§7.30)
+### src/core/time.ts (~190) — pure calendar/clock math (§7.30, §7.33)
 - Real (proleptic Gregorian) time, epoch-SECONDS in/out, no host. Surface syntax
   is `yyyy-mm-dd-hh` (hour optional, `:mm:ss` allowed); durations are
   `s/m/h/d/w/mo/y` tokens ("2w 4h", "1mo"). `daysInMonth`/date construction use
@@ -281,6 +285,11 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   `negative` + `totalSeconds`), computed by counting whole months from the
   earlier endpoint then a fixed remainder (exact + reversible; handles the
   Jan 31→Mar 01 = 1mo 1d borrow case); `formatCalendarSpan` → prose.
+- **Recovery boundaries (§7.33):** `countDayBoundaries(from,to)` = UTC
+  midnights in `(from,to]` (split advances accumulate; `to<=from` → 0);
+  `countFullMoons(from,to)` + `nextFullMoon(epoch)` on the MEAN synodic month
+  (29.530588853 d anchored to the 2000-01-06 18:14 UTC new moon + half a
+  cycle; ±hours vs true phase, fine proleptically in 1197).
 
 ### src/wizard.ts (83) — medium-agnostic wizard engine
 - `WizardPrompt {step, title, body, kind: choice|number|text|confirm,
@@ -295,14 +304,20 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - **Why medium-agnostic**: user wants text prompt→reply now, modals/windows
   later, same wizard logic.
 
-### src/rolls.ts (578) — pure roll machinery
+### src/rolls.ts (~600) — pure roll machinery
 - `RollSpec {pool, difficulty(6), difficultyExpr?, difficultyMod, requires(≥1),
-  diceMod, tags[]}` — serializable (that's what enables named rolls);
-  `makeRollSpec`. **`difficultyExpr`** (optional) is the difficulty as a pool
-  expression — a trait/calculation like `"stamina+3"`; `resolveSpec` evaluates it
-  via `parsePoolExpression` against the SAME resolver as the pool, in place of the
-  numeric `difficulty`. `describeSpec` shows the expression; `overrideSpec` swaps
-  numeric ↔ expression (a numeric override clears any expression).
+  diceMod, tags[], difficultyCap?}` — serializable (that's what enables named
+  rolls); `makeRollSpec`. **`difficultyExpr`** (optional) is the difficulty as a
+  pool expression — a trait/calculation like `"stamina+3"`; `resolveSpec`
+  evaluates it via `parsePoolExpression` against the SAME resolver as the pool,
+  in place of the numeric `difficulty`. **`difficultyCap`** (§7.33, default 10)
+  generalizes the over-10 rule to any ceiling (Mage casting; carried by
+  `overrideSpec`, shown by `describeSpec` when ≠10). `describeSpec` shows the
+  expression; `overrideSpec` swaps numeric ↔ expression (a numeric override
+  clears any expression). `RollModifier`/`ResolvedRoll` also carry
+  **`uncancelableSuccesses`** (§7.33) through `resolveSpec`/`executeRoll` into
+  `Dice.roll`. `DEFAULT_ROLL_MODIFIERS` gained the no-op identity tags
+  `magic`/`cast` (so [[cast]]'s tags aren't "unknown").
 - `parsePoolExpression(expr, resolve)` — `+`-separated integer literals or
   trait names via a `TraitResolver`; also reused for **expression caps**
   (`"stamina+3"`) and now **difficulty expressions**. Pool source is one token.
@@ -367,14 +382,23 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   **first to `target` wins** (a same-round dead heat stays open — nobody got there
   first); `rounds ≥ maxRounds` → draw. `describeContest` status line.
 
-### src/rules.ts (891) — all game DATA
+### src/rules.ts (~1030) — all game DATA
 - `ATTRIBUTES {physical, social, mental}` + `ALL_ATTRIBUTES` (the fixed nine).
 - `RulesetConfig` (freebie/XP/downtime costs — placeholder until the real cost
   engine; `VAMPIRE`, `MAGE` presets).
 - Soak specs: `MORTAL_SOAK` (bashing only, Stamina), `VAMPIRE_SOAK`
-  (b/l Stamina+Fortitude, agg Fortitude only), `MAGE_SOAK` (=mortal),
-  `DEMON_SOAK` (all three, Stamina), `WEREWOLF_SOAK` (all three; silver/fire
-  handled by reaction instead).
+  (b/l Stamina+Fortitude, agg Fortitude only), **`GHOUL_SOAK`** (§7.33 —
+  b/l Stamina+Fortitude, agg Fortitude; ghouls & revenants), `MAGE_SOAK`
+  (=mortal), `DEMON_SOAK` (all three, Stamina), `WEREWOLF_SOAK` (all three;
+  silver/fire handled by reaction instead).
+- **§7.33 additions**: `EffectOp.once` (fire once per spend);
+  `ResourceDef.description?/recovery?: RecoveryRule[]/rollAs?: {cap?,
+  negatesPenaltiesAbove?}`; `RESOURCE_PRESETS` + `LIVING_RESOLVE` +
+  `ResourceOverridePatch {preset?}` resolved in `resourcesForTemplates`;
+  `TEMPLATE_REVENANT` (+ `revenant` key); the `in-umbra` DEFAULT_AFFLICTION;
+  `MagicRules`/`DEFAULT_MAGIC_RULES`/`MAGIC_KNOB_NAMES`/`magicRulesFrom`
+  (knob overlay, unknown/non-numeric ignored); Mage Quintessence effect
+  gained `limits.maxPerUse 3` + Fount/min-diff label.
 - `bloodForGeneration(gen)` — classic table gen 3–15 → `{max, perTurn}`.
 - Roads: `RoadDefinition {name, virtues[3], ratingVirtues[2]}` —
   `ROAD_OF_HUMANITY` (conscience/self-control/courage), `ROAD_OF_KINGS`
@@ -570,7 +594,14 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1632) — the character model + every persistent store
+### src/state.ts (~1720) — the character model + every persistent store
+**§7.33 additions**: `MagicRulesConfig` (MapConfigStore<number>,
+`wod:config:magic`, self-registers in ALL_CONFIG_STORES); `CastAttempts`
+(`cast:<char>` scene-scoped spell-retry ledger — `get`/`record`, lazy reset on
+scene change, success deletes the spell's entry); `ResourceOverrides` retyped
+to `ResourceOverridePatch` (preset adoption); `CharacterResources.defsFor`
+unchanged but now sees preset-resolved defs.
+
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -723,7 +754,21 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (3231) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (~3560) — the verbs (interpreter, wizards, handlers, registrations)
+
+**§7.33 additions**: `ROLL_OPS` + `"uncancelable"`; `applyEffectSpec` honors
+`EffectOp.once` (multiplier 1, not effectUnits) and maps uncancelable;
+`passiveRollExtra` maps it too. `RollAsBinding` + `characterRollEnv` returns
+`{resolver, penalty, rollAs}` (resolver answers a rollAs resource's own or
+replaced names with min(cap, current)); `applyPenaltyShield(rollAs, poolTraits,
+specDiceMod, extra)` (mutating; returns the note) called from BOTH
+`execCharacterRoll` (which gained an optional `seed` extra param) and
+`rollAndReport`. `launchExtended` opts gained `firstExtra`/`preNotes`.
+`applyRecovery(from, to)` + wiring in `cmdAdvanceTime`; `cmdStoryDate` shows
+`nextFullMoon`. **MAGIC section** after `cmdResources`: `parsePillars`,
+`grantsUncancelableOnSpend`, `cmdCast`, `cmdSealSpell`, `cmdAdoptResource`
+(QUIET). `cmdResources` lines gained perTurn/rollAs/recovery/description.
+Registrations: `cast`, `seal-spell`, `adopt-resource`.
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -1038,6 +1083,9 @@ create-if-missing with `1197-01-01-00`, §7.30) · **`time:dates`** (named date
 bookmarks, `name → epoch` map) · **`scene:<name>`** (scene records, §7.31) /
 **`current-scene`** pointer (the open scene's normalized name) · **`gen:count`**
 (real-generation counter, §7.32 — incremented by onContextBuilt when !dryRun) ·
+**`cast:<char>`** (the same-scene spell-retry ledger `{scene, spells: {key →
+{unsuccessful, botched}}}`, §7.33 — lazily reset when the current scene differs;
+key = cast label else the pillar signature; success deletes its entry) ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
 (session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
 live form fields, e.g. `win:define-constraint:relation` - the documented home
@@ -1050,8 +1098,11 @@ once-per-session reconciliation-modal guard).
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
 (`wod:named-rolls:library` JSON map) · `wod:config` (entries: `general`
 seeded global-config card, unread for now; `wod:config:resources` overrides
-map; `wod:config:constraints` constraint groups; `wod:config:afflictions`
-affliction-def overlay — each array or `name → def` map) ·
+map — a patch may carry `preset: true` to adopt a `RESOURCE_PRESETS` def, §7.33;
+**`wod:config:magic`** spellcasting knob map, kebab-case name → number overlaid
+on `DEFAULT_MAGIC_RULES`; `wod:config:constraints` constraint groups;
+`wod:config:afflictions` affliction-def overlay — each array or `name → def`
+map) ·
 **`wod:config:success-tables`** — a CATEGORY (the virtual-subcategory tree,
 §7.21): its `general` card + any extra cards hold bare-named tables; each
 subcategory is the real category `wod:config:success-tables:<sub>` (own
@@ -1535,6 +1586,93 @@ and `prefill` are mocked/available but not yet written.
     a `<hide>` whose content spans MULTIPLE paragraphs isn't reassembled (single-
     section blocks — the common case — are handled). The system-prompt/
     onContextBuilt-injection pass is still next.
+33. **Living Resolve + recovery-on-the-clock + ghoul/revenant soak + the Dark
+    Ages: Mage casting engine** (the user pasted the full "How Magic Works"
+    chapter and their protagonist's fused-resource spec; forks CONFIRMED via
+    questions: spell **difficulty cap = 10** — their call, the book plays 9,
+    shipped as a data knob; **LR = 30/30 start full**, Willpower/Resolve-POOL
+    rolls cap at min(10, current) and each point above 10 negates 1 die of pool
+    reductions; **recovery auto-applies** on advance-time).
+    *Engine:* core/dice.ts **`uncancelableSuccesses`** — successes 1s can NEVER
+    cancel: `net = max(0, successes+auto−ones) + uncancelable` when any exist
+    (exact historical net, incl. negatives, when none), botch impossible with
+    any, header shows `+N sure`. rolls.ts threads it through `RollModifier`/
+    `resolveSpec`/`executeRoll`; **`RollSpec.difficultyCap`** (default 10)
+    generalizes the over-10 rule: die target clamps to the cap, `+1 required
+    success` per excess point, and because reductions subtract from RAW
+    difficulty they buy the surcharge off BEFORE lowering the die target — the
+    book's ordering by arithmetic (verified against the Ladislav example).
+    `EffectOp.once` = fire once per spend regardless of units (the max-1-sure-
+    success rule as data); interpreter honors it; `"uncancelable"` joined
+    ROLL_OPS and `passiveRollExtra`. `"magic"`/`"cast"` are registered as no-op
+    identity tags (not typos; powers gate on them).
+    *rollAs (game.ts):* `ResourceDef.rollAs {cap, negatesPenaltiesAbove}` —
+    `characterRollEnv` returns bindings; the resolver answers the resource's
+    name OR a replaced name with min(cap, current); `applyPenaltyShield`
+    offsets the wound penalty + explicit negative dice mods (spec/extra) when
+    the POOL used the resource, noting "living-resolve shields N dice".
+    LIMITATION: tag-driven dice reductions inside resolveSpec and contest-side
+    rolls are unshielded in v1.
+    *Recovery:* `ResourceDef.recovery: RecoveryRule[] {amount, per: day|
+    full-moon, requires?, note?}`; core/time.ts `countDayBoundaries` (UTC
+    midnights in (from,to] — split advances accumulate, rewinds credit 0) +
+    `countFullMoons`/`nextFullMoon` (MEAN synodic month 29.530588853d anchored
+    to the 2000-01-06 18:14 UTC new moon + half cycle — proleptically fine for
+    1197, ±hours vs true phase, documented approximation). `cmdAdvanceTime`
+    calls `applyRecovery(before, after)`: for every `CharacterStore.listNames()`
+    character and recovery-bearing def, credit rules whose `requires` matches an
+    ACTIVE affliction def-name/tag ("in-umbra" — a new DEFAULT_AFFLICTIONS
+    entry, the encoded "can't go yet" Umbra flag), 🌕-flag moon credits, report
+    only real gains. `story-date` shows the next full moon.
+    *Soak:* **GHOUL_SOAK** (bashing & lethal stamina+fortitude, aggravated
+    fortitude — the user's erratum "they are alive... but the rules say so");
+    TEMPLATE_GHOUL switched from MORTAL_SOAK; new **TEMPLATE_REVENANT**
+    (ghoul-like, blood 10/10 START FULL + `recovery 1/day`, key `revenant`).
+    *Living Resolve as data:* `RESOURCE_PRESETS` + `LIVING_RESOLVE` in rules.ts;
+    an override patch `{preset: true}` (or naming one) starts from the preset
+    and merges the rest on top — `resourcesForTemplates` resolves it;
+    **`[[adopt-resource]]`** (QUIET) writes the tiny patch; adoption is
+    STORY-LEVEL (overrides apply to every character — fine for the lone
+    protagonist; a per-character scope would need new machinery). The def:
+    pool 30/30, perTurnLimit 6 (surfaced ST), roles blood/willpower/resolve/
+    magic-fuel/quintessence, replaces all four, rollAs {10, 10}, recovery
+    [1/day; 1/day requires in-umbra; 20/full-moon], effects: default = +1
+    uncancelable (once, maxPerUse 1); heal (1 b/l per pt); boost (+1 Physical,
+    scene); **fuel** (pure cost — the Willpower component is CONSUMED by an
+    activation: no free success); **fuel-surge** (cost 2 = required cost + 1
+    extra point buys the sure success — the user's exact rule); **focus** (−1
+    casting diff per point max 3 + the once-op sure success). `[[resources]]`
+    displays description/recovery/rollAs/perTurn.
+    *Magic:* `DEFAULT_MAGIC_RULES` (12 knobs incl. difficulty-cap 10, min-diff
+    4, quint-per-turn 3, free-limit 2, retry 1, botch-retry 2, ongoing ×10,
+    fuel 1/success, seal 5/dot + 1 WP per 10) overlaid by the
+    `wod:config:magic` MapConfigStore<number> via `magicRulesFrom`.
+    **`[[cast pillars="name:REQUIRED-level,..."]]`**: ratings live in the free
+    `traits` bucket (foundation= names the trait, default `foundation`);
+    refuses when own rating < required or Foundation is 0. Primary pillar =
+    highest REQUIRED (tie → best own score, per the book). Simple: pool
+    F+Pillar, diff 4+required; complex: pool F+primary+⟨extras⟩ literal, diff
+    5+highest+extras. Same-scene retry penalty from **CastAttempts** (state.ts,
+    `cast:<char>`, `{unsuccessful, botched}` per spell key; penalty =
+    (botched ? 2 : 1) × unsuccessful; success clears; different scene = lazy
+    reset). Quintessence: MANDATORY stabilizer when required > Foundation
+    (Ladislav-verified: it does NOT reduce difficulty; refuse if unpayable);
+    `quintessence=N` EXTRA points −1 diff each within (per-turn cap −
+    mandatory) and the min-diff-4 floor; >free-limit → Fount note; spends via
+    role `magic-fuel`; if the paying def carries a once-uncancelable effect
+    (Living Resolve), the sure success is AUTO-GRANTED (seeded, capped 1).
+    `spend=` also rides (applySpend). Tags magic+cast; `requires=` successes.
+    **extended=true/ongoing=true** route through `launchExtended` (new
+    `firstExtra` seed + `preNotes` opts): onBotch DEFAULT "fail" (the book:
+    a botch ENDS the casting — Backlash, successes lost; on-botch= can
+    soften), ongoing target = requires × 10 + per-success-fuel note + seal
+    pointer. Single-roll botch appends the ⚡ BACKLASH stub note (Backlash
+    systems unmodelled). Extended/ongoing castings record the retry ledger
+    only when interval 1 concludes the action (continue-roll doesn't know
+    it's a cast — recorded limitation). **`[[seal-spell pillar=N [pay=true]]]`**:
+    5×N magic-fuel + ceil(that/10) Willpower; a FUSED payer (one def fills
+    both roles) pays max(the two) once and says so; partial payment = "owed,
+    payable over time (ST tracks)".
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1544,13 +1682,16 @@ Ordered roughly by unlock value:
    **Scenes + turn-length** (§7.31: `Scene`/`SceneStore` + `scene`/`turn`/
    `end-scene`/`downtime`/`scenes`) are now BUILT — the real-calendar substrate
    and the named unit of play (combat marches the clock in 3-second turns; a
-   freeform scene counts turns without moving it). LEFT: making advancing time
-   ENFORCE what is advisory today — effect durations, cooldowns, uses-per-scene
+   freeform scene counts turns without moving it) — and **recovery rules are
+   the FIRST thing the clock enforces** (§7.33: advance-time credits
+   per-day/per-full-moon refills). LEFT: making advancing time ENFORCE the
+   rest of what is advisory today — effect durations, cooldowns, uses-per-scene
    (from the existing `EffectUses` ledger), boost expiry, `Pool.perTurnLimit`
-   (blood per turn — field exists, unenforced), extended-roll interval spacing,
-   willpower-per-turn, and auto-`advance` of affliction chains (merging the
-   affliction stepper `[[advance]]` with `[[advance-time]]`); and the Chapter/
-   Story/Chronicle hierarchy above Scene (light labels for now).
+   (blood/Living-Resolve per turn — field exists, surfaced, unenforced),
+   extended-roll interval spacing, willpower-per-turn, and auto-`advance` of
+   affliction chains (merging the affliction stepper `[[advance]]` with
+   `[[advance-time]]`); and the Chapter/Story/Chronicle hierarchy above Scene
+   (light labels for now).
 2. **Roll-system residuals** — resisted / contested / extended contests and
    success tables **shipped** (§5, §7.16). Left: **auto-applying a table's
    numeric output** (damage/soak currently read the count for display but don't
@@ -1594,9 +1735,16 @@ Ordered roughly by unlock value:
    allowed roads/morality, and **the constraint groups they own via `scope`**).
    `DISCIPLINES` already carries clan lists; a Choice primitive is the next data
    atom after constraints, referenced by the template-definer window.
-7. **Sorcerer Paths** (static magic) + the "other powers": dynamic magic,
-   blood sorcery, ritual magic, Arcana — all currently just words the effect
-   grammar can already reference.
+7. **Sorcerer Paths** (static magic) + the "other powers". The **Dark Ages:
+   Mage casting PROCEDURE is SHIPPED** (§7.33: `[[cast]]`/`[[seal-spell]]`,
+   simple/complex/extended/ongoing, Quintessence, retries, the cap knob).
+   LEFT: Sorcerer Paths; **Backlash systems** (the stub note only); Foundation/
+   Pillars as MODELLED powers (ratings are free `traits`-bucket entries today —
+   no fellowship data, no validation); per-interval Quintessence on
+   `[[continue-roll]]` for extended castings (the launch interval takes it;
+   later intervals need `spend=` by hand); retry-ledger recording for
+   multi-interval castings; and spell EFFECTS (what a spell does is still
+   narration/ST — the effect grammar's open vocabulary is the seam).
 8. **Owned-power roll effects — SHIPPED** (§7.23): Trait Affinity, Trait
    Enhancement and Specialties are live (parameterized merits + passive
    effects + the specialty= knob). LEFT from this item: the

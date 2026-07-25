@@ -149,3 +149,34 @@ export function formatCalendarSpan(span: CalendarSpan): string {
   push(span.hours, "hour"); push(span.minutes, "minute"); push(span.seconds, "second");
   return parts.length ? parts.join(", ") : "no time";
 }
+
+// --- Recovery boundaries: days crossed & full moons ---------------------------
+
+// How many UTC midnights lie in (from, to]. Successive small advances accumulate
+// correctly (no "lastRecovery" state needed): each crossing is counted exactly
+// once, whichever advance stepped over it. 0 when to <= from (rewinds recover
+// nothing).
+export function countDayBoundaries(fromEpoch: number, toEpoch: number): number {
+  if (toEpoch <= fromEpoch) return 0;
+  return Math.floor(toEpoch / 86400) - Math.floor(fromEpoch / 86400);
+}
+
+// Full moons on the MEAN lunar cycle: the synodic month (29.530588853 days)
+// anchored to the 2000-01-06 18:14 UTC new moon, offset half a cycle. Real
+// phases wobble a few hours around the mean, so a computed instant can be off
+// by up to ~half a day - plenty for a story clock, even proleptically in 1197.
+const SYNODIC_SECONDS = 29.530588853 * 86400;
+const FULL_MOON_REF = 947182440 + SYNODIC_SECONDS / 2;   // 2000-01-06 18:14 UTC new moon + half a cycle
+
+// How many full-moon instants lie in (from, to]. 0 when to <= from.
+export function countFullMoons(fromEpoch: number, toEpoch: number): number {
+  if (toEpoch <= fromEpoch) return 0;
+  return Math.floor((toEpoch - FULL_MOON_REF) / SYNODIC_SECONDS)
+       - Math.floor((fromEpoch - FULL_MOON_REF) / SYNODIC_SECONDS);
+}
+
+// The first full-moon instant strictly after `epoch` (epoch seconds).
+export function nextFullMoon(epoch: number): number {
+  const k = Math.floor((epoch - FULL_MOON_REF) / SYNODIC_SECONDS) + 1;
+  return Math.round(FULL_MOON_REF + k * SYNODIC_SECONDS);
+}

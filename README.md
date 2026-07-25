@@ -893,11 +893,11 @@ component:
 - It **replaces** blood/willpower/resolve/quintessence and answers to their
   names and roles — every vitae trick (heal, `boost` a Physical), every power
   that burns Resolve or Willpower, all spell fuel.
-- **The fused Willpower grants ONE un-cancelable success per roll** whenever a
-  dice pool is involved — the default spend, and a `once`-op rider on `focus`
-  (casting) and `fuel-surge`. When a power *consumes* the Willpower as its
-  activation cost, use `fuel` (no free success) — or `fuel-surge` (1 extra
-  point buys it anyway).
+- **The fused Willpower buys un-cancelable successes** whenever a dice pool is
+  involved — **one per point spent, for any reason**, capped by Foundation (see
+  below). It rides the default spend, `focus` (casting) and `fuel-surge`. When a
+  power *consumes* the Willpower as its activation cost, use `fuel` (no free
+  success) — or `fuel-surge` (an extra point buys it anyway).
 - **Rolls that pool it** (Willpower/Resolve rolls) roll **min(10, current)** —
   and every point above 10 **shields a die of penalties** (wound penalties,
   negative dice mods) on that roll (`rollAs` in the def).
@@ -908,6 +908,15 @@ component:
 
 An ordinary mage's **Quintessence** recovers on those same two gates (Umbra,
 and rested-in-sanctum) — it just has no daily brew of its own.
+
+**Certainty is capped by Foundation.** Spent Willpower buys successes that
+rolled 1s can *never* cancel — one per point — but no mind holds unlimited
+certainty: the total per roll is **`max(1, Foundation ÷ 2)`** (the divisor is the
+`uncancelable-per-foundation` knob). At Modus 5 that's **2**; at Modus 3, **1**;
+a character with no Foundation at all still gets 1. This applies to everyone:
+the Ouroboros gets them from *any* Living Resolve spend (the Willpower is in
+every point), while an ordinary character spends that many Willpower explicitly —
+`[[roll strength spend=willpower spend-amount=2]]`.
 
 ### Casting magic — Dark Ages: Mage
 

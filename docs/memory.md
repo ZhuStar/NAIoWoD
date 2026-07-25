@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `6719345`** ("the Sanctum pass:
-> rating-scaled afflictions, the Library of the Unseen and its cray"). Prior:
+> **Last synced with the code as of commit `2d2a45a`** ("certainty scales
+> with Foundation; the wizard's roles step reads the sheet"). Prior: `6719345`
+> ("the Sanctum pass:
+> rating-scaled afflictions, the Library of the Unseen and its cray");
 > `1f5e7f2` (the Ouroboros: a unique template; Hermetic fellowship; rest gates);
 > `cc85f35` (Living Resolve, recovery on the clock, ghoul/revenant soak, the
 > Dark Ages: Mage casting engine); `d3a13fd` (document cleanup); `f537584`
@@ -407,7 +409,8 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   `AfflictionTier` + `AfflictionDef.scalesWith/tiers/requiresAwakened` +
   **`foldAfflictionTiers`** (cumulative, untargeted-supersedes-targeted);
   the `in-sanctum` (8 tiers) / `in-library` / `in-rotunda` DEFAULT_AFFLICTIONS;
-  `RecoveryRule.requiresTrait`; Mage Backgrounds (Cray/Fount/Library/Sanctum/
+  `RecoveryRule.requiresTrait`; `MagicRules.uncancelablePerFoundation` +
+  **`uncancelableCap`** (§7.36); Mage Backgrounds (Cray/Fount/Library/Sanctum/
   Talisman) in the SRD seed; `DEFAULT_ROLL_MODIFIERS` gained the place tags.
 - `bloodForGeneration(gen)` — classic table gen 3–15 → `{max, perTurn}`.
 - Roads: `RoadDefinition {name, virtues[3], ratingVirtues[2]}` —
@@ -1779,6 +1782,40 @@ and `prefill` are mocked/available but not yet written.
     harvest day earns nothing). Everything credits the `magic-fuel` ROLE, which
     is why "anything mentioning Quintessence is Living Resolve to him" needs no
     special case.
+
+36. **Certainty scales with Foundation + the wizard's roles step reads the
+    sheet** (user, after playing: "[configure-resources step 2/3] doesn't know
+    Living Resolve"; and "if Foundation is 5, if I spend 2 points of Living
+    Resolve for any reason, I gain two un-cancelable successes. For a regular
+    character, this means spend 2 extra Willpower explicitly").
+    *The cap became a rule, not a constant.* §7.33 shipped "max 1 un-cancelable
+    success per roll" as `EffectOp.once` + `maxPerUse: 1`. It is really
+    `uncancelableCap(foundation, rules) = max(1, floor(Foundation /
+    uncancelablePerFoundation))` - a new MagicRules knob (default 2, so
+    Foundation 5 -> 2, Foundation 3 -> 1, matching both data points the user
+    gave; the alternative ceil(F/3) reading was offered and left unanswered, so
+    the halving ships as the default and the knob flips it). The uncancelable
+    ops on willpower / living-resolve / fuel-surge / focus dropped `once` and
+    now scale 1-per-point; `applyEffectSpec` clamps the total to the cap and
+    says so. `resolveFoundation` gained `rating`; `cmdCast`'s auto-grant seeds
+    `min(points spent, cap)` and the spend= merge takes the LARGER of the two
+    grants rather than clamping to 1. `grantsUncancelableOnSpend` no longer
+    keys on `once` (it was the regression that silently killed the cast grant).
+    `once` stays in the grammar - still the right flag for genuinely
+    once-per-spend data - just unused by these defs.
+    *Willpower changed for everyone:* its default effect is now un-cancelable
+    successes rather than plain automatic ones ("for a regular character, this
+    means spend 2 extra Willpower explicitly to gain those successes"). A
+    character with no Foundation is capped at 1, which is what the old rule
+    effectively was. `TUNABLE_OPS` gained "uncancelable" so the resources wizard
+    can still tune Willpower's knob (dropping it silently SKIPPED the effect
+    step - caught by the wizard walk test).
+    *The wizard bug:* `rw.rolesPrompt` listed only roles ADDED during the run
+    and hardcoded a "quintessence: resolve" example - so for a character whose
+    Quintessence is replaced by Living Resolve, step 2/3 named a resource he
+    does not have and showed nothing about the one he does. It now lists every
+    resource on the sheet with the roles it currently fills (overrides applied)
+    and draws its example from them.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

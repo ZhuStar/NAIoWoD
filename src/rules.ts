@@ -285,7 +285,10 @@ export function willpowerResource(start: number): ResourceDef {
   return {
     name: "willpower", kind: "tracker", start, startMin: 1, startMax: 10, max: 10,
     roles: ["willpower"],
-    effect: { label: "Willpower: +1 automatic success", apply: [{ op: "successes", amount: 1 }] },
+    // Spent Willpower buys CERTAINTY: successes rolled 1s can never cancel, one
+    // per point - but a mind can only hold so much of it at once, so the total
+    // is capped by Foundation (uncancelableCap; 1 for the unawakened).
+    effect: { label: "Willpower: +1 un-cancelable success per point (capped by Foundation)", apply: [{ op: "uncancelable", amount: 1 }] },
     // Willpower is also static spell fuel (Sorcerers, some Thaumaturgy): a
     // mandatory pure cost with no dice bonus - `spend=willpower:fuel!`.
     effects: { fuel: { label: "Willpower spent as static spell fuel", apply: [], cost: { units: 1 } } },
@@ -522,9 +525,8 @@ export const LIVING_RESOLVE: ResourceDef = {
     + "Also regained by drinking vampiric vitae (immune to the bond) and consuming Tass - [[gain living-resolve N]]. "
     + "Spend up to 6/turn (ST-enforced)",
   effect: {
-    label: "Living Resolve: +1 un-cancelable success",
-    apply: [{ op: "uncancelable", amount: 1, once: true }],
-    limits: { maxPerUse: 1 },
+    label: "Living Resolve: +1 un-cancelable success per point (capped by Foundation)",
+    apply: [{ op: "uncancelable", amount: 1 }],
   },
   effects: {
     heal: {
@@ -542,12 +544,12 @@ export const LIVING_RESOLVE: ResourceDef = {
     },
     "fuel-surge": {
       label: "Required cost + 1 extra point: the un-cancelable success rides along",
-      apply: [{ op: "uncancelable", amount: 1, once: true }],
-      cost: { units: 2 }, limits: { maxPerUse: 1 },
+      apply: [{ op: "uncancelable", amount: 1 }],
+      cost: { units: 2 },
     },
     focus: {
-      label: "Living Resolve focuses the casting: -1 difficulty per point (min diff 4, ST) + the un-cancelable success",
-      apply: [{ op: "difficulty", amount: -1 }, { op: "uncancelable", amount: 1, once: true }],
+      label: "Living Resolve focuses the casting: -1 difficulty per point (min diff 4, ST) + un-cancelable successes",
+      apply: [{ op: "difficulty", amount: -1 }, { op: "uncancelable", amount: 1 }],
       limits: { maxPerUse: 3 },
     },
   },
@@ -683,12 +685,23 @@ export interface MagicRules {
   ongoingFuelPerSuccess: number; // Quintessence per success while casting ongoing
   sealPerPillarDot: number;      // seal: Quintessence per dot of the highest Pillar
   sealWillpowerPer: number;      // seal: 1 Willpower per this many Quintessence (ceil)
+  // How many Foundation dots buy one more un-cancelable success per roll:
+  // cap = max(1, floor(Foundation / this)). Foundation 5 / 2 = 2 successes.
+  uncancelablePerFoundation: number;
 }
 export const DEFAULT_MAGIC_RULES: MagicRules = {
   simpleBase: 4, complexBase: 5, difficultyCap: 10, minDifficulty: 4,
   quintPerTurn: 3, quintFreeLimit: 2, retryPenalty: 1, botchRetryPenalty: 2,
   ongoingMultiplier: 10, ongoingFuelPerSuccess: 1, sealPerPillarDot: 5, sealWillpowerPer: 10,
+  uncancelablePerFoundation: 2,
 };
+
+// The most un-cancelable successes one roll can carry, for this character's
+// Foundation: the Willpower being spent is only worth so much certainty. A
+// character with no Foundation (the unawakened) can still buy exactly one.
+export function uncancelableCap(foundationRating: number, rules: MagicRules): number {
+  return Math.max(1, Math.floor(Math.max(0, foundationRating) / Math.max(1, rules.uncancelablePerFoundation)));
+}
 
 const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
   "simple-base": "simpleBase", "complex-base": "complexBase",
@@ -697,6 +710,7 @@ const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
   "retry-penalty": "retryPenalty", "botch-retry-penalty": "botchRetryPenalty",
   "ongoing-multiplier": "ongoingMultiplier", "ongoing-fuel-per-success": "ongoingFuelPerSuccess",
   "seal-per-pillar-dot": "sealPerPillarDot", "seal-willpower-per": "sealWillpowerPer",
+  "uncancelable-per-foundation": "uncancelablePerFoundation",
 };
 export const MAGIC_KNOB_NAMES: string[] = Object.keys(MAGIC_KNOBS);
 

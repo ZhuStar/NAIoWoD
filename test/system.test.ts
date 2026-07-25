@@ -39,7 +39,7 @@ import {
   MAGIC_CONFIG_ENTRY, MagicRulesConfig, CastAttempts, magicRulesFrom, DEFAULT_MAGIC_RULES,
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, TEMPLATE_OUROBOROS, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
-  foldAfflictionTiers, isAwakened, CrayStore,
+  foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
@@ -1509,7 +1509,8 @@ describe("resources: model", () => {
   });
 
   test("Willpower and Resolve carry their configured effects/roles", () => {
-    expect(resourcesForTemplates(["mortal"])[0].effect?.apply).toEqual([{ op: "successes", amount: 1 }]);
+    // Spent Willpower buys certainty: un-cancelable successes, capped by Foundation.
+    expect(resourcesForTemplates(["mortal"])[0].effect?.apply).toEqual([{ op: "uncancelable", amount: 1 }]);
     const resolve = resourcesForTemplates(["demon"]).find(r => r.name === "resolve")!;
     expect(resolve.effect?.apply).toEqual([{ op: "difficulty", amount: -2 }]);
     expect(resolve.roles).toContain("resolve");
@@ -1843,7 +1844,7 @@ describe("[[configure-resources]] wizard (text medium)", () => {
     const wp = ResourceOverrides.current().willpower;
     expect(wp.start).toBe(5);
     expect(wp.max).toBe(8);
-    expect(wp.effect!.apply[0]).toEqual({ op: "successes", amount: 2 });
+    expect(wp.effect!.apply[0]).toEqual({ op: "uncancelable", amount: 2 });
     expect(await CommandRouter.route("resources")).toContain("willpower 0/8"); // record's chosen start (0) still wins; max is patched
     // The wizard released plain input.
     expect(await processAdventureInput("just walking")).toBeUndefined();
@@ -4255,7 +4256,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
     expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 for -1 difficulty");
-    expect(r).toContain("the fused Willpower grants an un-cancelable success");
+    expect(r).toContain("the fused Willpower grants 1 un-cancelable success (capped at 1 by Vis 2)");
     expect(r).toContain("+1 sure");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(28);
     // Sealing with the fused substance: one payment covers both components.
@@ -4568,5 +4569,60 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
     const dead = await CommandRouter.route("harvest 26", { rng: () => 0.05 });
     expect(dead).toContain("💀 the cray DIES");
     expect(await CommandRouter.route("harvest 1")).toContain("the cray is dead");
+  });
+});
+
+describe("certainty scales with Foundation: how many successes 1s can never touch", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("uncancelableCap is Foundation halved, and never below one", () => {
+    const rules = magicRulesFrom({});
+    expect(uncancelableCap(0, rules)).toBe(1);      // the unawakened still buy one
+    expect(uncancelableCap(3, rules)).toBe(1);
+    expect(uncancelableCap(5, rules)).toBe(2);      // the user's case
+    expect(uncancelableCap(8, rules)).toBe(4);
+    expect(uncancelableCap(5, magicRulesFrom({ "uncancelable-per-foundation": 3 }))).toBe(1);  // knob
+  });
+
+  test("spending 2 points at Foundation 5 buys 2 sure successes; at Foundation 3 the cap bites", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 5, corona: 3 };
+    await CharacterStore.save(c);
+    const two = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=2", { rng: seqRng([1, 1, 1]) });
+    expect(two).toContain("+2 sure");
+    expect(two).toContain("2 successes");           // three 1s cannot touch them
+    expect(two).not.toContain("BOTCH");
+    // Three points still only buy two - Modus 5 is the ceiling.
+    const three = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=3", { rng: seqRng([2, 2, 2]) });
+    expect(three).toContain("+2 sure");
+    expect(three).toContain("capped at 2 (Foundation)");
+    // A lesser Foundation caps at one.
+    c.traits = { modus: 3, corona: 3 };
+    await CharacterStore.save(c);
+    expect(await CommandRouter.route("roll 3 spend=living-resolve spend-amount=2", { rng: seqRng([2, 2, 2]) })).toContain("+1 sure");
+  });
+
+  test("an ordinary character spends Willpower explicitly for the same certainty", async () => {
+    await CommandRouter.route('create-playable name="Squire" templates=mortal');
+    const c = (await CharacterStore.getCurrent())!;
+    c.attributes = { ...c.attributes, strength: 3 };
+    await CharacterStore.save(c);
+    await CharacterResources.gain(c, "willpower", 5);
+    const r = await CommandRouter.route("roll strength spend=willpower spend-amount=2", { rng: seqRng([1, 1, 1]) });
+    expect(r).toContain("+1 sure");                 // no Foundation: one is the cap
+    expect(r).toContain("capped at 1 (Foundation)");
+    expect(r).not.toContain("BOTCH");
+  });
+
+  test("the resources wizard's roles step shows THIS character's resources", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const first = await CommandRouter.route("configure-resources");
+    expect(first).toContain("living-resolve");
+    // Plain input is the wizard's reply channel: keep the one resource as is.
+    const roles = (await processAdventureInput("keep"))?.inputText ?? "";
+    expect(roles).toContain("Extra roles");
+    expect(roles).toContain("living-resolve: blood/willpower/resolve/magic-fuel/quintessence");
+    expect(roles).not.toContain("quintessence: resolve");     // no stock example the sheet lacks
   });
 });

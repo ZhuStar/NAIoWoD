@@ -25,7 +25,7 @@ import {
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
-  magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers,
+  magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers, uncancelableCap,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
@@ -74,7 +74,7 @@ interface RwState {
 const rwState = (s: RwState): WizardStateData => s as unknown as WizardStateData;
 
 // The wizard tunes the first numeric roll op of a default effect (its "knob").
-const TUNABLE_OPS = ["difficulty", "dice", "successes"];
+const TUNABLE_OPS = ["difficulty", "dice", "successes", "uncancelable"];
 const knobIndex = (e?: EffectSpec): number =>
   e ? e.apply.findIndex(o => TUNABLE_OPS.includes(o.op.toLowerCase())) : -1;
 
@@ -122,12 +122,23 @@ const rw = {
     };
   },
   rolesPrompt(state: RwState): WizardPrompt {
-    const added = Object.entries(state.overrides)
-      .filter(([, p]) => p.roles !== undefined)
-      .map(([k, p]) => `${k}: ${(p.roles ?? []).join("/")}`).join("; ");
+    // Show THIS character's resources and the roles each fills right now
+    // (overrides included), so the step reflects the sheet in front of you -
+    // and take the example from those resources rather than a stock name the
+    // character may not even have.
+    const rolesOf = (d: ResourceDef): string[] => {
+      const patched = state.overrides[StringUtil.normalize(d.name)]?.roles;
+      return (patched ?? d.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(d.name));
+    };
+    const current = state.defs
+      .map(d => { const roles = rolesOf(d); return `${d.name}${roles.length ? `: ${roles.join("/")}` : " (no extra roles)"}`; })
+      .join("; ");
+    const sample = state.defs[0];
+    const sampleRole = sample ? (rolesOf(sample)[0] ?? "resolve") : "resolve";
     return {
       step: "roles", title: "Extra roles",
-      body: `Let one resource fill another's job: reply "resource: role" (e.g. "quintessence: resolve" spends Quintessence as Resolve).${added ? ` Set: ${added}.` : ""} "done" moves on.`,
+      body: `Let one resource fill another's job: reply "resource: role" (e.g. "${sample?.name ?? "quintessence"}: ${sampleRole}" spends it as ${StringUtil.toTitleCase(sampleRole)}).`
+        + ` Now: ${current || "no resources"}. "done" moves on.`,
       kind: "text", default: "done",
       progress: { at: state.total + 1, of: rw.steps(state) },
     };
@@ -461,6 +472,15 @@ async function applyEffectSpec(
       else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + (op.amount ?? 1) * mult;
       else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + (op.amount ?? 1) * mult;
       else if (kind === "nagain") extra.nAgain = Math.min(extra.nAgain ?? 10, op.amount ?? 10);
+      if (kind === "uncancelable") {
+        // However many points bought it, certainty caps out at the caster's
+        // Foundation (one for the unawakened).
+        const cap = uncancelableCap(resolveFoundation(undefined, resolver).rating, magicRulesFrom(MagicRulesConfig.current()));
+        if ((extra.uncancelableSuccesses ?? 0) > cap) {
+          extra.uncancelableSuccesses = cap;
+          notes.push(`un-cancelable successes capped at ${cap} (Foundation)`);
+        }
+      }
     } else if (kind === "increase") {
       const res = CharacterBoosts.resolveIncreaseTarget(char, op.target, opts.targetArg);
       if ("need" in res || "error" in res) continue; // pre-validated above; defensive
@@ -1214,20 +1234,21 @@ function parsePillars(raw: string, resolve: (n: string) => number): PillarReq[] 
 // any spend grants ONE un-cancelable success when a dice pool is involved.)
 function grantsUncancelableOnSpend(def: ResourceDef): boolean {
   const specs = [def.effect, ...Object.values(def.effects ?? {})].filter((e): e is EffectSpec => !!e);
-  return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable" && o.once === true));
+  return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable"));
 }
 
 // Which trait is this caster's Foundation? An explicit foundation= wins; else a
 // literal "foundation" trait; else the first FELLOWSHIPS entry whose Foundation
 // trait the caster actually has (Order of Hermes -> Modus). Returns the trait
 // name plus the fellowship it came from, when that's how it was found.
-function resolveFoundation(arg: string | undefined, resolve: (n: string) => number): { trait: string; fellowship?: string } {
-  if (arg?.trim()) return { trait: StringUtil.normalize(arg) };
-  if (resolve("foundation") > 0) return { trait: "foundation" };
+function resolveFoundation(arg: string | undefined, resolve: (n: string) => number): { trait: string; rating: number; fellowship?: string } {
+  if (arg?.trim()) { const t = StringUtil.normalize(arg); return { trait: t, rating: resolve(t) }; }
+  if (resolve("foundation") > 0) return { trait: "foundation", rating: resolve("foundation") };
   for (const f of Object.values(FELLOWSHIPS)) {
-    if (resolve(f.foundation) > 0) return { trait: StringUtil.normalize(f.foundation), fellowship: f.name };
+    const t = StringUtil.normalize(f.foundation);
+    if (resolve(t) > 0) return { trait: t, rating: resolve(t), fellowship: f.name };
   }
-  return { trait: "foundation" };
+  return { trait: "foundation", rating: 0 };
 }
 
 async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -1314,8 +1335,10 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
       if (applied < requested) notes.push(`only ${applied} of ${requested} reduction points could apply (cap ${rules.quintPerTurn}/turn, min diff ${rules.minDifficulty}, pool ${have})`);
       if (total > rules.quintFreeLimit) notes.push(`spending >${rules.quintFreeLimit}/turn needs the Fount Background (ST)`);
       if (grantsUncancelableOnSpend(fuelDef)) {
-        seed.uncancelableSuccesses = 1;
-        notes.push(`the fused Willpower grants an un-cancelable success`);
+        const cap = uncancelableCap(foundationRating, rules);
+        seed.uncancelableSuccesses = Math.min(total, cap);
+        notes.push(`the fused Willpower grants ${seed.uncancelableSuccesses} un-cancelable success${seed.uncancelableSuccesses === 1 ? "" : "es"}`
+          + `${total > cap ? ` (capped at ${cap} by ${disp(foundationTrait)} ${foundationRating})` : ""}`);
       }
       difficulty -= applied;
     }
@@ -1341,7 +1364,13 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
     if (spend.extra.difficultyMod) seed.difficultyMod = (seed.difficultyMod ?? 0) + spend.extra.difficultyMod;
     if (spend.extra.diceMod) seed.diceMod = (seed.diceMod ?? 0) + spend.extra.diceMod;
     if (spend.extra.autoSuccesses) seed.autoSuccesses = (seed.autoSuccesses ?? 0) + spend.extra.autoSuccesses;
-    if (spend.extra.uncancelableSuccesses) seed.uncancelableSuccesses = Math.min(1, (seed.uncancelableSuccesses ?? 0) + spend.extra.uncancelableSuccesses);
+    if (spend.extra.uncancelableSuccesses) {
+      // A spend= rider and the fuel's own grant are the same certainty - take
+      // the larger, then let the Foundation cap stand.
+      seed.uncancelableSuccesses = Math.min(
+        uncancelableCap(foundationRating, rules),
+        Math.max(seed.uncancelableSuccesses ?? 0, spend.extra.uncancelableSuccesses));
+    }
     if (spend.extra.nAgain !== undefined) seed.nAgain = Math.min(seed.nAgain ?? 10, spend.extra.nAgain);
   }
   if (spend.note) notes.push(spend.note);

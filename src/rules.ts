@@ -186,6 +186,10 @@ export interface EffectOp {
   // Resolve for anything grants ONE un-cancelable success" without a 3-point
   // spend granting three.
   once?: boolean;
+  // Gate: the op applies only while the character still HOLDS this much of a
+  // resource (by name or role) - "while he has at least one Living Resolve, he
+  // is immune to fear". Checked live, so it lapses the moment the pool empties.
+  requiresResource?: { resource: string; atLeast: number };
 }
 export interface EffectCost {
   units?: number;           // resource units per application (default 1)
@@ -827,11 +831,81 @@ export function passiveOpsOf(def: MeritFlawDef, param: string | undefined, point
     const out: EffectOp = { ...op, op: op.op };
     out.target = sub(op.target);
     out.trait = sub(op.trait);
+    // A pure gate/flag op (an immunity, a recorded state) carries no magnitude
+    // to scale - only numeric ops multiply by the points taken.
+    if (op.amount === undefined) {
+      out.amount = undefined;
+      delete out.amount;
+      if (out.target === undefined) delete out.target;
+      if (out.trait === undefined) delete out.trait;
+      return out;
+    }
     if (out.target === undefined) delete out.target;
     if (out.trait === undefined) delete out.trait;
     out.amount = (op.amount ?? 1) * Math.max(1, points);
     return out;
   });
+}
+
+// --- AUTHORING PASSIVES FROM A COMMAND LINE ---
+// A compact sentence per op, separated by ";":
+//   "<op>[:<target>] [+N|-N] [if=<trait>] [while=<resource>[>=N]] [once]"
+// e.g. "difficulty -1 if=$trait" or
+//      "immune:fear,mind-control while=living-resolve".
+// A value starting with "[" is read as raw JSON instead - the escape hatch for
+// anything this shorthand can't say.
+export function parsePassiveOps(raw: string): EffectOp[] | { error: string } {
+  const text = raw.trim();
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) return { error: `passive JSON must be an array of ops` };
+      return parsed as EffectOp[];
+    } catch (e) { return { error: `passive JSON didn't parse: ${(e as Error).message}` }; }
+  }
+  const ops: EffectOp[] = [];
+  for (const sentence of text.split(";").map(s => s.trim()).filter(s => s.length > 0)) {
+    const words = sentence.split(/\s+/);
+    const [head, target] = words[0].split(":");
+    if (!head) return { error: `each passive needs an op, e.g. "difficulty -1" (got "${sentence}")` };
+    const op: EffectOp = { op: StringUtil.normalize(head) };
+    if (target) op.target = target.split(",").map(t => StringUtil.normalize(t)).join(",");
+    for (const word of words.slice(1)) {
+      if (/^[+-]?\d+$/.test(word)) { op.amount = parseInt(word, 10); continue; }
+      if (word === "once") { op.once = true; continue; }
+      // Split on the FIRST "=" only - a value may carry its own (while=blood>=3).
+      const eq = word.indexOf("=");
+      const k = eq < 0 ? word : word.slice(0, eq);
+      const v = eq < 0 ? "" : word.slice(eq + 1);
+      const key = k.toLowerCase();
+      if (!v) return { error: `can't read "${word}" in "${sentence}" - use if=, while=, once, or a number` };
+      if (key === "if" || key === "trait") op.trait = v.startsWith("$") ? v : StringUtil.normalize(v);
+      else if (key === "on" || key === "target") op.target = v.split(",").map(t => StringUtil.normalize(t)).join(",");
+      else if (key === "amount") op.amount = parseInt(v, 10) || 0;
+      else if (key === "while") {
+        const m = v.match(/^([^>]+)(?:>=(\d+))?$/);
+        if (!m) return { error: `can't read while=${v} - use while=<resource>[>=N]` };
+        op.requiresResource = { resource: StringUtil.normalize(m[1]), atLeast: m[2] ? parseInt(m[2], 10) : 1 };
+      } else return { error: `unknown passive modifier "${k}" in "${sentence}"` };
+    }
+    ops.push(op);
+  }
+  if (!ops.length) return { error: `no passive ops read from "${raw}"` };
+  return ops;
+}
+
+// One passive op as prose, gates included - what [[merit]] and [[merits]] show.
+export function describePassiveOp(op: EffectOp): string {
+  const amount = op.amount === undefined ? "" : ` ${op.amount > 0 ? "+" : ""}${op.amount}`;
+  const on = op.target ? ` (${op.target})` : "";
+  const gates: string[] = [];
+  if (op.trait) gates.push(`when the pool uses ${op.trait}`);
+  if (op.requiresResource) {
+    const r = op.requiresResource;
+    gates.push(`while ${r.resource} >= ${r.atLeast}`);
+  }
+  if (op.once) gates.push("once per spend");
+  return `${op.op}${amount}${on}${gates.length ? ` - ${gates.join(", ")}` : ""}`;
 }
 
 export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [

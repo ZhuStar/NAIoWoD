@@ -26,6 +26,7 @@ import {
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
   magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers, uncancelableCap,
+  MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
@@ -566,18 +567,28 @@ interface RollAsBinding { def: ResourceDef; current: number; names: string[] }
 // A character's live roll environment: traits + active boosts, the wound
 // penalty to fold into the dice pool, and any rollAs resource bindings.
 // Shared by rolls and contests.
-async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n: string) => number; penalty: number; rollAs: RollAsBinding[] }> {
+async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n: string) => number; penalty: number; rollAs: RollAsBinding[]; resourceAt: (nameOrRole: string) => number }> {
   const boosts = await CharacterBoosts.all(char);
   const enh = enhancementsFor(char);   // Trait Enhancement: permanent, beside the temporary boosts
   const penalty = (await CharacterHealth.summary(char)).penalty;
   const rollAs: RollAsBinding[] = [];
-  for (const view of await CharacterResources.all(char)) {
+  const views = await CharacterResources.all(char);
+  for (const view of views) {
     if (!view.def.rollAs) continue;
     rollAs.push({
       def: view.def, current: view.current,
       names: [view.def.name, ...(view.def.replaces ?? [])].map(n => StringUtil.normalize(n)),
     });
   }
+  // How much of a resource the character holds RIGHT NOW, by name, by a role it
+  // fills, or by a name it replaced - the live side of a `requiresResource` gate.
+  const resourceAt = (nameOrRole: string): number => {
+    const key = StringUtil.normalize(nameOrRole);
+    const hit = views.find(v => StringUtil.normalize(v.def.name) === key)
+      ?? views.find(v => (v.def.roles ?? []).some(r => StringUtil.normalize(r) === key))
+      ?? views.find(v => (v.def.replaces ?? []).some(r => StringUtil.normalize(r) === key));
+    return hit?.current ?? 0;
+  };
   return {
     resolver: (n: string): number => {
       const key = StringUtil.normalize(n);
@@ -587,6 +598,7 @@ async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n
     },
     penalty,
     rollAs,
+    resourceAt,
   };
 }
 
@@ -626,7 +638,7 @@ function poolTraitsOf(char: PlayableCharacter, pool: string): string[] {
 // actionTag-gated ops iff the roll carries the tag; unmet gates skip SILENTLY
 // (passives must not spam every unrelated roll). "enhance" is env-level and
 // ignored here.
-function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: string[]): { extra: Partial<RollModifier>; notes: string[] } {
+function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: string[], resourceAt?: (n: string) => number): { extra: Partial<RollModifier>; notes: string[] } {
   const extra: Partial<RollModifier> = {};
   const notes: string[] = [];
   for (const inst of ownedMeritInstances(char)) {
@@ -635,6 +647,9 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
       if (!ROLL_OPS.has(kind)) continue;
       if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
       if (op.trait && !poolTraits.includes(StringUtil.normalize(op.trait))) continue;
+      // A "while I still hold N of this" gate - checked live, so it lapses the
+      // moment the pool runs dry.
+      if (op.requiresResource && (resourceAt?.(op.requiresResource.resource) ?? 0) < op.requiresResource.atLeast) continue;
       const amount = op.amount ?? 1;
       if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + amount;
       else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + amount;
@@ -780,7 +795,7 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
   const tagged = await withAfflictionTags(char.name, spec);
   const poolTraits = poolTraitsOf(char, tagged.pool);
   const env = await characterRollEnv(char);
-  const passive = passiveRollExtra(char, poolTraits, tagged.tags);
+  const passive = passiveRollExtra(char, poolTraits, tagged.tags, env.resourceAt);
   const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, tagged.tags);
   const extra: Partial<RollModifier> = { ...(seed ?? {}) };
   for (const p of [passive.extra, place.extra]) {
@@ -877,7 +892,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   // wound penalty (negative) comes off the dice pool, owned passives (Trait
   // Affinity et al.) fold in, and at most one specialty grants its die.
   const env = await characterRollEnv(char);
-  const passive = passiveRollExtra(char, poolTraits, spec.tags);
+  const passive = passiveRollExtra(char, poolTraits, spec.tags, env.resourceAt);
   const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, spec.tags);
   const specialtyRef = cmd.named["specialty"] ?? savedSpecialty;
   const specialty = specialtyRef ? resolveSpecialty(char, specialtyRef, poolTraits) : { note: "" };
@@ -2751,6 +2766,131 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
   return missing;
 }
 
+// --- DEFINING merits, flaws and arcana -----------------------------------
+// The custom-definition overlay lives in the srd:merits-flaws lorebook
+// category (a JSON array merged over the built-ins). These commands write it
+// for you; hand-editing the card stays equally valid.
+const MERITS_CATEGORY = "srd:merits-flaws";
+const MERITS_CUSTOM_ENTRY = "srd:merits-flaws:custom";
+
+async function customMeritDefs(): Promise<MeritFlawDef[]> {
+  const text = await LorebookManager.entryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY);
+  const body = LorebookManager.contentBelowHeader(text ?? "").trim();
+  if (!body.startsWith("[")) return [];
+  try {
+    const parsed = JSON.parse(body);
+    return Array.isArray(parsed) ? parsed as MeritFlawDef[] : [];
+  } catch { return []; }
+}
+
+async function writeCustomMeritDefs(defs: MeritFlawDef[]): Promise<void> {
+  const header = [
+    `Custom Merits, Flaws & arcana. The JSON array below the ${SRD_HEADER_MARKER} line is merged`,
+    "over the built-in list. [[define-merit]] writes this for you; hand-editing is equally fine.",
+    "Each definition: name, kind (merit|flaw), points (a number or [1,2,3]), optional param,",
+    "passive (always-on ops), requires, atMostOneAt, description.",
+  ];
+  const text = [...header, SRD_HEADER_MARKER, JSON.stringify(defs, null, 2)].join("\n");
+  const { id } = await LorebookManager.ensureCategory(MERITS_CATEGORY);
+  const created = await LorebookManager.ensureEntry(id, MERITS_CUSTOM_ENTRY, text);
+  if (!created) await LorebookManager.updateEntryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY, text);
+  await MeritFlawRegistry.loadFromLorebook();
+}
+
+// define-merit name="Inviolate Soul" points=0 description=`…`
+//   passive="immune:possession,soul-control; immune:fear,mind-control while=living-resolve"
+async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
+  const rawName = cmd.named["name"] ?? cmd.positional[0];
+  if (!rawName?.trim()) {
+    return sys("define-merit needs a name, e.g. [[define-merit name=`Inviolate Soul` points=0 "
+      + "passive=`immune:possession; immune:fear while=living-resolve` description=`…`]]. "
+      + 'Passives read "<op>[:<target>] [+N|-N] [if=<trait>] [while=<resource>[>=N]] [once]", ";"-separated '
+      + "(or raw JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
+  }
+  const name = rawName.trim();
+  const kindRaw = (cmd.named["kind"] ?? "merit").toLowerCase();
+  if (kindRaw !== "merit" && kindRaw !== "flaw") return sys(`kind must be "merit" or "flaw" (got "${kindRaw}"). Arcana are merits.`);
+
+  // points: a single number or a "1,2,3" ladder of allowed ratings.
+  const pointsRaw = (cmd.named["points"] ?? "0").trim();
+  const ladder = pointsRaw.split(",").map(p => parseInt(p.trim(), 10));
+  if (ladder.some(n => Number.isNaN(n))) return sys(`points must be a number or a list like "1,2,3" (got "${pointsRaw}").`);
+  const points: number | number[] = ladder.length === 1 ? ladder[0] : ladder;
+
+  const def: MeritFlawDef = { name, kind: kindRaw, points };
+  if (cmd.named["description"]?.trim()) def.description = cmd.named["description"].trim();
+  if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
+  const atMostOneAt = intOrUndef(cmd.named["at-most-one-at"] ?? "");
+  if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  if (cmd.named["passive"]?.trim()) {
+    const raw = cmd.named["passive"];
+    // A quoted (not backticked) value came through the boundary normalizer, so
+    // its spaces are now hyphens - say so rather than parsing nonsense.
+    if (/-(?:if|while|on|target|amount|once)\b/.test(raw)) {
+      return sys("passive= lost its spaces to normalization - wrap it in BACKTICKS: "
+        + "passive=`immune:fear while=living-resolve`.");
+    }
+    const ops = parsePassiveOps(raw);
+    if ("error" in ops) return sys(ops.error);
+    def.passive = ops;
+  }
+  const templates = (cmd.named["templates"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(Boolean);
+  if (templates.length) def.requires = { templates };
+
+  const key = StringUtil.normalize(name);
+  const defs = await customMeritDefs();
+  const existing = defs.findIndex(d => StringUtil.normalize(d.name) === key);
+  const shadows = existing < 0 && MeritFlawRegistry.get(key) ? ` (shadowing the built-in "${key}")` : "";
+  if (existing >= 0) defs[existing] = def; else defs.push(def);
+  await writeCustomMeritDefs(defs);
+
+  const bits = [`${def.kind} "${name}"`, `${Array.isArray(points) ? `[${points.join(", ")}]` : points} point${points === 1 ? "" : "s"}`];
+  if (def.param) bits.push(`parameterized by ${def.param}`);
+  if (def.passive?.length) bits.push(`passive: ${def.passive.map(describePassiveOp).join("; ")}`);
+  return sys(`${existing >= 0 ? "Redefined" : "Defined"} ${bits.join(", ")}${shadows}. `
+    + `Take it with [[take-merit ${key}${def.param ? `::<${def.param}>` : ""}${Array.isArray(points) ? ` ${points[0]}` : ""}]].`);
+}
+
+async function cmdForgetMerit(cmd: ParsedCommand): Promise<string> {
+  const raw = cmd.positional[0]?.trim() ?? cmd.named["name"]?.trim();
+  if (!raw) return sys(`forget-merit needs a name, e.g. [[forget-merit inviolate-soul]].`);
+  const key = StringUtil.normalize(raw);
+  const defs = await customMeritDefs();
+  const rest = defs.filter(d => StringUtil.normalize(d.name) !== key);
+  if (rest.length === defs.length) {
+    return MeritFlawRegistry.get(key)
+      ? sys(`"${key}" is a built-in - it can be shadowed with [[define-merit]] but not deleted.`)
+      : sys(`No custom merit/flaw "${key}".`);
+  }
+  await writeCustomMeritDefs(rest);
+  MeritFlawRegistry.reset();
+  await MeritFlawRegistry.loadFromLorebook();
+  const shipped = MeritFlawRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
+  return sys(`Forgot custom ${key}.${shipped}`);
+}
+
+// merit [name] - list the definitions, or inspect one in full.
+async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
+  const raw = cmd.positional[0]?.trim();
+  if (!raw) {
+    const items = MeritFlawRegistry.all()
+      .map(d => `${StringUtil.normalize(d.name)}${d.kind === "flaw" ? " (flaw)" : ""}`).join(", ");
+    return sys(`Defined merits & flaws: ${items}. [[merit <name>]] for detail; [[define-merit]] adds one.`);
+  }
+  const key = StringUtil.normalize(raw);
+  const def = MeritFlawRegistry.get(key);
+  if (!def) return sys(`No merit/flaw "${key}". [[merit]] lists them.`);
+  const bits = [`${def.kind} "${def.name}"`, `${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} point${def.points === 1 ? "" : "s"}`];
+  if (def.param) bits.push(`parameterized by ${def.param}`);
+  if (def.atMostOneAt) bits.push(`at most one instance at ${def.atMostOneAt} (advisory)`);
+  if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
+  if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
+  const note = def.passive?.some(o => !ROLL_OPS.has(o.op.toLowerCase()))
+    ? " Ops the engine has no interpreter for are recorded and surfaced for the Storyteller (immunities have no system to enforce them yet)."
+    : "";
+  return sys(`${bits.join("; ")}.${def.description ? ` ${def.description}` : ""}${note}`);
+}
+
 async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
@@ -2775,9 +2915,9 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   }
   char.meritsFlaws[key] = points;
   await CharacterStore.save(char);
-  const passiveBits = passiveOpsOf(hit.def, hit.param, points)
-    .map(o => `${o.op}${o.trait ? ` [${o.trait}]` : o.target ? ` [${o.target}]` : ""} ${(o.amount ?? 1) > 0 ? "+" : ""}${o.amount ?? 1}`);
-  return sys(`${disp(char.name)} takes ${key} (${points} pt${points === 1 ? "" : "s"})${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}.`);
+  const passiveBits = passiveOpsOf(hit.def, hit.param, points).map(describePassiveOp);
+  return sys(`${disp(char.name)} takes ${hit.def.name}${hit.param ? `::${hit.param}` : ""} (${points} pt${points === 1 ? "" : "s"})`
+    + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}.`);
 }
 
 async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
@@ -3676,6 +3816,27 @@ CommandRouter.register("drop-merit", cmdDropMerit, {
 CommandRouter.register("merits", cmdMerits, {
   summary: "list owned merits/flaws, enhancement totals and advisory issues",
 });
+CommandRouter.register("define-merit", cmdDefineMerit, {
+  summary: "define a merit, flaw or arcanum (writes the srd:merits-flaws overlay)",
+  params: [
+    { key: "name", kind: "named", required: true, type: "literal", hint: "`<name>`", example: "e.g. `Inviolate Soul`" },
+    { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw"], desc: "Arcana are merits (default merit)" },
+    { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings (default 0)" },
+    { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or raw JSON) - BACKTICKS' },
+    { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
+    { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
+    { key: "at-most-one-at", kind: "named", type: "int", desc: "Only one instance may sit at this rating (advisory)" },
+    { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
+  ],
+});
+CommandRouter.register("merit", cmdMeritInfo, {
+  summary: "inspect a merit/flaw definition (bare: list them)",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "inviolate-soul" }],
+});
+CommandRouter.register("forget-merit", cmdForgetMerit, {
+  summary: "delete a custom merit/flaw definition (built-ins resurface)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
 CommandRouter.register("specialty", cmdSpecialty, {
   summary: "add a specialty to a trait (labels keep their case)",
   params: [
@@ -3775,7 +3936,7 @@ const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
-  "check-constraints", "merits", "specialties", "affliction", "afflictions",
+  "check-constraints", "merits", "merit", "specialties", "affliction", "afflictions",
   "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
 ]);
 

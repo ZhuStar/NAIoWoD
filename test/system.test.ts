@@ -40,6 +40,7 @@ import {
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, TEMPLATE_OUROBOROS, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
+  parsePassiveOps, describePassiveOp, type EffectOp,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
@@ -3855,7 +3856,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(await CommandRouter.route("take-merit trait-affinity::melee 5")).toContain("one of [1, 2, 3]");
     expect(await CommandRouter.route("take-merit trait-affinity")).toContain("name its trait");
     expect(await CommandRouter.route("take-merit eat-food")).toContain("prerequisites not met");
-    expect(await CommandRouter.route("take-merit eat-food waive=true")).toContain("takes eat-food");
+    expect(await CommandRouter.route("take-merit eat-food waive=true")).toContain("takes Eat Food");
     expect(await CommandRouter.route("drop-merit eat-food")).toContain("drops eat-food");
   });
 
@@ -4624,5 +4625,74 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
     expect(roles).toContain("Extra roles");
     expect(roles).toContain("living-resolve: blood/willpower/resolve/magic-fuel/quintessence");
     expect(roles).not.toContain("quintessence: resolve");     // no stock example the sheet lacks
+  });
+});
+
+describe("defining merits, flaws & arcana from a command", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); MeritFlawRegistry.reset();
+    await LorebookManager.bootstrap();
+  });
+
+  test("the passive mini-syntax reads ops, gates and the JSON escape hatch", () => {
+    expect(parsePassiveOps("difficulty -1 if=$trait")).toEqual([{ op: "difficulty", amount: -1, trait: "$trait" }]);
+    expect(parsePassiveOps("immune:fear,mind-control while=living-resolve")).toEqual([
+      { op: "immune", target: "fear,mind-control", requiresResource: { resource: "living-resolve", atLeast: 1 } },
+    ]);
+    expect(parsePassiveOps("dice +2 on=melee while=blood>=3")).toEqual([
+      { op: "dice", amount: 2, target: "melee", requiresResource: { resource: "blood", atLeast: 3 } },
+    ]);
+    // Two ops in one sentence, and raw JSON when the shorthand won't do.
+    expect((parsePassiveOps("immune:possession; dice +1") as EffectOp[]).length).toBe(2);
+    expect(parsePassiveOps('[{"op":"weird","cap":"stamina+3"}]')).toEqual([{ op: "weird", cap: "stamina+3" }]);
+    expect(parsePassiveOps("difficulty -1 nonsense=3")).toHaveProperty("error");
+    expect(parsePassiveOps("[not json")).toHaveProperty("error");
+  });
+
+  test("Inviolate Soul: defined, taken, inspected - and it round-trips through the lorebook", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const defined = await CommandRouter.route("define-merit name=`Inviolate Soul` points=0 "
+      + "passive=`immune:possession,soul-control,soul-suppression; immune:fear,supernatural-mind-control while=living-resolve` "
+      + "description=`An inherent natal Investiture: the soul cannot be worn, steered or stilled.`");
+    expect(defined).toContain('Defined merit "Inviolate Soul"');
+    expect(defined).toContain("immune (possession,soul-control,soul-suppression)");
+    expect(defined).toContain("while living-resolve >= 1");
+    // The registry rebuilds itself from the lorebook alone.
+    MeritFlawRegistry.reset();
+    expect(MeritFlawRegistry.get("inviolate-soul")).toBeUndefined();
+    await MeritFlawRegistry.loadFromLorebook();
+    const def = MeritFlawRegistry.get("inviolate-soul")!;
+    expect(def.passive!.length).toBe(2);
+    expect(def.passive![1].requiresResource).toEqual({ resource: "living-resolve", atLeast: 1 });
+
+    expect(await CommandRouter.route("take-merit inviolate-soul")).toContain("Inviolate Soul");
+    expect(await CommandRouter.route("merits")).toContain("inviolate-soul");
+    const info = await CommandRouter.route("merit inviolate-soul");
+    expect(info).toContain("natal Investiture");
+    expect(info).toContain("no interpreter for are recorded and surfaced");
+    expect(await CommandRouter.route("merit")).toContain("inviolate-soul");
+  });
+
+  test("a resource-gated passive fires only while the pool holds enough", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.attributes = { ...c.attributes, wits: 3 };
+    await CharacterStore.save(c);
+    await CommandRouter.route("define-merit name=`Unshaken` points=1 passive=`difficulty -2 while=living-resolve`");
+    await CommandRouter.route("take-merit unshaken 1");
+    expect(await CommandRouter.route("roll wits", { rng: allTens })).toContain("vs diff 4");   // 30 points: gate open
+    await CharacterResources.spend(c, "living-resolve", 30);                                   // run it dry
+    expect(await CommandRouter.route("roll wits", { rng: allTens })).toContain("vs diff 6");   // gate shut
+  });
+
+  test("defining twice replaces; forget-merit removes the custom one", async () => {
+    await CommandRouter.route("define-merit name=`Unshaken` points=1 passive=`difficulty -2`");
+    await CommandRouter.route("define-merit name=`Unshaken` points=2 passive=`difficulty -1`");
+    expect(MeritFlawRegistry.all().filter(d => StringUtil.normalize(d.name) === "unshaken").length).toBe(1);
+    expect(MeritFlawRegistry.get("unshaken")!.points).toBe(2);
+    expect(await CommandRouter.route("forget-merit unshaken")).toContain("Forgot custom unshaken");
+    expect(MeritFlawRegistry.get("unshaken")).toBeUndefined();
+    expect(await CommandRouter.route("forget-merit iron-will")).toContain("is a built-in");
+    expect(await CommandRouter.route("define-merit")).toContain("define-merit needs a name");
   });
 });

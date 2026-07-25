@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `2d2a45a`** ("certainty scales
-> with Foundation; the wizard's roles step reads the sheet"). Prior: `6719345`
+> **Last synced with the code as of commit `62e6534`** ("define-merit +
+> resource-gated passives"). Prior: `2d2a45a` ("certainty scales
+> with Foundation; the wizard's roles step reads the sheet"); `6719345`
 > ("the Sanctum pass:
 > rating-scaled afflictions, the Library of the Unseen and its cray");
 > `1f5e7f2` (the Ouroboros: a unique template; Hermetic fellowship; rest gates);
@@ -1816,6 +1817,41 @@ and `prefill` are mocked/available but not yet written.
     does not have and showed nothing about the one he does. It now lists every
     resource on the sheet with the roles it currently fills (overrides applied)
     and draws its example from them.
+
+37. **`[[define-merit]]` + resource-gated passives** (user: "Is there a way for
+    me to create this arcanum with a command? Inviolate Soul is an inherent
+    natal Investiture... While he has at least one Living Resolve, he is immune
+    to fear and supernatural mind control").
+    *Two gaps.* (a) Merits were the ONLY definable thing without a `define-*`
+    command - tables, constraints and afflictions all had one, while custom
+    merits/arcana meant hand-writing JSON into srd:merits-flaws. (b) Passive ops
+    could gate on a trait (the pool used it) or an action tag, but not on
+    "while I still HOLD this much of a resource".
+    **`EffectOp.requiresResource {resource, atLeast}`** closes (b): checked LIVE
+    against the character's current pools (by name, role, or a replaced name -
+    `characterRollEnv` now exposes `resourceAt`), so the benefit lapses the
+    instant the pool empties. `passiveRollExtra` takes the lookup and skips
+    gated ops silently, as it does its other gates.
+    **`[[define-merit]]`/`[[merit]]`/`[[forget-merit]]`** close (a), writing the
+    srd:merits-flaws:custom card and reloading the registry. Passives are
+    authored with a mini-syntax - `<op>[:<target>] [+N|-N] [if=<trait>]
+    [while=<resource>[>=N]] [once]`, ";"-separated - parsed by
+    **`parsePassiveOps`** with a raw-JSON escape hatch; `describePassiveOp`
+    renders ops with their gates for [[merit]], [[merits]] and [[take-merit]].
+    *Backticks matter*: name/passive/description must be LITERALS, else the
+    boundary normalizer (§7.22) turns their spaces into hyphens - the command
+    detects that signature and says so instead of parsing nonsense.
+    `passiveOpsOf` no longer invents `amount: 1` for a FLAG op (an immunity has
+    no magnitude to scale by points); take-merit prints the def's display name.
+    *Deliberately not enforced:* an immunity is an open-vocabulary op - recorded
+    and surfaced for the Storyteller, since no possession/fear/mind-control
+    system exists to enforce it against. That is the §7.9 policy, not an
+    oversight.
+    *Thaumaturgy paths* (asked in the same breath) need no new machinery: the
+    Discipline is a `disciplines` entry, the PATH a rated `traits` entry
+    ("rego-vitae": 3), and the classic Willpower + Path roll is a saved roll -
+    `[[name-roll rego-vitae willpower+rego-vitae 6]]`. Paths as first-class data
+    (in-clan lists, per-level rituals) stay roadmap #7.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

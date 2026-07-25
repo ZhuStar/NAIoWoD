@@ -1131,6 +1131,33 @@ minutes, no roll, no resource — and it opens.
 - Everything credits the **`magic-fuel`** role — which for the Ouroboros is
   Living Resolve: every rule that says "Quintessence" means his fused substance.
 
+### Defining merits, flaws & arcana
+
+Merits, flaws and arcana are the same shape (`MeritFlawDef`) — arcana are simply
+merits with **passive** ops. Definitions live in the `srd:merits-flaws` lorebook
+category, merged over the built-ins, and **`[[define-merit]]` writes that card
+for you** (hand-editing stays equally valid).
+
+```
+[[define-merit name=`Inviolate Soul` points=0
+   passive=`immune:possession,soul-control; immune:fear,mind-control while=living-resolve`
+   description=`An inherent natal Investiture.`]]
+[[take-merit inviolate-soul]]     [[merit inviolate-soul]]     [[forget-merit …]]
+```
+
+- **Passives** read `<op>[:<target>] [+N|-N] [if=<trait>] [while=<resource>[>=N]]
+  [once]`, `;`-separated — or raw JSON (`[{…}]`) when the shorthand won't do.
+  **Use backticks**: a quoted value goes through the boundary normalizer and its
+  spaces become hyphens (the command says so if it detects that).
+- **`while=<resource>[>=N]`** is a live gate: the op applies only while the
+  character still *holds* that much (by name, role, or a name it replaced), so
+  it lapses the moment the pool runs dry.
+- Numeric ops scale by the points the instance was taken at; a **flag op** (an
+  immunity — no amount) doesn't scale. Ops the engine has no interpreter for are
+  **recorded and surfaced** for the Storyteller rather than rejected: there is no
+  possession or fear system to enforce an immunity against *yet*.
+- `[[merit]]` lists every definition; `[[merit <name>]]` shows one in full.
+
 ### Windows are just command emitters
 
 `[[win-constraint]]` opens an **`api.v1.ui` window** — a form (name; relation and

@@ -1913,6 +1913,23 @@ and `prefill` are mocked/available but not yet written.
     everything else (ordinary Attributes and Abilities, one-dot Pillars), his
     Living Resolve IS his potential.
 
+40. **The stale-sheet hint** (user: "I have these in the lorebook, but they
+    don't seem to sync, maybe? What am I doing wrong?" - a `[[cast]]` insisting
+    Primus was 0 while the pc: card plainly showed 1).
+    Nothing was broken: §7.20's policy is that the router does NOT re-read the
+    lorebook on every command - pc: cards sync only while CREATOR MODE is on
+    (the beforeRoute hook) or when it is switched off. An edit made with creator
+    mode off is simply invisible, and a stray trailing comma makes the JSON
+    unparseable (reported, correctly, only when a sync actually runs). Both
+    reproduced before answering.
+    The gap was diagnosability, so `cmdCast`'s two "you don't have that" refusals
+    (the Pillar check and the missing-Foundation check) now append
+    **`staleSheetHint()`**: with creator mode off it names the cause and the fix
+    ([[creator-mode set=true]] pulls it in on the next command); with it on, it
+    just points at [[sheet]] as the engine's own view. Deliberately NOT changed:
+    auto-syncing outside creator mode, which would re-read the lorebook every
+    command.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:

@@ -4743,3 +4743,39 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
     expect(legacy).toContain("deprecated");
   });
 });
+
+describe("stale sheets: a lorebook edit that never synced", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("editing the pc: card with creator mode OFF leaves the engine on the old copy - and cast says so", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const base = (await CharacterStore.load("Visvaldas"))!;
+    const edited = { ...base, traits: { modus: 5, primus: 1 } };
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
+      `edited by hand\n=====\n${JSON.stringify(edited, null, 2)}`);
+
+    // Creator mode off: the edit is invisible, and the refusal points at why.
+    const cold = await CommandRouter.route('cast pillars="primus:1"');
+    expect(cold).toContain("has Primus 0");
+    expect(cold).toContain("has NOT synced yet");
+    expect(cold).toContain("creator-mode set=true");
+
+    // Creator mode on: the very next command pulls the edit in.
+    await CommandRouter.route("creator-mode set=true");
+    const warm = await CommandRouter.route('cast pillars="primus:1"', { rng: allTens });
+    expect(warm).toContain("Modus + Primus");
+    expect(warm).not.toContain("has NOT synced yet");
+  });
+
+  test("malformed JSON is reported, not silently ignored", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const base = (await CharacterStore.load("Visvaldas"))!;
+    const trailingComma = JSON.stringify({ ...base, traits: { modus: 5 } }, null, 2).replace('"modus": 5\n', '"modus": 5,\n');
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas", `oops\n=====\n${trailingComma}`);
+    await CommandRouter.route("creator-mode set=true");
+    const off = await CommandRouter.route("creator-mode set=false");
+    expect(off).toContain("Could not parse");
+    expect(off).toContain("pc:visvaldas");
+    expect(resolveTraitFromRecord((await CharacterStore.load("Visvaldas"))!, "modus")).toBe(0);   // old copy intact
+  });
+});

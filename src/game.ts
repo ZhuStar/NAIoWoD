@@ -1231,6 +1231,17 @@ async function cmdResources(): Promise<string> {
 // =============================================================================
 interface PillarReq { name: string; required: number; own: number }
 
+// A trait the sheet ought to have but reads as 0 is USUALLY a lorebook edit
+// that never synced: the pc: cards are only read back while creator mode is on
+// (§7.20 - the router won't re-read the lorebook on every command). Say so
+// where the player hits it, not just in the docs.
+async function staleSheetHint(): Promise<string> {
+  return (await CreatorMode.enabled())
+    ? ` ([[sheet]] shows what the engine has.)`
+    : ` If you just edited the sheet in the lorebook, it has NOT synced yet - `
+      + `[[creator-mode set=true]] pulls it in on the next command ([[sheet]] shows what the engine has).`;
+}
+
 // "warrior:4,chieftain:2" -> requirements, with the caster's own ratings.
 function parsePillars(raw: string, resolve: (n: string) => number): PillarReq[] | { error: string } {
   const out: PillarReq[] = [];
@@ -1292,7 +1303,10 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
 
   // The caster must know each Pillar at the required level...
   for (const p of pillars) {
-    if (p.own < p.required) return sys(`${disp(char.name)} has ${disp(p.name)} ${p.own} - the effect needs ${p.required}. The spell is beyond their teaching.`);
+    if (p.own < p.required) {
+      return sys(`${disp(char.name)} has ${disp(p.name)} ${p.own} - the effect needs ${p.required}. `
+        + `The spell is beyond their teaching.${await staleSheetHint()}`);
+    }
   }
   // ...and have a Foundation to channel it through (their fellowship's, when
   // the sheet carries it - Order of Hermes casts on Modus).
@@ -1301,7 +1315,8 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   const foundationRating = env.resolver(foundationTrait);
   if (foundationRating <= 0) {
     const known = Object.values(FELLOWSHIPS).map(f => `${disp(f.foundation)} (${f.name})`).join(", ");
-    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket (e.g. "modus": 3) or name it with foundation=<trait>. Known fellowships: ${known}.`);
+    return sys(`${disp(char.name)} has no ${disp(foundationTrait)} rating. Put the Foundation in the sheet's traits bucket `
+      + `(e.g. "modus": 3) or name it with foundation=<trait>. Known fellowships: ${known}.${await staleSheetHint()}`);
   }
 
   // The primary Pillar is the highest REQUIRED one (ties: the caster adds their

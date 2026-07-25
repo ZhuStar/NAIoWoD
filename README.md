@@ -353,6 +353,13 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
 - **`creator-mode set=true`** lets the player edit those entries directly; edits
   sync **lorebook → storage** whenever a command runs and when creator mode is
   turned off. Unparseable edits are reported and skipped, never synced.
+  > ⚠️ **Edits made while creator mode is OFF are not picked up.** The router
+  > deliberately doesn't re-read the lorebook on every command, so a hand-edited
+  > sheet stays invisible until you turn creator mode on (the next command syncs
+  > it) or off again. That — and a stray **trailing comma**, which makes the JSON
+  > unparseable — are the two reasons a trait you *can see in the card* reads as
+  > 0. `[[sheet]]` always shows what the engine actually has, and `[[cast]]`
+  > says so when it refuses.
   **Manual fill works today**: with creator mode on, open the `pc:<name>`
   entry and edit the JSON below the `=====` line — set attribute/ability dots,
   add keys to any numeric bucket (anything there is rollable by name), set

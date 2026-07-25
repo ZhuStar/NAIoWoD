@@ -3380,6 +3380,15 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
   if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
+  // A pool start naming a resource this character doesn't have is a leftover -
+  // most often a Willpower entry on someone whose Willpower was REPLACED. Trait
+  // lookups can still find it, so say so rather than let it lurk.
+  const own = new Set(CharacterResources.defsFor(char).map(d => StringUtil.normalize(d.name)));
+  const stale = Object.keys(char.poolStarts ?? {}).filter(k => !own.has(StringUtil.normalize(k)));
+  if (stale.length) {
+    parts.push(`⚠️ pool start${stale.length === 1 ? "" : "s"} for ${stale.join(", ")} - this character has no such resource `
+      + `(replaced or never granted). Delete the line in creator mode; [[resources]] is the truth`);
+  }
   parts.push(`Live pools via [[resources]], damage via [[health]]`);
   return sys(`${parts.join(". ")}.`);
 }

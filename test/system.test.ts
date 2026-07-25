@@ -40,7 +40,7 @@ import {
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, TEMPLATE_OUROBOROS, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
-  parsePassiveOps, describePassiveOp, type EffectOp,
+  parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
@@ -4694,5 +4694,53 @@ describe("defining merits, flaws & arcana from a command", () => {
     expect(MeritFlawRegistry.get("unshaken")).toBeUndefined();
     expect(await CommandRouter.route("forget-merit iron-will")).toContain("is a built-in");
     expect(await CommandRouter.route("define-merit")).toContain("define-merit needs a name");
+  });
+});
+
+describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's bonus", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a character whose Willpower is replaced gets no willpower pool start", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const marius = (await CharacterStore.load("Marius"))!;
+    expect(marius.poolStarts).toEqual({});                       // no phantom
+    expect(resolveTraitFromRecord(marius, "willpower")).toBe(0);  // nothing for a trait lookup to find
+    // Everyone else still gets theirs.
+    await CommandRouter.route('create-playable name="Odo" templates=mortal');
+    expect((await CharacterStore.load("Odo"))!.poolStarts).toEqual({ willpower: 0 });
+  });
+
+  test("[[sheet]] flags a leftover pool start for a resource the character lacks", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.poolStarts = { willpower: 10 };                            // the stale hand-edit
+    await CharacterStore.save(c);
+    const sheet = await CommandRouter.route("sheet");
+    expect(sheet).toContain("⚠️ pool start for willpower");
+    expect(sheet).toContain("Delete the line in creator mode");
+  });
+
+  test("spending it pays out as Willpower AND Resolve: certainty plus -2 difficulty", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 5 };
+    c.attributes = { ...c.attributes, wits: 3 };
+    await CharacterStore.save(c);
+    const one = await CommandRouter.route("roll wits spend=living-resolve", { rng: seqRng([4, 4, 4]) });
+    expect(one).toContain("vs diff 4");                          // 6 - 2, the Resolve component
+    expect(one).toContain("+1 sure");                            // and the Willpower component
+    expect(one).toContain("4 successes");                        // three 4s now hit, plus the sure one
+    // Two points: the Resolve scales per point, the certainty by the Foundation cap.
+    const two = await CommandRouter.route("roll wits spend=living-resolve spend-amount=2", { rng: seqRng([2, 2, 2]) });
+    expect(two).toContain("vs diff 2");
+    expect(two).toContain("+2 sure");
+    // The casting knob stays the book's Quintessence math (-1/point), unchanged.
+    const focus = await CommandRouter.route("roll wits spend=living-resolve:focus spend-amount=3", { rng: seqRng([3, 3, 3]) });
+    expect(focus).toContain("vs diff 3");                        // 6 - 3, not 6 - 3 - 6
+    // And the Resolve `cast` bundle is there when he wants it wholesale.
+    const bundle = await CommandRouter.route("roll wits spend=living-resolve:cast", { rng: seqRng([4, 4, 4]) });
+    expect(bundle).toContain("vs diff 4");
+    expect(bundle).toContain("+1 auto");
+    expect(bundle).toContain("+1 sure");
   });
 });

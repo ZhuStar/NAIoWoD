@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `62e6534`** ("define-merit +
-> resource-gated passives"). Prior: `2d2a45a` ("certainty scales
+> **Last synced with the code as of commit `d9e2829`** ("Living Resolve IS
+> the other four: no phantom Willpower, Resolve's bonus"). Prior: `62e6534`
+> (define-merit + resource-gated passives); `2d2a45a` ("certainty scales
 > with Foundation; the wizard's roles step reads the sheet"); `6719345`
 > ("the Sanctum pass:
 > rating-scaled afflictions, the Library of the Unseen and its cray");
@@ -1852,6 +1853,30 @@ and `prefill` are mocked/available but not yet written.
     ("rego-vitae": 3), and the classic Willpower + Path roll is a saved roll -
     `[[name-roll rego-vitae willpower+rego-vitae 6]]`. Paths as first-class data
     (in-clan lists, per-level rituals) stay roadmap #7.
+
+38. **Living Resolve IS the other four** (user, in play: "I have willpower 10. I
+    should not have willpower. I should have Living Resolve. Also, I think we
+    were forgetting that Living Resolve is also Resolve, so it applies its
+    bonuses").
+    *The phantom:* `CharacterStore.newPotential` seeded `poolStarts: {willpower:
+    0}` unconditionally, from the days when no template lacked Willpower. For
+    the Ouroboros - whose Willpower is REPLACED by Living Resolve - that left a
+    willpower entry that `resolveTraitFromRecord` could still find (rolls were
+    safe: the rollAs binding intercepts first, §7.33). Now seeded only when the
+    templates actually grant a non-replaced Willpower
+    (`CharacterStore._grantsWillpower`), and `[[sheet]]` FLAGS a leftover pool
+    start naming a resource the character doesn't have - existing sheets are
+    surfaced, never silently rewritten.
+    *The forgotten component:* Living Resolve carried the "resolve" ROLE but
+    none of Resolve's payout. Its default effect now grants BOTH halves of an
+    ordinary spend - the Willpower's un-cancelable success AND Resolve's -2
+    difficulty (Devil's Due) - and a `cast` effect mirrors Resolve's full bundle
+    (+1 success, 8-again, -2 difficulty, 3/scene) for spending it into a spell
+    wholesale. `focus` deliberately KEEPS the plain Quintessence math (-1 per
+    point, max 3): the book's casting difficulties are calibrated against that,
+    and stacking Resolve's -2 on top of it per point would collapse them. The
+    division is now explicit in the def's comments: default = Willpower+Resolve,
+    focus = Quintessence, heal/boost = vitae, fuel = the consumed-cost case.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

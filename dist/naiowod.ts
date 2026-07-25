@@ -2281,9 +2281,13 @@ const LIVING_RESOLVE: ResourceDef = {
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
     + "Also regained by drinking vampiric vitae (immune to the bond) and consuming Tass - [[gain living-resolve N]]. "
     + "Spend up to 6/turn (ST-enforced)",
+  // ONE point is one of each component, so an ordinary spend pays out as both
+  // the Willpower (certainty) and the Resolve (-2 difficulty, Devil's Due).
+  // The Quintessence component is the casting knob (`focus`), and the vitae the
+  // body knobs (`heal`/`boost`) - a spend states which job it is doing.
   effect: {
-    label: "Living Resolve: +1 un-cancelable success per point (capped by Foundation)",
-    apply: [{ op: "uncancelable", amount: 1 }],
+    label: "Living Resolve: +1 un-cancelable success per point (capped by Foundation) and -2 difficulty (its Resolve)",
+    apply: [{ op: "uncancelable", amount: 1 }, { op: "difficulty", amount: -2 }],
   },
   effects: {
     heal: {
@@ -2308,6 +2312,19 @@ const LIVING_RESOLVE: ResourceDef = {
       label: "Living Resolve focuses the casting: -1 difficulty per point (min diff 4, ST) + un-cancelable successes",
       apply: [{ op: "difficulty", amount: -1 }, { op: "uncancelable", amount: 1 }],
       limits: { maxPerUse: 3 },
+    },
+    // The Resolve component thrown into a spell wholesale (Devil's Due's
+    // Resolve `cast` bundle), for when he is spending it AS Resolve rather than
+    // as the book's Quintessence reduction.
+    cast: {
+      label: "Living Resolve fuels the spell as Resolve: +1 success, 8-again, -2 difficulty",
+      apply: [
+        { op: "successes", amount: 1 },
+        { op: "nagain", amount: 8 },
+        { op: "difficulty", amount: -2 },
+        { op: "uncancelable", amount: 1 },
+      ],
+      limits: { uses: { n: 3, per: "scene" } },
     },
   },
 };
@@ -4380,9 +4397,20 @@ class CharacterStore {
   private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
   private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
 
+  // Do these templates actually grant a Willpower tracker of its own? Almost
+  // every splat does - but a resource that REPLACES Willpower (Living Resolve)
+  // takes over its name, and then a seeded `poolStarts.willpower` would be a
+  // phantom trait lookups could still find.
+  private static _grantsWillpower(templates: string[]): boolean {
+    const defs = resourcesForTemplates(templates, ResourceOverrides.current());
+    const replaced = new Set(defs.flatMap(d => (d.replaces ?? []).map(r => StringUtil.normalize(r))));
+    return defs.some(d => StringUtil.normalize(d.name) === "willpower" && !replaced.has("willpower"));
+  }
+
   // A fresh potential character: all nine Attributes at 1 (the free dot), every
-  // ability at 0 (so the sheet lists them all), Willpower at 0 (no oWoD template
-  // lacks it), and empty Merits/Flaws & Backgrounds. Other buckets fill in later.
+  // ability at 0 (so the sheet lists them all), Willpower at 0 when the
+  // templates grant one, and empty Merits/Flaws & Backgrounds. Other buckets
+  // fill in later.
   static async newPotential(name: string, templates: string[]): Promise<PlayableCharacter> {
     const attributes: Record<string, number> = {};
     for (const attr of ALL_ATTRIBUTES) attributes[StringUtil.normalize(attr)] = 1;
@@ -4400,7 +4428,10 @@ class CharacterStore {
       stage: "potential",
       attributes, abilities,
       backgrounds: {}, virtues: {}, disciplines: {}, traits: {},
-      poolStarts: { willpower: 0 },
+      // Seed a Willpower start ONLY if these templates actually grant one: a
+      // character whose Willpower is replaced (the Ouroboros' Living Resolve)
+      // must not carry a phantom willpower entry that trait lookups can find.
+      poolStarts: CharacterStore._grantsWillpower(templates) ? { willpower: 0 } : {},
       meritsFlaws: {},
       tags: [],
       specialties: {},
@@ -8946,6 +8977,15 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
   if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
+  // A pool start naming a resource this character doesn't have is a leftover -
+  // most often a Willpower entry on someone whose Willpower was REPLACED. Trait
+  // lookups can still find it, so say so rather than let it lurk.
+  const own = new Set(CharacterResources.defsFor(char).map(d => StringUtil.normalize(d.name)));
+  const stale = Object.keys(char.poolStarts ?? {}).filter(k => !own.has(StringUtil.normalize(k)));
+  if (stale.length) {
+    parts.push(`⚠️ pool start${stale.length === 1 ? "" : "s"} for ${stale.join(", ")} - this character has no such resource `
+      + `(replaced or never granted). Delete the line in creator mode; [[resources]] is the truth`);
+  }
   parts.push(`Live pools via [[resources]], damage via [[health]]`);
   return sys(`${parts.join(". ")}.`);
 }

@@ -893,11 +893,19 @@ component:
 - It **replaces** blood/willpower/resolve/quintessence and answers to their
   names and roles — every vitae trick (heal, `boost` a Physical), every power
   that burns Resolve or Willpower, all spell fuel.
-- **The fused Willpower buys un-cancelable successes** whenever a dice pool is
-  involved — **one per point spent, for any reason**, capped by Foundation (see
-  below). It rides the default spend, `focus` (casting) and `fuel-surge`. When a
-  power *consumes* the Willpower as its activation cost, use `fuel` (no free
-  success) — or `fuel-surge` (an extra point buys it anyway).
+- **One point pays out as all four.** The plain spend
+  (`spend=living-resolve`) is the Willpower **and** the Resolve: **+1
+  un-cancelable success per point** (capped by Foundation) **and −2 difficulty**
+  (Devil's Due's Resolve). The Quintessence component is the casting knob
+  (`focus`, −1/point per the book's math) and the vitae the body knobs
+  (`heal`, `boost`) — a spend says which job the points are doing. `cast` is
+  Resolve's full bundle (+1 success, 8-again, −2 difficulty) when he throws it
+  into a spell wholesale.
+- When a power *consumes* the Willpower as its activation cost, use `fuel` (no
+  free success) — or `fuel-surge` (an extra point buys it anyway).
+- He has **no Willpower entry at all**: it is replaced, so a character created
+  on this template gets no `poolStarts.willpower`, and `[[sheet]]` flags a
+  leftover one if an older sheet still carries it.
 - **Rolls that pool it** (Willpower/Resolve rolls) roll **min(10, current)** —
   and every point above 10 **shields a die of penalties** (wound penalties,
   negative dice mods) on that roll (`rollAs` in the def).

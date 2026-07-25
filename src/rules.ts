@@ -528,9 +528,13 @@ export const LIVING_RESOLVE: ResourceDef = {
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
     + "Also regained by drinking vampiric vitae (immune to the bond) and consuming Tass - [[gain living-resolve N]]. "
     + "Spend up to 6/turn (ST-enforced)",
+  // ONE point is one of each component, so an ordinary spend pays out as both
+  // the Willpower (certainty) and the Resolve (-2 difficulty, Devil's Due).
+  // The Quintessence component is the casting knob (`focus`), and the vitae the
+  // body knobs (`heal`/`boost`) - a spend states which job it is doing.
   effect: {
-    label: "Living Resolve: +1 un-cancelable success per point (capped by Foundation)",
-    apply: [{ op: "uncancelable", amount: 1 }],
+    label: "Living Resolve: +1 un-cancelable success per point (capped by Foundation) and -2 difficulty (its Resolve)",
+    apply: [{ op: "uncancelable", amount: 1 }, { op: "difficulty", amount: -2 }],
   },
   effects: {
     heal: {
@@ -555,6 +559,19 @@ export const LIVING_RESOLVE: ResourceDef = {
       label: "Living Resolve focuses the casting: -1 difficulty per point (min diff 4, ST) + un-cancelable successes",
       apply: [{ op: "difficulty", amount: -1 }, { op: "uncancelable", amount: 1 }],
       limits: { maxPerUse: 3 },
+    },
+    // The Resolve component thrown into a spell wholesale (Devil's Due's
+    // Resolve `cast` bundle), for when he is spending it AS Resolve rather than
+    // as the book's Quintessence reduction.
+    cast: {
+      label: "Living Resolve fuels the spell as Resolve: +1 success, 8-again, -2 difficulty",
+      apply: [
+        { op: "successes", amount: 1 },
+        { op: "nagain", amount: 8 },
+        { op: "difficulty", amount: -2 },
+        { op: "uncancelable", amount: 1 },
+      ],
+      limits: { uses: { n: 3, per: "scene" } },
     },
   },
 };

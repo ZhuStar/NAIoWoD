@@ -514,9 +514,20 @@ export class CharacterStore {
   private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
   private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
 
+  // Do these templates actually grant a Willpower tracker of its own? Almost
+  // every splat does - but a resource that REPLACES Willpower (Living Resolve)
+  // takes over its name, and then a seeded `poolStarts.willpower` would be a
+  // phantom trait lookups could still find.
+  private static _grantsWillpower(templates: string[]): boolean {
+    const defs = resourcesForTemplates(templates, ResourceOverrides.current());
+    const replaced = new Set(defs.flatMap(d => (d.replaces ?? []).map(r => StringUtil.normalize(r))));
+    return defs.some(d => StringUtil.normalize(d.name) === "willpower" && !replaced.has("willpower"));
+  }
+
   // A fresh potential character: all nine Attributes at 1 (the free dot), every
-  // ability at 0 (so the sheet lists them all), Willpower at 0 (no oWoD template
-  // lacks it), and empty Merits/Flaws & Backgrounds. Other buckets fill in later.
+  // ability at 0 (so the sheet lists them all), Willpower at 0 when the
+  // templates grant one, and empty Merits/Flaws & Backgrounds. Other buckets
+  // fill in later.
   static async newPotential(name: string, templates: string[]): Promise<PlayableCharacter> {
     const attributes: Record<string, number> = {};
     for (const attr of ALL_ATTRIBUTES) attributes[StringUtil.normalize(attr)] = 1;
@@ -534,7 +545,10 @@ export class CharacterStore {
       stage: "potential",
       attributes, abilities,
       backgrounds: {}, virtues: {}, disciplines: {}, traits: {},
-      poolStarts: { willpower: 0 },
+      // Seed a Willpower start ONLY if these templates actually grant one: a
+      // character whose Willpower is replaced (the Ouroboros' Living Resolve)
+      // must not carry a phantom willpower entry that trait lookups can find.
+      poolStarts: CharacterStore._grantsWillpower(templates) ? { willpower: 0 } : {},
       meritsFlaws: {},
       tags: [],
       specialties: {},

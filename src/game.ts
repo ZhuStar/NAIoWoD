@@ -1263,13 +1263,30 @@ function grantsUncancelableOnSpend(def: ResourceDef): boolean {
   return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable"));
 }
 
-// The UNTARGETED difficulty break a point of this resource carries by default
-// (Living Resolve's Resolve component, -2). Read from the data, so a re-tuned
-// def moves the casting maths with it. 0 when it has no such op.
-function resolveComponentBreak(def: ResourceDef): number {
-  return (def.effect?.apply ?? [])
-    .filter(o => o.op.toLowerCase() === "difficulty" && !o.target)
-    .reduce((sum, o) => sum + (o.amount ?? 0), 0);
+// What `points` of the fused substance pay ON TOP of the job they were spent
+// for, read straight off the resource's default effect - so re-tuning the def
+// moves the casting maths with it. TARGETED ops are skipped: [[cast]] has
+// already counted the Quintessence reduction in its own difficulty maths, and
+// double-dipping it here would pay for the same point twice.
+function fusedComponentExtra(def: ResourceDef, points: number, uncancelableLimit: number): { extra: Partial<RollModifier>; bits: string[] } {
+  const extra: Partial<RollModifier> = {};
+  const bits: string[] = [];
+  for (const op of def.effect?.apply ?? []) {
+    if (op.target) continue;
+    const kind = op.op.toLowerCase();
+    const total = (op.amount ?? 1) * points;
+    if (kind === "difficulty") { extra.difficultyMod = (extra.difficultyMod ?? 0) + total; bits.push(`${total} difficulty`); }
+    else if (kind === "successes") { extra.autoSuccesses = (extra.autoSuccesses ?? 0) + total; bits.push(`+${total} automatic success${total === 1 ? "" : "es"}`); }
+    else if (kind === "uncancelable") {
+      const capped = Math.min(total, uncancelableLimit);
+      extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + capped;
+      bits.push(`${capped} un-cancelable success${capped === 1 ? "" : "es"}${total > capped ? ` (capped at ${uncancelableLimit})` : ""}`);
+    } else if (kind === "nagain") {
+      extra.nAgain = Math.min(extra.nAgain ?? 10, op.amount ?? 10);
+      bits.push(`${op.amount ?? 10}-again`);
+    }
+  }
+  return { extra, bits };
 }
 
 // Which trait is this caster's Foundation? An explicit foundation= wins; else a
@@ -1375,16 +1392,14 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
       if (total > rules.quintFreeLimit) notes.push(`spending >${rules.quintFreeLimit}/turn needs the Fount Background (ST)`);
       if (grantsUncancelableOnSpend(fuelDef)) {
         // The fused substance: every point spent here is ALSO a Willpower and a
-        // Resolve point, so the certainty and the Resolve difficulty break ride
-        // along on top of the Quintessence reduction already counted.
-        const cap = uncancelableCap(foundationRating, rules);
-        seed.uncancelableSuccesses = Math.min(total, cap);
-        const resolveBreak = resolveComponentBreak(fuelDef) * total;
-        if (resolveBreak) seed.difficultyMod = (seed.difficultyMod ?? 0) + resolveBreak;
-        notes.push(`the fused substance also spends as Willpower and Resolve: `
-          + `${seed.uncancelableSuccesses} un-cancelable success${seed.uncancelableSuccesses === 1 ? "" : "es"}`
-          + `${total > cap ? ` (capped at ${cap} by ${disp(foundationTrait)} ${foundationRating})` : ""}`
-          + `${resolveBreak ? `, ${resolveBreak} difficulty` : ""}`);
+        // Resolve point, so their whole payout rides along on top of the
+        // Quintessence reduction already counted above.
+        const fused = fusedComponentExtra(fuelDef, total, uncancelableCap(foundationRating, rules));
+        for (const [k, v] of Object.entries(fused.extra) as Array<[keyof RollModifier, number]>) {
+          if (k === "nAgain") seed.nAgain = Math.min(seed.nAgain ?? 10, v);
+          else (seed as Record<string, number>)[k] = ((seed as Record<string, number>)[k] ?? 0) + v;
+        }
+        if (fused.bits.length) notes.push(`the fused substance also spends as Willpower and Resolve: ${fused.bits.join(", ")}`);
       }
       difficulty -= applied;
     }

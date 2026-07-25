@@ -4010,7 +4010,8 @@ describe("Living Resolve: the unique template and its fused-substance spends", (
     // Default spend (the Willpower analog): 1 point, +1 sure.
     const plain = await CommandRouter.route("roll 3 spend=living-resolve", { rng: seqRng([2, 2, 2]) });
     expect(plain).toContain("+1 sure");
-    expect(plain).toContain("1 success");            // all dice missed; the sure one stands
+    expect(plain).toContain("+1 auto");              // Resolve's automatic success rides along
+    expect(plain).toContain("2 successes");          // all dice missed; the granted pair stands
     // 3 points on an ordinary roll: -2 each (Resolve), one sure success (Vis-less cap).
     const focus = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=3", { rng: seqRng([2, 2, 2]) });
     expect(focus).toContain("vs diff 2");
@@ -4257,7 +4258,8 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
     expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 for -1 difficulty");
-    expect(r).toContain("the fused substance also spends as Willpower and Resolve: 1 un-cancelable success (capped at 1 by Vis 2), -4 difficulty");
+    expect(r).toContain("the fused substance also spends as Willpower and Resolve: "
+      + "1 un-cancelable success (capped at 1), +2 automatic successes, 8-again, -4 difficulty");
     expect(r).toContain("+1 sure");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(28);
     // Sealing with the fused substance: one payment covers both components.
@@ -4729,7 +4731,7 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
     const one = await CommandRouter.route("roll wits spend=living-resolve", { rng: seqRng([4, 4, 4]) });
     expect(one).toContain("vs diff 4");                          // 6 - 2, the Resolve component
     expect(one).toContain("+1 sure");                            // and the Willpower component
-    expect(one).toContain("4 successes");                        // three 4s now hit, plus the sure one
+    expect(one).toContain("5 successes");                        // three 4s now hit, plus the sure AND automatic ones
     // Two points: the Resolve scales per point, the certainty by the Foundation cap.
     const two = await CommandRouter.route("roll wits spend=living-resolve spend-amount=2", { rng: seqRng([2, 2, 2]) });
     expect(two).toContain("vs diff 2");
@@ -4777,5 +4779,39 @@ describe("stale sheets: a lorebook edit that never synced", () => {
     expect(off).toContain("Could not parse");
     expect(off).toContain("pc:visvaldas");
     expect(resolveTraitFromRecord((await CharacterStore.load("Visvaldas"))!, "modus")).toBe(0);   // old copy intact
+  });
+});
+
+describe("the Resolve component pays in FULL, not just its difficulty break", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("one point carries Resolve's whole bundle: +1 automatic success and 8-again", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 5 };
+    c.attributes = { ...c.attributes, wits: 3 };
+    await CharacterStore.save(c);
+    // Three 9s: at 8-again every one of them explodes into another die.
+    const r = await CommandRouter.route("roll wits spend=living-resolve", { rng: seqRng([9, 9, 9, 2, 2, 2]) });
+    expect(r).toContain("+1 auto");                  // Resolve's automatic success
+    expect(r).toContain("+1 sure");                  // the Willpower's un-cancelable one
+    expect(r).toContain("💥9");                       // 8-again: 9s explode
+    expect(r).toContain("vs diff 4");                // and its -2
+    const def = LIVING_RESOLVE.effect!.apply.map(o => o.op).sort();
+    expect(def).toEqual(["difficulty", "difficulty", "nagain", "successes", "uncancelable"]);
+  });
+
+  test("a casting gets the same bundle on top of the Quintessence reduction", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 5, primus: 1 };
+    await CharacterStore.save(c);
+    const r = await CommandRouter.route('cast pillars="primus:1" quintessence=1', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    expect(r).toContain("simple spell: diff 4+1 = 5");
+    expect(r).toContain("1 for -1 difficulty");                          // the Quintessence, counted once
+    expect(r).toContain("+1 automatic success");                         // the Resolve, in full
+    expect(r).toContain("8-again");
+    expect(r).toContain("-2 difficulty");                                // and its break, not double-counted
+    expect(r).toContain("vs diff 2");                                    // 5 - 1 (quint) - 2 (resolve)
   });
 });

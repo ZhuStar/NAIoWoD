@@ -1930,6 +1930,25 @@ and `prefill` are mocked/available but not yet written.
     auto-syncing outside creator mode, which would re-read the lorebook every
     command.
 
+41. **The Resolve component pays in FULL** (user, reading a casting line: "I
+    didn't gain extra successes or 8-again, it seems").
+    A bug in §7.39's collapse, not a rules question: folding the components
+    together, I took only the plain `resolve` effect (-2 difficulty) and DROPPED
+    the richer bundle the resource also carries (+1 automatic success, 8-again,
+    -2 difficulty) instead of merging it. One point is one Resolve point, so it
+    pays what a Resolve point pays. The default effect now carries the whole
+    thing - uncancelable +1, successes +1, nagain 8, difficulty -2, plus the
+    magic-gated difficulty -1 - and the deprecated `focus` alias mirrors it.
+    `[[cast]]` stopped hand-computing one op: `resolveComponentBreak` (which
+    read only the difficulty) became **`fusedComponentExtra(def, points, cap)`**,
+    which folds EVERY untargeted roll op off the def's default effect, scaled by
+    the points spent, capping uncancelable at the Foundation limit. Targeted ops
+    are skipped by design: cast has already counted the Quintessence reduction
+    in its own difficulty maths, and folding it again would pay for the same
+    point twice. The Devil's Due 3/scene limit on that bundle is deliberately
+    NOT carried over - this substance is not Resolve, it is the fusion, and the
+    owner's ruling is that it is meant to be overwhelming.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:

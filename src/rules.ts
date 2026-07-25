@@ -535,11 +535,14 @@ export const LIVING_RESOLVE: ResourceDef = {
   // when the roll is a casting. The vitae is the same point aimed at flesh
   // (`heal`/`boost`) - not a different way of spending, just a different target.
   effect: {
-    label: "Living Resolve: per point, +1 un-cancelable success (capped by Foundation), -2 difficulty (Resolve) and -1 more when casting (Quintessence)",
+    label: "Living Resolve: per point, +1 un-cancelable success (capped by Foundation) + Resolve's whole payout "
+      + "(+1 automatic success, 8-again, -2 difficulty) + -1 more when casting (Quintessence)",
     apply: [
-      { op: "uncancelable", amount: 1 },
+      { op: "uncancelable", amount: 1 },   // the Willpower
+      { op: "successes", amount: 1 },      // the Resolve, in full - not just its difficulty break
+      { op: "nagain", amount: 8 },
       { op: "difficulty", amount: -2 },
-      { op: "difficulty", amount: -1, target: "magic" },
+      { op: "difficulty", amount: -1, target: "magic" },   // the Quintessence, on spell rolls
     ],
   },
   effects: {
@@ -565,9 +568,11 @@ export const LIVING_RESOLVE: ResourceDef = {
     // everything else). Kept so older saved rolls carrying spend=…:focus still
     // resolve; it is simply the default effect by another name.
     focus: {
-      label: "Living Resolve focuses the casting (the plain spend does this and more - deprecated)",
+      label: "Living Resolve focuses the casting (an alias of the plain spend - deprecated)",
       apply: [
         { op: "uncancelable", amount: 1 },
+        { op: "successes", amount: 1 },
+        { op: "nagain", amount: 8 },
         { op: "difficulty", amount: -2 },
         { op: "difficulty", amount: -1, target: "magic" },
       ],

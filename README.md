@@ -902,11 +902,12 @@ component:
   that burns Resolve or Willpower, all spell fuel.
 - **One point pays out as all four, at once** — it is never spent *as* one
   component. A plain `spend=living-resolve` gives, per point: **+1 un-cancelable
-  success** (Willpower, capped by Foundation), **−2 difficulty** (Resolve), and
-  **−1 more on a casting** (Quintessence). The same holds inside `[[cast]]`:
-  Quintessence points spent there also pay their Willpower and Resolve. The
-  vitae is that same point aimed at flesh — `heal`, `boost` — not a different
-  way of spending it. **It is meant to be overwhelming.**
+  success** (Willpower, capped by Foundation); Resolve's **whole** payout —
+  **+1 automatic success, 8-again and −2 difficulty**; and **−1 more on a
+  casting** (Quintessence). The same holds inside `[[cast]]`: Quintessence points
+  spent there also pay their Willpower and their Resolve in full. The vitae is
+  that same point aimed at flesh — `heal`, `boost` — not a different way of
+  spending it. **It is meant to be overwhelming.**
 - When a power *consumes* the Willpower as its activation cost, use `fuel` (no
   free success) — or `fuel-surge` (an extra point buys it anyway).
 - He has **no Willpower entry at all**: it is replaced, so a character created

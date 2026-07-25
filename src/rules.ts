@@ -222,6 +222,9 @@ export interface RecoveryRule {
   amount: number;
   per: "day" | "full-moon";
   requires?: string | string[];
+  // A Background/trait threshold the character must ALSO meet - the sanctum's
+  // sleep point is Sanctum 4's benefit, not every sanctum's.
+  requiresTrait?: { trait: string; atLeast: number };
   note?: string;            // shown beside the credit ("Umbral communion")
 }
 
@@ -338,7 +341,11 @@ export class TemplateConfig {
     // Innate damage reactions granted to every character of this template
     // (e.g. a vampire's undead physiology). Copied onto the character at build
     // time so per-character armour can be appended without touching the template.
-    public readonly Reactions: DamageReaction[] = []
+    public readonly Reactions: DamageReaction[] = [],
+    // Has the character Awakened? Mages have; so does the Ouroboros. Sanctum,
+    // Library and Cray benefits are all predicated on it (the sleeping world
+    // gets nothing from a place of power).
+    public readonly Awakened: boolean = false
   ) {}
 
   // Resources is the modern name for Pools (trackers + pools with roles/effects).
@@ -402,11 +409,12 @@ export const TEMPLATE_MAGE = new TemplateConfig(
       // the mage's own sanctum (both afflictions at once).
       recovery: [
         { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
-        { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
+        { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], requiresTrait: { trait: "sanctum", atLeast: 4 }, note: "rested in the sanctum" },
       ] },
   ],
   MAGE_SOAK,
-  null, false   // Mages have no Road/Humanity and no Virtues
+  null, false,   // Mages have no Road/Humanity and no Virtues
+  STANDARD_HEALTH_LEVELS, [], true   // Awakened
 );
 
 // Dark Ages: Devil's Due.
@@ -507,7 +515,7 @@ export const LIVING_RESOLVE: ResourceDef = {
   recovery: [
     { amount: 1, per: "day", note: "revenant vitae" },
     { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
-    { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
+    { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], requiresTrait: { trait: "sanctum", atLeast: 4 }, note: "rested in the sanctum" },
     { amount: 20, per: "full-moon" },
   ],
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
@@ -557,7 +565,9 @@ export const TEMPLATE_OUROBOROS = new TemplateConfig(
   RulesetConfig.MAGE,
   [LIVING_RESOLVE],
   GHOUL_SOAK,
-  HUMANITY_MORALITY, true
+  // Like a mage: the ritual burned the Road away. No morality, no Virtues.
+  null, false,
+  STANDARD_HEALTH_LEVELS, [], true   // Awakened
 );
 
 export const TEMPLATES: Record<string, TemplateConfig> = {
@@ -612,6 +622,12 @@ export function resourcesForTemplates(keys: string[], overrides?: Record<string,
     }
   }
   return out;
+}
+
+// Has any of these templates Awakened? Places of power (Sanctum, Library, Cray)
+// answer only to the Awakened.
+export function isAwakened(keys: string[]): boolean {
+  return keys.some(k => TEMPLATES[StringUtil.normalize(k)]?.Awakened === true);
 }
 
 // The health track a character uses: the FIRST of its templates decides (same
@@ -960,6 +976,19 @@ export function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits):
 // the word *condition* for future conditional things - predicates the engine
 // will someday evaluate.
 // =============================================================================
+// --- RATING-SCALED AFFLICTIONS ---
+// Some states are not flat flags: what "in my sanctum" GRANTS depends on the
+// character's Sanctum Background rating, and the same holds for a Library. A
+// scaled affliction names the trait it `scalesWith` and lists `tiers`; every
+// tier at or below the rating contributes (the book: "these benefits are
+// cumulative"). See foldAfflictionTiers for the one subtlety - how a wider
+// tier absorbs a narrower one.
+export interface AfflictionTier {
+  atLeast: number;              // rating threshold this tier turns on at
+  apply?: EffectOp[];           // roll ops (target = an action tag the roll must carry)
+  note?: string;                // what it grants in prose (shown by [[afflictions]])
+}
+
 export interface AfflictionDef {
   name: string;                 // normalized id
   description?: string;
@@ -969,6 +998,24 @@ export interface AfflictionDef {
   mirror?: string;              // affliction auto-afflicted on bindings.target, bound back
   tags?: string[];              // tags granted while active
   note?: string;
+  scalesWith?: string;          // the trait/Background whose rating selects tiers
+  tiers?: AfflictionTier[];     // cumulative benefits by rating
+  requiresAwakened?: boolean;   // tiers apply only to Awakened characters
+}
+
+// What a scaled affliction grants at `rating`: every tier at or below it, with
+// ONE resolution rule - within an op kind, an UNTARGETED op supersedes targeted
+// ops of the same kind. That is how a wider tier widens rather than stacks: a
+// Sanctum 8's "-2 difficulty on ALL rolls" absorbs the "-1 on magic" of tiers 2
+// and 3 instead of adding to them (the caster ends at -2, not -4).
+export function foldAfflictionTiers(rating: number, tiers: AfflictionTier[] | undefined): { ops: EffectOp[]; notes: string[] } {
+  const reached = (tiers ?? []).filter(t => rating >= t.atLeast);
+  const all = reached.flatMap(t => t.apply ?? []);
+  const widened = new Set(all.filter(o => !o.target).map(o => o.op.toLowerCase()));
+  return {
+    ops: all.filter(o => !(o.target && widened.has(o.op.toLowerCase()))),
+    notes: reached.map(t => t.note).filter((n): n is string => !!n),
+  };
 }
 
 // Normalize a definition: name/bindings/then/mirror/tags through normalize;
@@ -984,6 +1031,9 @@ export function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string
   const tags = (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
   if (tags.length) def.tags = tags;
   if (parts.note && parts.note.trim()) def.note = parts.note.trim();
+  if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
+  if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
+  if (parts.requiresAwakened) def.requiresAwakened = true;
   return def;
 }
 
@@ -1053,10 +1103,62 @@ export const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
     description: "Eight full hours of sleep behind them",
     tags: ["full-rested"],
   }),
+  // THE SANCTUM - the exemplar rating-scaled affliction. What being here grants
+  // depends on the character's Sanctum Background; the benefits are cumulative,
+  // and a wider tier absorbs the narrower one it supersedes (see
+  // foldAfflictionTiers). Ratings 6-8 continue the book's table past 5.
   makeAfflictionDef({
     name: "in-sanctum",
-    description: "Within their warded sanctum",
+    description: "Within their own sanctum, where their Aura and the place's power mesh. "
+      + "At ANY rating the mage is immune to Backlash here.",
     tags: ["in-sanctum"],
+    scalesWith: "sanctum",
+    requiresAwakened: true,
+    tiers: [
+      { atLeast: 1, note: "immune to Backlash" },
+      { atLeast: 2, apply: [{ op: "difficulty", amount: -1, target: "magic" }] },
+      { atLeast: 3, apply: [{ op: "difficulty", amount: -1, target: "magic" }] },
+      { atLeast: 4, note: "regain 1 Quintessence by sleeping eight hours here" },
+      // "@foundation" is the caster's Foundation trait, whatever their
+      // fellowship calls it - resolved at roll time.
+      { atLeast: 5, apply: [{ op: "dice", amount: 1, trait: "@foundation" }], note: "you know of any incursion onto your lands" },
+      { atLeast: 6, apply: [{ op: "difficulty", amount: -2 }], note: "the -2 widens to every roll, not just magic" },
+      { atLeast: 7, apply: [{ op: "successes", amount: 1, target: "magic" }] },
+      { atLeast: 8, apply: [{ op: "successes", amount: 1 }], note: "the automatic success widens to every roll" },
+    ],
+  }),
+  // THE LIBRARY - physical sources of knowledge. Its benefits are rolls you
+  // make ([[research]]), not passive dice, so the tiers are prose; the rating
+  // is the pool.
+  makeAfflictionDef({
+    name: "in-library",
+    description: "Among their books and scrolls - [[research]] rolls Intelligence + Library here. "
+      + "(Spending experience on a Pillar may also be reduced 1 per success on a Library roll vs 8 - "
+      + "awaiting the experience system.)",
+    tags: ["in-library"],
+    scalesWith: "library",
+    requiresAwakened: true,
+    tiers: [
+      { atLeast: 1, note: "an incomplete book or a partly burned scroll" },
+      { atLeast: 2, note: "a book handwritten by a knowledgeable source... you hope" },
+      { atLeast: 3, note: "an inscribed cave wall, undisturbed for centuries" },
+      { atLeast: 4, note: "a collection of illuminated manuscripts in fair condition" },
+      { atLeast: 5, note: "truly impressive: any topic you research is probably at least mentioned" },
+      { atLeast: 8, note: "the Library of the Unseen: no topic limits at all" },
+    ],
+  }),
+  // A specialized corner of a library: a small sanctum devoted to one tradition,
+  // sharpening every roll on its subject. Tag the roll `hermetic` to claim it.
+  makeAfflictionDef({
+    name: "in-rotunda",
+    description: "In the rotunda of the Library of the Unseen - a Sanctum 5 of all things Hermetic",
+    tags: ["in-rotunda"],
+    tiers: [
+      { atLeast: 0, apply: [
+        { op: "difficulty", amount: -2, target: "hermetic" },
+        { op: "successes", amount: 1, target: "hermetic" },
+      ], note: "-2 difficulty and +1 automatic success on Hermetic matters (tag the roll `hermetic`)" },
+    ],
   }),
 ];
 
@@ -1094,8 +1196,13 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
     blurb: "the Backgrounds available at creation (one per line)",
     entries: [
       { displayName: "srd:backgrounds:all", text: srdEntryText(
-        [`Backgrounds characters may buy at creation - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
-        ["Allies", "Contacts", "Domain", "Generation", "Herd", "Influence", "Mentor", "Resources", "Retainers", "Status"]) },
+        [`Backgrounds characters may buy at creation - one per line below the ${SRD_HEADER_MARKER} line.`,
+         "Cray, Fount, Library, Sanctum and Talisman are the Awakened ones - a mage's places",
+         "of power. Sanctum and Library have live mechanics (see the in-sanctum / in-library",
+         "afflictions); a Cray is a real, drainable site ([[cray]], [[harvest]], [[absorb]]).",
+         __srdEditNote],
+        ["Allies", "Contacts", "Cray", "Domain", "Fount", "Generation", "Herd", "Influence",
+         "Library", "Mentor", "Resources", "Retainers", "Sanctum", "Status", "Talisman"]) },
     ],
   },
   {

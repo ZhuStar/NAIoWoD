@@ -39,6 +39,7 @@ import {
   MAGIC_CONFIG_ENTRY, MagicRulesConfig, CastAttempts, magicRulesFrom, DEFAULT_MAGIC_RULES,
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, TEMPLATE_OUROBOROS, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
+  foldAfflictionTiers, isAwakened, CrayStore,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
@@ -4271,6 +4272,8 @@ describe("the rest gates: full-rested AND in-sanctum, on both fuels", () => {
     await CommandRouter.route("story-start 1197-03-15-00");
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     const char = (await CharacterStore.getCurrent())!;
+    char.backgrounds = { sanctum: 8, library: 8, cray: 5 };            // the sleep point is Sanctum 4's
+    await CharacterStore.save(char);
     await CharacterResources.spend(char, "living-resolve", 25);        // 30 -> 5
     // Rested, but not in the sanctum: only the base vitae point lands.
     await CommandRouter.route("afflict full-rested");
@@ -4290,6 +4293,9 @@ describe("the rest gates: full-rested AND in-sanctum, on both fuels", () => {
   test("an ordinary mage's Quintessence recovers on the same two gates (but doesn't brew)", async () => {
     await CommandRouter.route("story-start 1197-03-15-00");
     await CommandRouter.route('create-playable name="Hermetic" templates=mage');
+    const mage = (await CharacterStore.getCurrent())!;
+    mage.backgrounds = { sanctum: 4 };
+    await CharacterStore.save(mage);
     // No gates: Quintessence has no daily brew of its own.
     expect(await CommandRouter.route("advance-time 1d")).not.toContain("quintessence");
     await CommandRouter.route("afflict full-rested");
@@ -4344,5 +4350,223 @@ describe("fellowships: the Order of Hermes, and finding a caster's Foundation", 
     const lost = await CommandRouter.route('cast pillars="anima:1"');
     expect(lost).toContain("has no Foundation rating");
     expect(lost).toContain("Modus (Order of Hermes)");
+  });
+});
+
+describe("rating-scaled afflictions: the sanctum knows how big it is", () => {
+  test("foldAfflictionTiers is cumulative - and an untargeted op absorbs the targeted ones", () => {
+    const tiers = [
+      { atLeast: 2, apply: [{ op: "difficulty", amount: -1, target: "magic" }] },
+      { atLeast: 3, apply: [{ op: "difficulty", amount: -1, target: "magic" }] },
+      { atLeast: 6, apply: [{ op: "difficulty", amount: -2 }] },
+    ];
+    expect(foldAfflictionTiers(0, tiers).ops).toEqual([]);                       // nothing reached
+    expect(foldAfflictionTiers(2, tiers).ops.length).toBe(1);                    // -1 magic
+    expect(foldAfflictionTiers(3, tiers).ops.length).toBe(2);                    // -2 magic, cumulative
+    // At 6 the wide tier WIDENS instead of stacking: one -2, on everything.
+    expect(foldAfflictionTiers(6, tiers).ops).toEqual([{ op: "difficulty", amount: -2 }]);
+    expect(foldAfflictionTiers(0, undefined).ops).toEqual([]);
+  });
+
+  test("the shipped sanctum table matches the book (and its 6-8 continuation)", () => {
+    const def = AfflictionRegistry.get("in-sanctum")!;
+    expect(def.scalesWith).toBe("sanctum");
+    expect(def.requiresAwakened).toBe(true);
+    const at = (r: number) => foldAfflictionTiers(r, def.tiers).ops;
+    expect(at(1)).toEqual([]);                                                    // Backlash immunity is a note
+    expect(at(3).filter(o => o.op === "difficulty").length).toBe(2);              // -2 on magic
+    expect(at(5).some(o => o.op === "dice" && o.trait === "@foundation")).toBe(true);
+    expect(at(8)).toEqual([
+      { op: "dice", amount: 1, trait: "@foundation" },     // tier 5 rides along
+      { op: "difficulty", amount: -2 },                    // one -2, widened to everything
+      { op: "successes", amount: 1 },
+    ]);
+    expect(foldAfflictionTiers(1, def.tiers).notes.join(" ")).toContain("immune to Backlash");
+  });
+
+  test("the Ouroboros has no morality and no Virtues (it is Awakened, like a mage)", () => {
+    expect(TEMPLATE_OUROBOROS.Morality).toBeNull();
+    expect(TEMPLATE_OUROBOROS.HasVirtues).toBe(false);
+    expect(TEMPLATE_OUROBOROS.Awakened).toBe(true);
+    expect(TEMPLATE_MAGE.Awakened).toBe(true);
+    expect(TEMPLATE_VAMPIRE.Awakened).toBe(false);
+    expect(isAwakened(["ouroboros"])).toBe(true);
+    expect(isAwakened(["revenant", "mage"])).toBe(true);
+    expect(isAwakened(["revenant"])).toBe(false);
+  });
+});
+
+describe("the sanctum in play: what a rating actually does to a roll", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  async function mageWithSanctum(rating: number, name = "Hermetic"): Promise<PlayableCharacter> {
+    await CommandRouter.route(`create-playable name="${name}" templates=mage`);
+    await CommandRouter.route(`play name="${name}"`);
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 3, corona: 2 };
+    c.attributes = { ...c.attributes, strength: 3 };
+    c.abilities = { ...c.abilities, brawl: 2 };
+    c.backgrounds = { sanctum: rating };
+    await CharacterStore.save(c);
+    await CharacterResources.gain(c, "quintessence", 10);
+    await CommandRouter.route("afflict in-sanctum");
+    return c;
+  }
+
+  test("Sanctum 3 lowers magic by 2 and leaves everything else alone", async () => {
+    await mageWithSanctum(3);
+    const spell = await CommandRouter.route('cast pillars="corona:2"', { rng: allTens });
+    expect(spell).toContain("vs diff 4");                       // 4+2 = 6, sanctum -2
+    expect(spell).toContain("in-sanctum 3: difficulty -1");
+    const punch = await CommandRouter.route("roll strength+brawl", { rng: allTens });
+    expect(punch).toContain("vs diff 6");                       // untouched
+  });
+
+  test("Sanctum 8 widens both benefits to EVERY roll (-2 and +1 auto), not double on magic", async () => {
+    await mageWithSanctum(8);
+    const spell = await CommandRouter.route('cast pillars="corona:2"', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    expect(spell).toContain("vs diff 4");                       // 6 - 2, NOT 6 - 4
+    expect(spell).toContain("+1 auto");
+    const punch = await CommandRouter.route("roll strength+brawl", { rng: seqRng([2, 2, 2, 2, 2]) });
+    expect(punch).toContain("vs diff 4");                       // the -2 reaches ordinary rolls now
+    expect(punch).toContain("+1 auto");
+  });
+
+  test("Sanctum 5 adds a die only when the pool uses the Foundation", async () => {
+    await mageWithSanctum(5);
+    expect(await CommandRouter.route("roll modus", { rng: allTens })).toContain("Modus (4)");     // 3 + the sanctum die
+    expect(await CommandRouter.route("roll strength", { rng: allTens })).toContain("Strength (3)");
+  });
+
+  test("the unawakened get nothing from a sanctum, however large", async () => {
+    await CommandRouter.route('create-playable name="Squire" templates=mortal');
+    const c = (await CharacterStore.getCurrent())!;
+    c.backgrounds = { sanctum: 8 };
+    c.attributes = { ...c.attributes, strength: 3 };
+    await CharacterStore.save(c);
+    await CommandRouter.route("afflict in-sanctum");
+    expect(await CommandRouter.route("roll strength", { rng: allTens })).toContain("vs diff 6");
+    expect(await CommandRouter.route("afflictions")).toContain("benefits need the Awakened");
+  });
+
+  test("in their sanctum a botched casting draws NO Backlash", async () => {
+    await mageWithSanctum(2);
+    const botch = await CommandRouter.route('cast pillars="corona:2"', { rng: () => 0.05 });
+    expect(botch).toContain("this is their sanctum: NO Backlash");
+    expect(botch).not.toContain("⚡");
+    await CommandRouter.route("lift in-sanctum");
+    expect(await CommandRouter.route('cast pillars="corona:2"', { rng: () => 0.05 })).toContain("⚡ BACKLASH");
+  });
+
+  test("[[afflictions]] reports what the place is granting right now", async () => {
+    await mageWithSanctum(8);
+    const line = await CommandRouter.route("afflictions");
+    expect(line).toContain("sanctum 8");
+    expect(line).toContain("difficulty -2");
+    expect(line).toContain("immune to Backlash");
+  });
+});
+
+describe("the Library of the Unseen: the door, the shelves, and the cray", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  async function marius(): Promise<PlayableCharacter> {
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 3, anima: 2, corona: 4, primus: 3, vires: 2 };
+    c.attributes = { ...c.attributes, wits: 3, intelligence: 4 };
+    c.backgrounds = { sanctum: 8, library: 8, cray: 5 };
+    await CharacterStore.save(c);
+    return c;
+  }
+
+  test("measuring a door spends ten minutes and opens all three states; leaving closes them", async () => {
+    await marius();
+    const open = await CommandRouter.route("measure-door");
+    expect(open).toContain("opens onto the Library of the Unseen");
+    expect(open).toContain("1197-03-15 08:10");                  // ten minutes, no roll, no resource
+    const states = (await CharacterAfflictions.list("Marius")).map(a => a.def).sort();
+    expect(states).toEqual(["in-library", "in-sanctum", "in-umbra"]);
+    const out = await CommandRouter.route("leave-library");
+    expect(out).toContain("steps back through the measured door");
+    expect(await CharacterAfflictions.list("Marius")).toEqual([]);
+    // Without a Library there is no door to measure.
+    await CommandRouter.route('create-playable name="Doorless" templates=mage');
+    await CommandRouter.route('play name="Doorless"');
+    expect(await CommandRouter.route("measure-door")).toContain("has no Library");
+  });
+
+  test("research rolls Intelligence + Library, but only inside the library", async () => {
+    await marius();
+    expect(await CommandRouter.route("research `the seals of Belial`")).toContain("is not in their library");
+    await CommandRouter.route("measure-door");
+    const r = await CommandRouter.route("research `the seals of Belial` difficulty=8", { rng: allTens });
+    expect(r).toContain("Intelligence + Library (12)");          // 4 + 8
+    expect(r).toContain("vs diff 6");                            // 8, less the Sanctum 8 that IS the library
+    expect(r).not.toContain("unknown tag");                      // the place tags are known, not typos
+    expect(r).toContain("the Storyteller says what it says");
+  });
+
+  test("the rotunda sharpens Hermetic matters", async () => {
+    await marius();
+    await CommandRouter.route("afflict in-rotunda");
+    const hermetic = await CommandRouter.route('roll intelligence tags="hermetic"', { rng: seqRng([4, 4, 4, 4]) });
+    expect(hermetic).toContain("vs diff 4");                     // 6 - 2
+    expect(hermetic).toContain("+1 auto");
+    expect(await CommandRouter.route("roll intelligence", { rng: seqRng([4, 4, 4, 4]) })).toContain("vs diff 6");
+  });
+
+  test("harvesting draws points into Living Resolve and taps the site for the day", async () => {
+    const c = await marius();
+    await CharacterResources.spend(c, "living-resolve", 10);      // 30 -> 20
+    expect(await CommandRouter.route("cray")).toContain("cray 5 (25/25 points)");
+    const h = await CommandRouter.route("harvest 4");
+    expect(h).toContain("+4 living-resolve -> 24/30");
+    expect(h).toContain("cray 5 (21/25 points)");
+    // Tapped today: the day it was drawn earns nothing back.
+    const day = await CommandRouter.route("advance-time 1d");
+    expect(day).not.toContain("cray");
+    const later = await CommandRouter.route("advance-time 2d");
+    expect(later).toContain("cray +2 -> 23/25");
+  });
+
+  test("absorbing tears it out on Wits + Foundation vs 10 - rating", async () => {
+    const c = await marius();
+    await CharacterResources.spend(c, "living-resolve", 10);
+    const r = await CommandRouter.route("absorb", { rng: seqRng([7, 3, 3, 3, 3, 3]) });
+    expect(r).toContain("Wits + Modus (6)");                     // 3 + 3
+    expect(r).toContain("vs diff 5");                            // 10 - 5
+    expect(r).toContain("tears 1 point from the cray");
+    expect(r).toContain("+1 living-resolve");
+  });
+
+  test("overdrawing costs the site a dot, and its own rating decides the aftermath", async () => {
+    const c = await marius();
+    await CharacterResources.spend(c, "living-resolve", 30);
+    expect(await CommandRouter.route("harvest 31")).toContain("would tear it apart entirely");  // 25 + rating 5 is the ceiling
+    // Draining it to empty and 3 beyond: a dot goes, then the roll decides.
+    const greedy = await CommandRouter.route("harvest 28", { rng: allTens });
+    expect(greedy).toContain("OVERDRAWN by 3");
+    expect(greedy).toContain("drops to 4 dots");
+    expect(greedy).toContain("survives, depleted");
+    expect((await CharacterStore.load("Marius"))!.backgrounds.cray).toBe(4);
+    expect((await CommandRouter.route("cray"))).toContain("cray 4 (0/20 points)");
+  });
+
+  test("a failed aftermath roll puts the cray to sleep; a botch kills it", async () => {
+    await marius();
+    const dormant = await CommandRouter.route("harvest 26", { rng: seqRng([2, 2, 2, 2]) });
+    expect(dormant).toContain("falls DORMANT");
+    expect(await CommandRouter.route("cray")).toContain("1 point per YEAR");
+    // A dormant cray creeps back a point a year, not a day.
+    expect(await CommandRouter.route("advance-time 10d")).not.toContain("cray +");
+    expect(await CommandRouter.route("advance-time 1y")).toContain("cray +1");
+
+    __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap();
+    await marius();
+    const dead = await CommandRouter.route("harvest 26", { rng: () => 0.05 });
+    expect(dead).toContain("💀 the cray DIES");
+    expect(await CommandRouter.route("harvest 1")).toContain("the cray is dead");
   });
 });

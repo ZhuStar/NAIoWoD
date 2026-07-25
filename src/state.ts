@@ -1627,6 +1627,66 @@ export class EffectUses {
 }
 
 // =============================================================================
+// THE CRAY - a real, drainable site of Quintessence (the Cray Background)
+// -----------------------------------------------------------------------------
+// A cray holds rating x 5 points and refills 1/day, but ONLY on days it went
+// untapped. Overdrawing past empty (by up to its rating) costs the site a dot
+// and risks dormancy (1/year) or death. The RATING lives on the character's
+// sheet (backgrounds.cray - it is a Background); the live points/status live
+// here, keyed by owner, since the Background assumes exclusive access.
+// =============================================================================
+export type CrayStatus = "active" | "dormant" | "dead";
+export interface CrayState { points: number; status: CrayStatus; lastTapDay: number }
+const DORMANT_DAYS_PER_POINT = 365;
+
+export class CrayStore {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `cray:${StringUtil.normalize(name)}`; }
+
+  static rating(char: PlayableCharacter): number { return resolveTraitFromRecord(char, "cray"); }
+  static capacity(char: PlayableCharacter): number { return CrayStore.rating(char) * 5; }
+
+  // A cray starts full (it has been bubbling away untended).
+  static async get(char: PlayableCharacter): Promise<CrayState> {
+    const raw = (await CrayStore._storage.get(CrayStore._key(char.name))) as CrayState | undefined;
+    return raw ?? { points: CrayStore.capacity(char), status: "active", lastTapDay: -1 };
+  }
+  static async set(char: PlayableCharacter, state: CrayState): Promise<void> {
+    await CrayStore._storage.set(CrayStore._key(char.name), state);
+  }
+
+  // Draw `n` points, marking the day so it doesn't also regenerate today.
+  // Returns what actually came out (never more than it holds - the caller
+  // handles the overdraw rules).
+  static async tap(char: PlayableCharacter, n: number, day: number): Promise<number> {
+    const state = await CrayStore.get(char);
+    const drawn = Math.max(0, Math.min(n, state.points));
+    await CrayStore.set(char, { ...state, points: state.points - drawn, lastTapDay: day });
+    return drawn;
+  }
+
+  // Refill for the day boundaries in (fromDay, toDay]: 1/day while active (a
+  // dormant cray manages one point a YEAR; a dead one never recovers), skipping
+  // any day it was tapped. Returns the points actually added.
+  static async replenish(char: PlayableCharacter, fromDay: number, toDay: number): Promise<number> {
+    const state = await CrayStore.get(char);
+    if (state.status === "dead") return 0;
+    const days = Math.max(0, toDay - fromDay);
+    if (days <= 0) return 0;
+    // Each boundary credits the day that just ENDED, so the window covers days
+    // [fromDay, toDay-1] - and the day it was tapped earns nothing.
+    const tapped = state.lastTapDay >= fromDay && state.lastTapDay <= toDay - 1 ? 1 : 0;
+    const earned = state.status === "dormant"
+      ? Math.floor(days / DORMANT_DAYS_PER_POINT)
+      : Math.max(0, days - tapped);
+    const cap = CrayStore.capacity(char);
+    const gained = Math.max(0, Math.min(earned, cap - state.points));
+    if (gained > 0) await CrayStore.set(char, { ...state, points: state.points + gained });
+    return gained;
+  }
+}
+
+// =============================================================================
 // CAST ATTEMPTS - the same-scene spell-retry ledger (Dark Ages: Mage)
 // -----------------------------------------------------------------------------
 // Retrying a failed spell in the same scene costs +1 difficulty per prior

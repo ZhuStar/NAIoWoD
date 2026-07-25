@@ -7,12 +7,13 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `1f5e7f2`** ("the Ouroboros:
-> Living Resolve becomes a unique template; Hermetic fellowship; the rest
-> gates"). Prior: `cc85f35` (Living Resolve, recovery on the clock,
-> ghoul/revenant soak, the Dark Ages: Mage casting engine); `d3a13fd` (document
-> cleanup); `f537584` (context hygiene); `baa8252` (<hide> plans → Author's
-> Note); `25c6a9a` (scenes); `cb5b4c3` (vendor script-types.d.ts).
+> **Last synced with the code as of commit `6719345`** ("the Sanctum pass:
+> rating-scaled afflictions, the Library of the Unseen and its cray"). Prior:
+> `1f5e7f2` (the Ouroboros: a unique template; Hermetic fellowship; rest gates);
+> `cc85f35` (Living Resolve, recovery on the clock, ghoul/revenant soak, the
+> Dark Ages: Mage casting engine); `d3a13fd` (document cleanup); `f537584`
+> (context hygiene); `baa8252` (<hide> plans → Author's Note); `25c6a9a`
+> (scenes); `cb5b4c3` (vendor script-types.d.ts).
 
 ---
 
@@ -402,6 +403,12 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   `MagicRules`/`DEFAULT_MAGIC_RULES`/`MAGIC_KNOB_NAMES`/`magicRulesFrom`
   (knob overlay, unknown/non-numeric ignored); Mage Quintessence effect
   gained `limits.maxPerUse 3` + Fount/min-diff label.
+- **§7.35 additions**: `TemplateConfig.Awakened` (+ `isAwakened(keys)`);
+  `AfflictionTier` + `AfflictionDef.scalesWith/tiers/requiresAwakened` +
+  **`foldAfflictionTiers`** (cumulative, untargeted-supersedes-targeted);
+  the `in-sanctum` (8 tiers) / `in-library` / `in-rotunda` DEFAULT_AFFLICTIONS;
+  `RecoveryRule.requiresTrait`; Mage Backgrounds (Cray/Fount/Library/Sanctum/
+  Talisman) in the SRD seed; `DEFAULT_ROLL_MODIFIERS` gained the place tags.
 - `bloodForGeneration(gen)` — classic table gen 3–15 → `{max, perTurn}`.
 - Roads: `RoadDefinition {name, virtues[3], ratingVirtues[2]}` —
   `ROAD_OF_HUMANITY` (conscience/self-control/courage), `ROAD_OF_KINGS`
@@ -601,7 +608,10 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 **§7.33 additions**: `MagicRulesConfig` (MapConfigStore<number>,
 `wod:config:magic`, self-registers in ALL_CONFIG_STORES); `CastAttempts`
 (`cast:<char>` scene-scoped spell-retry ledger — `get`/`record`, lazy reset on
-scene change, success deletes the spell's entry).
+scene change, success deletes the spell's entry); **`CrayStore`** (§7.35 -
+`cray:<char>`; rating/capacity read the sheet's Background, `tap` marks the day,
+`replenish` credits 1/day for days that ENDED untapped, 1/year while dormant,
+never when dead).
 
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
@@ -767,7 +777,11 @@ specDiceMod, extra)` (mutating; returns the note) called from BOTH
 `rollAndReport`. `launchExtended` opts gained `firstExtra`/`preNotes`.
 `applyRecovery(from, to)` + wiring in `cmdAdvanceTime`; `cmdStoryDate` shows
 `nextFullMoon`. **MAGIC section** after `cmdResources`: `parsePillars`,
-`grantsUncancelableOnSpend`, `cmdCast`, `cmdSealSpell`, `resolveFoundation`
+`grantsUncancelableOnSpend`, `afflictionRollExtra` (§7.35 - the twin of passiveRollExtra, folding scaled
+affliction tiers with the `@foundation` sentinel), `applyPenaltyShield`,
+`cmdMeasureDoor`/`cmdLeaveLibrary`/`cmdCray`/`cmdHarvest`/`cmdAbsorb`/
+`cmdResearch` + `drawFromCray`/`crayLine`, `cmdCast`, `cmdSealSpell`,
+`resolveFoundation`
 (explicit foundation= → a literal `foundation` trait → the first FELLOWSHIPS
 Foundation the caster actually has), `cmdFellowships` (QUIET). `applyRecovery`
 gates accept an array (ALL must be active). `cmdResources` lines gained
@@ -1090,6 +1104,8 @@ bookmarks, `name → epoch` map) · **`scene:<name>`** (scene records, §7.31) /
 **`cast:<char>`** (the same-scene spell-retry ledger `{scene, spells: {key →
 {unsuccessful, botched}}}`, §7.33 — lazily reset when the current scene differs;
 key = cast label else the pillar signature; success deletes its entry) ·
+**`cray:<char>`** (the cray SITE's live state `{points, status: active|dormant|
+dead, lastTapDay}`, §7.35 - the RATING is a Background on the sheet) ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
 (session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
 live form fields, e.g. `win:define-constraint:relation` - the documented home
@@ -1712,6 +1728,57 @@ and `prefill` are mocked/available but not yet written.
     Resolve's base 1/day is now labelled "revenant vitae" (it IS the revenant
     daily point, per the user), and `[[resources]]` renders multi-gates as
     "if full-rested+in-sanctum".
+35. **The Sanctum pass: rating-scaled afflictions, the Library of the Unseen and
+    its cray** (user: "these conditions should also look at the character's
+    background... all this is predicated on one being a mage (or something else,
+    like my character, but still Awakened)"). Also: the Ouroboros has NO
+    morality and NO Virtues - "in this sense, he's like a mage".
+    *The gap:* afflictions granted only flat TAGS, but what "in my sanctum"
+    means depends on the Sanctum Background - 2 and 8 are different worlds.
+    **`AfflictionDef.scalesWith` + `tiers[]` + `requiresAwakened`** close it;
+    `foldAfflictionTiers(rating, tiers)` (pure) collects every tier at or below
+    the rating (the book: "these benefits are cumulative") and applies ONE
+    resolution rule: **within an op kind, an UNTARGETED op supersedes targeted
+    ops of the same kind**. That single rule expresses the user's ruling on the
+    6/8 tiers (asked and confirmed): the wider tier WIDENS rather than stacks,
+    so Sanctum 8 casts at -2, not -4, and gets ONE automatic success, not two.
+    (The alternative - literal cumulative stacking - was offered and declined.)
+    `TemplateConfig.Awakened` (mage + ouroboros) + `isAwakened()` gate the lot.
+    *Rolls:* `afflictionRollExtra(char, active, poolTraits, tags)` in game.ts -
+    the twin of `passiveRollExtra`, folded into BOTH roll paths. Op gates are
+    the existing ones (`target` = action tag, `trait` = a trait the pool used),
+    plus the **`@foundation` sentinel** resolved per-caster through
+    `resolveFoundation` (Sanctum 5's "+1 die to Foundation" without hardcoding
+    Modus). `afflictionLine(c, char?)` reports a scaled affliction's CURRENT
+    grants, so [[afflictions]] answers "what is my sanctum doing for me".
+    Place tags (`in-sanctum`, `in-umbra`, `in-library`, `in-rotunda`,
+    `full-rested`, `hermetic`) joined DEFAULT_ROLL_MODIFIERS as no-op identity
+    tags so they stop reading as typos on every roll made there.
+    *The sanctum:* the book's table with the user's 6-8 continuation; **Backlash
+    immunity at ANY rating** (cmdCast's botch branch checks for in-sanctum: the
+    spell still fails utterly, but nothing turns on the caster - the retry
+    penalty stands, since the botch happened). Sanctum 4's sleep point became a
+    `RecoveryRule.requiresTrait {sanctum, 4}` gate on both fuels.
+    *The Library of the Unseen:* his sanctum IS an Umbral realm, so
+    **`[[measure-door]]`** (the Talisman "Cosmos Within the Measure": ten
+    minutes on the clock, no roll, no resource, gated on having a Library
+    Background) stamps `in-sanctum` + `in-umbra` + `in-library` together;
+    `[[leave-library]]` lifts all three. `[[research <topic>]]` rolls
+    Intelligence + Library (must be inside). A general item/Talisman system was
+    considered and DEFERRED (asked; "one command now" chosen) - roadmap.
+    *The cray:* a real site, not a number. `CrayStore` (state.ts) holds
+    `{points, status, lastTapDay}` against the sheet's Cray Background (rating x
+    5 capacity); `[[harvest N [time=]]]` is the ritual (no roll - for him,
+    reading the books), `[[absorb]]` the dangerous way (Wits + Foundation vs
+    10 - rating). **Overdraw** past empty by up to its rating: the site loses a
+    dot ON THE SHEET, then its reduced rating rolls vs 8 - success = depleted,
+    failure = dormant (1/YEAR), botch = dead forever. All auto-applied and
+    reported (asked; "auto-apply and report" chosen, matching the recovery
+    precedent). `applyRecovery` also refills the cray - 1/day for days that
+    ENDED untapped (a boundary credits the day that just finished, so the
+    harvest day earns nothing). Everything credits the `magic-fuel` ROLE, which
+    is why "anything mentioning Quintessence is Living Resolve to him" needs no
+    special case.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
@@ -1776,14 +1843,22 @@ Ordered roughly by unlock value:
    atom after constraints, referenced by the template-definer window.
 7. **Sorcerer Paths** (static magic) + the "other powers". The **Dark Ages:
    Mage casting PROCEDURE is SHIPPED** (§7.33: `[[cast]]`/`[[seal-spell]]`,
-   simple/complex/extended/ongoing, Quintessence, retries, the cap knob).
-   LEFT: Sorcerer Paths; **Backlash systems** (the stub note only); Foundation/
-   Pillars as MODELLED powers (ratings are free `traits`-bucket entries today —
-   no fellowship data, no validation); per-interval Quintessence on
+   simple/complex/extended/ongoing, Quintessence, retries, the cap knob), as are
+   the **places of power** (§7.35: rating-scaled sanctum/library, the cray as a
+   real drainable site, the Talisman door).
+   LEFT: Sorcerer Paths; **Backlash systems** (a botch prints the stub note, and
+   the sanctum's immunity is real, but nothing is rolled); Foundation/Pillars as
+   MODELLED powers (ratings are free `traits`-bucket entries; FELLOWSHIPS names
+   them but validates nothing); per-interval Quintessence on
    `[[continue-roll]]` for extended castings (the launch interval takes it;
    later intervals need `spend=` by hand); retry-ledger recording for
-   multi-interval castings; and spell EFFECTS (what a spell does is still
-   narration/ST — the effect grammar's open vocabulary is the seam).
+   multi-interval castings; the Library's experience-cost benefit (needs the XP
+   engine, #5); and spell EFFECTS (what a spell does is still narration/ST —
+   the effect grammar's open vocabulary is the seam).
+   **Items / Talismans** are their own deferred atom: `[[measure-door]]` ships
+   the one Talisman as a command (asked; chosen over building a general item
+   registry now). A real system would own possession, attunement, rituals and
+   effects — and `[[measure-door]]` becomes its first entry.
 8. **Owned-power roll effects — SHIPPED** (§7.23): Trait Affinity, Trait
    Enhancement and Specialties are live (parameterized merits + passive
    effects + the specialty= knob). LEFT from this item: the

@@ -101,6 +101,15 @@ export const DEFAULT_ROLL_MODIFIERS: RollModifier[] = [
   // not read as typos.
   { tag: "magic", describe: "A spell roll." },
   { tag: "cast", describe: "The casting action." },
+  // Where the character IS. These tags carry no modifier of their own - the
+  // afflictions that grant them scale off a Background rating instead - but
+  // they must not read as typos on every roll made there.
+  { tag: "in-sanctum", describe: "Standing in their own sanctum." },
+  { tag: "in-umbra", describe: "Walking the spirit world." },
+  { tag: "in-library", describe: "Among their books." },
+  { tag: "in-rotunda", describe: "In the Hermetic rotunda." },
+  { tag: "full-rested", describe: "Eight hours of sleep behind them." },
+  { tag: "hermetic", describe: "A matter of Hermetic lore." },
 ];
 
 export class RollModifierRegistry {

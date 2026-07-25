@@ -1247,6 +1247,15 @@ const DEFAULT_ROLL_MODIFIERS: RollModifier[] = [
   // not read as typos.
   { tag: "magic", describe: "A spell roll." },
   { tag: "cast", describe: "The casting action." },
+  // Where the character IS. These tags carry no modifier of their own - the
+  // afflictions that grant them scale off a Background rating instead - but
+  // they must not read as typos on every roll made there.
+  { tag: "in-sanctum", describe: "Standing in their own sanctum." },
+  { tag: "in-umbra", describe: "Walking the spirit world." },
+  { tag: "in-library", describe: "Among their books." },
+  { tag: "in-rotunda", describe: "In the Hermetic rotunda." },
+  { tag: "full-rested", describe: "Eight hours of sleep behind them." },
+  { tag: "hermetic", describe: "A matter of Hermetic lore." },
 ];
 
 class RollModifierRegistry {
@@ -1966,6 +1975,9 @@ interface RecoveryRule {
   amount: number;
   per: "day" | "full-moon";
   requires?: string | string[];
+  // A Background/trait threshold the character must ALSO meet - the sanctum's
+  // sleep point is Sanctum 4's benefit, not every sanctum's.
+  requiresTrait?: { trait: string; atLeast: number };
   note?: string;            // shown beside the credit ("Umbral communion")
 }
 
@@ -2082,7 +2094,11 @@ class TemplateConfig {
     // Innate damage reactions granted to every character of this template
     // (e.g. a vampire's undead physiology). Copied onto the character at build
     // time so per-character armour can be appended without touching the template.
-    public readonly Reactions: DamageReaction[] = []
+    public readonly Reactions: DamageReaction[] = [],
+    // Has the character Awakened? Mages have; so does the Ouroboros. Sanctum,
+    // Library and Cray benefits are all predicated on it (the sleeping world
+    // gets nothing from a place of power).
+    public readonly Awakened: boolean = false
   ) {}
 
   // Resources is the modern name for Pools (trackers + pools with roles/effects).
@@ -2146,11 +2162,12 @@ const TEMPLATE_MAGE = new TemplateConfig(
       // the mage's own sanctum (both afflictions at once).
       recovery: [
         { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
-        { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
+        { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], requiresTrait: { trait: "sanctum", atLeast: 4 }, note: "rested in the sanctum" },
       ] },
   ],
   MAGE_SOAK,
-  null, false   // Mages have no Road/Humanity and no Virtues
+  null, false,   // Mages have no Road/Humanity and no Virtues
+  STANDARD_HEALTH_LEVELS, [], true   // Awakened
 );
 
 // Dark Ages: Devil's Due.
@@ -2251,7 +2268,7 @@ const LIVING_RESOLVE: ResourceDef = {
   recovery: [
     { amount: 1, per: "day", note: "revenant vitae" },
     { amount: 1, per: "day", requires: "in-umbra", note: "Umbral communion" },
-    { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], note: "rested in the sanctum" },
+    { amount: 1, per: "day", requires: ["full-rested", "in-sanctum"], requiresTrait: { trait: "sanctum", atLeast: 4 }, note: "rested in the sanctum" },
     { amount: 20, per: "full-moon" },
   ],
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
@@ -2301,7 +2318,9 @@ const TEMPLATE_OUROBOROS = new TemplateConfig(
   RulesetConfig.MAGE,
   [LIVING_RESOLVE],
   GHOUL_SOAK,
-  HUMANITY_MORALITY, true
+  // Like a mage: the ritual burned the Road away. No morality, no Virtues.
+  null, false,
+  STANDARD_HEALTH_LEVELS, [], true   // Awakened
 );
 
 const TEMPLATES: Record<string, TemplateConfig> = {
@@ -2356,6 +2375,12 @@ function resourcesForTemplates(keys: string[], overrides?: Record<string, Partia
     }
   }
   return out;
+}
+
+// Has any of these templates Awakened? Places of power (Sanctum, Library, Cray)
+// answer only to the Awakened.
+function isAwakened(keys: string[]): boolean {
+  return keys.some(k => TEMPLATES[StringUtil.normalize(k)]?.Awakened === true);
 }
 
 // The health track a character uses: the FIRST of its templates decides (same
@@ -2704,6 +2729,19 @@ function checkConstraints(groups: ConstraintGroup[], owned: OwnedTraits): Constr
 // the word *condition* for future conditional things - predicates the engine
 // will someday evaluate.
 // =============================================================================
+// --- RATING-SCALED AFFLICTIONS ---
+// Some states are not flat flags: what "in my sanctum" GRANTS depends on the
+// character's Sanctum Background rating, and the same holds for a Library. A
+// scaled affliction names the trait it `scalesWith` and lists `tiers`; every
+// tier at or below the rating contributes (the book: "these benefits are
+// cumulative"). See foldAfflictionTiers for the one subtlety - how a wider
+// tier absorbs a narrower one.
+interface AfflictionTier {
+  atLeast: number;              // rating threshold this tier turns on at
+  apply?: EffectOp[];           // roll ops (target = an action tag the roll must carry)
+  note?: string;                // what it grants in prose (shown by [[afflictions]])
+}
+
 interface AfflictionDef {
   name: string;                 // normalized id
   description?: string;
@@ -2713,6 +2751,24 @@ interface AfflictionDef {
   mirror?: string;              // affliction auto-afflicted on bindings.target, bound back
   tags?: string[];              // tags granted while active
   note?: string;
+  scalesWith?: string;          // the trait/Background whose rating selects tiers
+  tiers?: AfflictionTier[];     // cumulative benefits by rating
+  requiresAwakened?: boolean;   // tiers apply only to Awakened characters
+}
+
+// What a scaled affliction grants at `rating`: every tier at or below it, with
+// ONE resolution rule - within an op kind, an UNTARGETED op supersedes targeted
+// ops of the same kind. That is how a wider tier widens rather than stacks: a
+// Sanctum 8's "-2 difficulty on ALL rolls" absorbs the "-1 on magic" of tiers 2
+// and 3 instead of adding to them (the caster ends at -2, not -4).
+function foldAfflictionTiers(rating: number, tiers: AfflictionTier[] | undefined): { ops: EffectOp[]; notes: string[] } {
+  const reached = (tiers ?? []).filter(t => rating >= t.atLeast);
+  const all = reached.flatMap(t => t.apply ?? []);
+  const widened = new Set(all.filter(o => !o.target).map(o => o.op.toLowerCase()));
+  return {
+    ops: all.filter(o => !(o.target && widened.has(o.op.toLowerCase()))),
+    notes: reached.map(t => t.note).filter((n): n is string => !!n),
+  };
 }
 
 // Normalize a definition: name/bindings/then/mirror/tags through normalize;
@@ -2728,6 +2784,9 @@ function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): Af
   const tags = (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
   if (tags.length) def.tags = tags;
   if (parts.note && parts.note.trim()) def.note = parts.note.trim();
+  if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
+  if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
+  if (parts.requiresAwakened) def.requiresAwakened = true;
   return def;
 }
 
@@ -2797,10 +2856,62 @@ const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
     description: "Eight full hours of sleep behind them",
     tags: ["full-rested"],
   }),
+  // THE SANCTUM - the exemplar rating-scaled affliction. What being here grants
+  // depends on the character's Sanctum Background; the benefits are cumulative,
+  // and a wider tier absorbs the narrower one it supersedes (see
+  // foldAfflictionTiers). Ratings 6-8 continue the book's table past 5.
   makeAfflictionDef({
     name: "in-sanctum",
-    description: "Within their warded sanctum",
+    description: "Within their own sanctum, where their Aura and the place's power mesh. "
+      + "At ANY rating the mage is immune to Backlash here.",
     tags: ["in-sanctum"],
+    scalesWith: "sanctum",
+    requiresAwakened: true,
+    tiers: [
+      { atLeast: 1, note: "immune to Backlash" },
+      { atLeast: 2, apply: [{ op: "difficulty", amount: -1, target: "magic" }] },
+      { atLeast: 3, apply: [{ op: "difficulty", amount: -1, target: "magic" }] },
+      { atLeast: 4, note: "regain 1 Quintessence by sleeping eight hours here" },
+      // "@foundation" is the caster's Foundation trait, whatever their
+      // fellowship calls it - resolved at roll time.
+      { atLeast: 5, apply: [{ op: "dice", amount: 1, trait: "@foundation" }], note: "you know of any incursion onto your lands" },
+      { atLeast: 6, apply: [{ op: "difficulty", amount: -2 }], note: "the -2 widens to every roll, not just magic" },
+      { atLeast: 7, apply: [{ op: "successes", amount: 1, target: "magic" }] },
+      { atLeast: 8, apply: [{ op: "successes", amount: 1 }], note: "the automatic success widens to every roll" },
+    ],
+  }),
+  // THE LIBRARY - physical sources of knowledge. Its benefits are rolls you
+  // make ([[research]]), not passive dice, so the tiers are prose; the rating
+  // is the pool.
+  makeAfflictionDef({
+    name: "in-library",
+    description: "Among their books and scrolls - [[research]] rolls Intelligence + Library here. "
+      + "(Spending experience on a Pillar may also be reduced 1 per success on a Library roll vs 8 - "
+      + "awaiting the experience system.)",
+    tags: ["in-library"],
+    scalesWith: "library",
+    requiresAwakened: true,
+    tiers: [
+      { atLeast: 1, note: "an incomplete book or a partly burned scroll" },
+      { atLeast: 2, note: "a book handwritten by a knowledgeable source... you hope" },
+      { atLeast: 3, note: "an inscribed cave wall, undisturbed for centuries" },
+      { atLeast: 4, note: "a collection of illuminated manuscripts in fair condition" },
+      { atLeast: 5, note: "truly impressive: any topic you research is probably at least mentioned" },
+      { atLeast: 8, note: "the Library of the Unseen: no topic limits at all" },
+    ],
+  }),
+  // A specialized corner of a library: a small sanctum devoted to one tradition,
+  // sharpening every roll on its subject. Tag the roll `hermetic` to claim it.
+  makeAfflictionDef({
+    name: "in-rotunda",
+    description: "In the rotunda of the Library of the Unseen - a Sanctum 5 of all things Hermetic",
+    tags: ["in-rotunda"],
+    tiers: [
+      { atLeast: 0, apply: [
+        { op: "difficulty", amount: -2, target: "hermetic" },
+        { op: "successes", amount: 1, target: "hermetic" },
+      ], note: "-2 difficulty and +1 automatic success on Hermetic matters (tag the roll `hermetic`)" },
+    ],
   }),
 ];
 
@@ -2838,8 +2949,13 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
     blurb: "the Backgrounds available at creation (one per line)",
     entries: [
       { displayName: "srd:backgrounds:all", text: srdEntryText(
-        [`Backgrounds characters may buy at creation - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
-        ["Allies", "Contacts", "Domain", "Generation", "Herd", "Influence", "Mentor", "Resources", "Retainers", "Status"]) },
+        [`Backgrounds characters may buy at creation - one per line below the ${SRD_HEADER_MARKER} line.`,
+         "Cray, Fount, Library, Sanctum and Talisman are the Awakened ones - a mage's places",
+         "of power. Sanctum and Library have live mechanics (see the in-sanctum / in-library",
+         "afflictions); a Cray is a real, drainable site ([[cray]], [[harvest]], [[absorb]]).",
+         __srdEditNote],
+        ["Allies", "Contacts", "Cray", "Domain", "Fount", "Generation", "Herd", "Influence",
+         "Library", "Mentor", "Resources", "Retainers", "Sanctum", "Status", "Talisman"]) },
     ],
   },
   {
@@ -5289,6 +5405,66 @@ class EffectUses {
 }
 
 // =============================================================================
+// THE CRAY - a real, drainable site of Quintessence (the Cray Background)
+// -----------------------------------------------------------------------------
+// A cray holds rating x 5 points and refills 1/day, but ONLY on days it went
+// untapped. Overdrawing past empty (by up to its rating) costs the site a dot
+// and risks dormancy (1/year) or death. The RATING lives on the character's
+// sheet (backgrounds.cray - it is a Background); the live points/status live
+// here, keyed by owner, since the Background assumes exclusive access.
+// =============================================================================
+type CrayStatus = "active" | "dormant" | "dead";
+interface CrayState { points: number; status: CrayStatus; lastTapDay: number }
+const DORMANT_DAYS_PER_POINT = 365;
+
+class CrayStore {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `cray:${StringUtil.normalize(name)}`; }
+
+  static rating(char: PlayableCharacter): number { return resolveTraitFromRecord(char, "cray"); }
+  static capacity(char: PlayableCharacter): number { return CrayStore.rating(char) * 5; }
+
+  // A cray starts full (it has been bubbling away untended).
+  static async get(char: PlayableCharacter): Promise<CrayState> {
+    const raw = (await CrayStore._storage.get(CrayStore._key(char.name))) as CrayState | undefined;
+    return raw ?? { points: CrayStore.capacity(char), status: "active", lastTapDay: -1 };
+  }
+  static async set(char: PlayableCharacter, state: CrayState): Promise<void> {
+    await CrayStore._storage.set(CrayStore._key(char.name), state);
+  }
+
+  // Draw `n` points, marking the day so it doesn't also regenerate today.
+  // Returns what actually came out (never more than it holds - the caller
+  // handles the overdraw rules).
+  static async tap(char: PlayableCharacter, n: number, day: number): Promise<number> {
+    const state = await CrayStore.get(char);
+    const drawn = Math.max(0, Math.min(n, state.points));
+    await CrayStore.set(char, { ...state, points: state.points - drawn, lastTapDay: day });
+    return drawn;
+  }
+
+  // Refill for the day boundaries in (fromDay, toDay]: 1/day while active (a
+  // dormant cray manages one point a YEAR; a dead one never recovers), skipping
+  // any day it was tapped. Returns the points actually added.
+  static async replenish(char: PlayableCharacter, fromDay: number, toDay: number): Promise<number> {
+    const state = await CrayStore.get(char);
+    if (state.status === "dead") return 0;
+    const days = Math.max(0, toDay - fromDay);
+    if (days <= 0) return 0;
+    // Each boundary credits the day that just ENDED, so the window covers days
+    // [fromDay, toDay-1] - and the day it was tapped earns nothing.
+    const tapped = state.lastTapDay >= fromDay && state.lastTapDay <= toDay - 1 ? 1 : 0;
+    const earned = state.status === "dormant"
+      ? Math.floor(days / DORMANT_DAYS_PER_POINT)
+      : Math.max(0, days - tapped);
+    const cap = CrayStore.capacity(char);
+    const gained = Math.max(0, Math.min(earned, cap - state.points));
+    if (gained > 0) await CrayStore.set(char, { ...state, points: state.points + gained });
+    return gained;
+  }
+}
+
+// =============================================================================
 // CAST ATTEMPTS - the same-scene spell-retry ledger (Dark Ages: Mage)
 // -----------------------------------------------------------------------------
 // Retrying a failed spell in the same scene costs +1 difficulty per prior
@@ -5931,6 +6107,44 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
   return { extra, notes };
 }
 
+// Fold the character's ACTIVE afflictions' rating-scaled tiers into a roll -
+// the twin of passiveRollExtra, but the magnitude comes from a Background
+// (Sanctum 8 grants more than Sanctum 2). Gates: `requiresAwakened` defs skip
+// the unawakened entirely; an op's `target` still names an action tag the roll
+// must carry, and its `trait` the trait the pool must have used - with
+// "@foundation" standing for the caster's own Foundation trait, whatever their
+// fellowship calls it. Unmet gates skip SILENTLY, as passives do.
+function afflictionRollExtra(char: PlayableCharacter, active: ActiveAffliction[], poolTraits: string[], tags: string[]): { extra: Partial<RollModifier>; notes: string[] } {
+  const extra: Partial<RollModifier> = {};
+  const notes: string[] = [];
+  const awakened = isAwakened(char.templates);
+  const foundation = resolveFoundation(undefined, (n: string) => resolveTraitFromRecord(char, n)).trait;
+  for (const inst of active) {
+    const def = AfflictionRegistry.get(inst.def);
+    if (!def?.tiers?.length) continue;
+    if (def.requiresAwakened && !awakened) continue;
+    const rating = def.scalesWith ? resolveTraitFromRecord(char, def.scalesWith) : 0;
+    if (def.scalesWith && rating <= 0) continue;
+    for (const op of foldAfflictionTiers(rating, def.tiers).ops) {
+      const kind = op.op.toLowerCase();
+      if (!ROLL_OPS.has(kind)) continue;
+      if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
+      if (op.trait) {
+        const wanted = StringUtil.normalize(op.trait) === "@foundation" ? foundation : StringUtil.normalize(op.trait);
+        if (!poolTraits.includes(wanted)) continue;
+      }
+      const amount = op.amount ?? 1;
+      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + amount;
+      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + amount;
+      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + amount;
+      else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + amount;
+      else if (kind === "nagain") extra.nAgain = Math.min(extra.nAgain ?? 10, amount);
+      notes.push(`${inst.def}${def.scalesWith ? ` ${rating}` : ""}: ${kind} ${amount > 0 ? "+" : ""}${amount}`);
+    }
+  }
+  return { extra, notes };
+}
+
 // Resolve a specialty= reference (a trait name, or a specialty label) against
 // the character's specialties. AT MOST ONE specialty applies per roll - the
 // argument names it. Applying requires the pool to have used the trait
@@ -6026,17 +6240,19 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
   const poolTraits = poolTraitsOf(char, tagged.pool);
   const env = await characterRollEnv(char);
   const passive = passiveRollExtra(char, poolTraits, tagged.tags);
+  const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, tagged.tags);
   const extra: Partial<RollModifier> = { ...(seed ?? {}) };
-  const p = passive.extra;
-  if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
-  if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
-  if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
-  if (p.uncancelableSuccesses) extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
-  if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
+  for (const p of [passive.extra, place.extra]) {
+    if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
+    if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
+    if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
+    if (p.uncancelableSuccesses) extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
+    if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
+  }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, tagged.diceMod, extra);
   const exec = executeRoll(tagged, env.resolver, { rng: ctx.rng, extra });
-  const notes = [...passive.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : "", shieldNote].filter(Boolean);
+  const notes = [...passive.notes, ...place.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : "", shieldNote].filter(Boolean);
   return { exec, notes };
 }
 
@@ -6121,10 +6337,11 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   // Affinity et al.) fold in, and at most one specialty grants its die.
   const env = await characterRollEnv(char);
   const passive = passiveRollExtra(char, poolTraits, spec.tags);
+  const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, spec.tags);
   const specialtyRef = cmd.named["specialty"] ?? savedSpecialty;
   const specialty = specialtyRef ? resolveSpecialty(char, specialtyRef, poolTraits) : { note: "" };
   const extra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
-  for (const p of [passive.extra, specialty.extra ?? {}]) {
+  for (const p of [passive.extra, place.extra, specialty.extra ?? {}]) {
     if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
     if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
     if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
@@ -6137,6 +6354,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   const notes = [
     spend.note,
     ...passive.notes,
+    ...place.notes,
     specialty.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
     shieldNote,
@@ -6629,7 +6847,13 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
 
   const { exec, notes: execNotes } = await execCharacterRoll(char, spec, ctx, seed);
   await CastAttempts.record(char, sceneName, spellKey, exec.outcome === "botch" ? "botch" : exec.outcome === "success" ? "success" : "failure");
-  const backlash = exec.outcome === "botch" ? ` ⚡ BACKLASH - the spell fails utterly and the power turns on the caster (Storyteller describes; retrying this scene: +${rules.botchRetryPenalty}/attempt).` : "";
+  // In their own sanctum a mage is immune to Backlash at ANY rating - the spell
+  // still fails utterly, but the power doesn't turn on them.
+  const inSanctum = (await CharacterAfflictions.list(char.name)).some(a => a.def === "in-sanctum");
+  const backlash = exec.outcome !== "botch" ? ""
+    : inSanctum
+      ? ` The spell fails utterly - but this is their sanctum: NO Backlash (retrying this scene: +${rules.botchRetryPenalty}/attempt).`
+      : ` ⚡ BACKLASH - the spell fails utterly and the power turns on the caster (Storyteller describes; retrying this scene: +${rules.botchRetryPenalty}/attempt).`;
   const allNotes = [...notes, ...execNotes].filter(Boolean).join("; ");
   return sys(`${disp(char.name)} casts ${spellName} - ${formatExecution(exec)}${allNotes ? ` [${allNotes}]` : ""}.${backlash}`);
 }
@@ -6694,6 +6918,174 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   if (!entries.length) return sys(`No fellowships defined.`);
   const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
   return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
+}
+
+// =============================================================================
+// PLACES OF POWER - the sanctum, the library, and the cray within it
+// -----------------------------------------------------------------------------
+// Where a mage stands is mechanical: rating-scaled afflictions (in-sanctum /
+// in-library, §rules.ts) fold their tiers into every roll, and a cray is a real
+// site with points that run out. The Talisman ritual below is the door.
+// =============================================================================
+const LIBRARY_STATES = ["in-sanctum", "in-umbra", "in-library"];
+
+// The Talisman "Cosmos Within the Measure": ritually measure any door (ten
+// minutes, no roll, no resource) and it opens onto the Library of the Unseen -
+// an Umbral realm that is also the mage's sanctum, hence all three states.
+async function cmdMeasureDoor(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (resolveTraitFromRecord(char, "library") <= 0) {
+    return sys(`${disp(char.name)} has no Library to open a door onto (the Talisman measures the way to YOUR library).`);
+  }
+  const clock = await StoryClock.get();
+  if (clock) await StoryClock.advance({ months: 0, seconds: 10 * 60 });
+  for (const state of LIBRARY_STATES) {
+    const def = AfflictionRegistry.get(state);
+    if (def) await applyAffliction(StringUtil.normalize(char.name), def, {});
+  }
+  const when = clock ? ` Ten minutes pass (${formatStoryDate((await StoryClock.get())!.now)}).` : "";
+  return sys(`${disp(char.name)} measures the door - jamb, lintel, threshold - and it opens onto the Library of the Unseen.${when} `
+    + `Now ${LIBRARY_STATES.join(" + ")}; [[afflictions]] shows what they grant. Leave with [[leave-library]].`);
+}
+
+async function cmdLeaveLibrary(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const lifted: string[] = [];
+  for (const state of LIBRARY_STATES) {
+    const r = await removeAffliction(StringUtil.normalize(char.name), state);
+    if (!r.error) lifted.push(state);
+  }
+  if (!lifted.length) return sys(`${disp(char.name)} is not in the Library.`);
+  return sys(`${disp(char.name)} steps back through the measured door (${lifted.join(", ")} lifted).`);
+}
+
+// One line of cray state, for the status command and after every draw.
+function crayLine(char: PlayableCharacter, state: CrayState): string {
+  const rating = CrayStore.rating(char);
+  const status = state.status === "active" ? "" : ` - ${state.status.toUpperCase()}`;
+  return `cray ${rating} (${state.points}/${CrayStore.capacity(char)} points${status})`;
+}
+
+async function cmdCray(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray (it is a Background - rate it on the sheet).`);
+  const state = await CrayStore.get(char);
+  const regen = state.status === "dead" ? "never regenerates"
+    : state.status === "dormant" ? "1 point per YEAR (dormant)"
+    : "1 point per day it goes untapped";
+  return sys(`${disp(char.name)}'s ${crayLine(char, state)}: ${regen}. `
+    + `[[harvest N]] to draw it ritually, [[absorb]] to tear it out (Wits + Foundation vs ${10 - CrayStore.rating(char)}).`);
+}
+
+// Draw `want` points out of the cray and into the mage. Shared by the ritual
+// harvest and the dangerous absorption: both can OVERDRAW, and overdrawing is
+// what breaks a site (a dot lost, then dormancy or death).
+async function drawFromCray(char: PlayableCharacter, want: number, ctx: CommandContext): Promise<{ gained: number; notes: string[]; refuse?: string }> {
+  const notes: string[] = [];
+  const state = await CrayStore.get(char);
+  if (state.status === "dead") return { gained: 0, notes, refuse: `the cray is dead - it will never give again` };
+  const rating = CrayStore.rating(char);
+  const day = Math.floor(((await StoryClock.get())?.now ?? 0) / 86400);
+  const overdraw = Math.max(0, want - state.points);
+  if (overdraw > rating) {
+    return { gained: 0, notes, refuse: `the cray holds ${state.points} and can be forced ${rating} beyond that - ${want} would tear it apart entirely` };
+  }
+
+  const fromPool = await CrayStore.tap(char, want, day);
+  let gained = fromPool;
+  if (overdraw > 0) {
+    // Past empty: the site itself pays. A dot goes, and its own (reduced)
+    // rating decides whether it recovers, sleeps for years, or dies.
+    gained += overdraw;
+    const reduced = Math.max(0, rating - 1);
+    char.backgrounds = { ...char.backgrounds, cray: reduced };
+    await CharacterStore.save(char);
+    const exec = executeRoll(makeRollSpec({ pool: `${reduced}`, difficulty: 8 }), () => 0, { rng: ctx.rng });
+    const status: CrayState["status"] = exec.outcome === "botch" ? "dead" : exec.met ? "active" : "dormant";
+    await CrayStore.set(char, { points: 0, status, lastTapDay: day });
+    notes.push(`OVERDRAWN by ${overdraw}: the cray drops to ${reduced} dot${reduced === 1 ? "" : "s"} and is drained`);
+    notes.push(exec.result!.message);
+    notes.push(status === "dead" ? `💀 the cray DIES - it will never generate Quintessence again`
+      : status === "dormant" ? `the cray falls DORMANT - one point per year until it wakes`
+      : `the cray survives, depleted, and will refill at its normal rate`);
+  }
+  const def = CharacterResources.resolveDef(char, "magic-fuel");
+  if (!def) return { gained: 0, notes, refuse: `has no magic-fuel resource to hold Quintessence` };
+  const before = await CharacterResources.current(char, def);
+  const { value } = await CharacterResources.gain(char, def.name, gained);
+  notes.push(value - before < gained
+    ? `${value - before} of ${gained} fit - ${def.name} is at ${value}/${def.max}, the rest spills`
+    : `+${gained} ${def.name} -> ${value}/${def.max}`);
+  return { gained, notes };
+}
+
+// The ritual method: no roll, the mage controls exactly how much - but it is
+// time-consuming (pass time= to advance the clock with it).
+async function cmdHarvest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray to harvest.`);
+  const want = Math.max(1, parseInt(cmd.positional[0] ?? "1", 10) || 1);
+  const r = await drawFromCray(char, want, ctx);
+  if (r.refuse) return sys(`${disp(char.name)} can't harvest ${want}: ${r.refuse}.`);
+  let timeNote = "";
+  const timeArg = cmd.named["time"]?.trim();
+  if (timeArg) {
+    const dur = parseDuration(timeArg);
+    if ("error" in dur) return sys(dur.error);
+    const before = await StoryClock.get();
+    if (before) {
+      const after = (await StoryClock.advance(dur))!;
+      timeNote = ` The ritual takes until ${formatStoryDate(after.now)}.`;
+      timeNote += await applyRecovery(before.now, after.now);
+    }
+  }
+  const state = await CrayStore.get(char);
+  return sys(`${disp(char.name)} harvests the cray - ${r.notes.join("; ")}. Now ${crayLine(char, state)}.${timeNote}`);
+}
+
+// The dangerous method: tear it out directly. Wits + Foundation vs 10 - rating,
+// one point per success - and the mage must absorb everything drawn.
+async function cmdAbsorb(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const rating = CrayStore.rating(char);
+  if (rating <= 0) return sys(`${disp(char.name)} has no Cray to draw from.`);
+  const found = resolveFoundation(cmd.named["foundation"], (n: string) => resolveTraitFromRecord(char, n));
+  const spec = makeRollSpec({ pool: `wits+${found.trait}`, difficulty: Math.max(2, 10 - rating), tags: ["magic"] });
+  const { exec, notes } = await execCharacterRoll(char, spec, ctx);
+  const net = exec.outcome === "botch" ? 0 : Math.max(0, exec.result?.net ?? 0);
+  if (net <= 0) {
+    return sys(`${disp(char.name)} reaches into the cray - ${formatExecution(exec)}${notes.length ? ` [${notes.join("; ")}]` : ""}. Nothing comes.`);
+  }
+  const r = await drawFromCray(char, net, ctx);
+  if (r.refuse) return sys(`${disp(char.name)} draws ${net} - but ${r.refuse}.`);
+  const state = await CrayStore.get(char);
+  return sys(`${disp(char.name)} tears ${net} point${net === 1 ? "" : "s"} from the cray - ${formatExecution(exec)} - ${r.notes.join("; ")}. Now ${crayLine(char, state)}.`);
+}
+
+// Search the library: Intelligence + Library, the Storyteller setting the
+// difficulty by how obscure the secret is. What the pages SAY is theirs to
+// narrate; the roll says how much of it the mage finds.
+async function cmdResearch(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const topic = cmd.positional.join(" ").trim() || cmd.named["topic"]?.trim();
+  if (!topic) return sys(`research needs a topic, e.g. [[research \`the seals of Belial\` difficulty=8]].`);
+  const rating = resolveTraitFromRecord(char, "library");
+  if (rating <= 0) return sys(`${disp(char.name)} has no Library to search.`);
+  const present = (await CharacterAfflictions.list(char.name)).some(a => a.def === "in-library");
+  if (!present) return sys(`${disp(char.name)} is not in their library - [[measure-door]] opens the way, or [[afflict in-library]] if they are simply there.`);
+  const difficulty = parseInt(cmd.named["difficulty"] ?? "6", 10) || 6;
+  const spec = makeRollSpec({ pool: "intelligence+library", difficulty, tags: (cmd.named["tags"] ?? "").split(",").map(t => t.trim()).filter(Boolean) });
+  const { exec, notes } = await execCharacterRoll(char, spec, ctx);
+  const found = exec.outcome === "botch" ? "the sources contradict each other - worse than nothing"
+    : exec.met ? `${exec.result!.net} success${exec.result!.net === 1 ? "" : "es"} of material - the Storyteller says what it says`
+    : "nothing useful surfaces";
+  return sys(`${disp(char.name)} searches the library for "${topic}" - ${formatExecution(exec)}${notes.length ? ` [${notes.join("; ")}]` : ""}. ${found}.`);
 }
 
 // One line of health state for OOC replies.
@@ -7093,6 +7485,8 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
         // (full-rested AND in-sanctum).
         const needs = rule.requires === undefined ? [] : Array.isArray(rule.requires) ? rule.requires : [rule.requires];
         if (!needs.every(n => gates.has(StringUtil.normalize(n)))) continue;
+        // A Background threshold too (the sanctum's sleep point is Sanctum 4's).
+        if (rule.requiresTrait && resolveTraitFromRecord(char, rule.requiresTrait.trait) < rule.requiresTrait.atLeast) continue;
         const times = rule.per === "day" ? days : moons;
         if (times <= 0) continue;
         credit += rule.amount * times;
@@ -7102,6 +7496,14 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
       const had = await CharacterResources.current(char, def);
       const { value } = await CharacterResources.gain(char, def.name, credit);
       if (value > had) lines.push(`${disp(char.name)} +${value - had} ${def.name} -> ${value}/${def.max} (${parts.join(", ")})`);
+    }
+    // A cray bubbles back too - 1/day on the days it went untapped.
+    if (CrayStore.rating(char) > 0) {
+      const gained = await CrayStore.replenish(char, Math.floor(fromEpoch / 86400), Math.floor(toEpoch / 86400));
+      if (gained > 0) {
+        const state = await CrayStore.get(char);
+        lines.push(`${disp(char.name)}'s cray +${gained} -> ${state.points}/${CrayStore.capacity(char)}`);
+      }
     }
   }
   return lines.length ? ` Recovery: ${lines.join("; ")}.` : "";
@@ -7936,7 +8338,9 @@ async function afflictionSubject(cmd: ParsedCommand): Promise<{ name?: string; e
   return { name: StringUtil.normalize(cur.name) };
 }
 
-function afflictionLine(c: ActiveAffliction): string {
+// One line of active affliction. Given the CHARACTER, a rating-scaled def also
+// reports what it is granting right now ("what is my sanctum doing for me?").
+function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
   const def = AfflictionRegistry.get(c.def);
   const bits = [c.def];
   const bound = Object.entries(c.bindings).map(([k, v]) => `${k}: ${disp(v)}`).join(", ");
@@ -7944,6 +8348,22 @@ function afflictionLine(c: ActiveAffliction): string {
   const dur = describeDuration(def?.duration);
   if (dur && dur !== "instant") bits.push(`- ${dur} (ST-enforced)`);
   if (def?.then) bits.push(`- then ${def.then}`);
+  if (char && def?.tiers?.length) {
+    if (def.requiresAwakened && !isAwakened(char.templates)) {
+      bits.push(`- ${def.scalesWith ?? "its"} benefits need the Awakened`);
+    } else {
+      const rating = def.scalesWith ? resolveTraitFromRecord(char, def.scalesWith) : 0;
+      const folded = foldAfflictionTiers(rating, def.tiers);
+      const ops = folded.ops.map(o => {
+        const amount = o.amount ?? 1;
+        const where = o.target ? ` on ${o.target}` : o.trait ? ` when the pool uses ${o.trait}` : "";
+        return `${o.op} ${amount > 0 ? "+" : ""}${amount}${where}`;
+      });
+      const at = def.scalesWith ? `${def.scalesWith} ${rating}` : "grants";
+      const all = [...ops, ...folded.notes];
+      bits.push(all.length ? `- ${at}: ${all.join("; ")}` : `- ${at}: nothing yet`);
+    }
+  }
   if (c.note) bits.push(c.note);
   return bits.join(" ");
 }
@@ -8098,7 +8518,8 @@ async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
   }
   const list = await CharacterAfflictions.list(subject);
   if (!list.length) return sys(`${disp(subject)} has no afflictions.`);
-  return sys(`${disp(subject)} - ${list.map(afflictionLine).join("; ")}.`);
+  const char = await CharacterStore.load(subject);   // a sheet lets scaled afflictions report their tiers
+  return sys(`${disp(subject)} - ${list.map(c => afflictionLine(c, char)).join("; ")}.`);
 }
 
 // --- ALIASES & PLAYERS ------------------------------------------------------
@@ -8550,6 +8971,32 @@ CommandRouter.register("fellowships", cmdFellowships, {
   summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
 });
+CommandRouter.register("measure-door", cmdMeasureDoor, {
+  summary: "the Talisman ritual: ten minutes measuring a door opens the Library of the Unseen",
+});
+CommandRouter.register("leave-library", cmdLeaveLibrary, {
+  summary: "step back through the measured door",
+});
+CommandRouter.register("cray", cmdCray, { summary: "the cray's points, status and how it refills" });
+CommandRouter.register("harvest", cmdHarvest, {
+  summary: "draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot)",
+  params: [
+    { key: "points", kind: "positional", type: "int", hint: "[points]", example: "3" },
+    { key: "time", kind: "named", desc: "How long the ritual takes (advances the clock)", example: "2h" },
+  ],
+});
+CommandRouter.register("absorb", cmdAbsorb, {
+  summary: "tear Quintessence from the cray directly: Wits + Foundation vs 10 - its rating",
+  params: [{ key: "foundation", kind: "named", hint: "<trait>", desc: "Foundation trait (default: auto)" }],
+});
+CommandRouter.register("research", cmdResearch, {
+  summary: "search the library: Intelligence + Library (must be in it)",
+  params: [
+    { key: "topic", kind: "positional", required: true, hint: "<topic>", example: "`the seals of Belial`" },
+    { key: "difficulty", kind: "named", type: "int", desc: "How obscure the secret is (default 6)" },
+    { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (e.g. hermetic, in the rotunda)" },
+  ],
+});
 CommandRouter.register("story-date", cmdStoryDate, {
   summary: "show the current story date and how long since it began",
 });
@@ -8779,7 +9226,7 @@ const QUIET_VERBS = new Set<string>([
   "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "specialties", "affliction", "afflictions",
-  "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships",
+  "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
 ]);
 
 // =============================================================================

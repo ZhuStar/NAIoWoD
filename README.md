@@ -201,7 +201,11 @@ per-template starting-value constraints. Examples baked in:
   `recovery` rule; see *Recovery and the moon*).
 - **Ouroboros** — a **unique** template (one creature in the world): revenant +
   *laham* + Awakened Hermetic, whose four fuels are fused into **Living
-  Resolve**. See *The Ouroboros & Living Resolve*.
+  Resolve**. Like a mage he has **no Road/Humanity and no Virtues**. See *The
+  Ouroboros & Living Resolve*.
+
+Templates also carry an **`Awakened`** flag (Mage, Ouroboros). Places of power —
+sanctum, library, cray — answer only to the Awakened.
 
 ```ts
 import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src";
@@ -1053,6 +1057,70 @@ the conversation too:
 - A def's **tags** merge into every roll (and contest side) the afflicted
   character makes — e.g. a house-ruled `dazed` affliction with tag `off-hand`
   is a real +1 difficulty right now.
+
+### Rating-scaled afflictions — a state that consults the sheet
+
+Some states aren't flat: *being in your sanctum* is worth wildly different things
+at Sanctum 2 and Sanctum 8. Such a def names the Background it **`scalesWith`**
+and lists **`tiers`**; every tier at or below the character's rating applies (the
+book: "these benefits are cumulative"), and `requiresAwakened` keeps them from
+the sleeping world.
+
+```jsonc
+{ "name": "in-sanctum", "scalesWith": "sanctum", "requiresAwakened": true,
+  "tiers": [ { "atLeast": 2, "apply": [{ "op": "difficulty", "amount": -1, "target": "magic" }] },
+             { "atLeast": 6, "apply": [{ "op": "difficulty", "amount": -2 }] } ] }
+```
+
+**One resolution rule** decides how a wider tier meets a narrower one: within an
+op kind, an **untargeted op supersedes targeted ops of the same kind**. So a
+Sanctum 8's "−2 on *all* rolls" **absorbs** the "−1 on magic" of tiers 2 and 3
+rather than adding to it — the caster ends at −2, not −4. Tier ops honor the
+usual gates (`target` = an action tag the roll must carry, `trait` = a trait the
+pool must have used), plus **`@foundation`** — "whatever this caster's Foundation
+trait is". `[[afflictions]]` prints what a place is granting right now.
+
+**The Sanctum** ships with the full table: 2 → −1 magic, 3 → −2 magic, 4 →
+regain a point by sleeping eight hours there, 5 → +1 die on Foundation pools and
+you know of any incursion, 6 → the −2 widens to *every* roll, 7 → +1 automatic
+success on magic, 8 → that widens to every roll too. At **any** rating a mage is
+**immune to Backlash** in their own sanctum — a botched casting still fails, but
+the power doesn't turn on them. **The Library** ships as prose tiers plus the
+`[[research]]` roll; **`in-rotunda`** sharpens Hermetic matters (−2 difficulty,
++1 automatic success on rolls tagged `hermetic`).
+
+### The Library of the Unseen — a place you walk into
+
+The protagonist's sanctum *is* an Umbral realm, so being there means `in-sanctum`
++ `in-umbra` + `in-library` at once, and the Talisman **Cosmos Within the
+Measure** is the door: measure any door's jamb, lintel and threshold — ten
+minutes, no roll, no resource — and it opens.
+
+```
+[[measure-door]]      # 10 minutes; you are now in-sanctum + in-umbra + in-library
+[[research `the seals of Belial` difficulty=8]]   # Intelligence + Library
+[[cray]]  [[harvest 4 time=`2h`]]  [[absorb]]     # the cray within
+[[leave-library]]
+```
+
+- **`measure-door`** needs a Library Background (you open the way to *your*
+  library) and advances the story clock ten minutes.
+- **`research <topic> [difficulty=] [tags=]`** rolls **Intelligence + Library**
+  and reports how much material surfaced — what it *says* stays the
+  Storyteller's. You must be in the library. (The Library's other benefit —
+  a roll vs 8 cutting a Pillar's experience cost by 1 per success — waits on the
+  experience system.)
+- **A cray** is a real site, not a number: it holds **rating × 5** points and
+  refills **1/day on days it goes untapped** (`[[advance-time]]` credits it).
+  **`harvest N`** is the ritual method — no roll, you choose the amount, and
+  `time=` advances the clock with it. **`absorb`** is the dangerous one: **Wits +
+  Foundation vs 10 − rating**, one point per success.
+- **Overdrawing** past empty (by up to its rating) **costs the site a dot**, then
+  its reduced rating rolls vs 8: success → depleted but recovering, failure →
+  **dormant** (a point a *year*), botch → **dead**, forever. The engine applies
+  all of it and says so.
+- Everything credits the **`magic-fuel`** role — which for the Ouroboros is
+  Living Resolve: every rule that says "Quintessence" means his fused substance.
 
 ### Windows are just command emitters
 

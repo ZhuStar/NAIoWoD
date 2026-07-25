@@ -45,7 +45,7 @@ import {
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
-  StoryClock, DateBook, Scene, SceneStore,
+  StoryClock, DateBook, Scene, SceneStore, GenCounter,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
   resolveTraitFromRecord, ownedMeritInstances, enhancementsFor, SavedRoll, ExtendedSavedConfig,
   OpposedSavedConfig, ProcedureStep, ProcedureCondition,
@@ -3105,10 +3105,54 @@ const QUIET_VERBS = new Set<string>([
   "story-date", "dates", "time-between", "scenes", "scene-info",
 ]);
 
+// =============================================================================
+// CONTEXT HYGIENE - keep engine noise out of the AI's context (§7.32)
+// -----------------------------------------------------------------------------
+// A QUIET reply (help, listings, sheet, scene-info, ...) is for the PLAYER, not
+// the AI - it is pure noise in the model's context. Such replies are wrapped in
+// a marker tagged with the generation count at which they were written; the
+// onContextBuilt hook strips marked spans out of the messages before generation
+// (so the AI never reads them), and Pass 2 will age-delete the blocks from the
+// document itself after a few generations. onContextBuilt is also the reliable
+// place to COUNT real generations: it fires for every generation AND for the
+// player's context inspections, and the `dryRun` flag tells them apart.
+// =============================================================================
+const CTX_SKIP_TAG = "wod:ctx-skip";
+const CTX_SKIP_RE = /<!--wod:ctx-skip:\d+-->[\s\S]*?<!--\/wod:ctx-skip-->/g;
+
+// Wrap a reply the AI should not see, tagged with the current generation count
+// (for later age-out). No newlines - the marker rides the single input line.
+async function markCtxSkip(reply: string): Promise<string> {
+  return `<!--${CTX_SKIP_TAG}:${await GenCounter.get()}-->${reply}<!--/${CTX_SKIP_TAG}-->`;
+}
+// Remove every ctx-skip block from a text (leaving surrounding prose intact).
+export function stripCtxSkip(text: string): string {
+  return text.replace(CTX_SKIP_RE, "");
+}
+
+// The onContextBuilt handler: count the generation (real ones only), then strip
+// ctx-skip noise from the messages so the AI never reads it. Returns the modified
+// message array, or undefined when nothing changed. Emptied messages are dropped.
+export async function processContextBuilt(messages: Message[], dryRun: boolean): Promise<Message[] | undefined> {
+  if (!dryRun) await GenCounter.increment();
+  let changed = false;
+  const out: Message[] = [];
+  for (const msg of messages) {
+    const content = msg.content ?? "";
+    if (!content.includes(`<!--${CTX_SKIP_TAG}:`)) { out.push(msg); continue; }
+    changed = true;
+    const stripped = stripCtxSkip(content).replace(/[ \t]{2,}/g, " ").trim();
+    if (stripped) out.push({ ...msg, content: stripped });   // else: drop the now-empty message
+  }
+  return changed ? out : undefined;
+}
+
 // Replace every [[command]] in the player's adventure-mode input with its
 // [SYSTEM: ...] note, running commands in order. Generation is suppressed when
 // the input was ONLY commands (no prose) OR any command was a QUIET (query) one
 // - either way the player is operating the system, not advancing the story.
+// A QUIET reply is also wrapped in a ctx-skip marker (kept out of the AI's
+// context by onContextBuilt); a signal reply (a roll, a scene change) is not.
 export async function processAdventureInput(rawInputText: string): Promise<OnTextAdventureInputReturnValue | undefined> {
   const matches = [...rawInputText.matchAll(COMMAND_PATTERN)];
   if (matches.length === 0) {
@@ -3127,8 +3171,10 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
   let anyQuiet = false;
   for (const m of matches) {
     out += rawInputText.slice(cursor, m.index);
-    if (QUIET_VERBS.has(CommandParser.parse(m[1]).name)) anyQuiet = true;
-    out += await CommandRouter.route(m[1]);
+    const quiet = QUIET_VERBS.has(CommandParser.parse(m[1]).name);
+    if (quiet) anyQuiet = true;
+    const reply = await CommandRouter.route(m[1]);
+    out += quiet ? await markCtxSkip(reply) : reply;   // quiet replies are noise the AI shouldn't read
     cursor = (m.index ?? 0) + m[0].length;
   }
   out += rawInputText.slice(cursor);

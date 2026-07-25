@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `baa8252`** ("storyteller output:
-> the AI's <hide> plans → scene plan → Author's Note (onResponse)"). Prior:
+> **Last synced with the code as of commit `5908bee`** ("context hygiene:
+> keep QUIET engine noise out of the AI's context; count real generations"). Prior:
+> `baa8252` (storyteller output: <hide> plans → scene plan → Author's Note);
 > `25c6a9a` (scenes: the named unit of play on the story clock); `65c67f8` (time:
-> the story clock — real Gregorian calendar); `c20d0df` (win-roll bakes contests:
-> the Opposed knob); `cb5b4c3` (vendor NovelAI's script-types.d.ts as ambient
-> truth).
+> the story clock — real Gregorian calendar); `cb5b4c3` (vendor NovelAI's
+> script-types.d.ts as ambient truth).
 
 ---
 
@@ -193,7 +193,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - Declares NO NovelAI type and NO `const api`. This is all of host.ts that
   reaches the release.
 
-### src/host-mock.ts (182 lines) — off-host mock + test hooks, TEST-ONLY
+### src/host-mock.ts (190 lines) — off-host mock + test hooks, TEST-ONLY
 - NOT in `MODULES`, so it never enters dist. Installs `globalThis.api = {...}`
   when absent (3 Map-backed storages, empty lorebook, uuid fallback,
   `hooks.register` that logs, `log`/`error`→console). Typed loosely (assigned
@@ -570,7 +570,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
 
-### src/state.ts (1614) — the character model + every persistent store
+### src/state.ts (1632) — the character model + every persistent store
 **Legacy-but-working sheet objects** (predate PlayableCharacter; used by tests
 and the future "ready character" path):
 - `LiveCharacter` — full sheet: Attributes/Abilities/Backgrounds (Stat maps),
@@ -723,7 +723,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (3139) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (3185) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -1004,7 +1004,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3828 + 34 lines, 344 tests, 89 describes)
+### test/ (3872 + 34 lines, 347 tests, 90 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1036,8 +1036,9 @@ without records carry them too) · **`lb:ids`** (tracked lorebook uuids:
 **`time:clock`** (the story clock `{start, now}`, epoch seconds — seeded
 create-if-missing with `1197-01-01-00`, §7.30) · **`time:dates`** (named date
 bookmarks, `name → epoch` map) · **`scene:<name>`** (scene records, §7.31) /
-**`current-scene`** pointer (the open scene's normalized name) · `char_<name>`
-(legacy LiveCharacter serialization). **tempStorage**
+**`current-scene`** pointer (the open scene's normalized name) · **`gen:count`**
+(real-generation counter, §7.32 — incremented by onContextBuilt when !dryRun) ·
+`char_<name>` (legacy LiveCharacter serialization). **tempStorage**
 (session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
 live form fields, e.g. `win:define-constraint:relation` - the documented home
 for UI storageKey state) · `recon:<category>/<entry>:<kind>:<hash>` (the
@@ -1500,6 +1501,29 @@ and `prefill` are mocked/available but not yet written.
     caveat: a `<hide>` split across onResponse chunks isn't stripped (first
     version handles complete blocks per call — buffer-across-chunks is a later
     refinement). The system-prompt/`onContextBuilt` injection pass is next.
+32. **Context hygiene: keep engine noise out of the AI's context** (user: "many
+    commands, such as help, should not be included in the context... wrap blocks
+    to be subtracted with a marker... the hook for when context is about to be
+    built is the most reliable to count AI generations, using the dryRun flag to
+    separate a story generation from a context inspection"). Pass 1 of two.
+    A **QUIET reply** (help/listings/sheet/scene-info — the §7.27 query set) is
+    for the PLAYER, noise to the model, so `processAdventureInput` wraps each
+    quiet reply in a **`<!--wod:ctx-skip:<gen>-->…<!--/wod:ctx-skip-->`** marker
+    (tagged with the generation count at write time, for Pass 2's age-out); the
+    **`onContextBuilt`** hook (`processContextBuilt`) strips those spans out of
+    the `messages` before generation (dropping any message that becomes empty),
+    so the AI never reads them. onContextBuilt is ALSO where **real generations
+    are counted** (`GenCounter`, storyStorage `gen:count`): it fires for both
+    generations and the player's context *inspections*, and **`dryRun`** (true =
+    inspection, no generation — confirmed in the vendored d.ts) tells them apart,
+    so the count increments only when `!dryRun`. Stripping happens on both (an
+    inspection shows the same clean context the AI gets). `Message` is
+    `{role, content?}`; the return `{messages}` replaces the array. Pass 2 (next):
+    the **`onGenerationEnd`** document-cleanup — the streaming-`<hide>` backstop
+    (scan the doc for a block that survived a chunk split, route it, remove it via
+    the Document API `scan`/`removeParagraph`/`updateParagraph`) AND age-out
+    (delete ctx-skip blocks older than K generations from the story itself). Both
+    need `documentEdit`; both reuse `GenCounter` + the document mock.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

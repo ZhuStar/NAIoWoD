@@ -63,6 +63,14 @@ export async function __fireOnResponse(text: string[], final = true): Promise<{ 
   const r = await h({ continuityId: "test", text, logprobs: [], tokenIds: [], final });
   return (r ?? undefined) as { text?: string[] } | undefined;
 }
+// Fire the engine's onContextBuilt hook (dryRun=false is a real generation) and
+// return its result (the modified message array the host would send).
+export async function __fireOnContextBuilt(messages: Message[], dryRun = false): Promise<{ messages?: Message[] } | undefined> {
+  const h = __mockHooks.get("onContextBuilt");
+  if (!h) return undefined;
+  const r = await h({ continuityId: "test", model: "mock", dryRun, messages });
+  return (r ?? undefined) as { messages?: Message[] } | undefined;
+}
 
 // --- UI MOCK -----------------------------------------------------------------
 // Records every opened window/modal and its current UIPart tree, and lets tests

@@ -758,6 +758,16 @@ Baron: "You are late, childe."
 - The Author's Note write needs the script's **`storyEdit`** permission; without
   it the plan still lives in the scene record (best-effort, never errors).
 
+### Keeping the AI's context clean
+
+A **query** reply (help, `[[scenes]]`, `[[list-rolls]]`, `[[sheet]]`, …) is for
+*you*, not the AI — it's noise in the model's context. Those replies are wrapped
+in a `ctx-skip` marker, and the engine's **`onContextBuilt`** hook strips the
+marked spans out of the messages before every generation, so the AI never reads
+your bookkeeping. The engine also **counts real generations** there (using the
+hook's `dryRun` flag to tell an actual generation from a context *inspection*),
+which a later pass uses to age-delete those noise blocks from the story entirely.
+
 ### Resources
 
 Resources (Willpower, Blood, Resolve, Quintessence, …) are **abstract and

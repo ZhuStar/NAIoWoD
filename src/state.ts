@@ -1002,6 +1002,24 @@ export class SceneStore {
 }
 
 // =============================================================================
+// GENERATION COUNTER - how many real AI generations have happened (§7.32)
+// -----------------------------------------------------------------------------
+// Incremented once per REAL generation (onContextBuilt with dryRun=false; a
+// dry run is the player inspecting context, not generating). Story storage so
+// it survives turns. Drives the age-out of context-skip noise blocks (Pass 2).
+// =============================================================================
+export class GenCounter {
+  private static _storage = new ScopedStorage();
+  private static readonly KEY = "gen:count";
+  static async get(): Promise<number> { return GenCounter._storage.getOrDefault<number>(GenCounter.KEY, 0); }
+  static async increment(): Promise<number> {
+    const n = (await GenCounter.get()) + 1;
+    await GenCounter._storage.set(GenCounter.KEY, n);
+    return n;
+  }
+}
+
+// =============================================================================
 // PLAYERS - the engine's first identity concept
 // -----------------------------------------------------------------------------
 // A player is just a normalized id string (no record): "storyteller" always

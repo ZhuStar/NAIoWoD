@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt } from "../src/host-mock";
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -44,6 +44,7 @@ import {
   parseStoryDate, formatStoryDate, parseDuration, addDuration, diffCalendar, formatCalendarSpan,
   StoryClock, DateBook, DEFAULT_STORY_START,
   extractHideBlocks, processGeneratedText, init,
+  processContextBuilt, stripCtxSkip, GenCounter,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -3624,6 +3625,49 @@ describe("storyteller output: <hide> -> scene plan -> Author's Note", () => {
     const r = await __fireOnResponse([`ST: A line.\n<hide>secret</hide>`]);
     expect(r!.text![0]).not.toContain("secret");
     expect(__authorNote()).toContain("secret");
+  });
+});
+
+describe("context hygiene: QUIET noise stays out of the AI's context", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a QUIET reply is wrapped in a ctx-skip marker; a signal reply (a roll) is not", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const q = await processAdventureInput("Let me check. [[help]] Onward.");
+    expect(q!.inputText).toContain("wod:ctx-skip");     // help is noise -> wrapped
+    expect(q!.inputText).toContain("[SYSTEM:");          // the reply is still there for the player
+    const s = await processAdventureInput("I strike. [[roll strength+brawl 6]] Ha!");
+    expect(s!.inputText).not.toContain("wod:ctx-skip");  // a roll is a signal the AI should narrate
+  });
+
+  test("processContextBuilt strips ctx-skip spans and counts a real generation; a dry run does not count", async () => {
+    const wrapped = (await processAdventureInput("Look. [[help]] Go."))!.inputText!;
+    const messages: Message[] = [
+      { role: "system", content: "You are the Storyteller." },
+      { role: "user", content: wrapped },
+      { role: "user", content: "<!--wod:ctx-skip:0-->[SYSTEM: only noise]<!--/wod:ctx-skip-->" },
+    ];
+    const before = await GenCounter.get();
+    const out = await processContextBuilt(messages, false);   // a REAL generation
+    const joined = out!.map(m => m.content ?? "").join("\n");
+    expect(joined).not.toContain("wod:ctx-skip");
+    expect(joined).not.toContain("[SYSTEM:");                 // the help noise is gone from context
+    expect(joined).toContain("Look.");                        // surrounding prose kept
+    expect(joined).toContain("Go.");
+    expect(out!.length).toBe(2);                              // the all-noise message was dropped
+    expect(await GenCounter.get()).toBe(before + 1);          // counted
+    // A dry run (context inspection) strips the noise but does NOT increment.
+    const dry = await processContextBuilt([{ role: "user", content: "<!--wod:ctx-skip:0-->[SYSTEM: x]<!--/wod:ctx-skip--> real" }], true);
+    expect(dry![0].content).toBe("real");
+    expect(await GenCounter.get()).toBe(before + 1);          // unchanged by the dry run
+    expect(stripCtxSkip("a<!--wod:ctx-skip:3-->noise<!--/wod:ctx-skip-->b")).toBe("ab");   // pure helper
+    expect(await processContextBuilt([{ role: "user", content: "plain" }], true)).toBeUndefined();   // nothing marked
+  });
+
+  test("init registers onContextBuilt so a live context build is cleaned", async () => {
+    await init();
+    const out = await __fireOnContextBuilt([{ role: "user", content: "<!--wod:ctx-skip:0-->[SYSTEM: x]<!--/wod:ctx-skip--> hi" }], false);
+    expect(out!.messages![0].content).toBe("hi");
   });
 });
 

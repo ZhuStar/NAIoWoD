@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd } from "../src/host-mock";
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -45,6 +45,7 @@ import {
   StoryClock, DateBook, DEFAULT_STORY_START,
   extractHideBlocks, processGeneratedText, init,
   processContextBuilt, stripCtxSkip, GenCounter,
+  processGenerationEnd, stripAgedCtxSkip,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -3668,6 +3669,43 @@ describe("context hygiene: QUIET noise stays out of the AI's context", () => {
     await init();
     const out = await __fireOnContextBuilt([{ role: "user", content: "<!--wod:ctx-skip:0-->[SYSTEM: x]<!--/wod:ctx-skip--> hi" }], false);
     expect(out!.messages![0].content).toBe("hi");
+  });
+});
+
+describe("document cleanup: streaming-hide backstop + noise age-out (onGenerationEnd)", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("stripAgedCtxSkip drops only blocks older than the keep window (pure)", () => {
+    const t = 'a<!--wod:ctx-skip:0-->old<!--/wod:ctx-skip-->b<!--wod:ctx-skip:9-->new<!--/wod:ctx-skip-->c';
+    expect(stripAgedCtxSkip(t, 10, 2)).toBe('ab<!--wod:ctx-skip:9-->new<!--/wod:ctx-skip-->c');   // gen 0 dropped, gen 9 kept
+    expect(stripAgedCtxSkip('x<!--wod:ctx-skip:9-->fresh<!--/wod:ctx-skip-->y', 10, 2)).toBeNull(); // nothing old enough
+  });
+
+  test("onGenerationEnd strips a surviving <hide> (routing it), age-deletes old noise, keeps fresh noise", async () => {
+    await init();
+    await CommandRouter.route("story-start 1230-06-01-20");
+    await CommandRouter.route('scene "The Parapet" ');
+    for (let i = 0; i < 10; i++) await GenCounter.increment();     // now = 10
+    __seedDocument([
+      "Plain narration.",
+      'ST: A line. <hide>a split-survived plan</hide> and more.',
+      "<!--wod:ctx-skip:0-->[SYSTEM: old help]<!--/wod:ctx-skip-->",          // gen 0 -> age-deleted
+      "keep <!--wod:ctx-skip:9-->[SYSTEM: recent]<!--/wod:ctx-skip--> me",     // gen 9 -> kept
+    ]);
+    await __fireOnGenerationEnd();
+    const texts = __document().map(s => s.text);
+    expect(texts).toContain("Plain narration.");                    // untouched
+    expect(texts.some(t => t.includes("<hide"))).toBe(false);       // the surviving hide was stripped
+    expect(texts).toContain("ST: A line. and more.");               // ...its section cleaned (gap collapsed)
+    expect(texts.some(t => t.includes("old help"))).toBe(false);    // old noise deleted from the story
+    expect(texts.some(t => t.includes("recent"))).toBe(true);       // fresh noise still there
+    expect(await CommandRouter.route("scene-info")).toContain("a split-survived plan");   // hide reached the plan
+  });
+
+  test("onGenerationEnd on an empty document is a harmless no-op", async () => {
+    await init();
+    __seedDocument([]);
+    await expect(__fireOnGenerationEnd()).resolves.toBeUndefined();
   });
 });
 

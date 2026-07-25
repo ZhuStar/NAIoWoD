@@ -8106,6 +8106,52 @@ async function processContextBuilt(messages: Message[], dryRun: boolean): Promis
   return changed ? out : undefined;
 }
 
+// Age-out: remove the ctx-skip blocks whose creation generation is at least
+// `keepFor` generations behind `now` (leaving fresher ones + surrounding prose).
+// Returns the new text, or null when nothing was old enough to drop.
+function stripAgedCtxSkip(text: string, now: number, keepFor: number): string | null {
+  let changed = false;
+  const out = text.replace(/<!--wod:ctx-skip:(\d+)-->[\s\S]*?<!--\/wod:ctx-skip-->/g, (m, g: string) => {
+    if (now - parseInt(g, 10) >= keepFor) { changed = true; return ""; }
+    return m;
+  });
+  return changed ? out : null;
+}
+
+const CTX_SKIP_KEEP = 2;   // keep a noise block visible for this many generations, then delete it from the story
+
+// The onGenerationEnd handler: post-generation DOCUMENT cleanup (best-effort,
+// needs documentEdit). Two jobs: (a) the streaming <hide> backstop - a block
+// that survived a chunk split lands in the document, so scan for any complete
+// <hide>...</hide>, route it to the scene plan/Author's Note, and strip it out;
+// (b) age-out - delete ctx-skip noise blocks older than CTX_SKIP_KEEP generations
+// from the story itself (onContextBuilt already keeps them out of the AI's view).
+async function processGenerationEnd(): Promise<void> {
+  let sections: { sectionId: number; section: { text: string } }[];
+  try { sections = await api.v1.document.scan(); }
+  catch { return; }   // no documentEdit permission - nothing to clean
+  const now = await GenCounter.get();
+  const recovered: HideDirective[] = [];
+  for (const { sectionId, section } of sections) {
+    let text = section.text ?? "";
+    let dirty = false;
+    if (/<hide[\s>]/i.test(text) && /<\/hide>/i.test(text)) {   // (a) a surviving hide block
+      const ex = extractHideBlocks(text);
+      recovered.push(...ex.directives);
+      text = ex.cleaned; dirty = true;
+    }
+    const aged = stripAgedCtxSkip(text, now, CTX_SKIP_KEEP);    // (b) old noise
+    if (aged !== null) { text = aged; dirty = true; }
+    if (!dirty) continue;
+    text = text.replace(/[ \t]{2,}/g, " ").trimEnd();           // tidy the gap a removed block left
+    try {
+      if (text.trim()) await api.v1.document.updateParagraph(sectionId, { text });
+      else await api.v1.document.removeParagraph(sectionId);
+    } catch { /* best-effort per section */ }
+  }
+  if (recovered.length) await applyHideDirectives(recovered);
+}
+
 // Replace every [[command]] in the player's adventure-mode input with its
 // [SYSTEM: ...] note, running commands in order. Generation is suppressed when
 // the input was ONLY commands (no prose) OR any command was a QUIET (query) one
@@ -8565,6 +8611,11 @@ async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onContextBuilt", async (params: Parameters<OnContextBuilt>[0]) => {
     const messages = await processContextBuilt(params.messages, params.dryRun);
     return messages ? { messages } : undefined;
+  });
+  // Post-generation document cleanup: the streaming-<hide> backstop + age-out of
+  // old noise blocks from the story itself (best-effort; needs documentEdit).
+  api.v1.hooks.register("onGenerationEnd", async (_params: Parameters<OnGenerationEnd>[0]) => {
+    await processGenerationEnd();
   });
   const boot = await LorebookManager.bootstrap();
   await ensurePath("config", CONFIG_GENERAL_HEADER);

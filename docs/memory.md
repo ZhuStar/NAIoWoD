@@ -7,12 +7,12 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `5908bee`** ("context hygiene:
-> keep QUIET engine noise out of the AI's context; count real generations"). Prior:
+> **Last synced with the code as of commit `d3a13fd`** ("document cleanup:
+> the streaming-<hide> backstop + noise age-out via onGenerationEnd"). Prior:
+> `f537584` (context hygiene: keep QUIET noise out of context; count generations);
 > `baa8252` (storyteller output: <hide> plans → scene plan → Author's Note);
-> `25c6a9a` (scenes: the named unit of play on the story clock); `65c67f8` (time:
-> the story clock — real Gregorian calendar); `cb5b4c3` (vendor NovelAI's
-> script-types.d.ts as ambient truth).
+> `25c6a9a` (scenes: the named unit of play on the story clock); `cb5b4c3` (vendor
+> NovelAI's script-types.d.ts as ambient truth).
 
 ---
 
@@ -193,7 +193,7 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - Declares NO NovelAI type and NO `const api`. This is all of host.ts that
   reaches the release.
 
-### src/host-mock.ts (190 lines) — off-host mock + test hooks, TEST-ONLY
+### src/host-mock.ts (217 lines) — off-host mock + test hooks, TEST-ONLY
 - NOT in `MODULES`, so it never enters dist. Installs `globalThis.api = {...}`
   when absent (3 Map-backed storages, empty lorebook, uuid fallback,
   `hooks.register` that logs, `log`/`error`→console). Typed loosely (assigned
@@ -723,7 +723,7 @@ normalized character name; all default lazily from the record/template):
 (`ActiveWizard`); `get/set/clear`. The definitions and the reply loop live in
 game.ts.
 
-### src/game.ts (3185) — the verbs (interpreter, wizards, handlers, registrations)
+### src/game.ts (3231) — the verbs (interpreter, wizards, handlers, registrations)
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -1004,7 +1004,7 @@ counts + reconciliation notes; main calls `init().catch`.
 `export `), `buildSingleFile()` + `OUTPUT_PATH` (exported for the sync test),
 guardrails (starts with `//`, NOT `/*---`, no import/export lines survive).
 
-### test/ (3872 + 34 lines, 347 tests, 90 describes)
+### test/ (3910 + 34 lines, 350 tests, 91 describes)
 `test/system.test.ts` — everything; `test/build.test.ts` — dist sync +
 plain-TS guarantees. Conventions: `seqRng(faces[])` (maps desired d10 faces to
 rng values; **throws when exhausted** — used to prove exact dice counts),
@@ -1498,9 +1498,11 @@ and `prefill` are mocked/available but not yet written.
     Chosen: keep the AI's `<hide>` TAG syntax (what the user's prompt already
     teaches) intercepted by onResponse — NOT the `[[...]]` command syntax (the
     AI's output isn't input, so onTextAdventureInput never sees it). Streaming
-    caveat: a `<hide>` split across onResponse chunks isn't stripped (first
-    version handles complete blocks per call — buffer-across-chunks is a later
-    refinement). The system-prompt/`onContextBuilt` injection pass is next.
+    caveat: a `<hide>` split across onResponse chunks isn't stripped by onResponse
+    itself (it handles complete blocks per call) — but §7.32 Pass 2's
+    `onGenerationEnd` document scan is the BACKSTOP that removes any such block
+    once it lands in the story. The system-prompt/`onContextBuilt` injection pass
+    is next.
 32. **Context hygiene: keep engine noise out of the AI's context** (user: "many
     commands, such as help, should not be included in the context... wrap blocks
     to be subtracted with a marker... the hook for when context is about to be
@@ -1518,12 +1520,21 @@ and `prefill` are mocked/available but not yet written.
     inspection, no generation — confirmed in the vendored d.ts) tells them apart,
     so the count increments only when `!dryRun`. Stripping happens on both (an
     inspection shows the same clean context the AI gets). `Message` is
-    `{role, content?}`; the return `{messages}` replaces the array. Pass 2 (next):
-    the **`onGenerationEnd`** document-cleanup — the streaming-`<hide>` backstop
-    (scan the doc for a block that survived a chunk split, route it, remove it via
-    the Document API `scan`/`removeParagraph`/`updateParagraph`) AND age-out
-    (delete ctx-skip blocks older than K generations from the story itself). Both
-    need `documentEdit`; both reuse `GenCounter` + the document mock.
+    `{role, content?}`; the return `{messages}` replaces the array.
+    *Pass 2 (SHIPPED):* the **`onGenerationEnd`** document cleanup
+    (`processGenerationEnd`, best-effort, needs `documentEdit`). It `scan`s the
+    document and per section does two jobs: (a) the **streaming-`<hide>` backstop**
+    — a block that survived a chunk split lands in the story, so any complete
+    `<hide>…</hide>` is extracted, routed via `applyHideDirectives` (to the current
+    scene's plan + Author's Note), and stripped out; (b) **age-out** —
+    `stripAgedCtxSkip` deletes ctx-skip blocks whose creation gen is ≥
+    `CTX_SKIP_KEEP` (=2) generations behind `GenCounter.get()`. A section left
+    empty is `removeParagraph`'d, else `updateParagraph`'d (double-space gap
+    collapsed). host-mock gained a minimal `document` (scan/remove/update/append)
+    + `__seedDocument`/`__document`/`__fireOnGenerationEnd`. Streaming limitation:
+    a `<hide>` whose content spans MULTIPLE paragraphs isn't reassembled (single-
+    section blocks — the common case — are handled). The system-prompt/
+    onContextBuilt-injection pass is still next.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

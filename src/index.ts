@@ -25,7 +25,7 @@ import {
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,
 } from "./services";
 import { NamedRollStore, StoryClock } from "./state";
-import { processAdventureInput, processGeneratedText, processContextBuilt, reconcileLorebook } from "./game";
+import { processAdventureInput, processGeneratedText, processContextBuilt, processGenerationEnd, reconcileLorebook } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
 // Wire the engine to the host: input hook, lorebook seed, the base virtual
@@ -47,6 +47,11 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onContextBuilt", async (params: Parameters<OnContextBuilt>[0]) => {
     const messages = await processContextBuilt(params.messages, params.dryRun);
     return messages ? { messages } : undefined;
+  });
+  // Post-generation document cleanup: the streaming-<hide> backstop + age-out of
+  // old noise blocks from the story itself (best-effort; needs documentEdit).
+  api.v1.hooks.register("onGenerationEnd", async (_params: Parameters<OnGenerationEnd>[0]) => {
+    await processGenerationEnd();
   });
   const boot = await LorebookManager.bootstrap();
   await ensurePath("config", CONFIG_GENERAL_HEADER);

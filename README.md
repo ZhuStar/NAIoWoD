@@ -764,9 +764,14 @@ A **query** reply (help, `[[scenes]]`, `[[list-rolls]]`, `[[sheet]]`, …) is fo
 *you*, not the AI — it's noise in the model's context. Those replies are wrapped
 in a `ctx-skip` marker, and the engine's **`onContextBuilt`** hook strips the
 marked spans out of the messages before every generation, so the AI never reads
-your bookkeeping. The engine also **counts real generations** there (using the
-hook's `dryRun` flag to tell an actual generation from a context *inspection*),
-which a later pass uses to age-delete those noise blocks from the story entirely.
+your bookkeeping. The engine **counts real generations** there (using the hook's
+`dryRun` flag to tell an actual generation from a context *inspection*), and a
+few generations later the **`onGenerationEnd`** hook **age-deletes** those noise
+blocks from the story document itself (via the Document API). That same
+post-generation pass is the **streaming backstop** for `<hide>`: if a hidden
+block ever gets split across generation chunks and lands in the story, it's
+found there, routed to the scene plan, and removed. (Document edits need the
+script's **`documentEdit`** permission; best-effort, never errors.)
 
 ### Resources
 

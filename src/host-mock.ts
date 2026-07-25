@@ -38,7 +38,7 @@ export function __resetLorebookMock(): void { __mockCategories = []; __mockEntri
 // the generation-side story fields (author's note, system prompt, prefill).
 export function __resetStorageMock(): void {
   __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear();
-  __mockAuthorNote = ""; __mockSystemPrompt = ""; __mockPrefill = "";
+  __mockAuthorNote = ""; __mockSystemPrompt = ""; __mockPrefill = ""; __mockSections = [];
 }
 
 // --- GENERATION MOCK (author's note / system prompt / prefill / hooks) --------
@@ -50,6 +50,14 @@ let __mockAuthorNote = "";
 let __mockSystemPrompt = "";
 let __mockPrefill = "";
 const __mockHooks = new Map<string, (params: unknown) => unknown>();
+
+// A minimal document: a list of paragraphs (sections) with numeric ids, enough
+// to exercise scan / removeParagraph / updateParagraph.
+let __mockSections: { id: number; text: string }[] = [];
+let __mockSectionCounter = 1000;
+// Test/off-host helpers: seed / read the document paragraphs.
+export function __seedDocument(texts: string[]): void { __mockSections = texts.map(t => ({ id: ++__mockSectionCounter, text: t })); }
+export function __document(): { id: number; text: string }[] { return __mockSections.map(s => ({ ...s })); }
 
 // Test/off-host helpers: read the mock author's note / system prompt / prefill.
 export function __authorNote(): string { return __mockAuthorNote; }
@@ -70,6 +78,11 @@ export async function __fireOnContextBuilt(messages: Message[], dryRun = false):
   if (!h) return undefined;
   const r = await h({ continuityId: "test", model: "mock", dryRun, messages });
   return (r ?? undefined) as { messages?: Message[] } | undefined;
+}
+// Fire the engine's onGenerationEnd hook (post-generation document cleanup).
+export async function __fireOnGenerationEnd(): Promise<void> {
+  const h = __mockHooks.get("onGenerationEnd");
+  if (h) await h({ continuityId: "test", model: "mock" });
 }
 
 // --- UI MOCK -----------------------------------------------------------------
@@ -178,6 +191,20 @@ if (!__g.api) {
         get: async () => __mockPrefill,
         set: async (text: string) => { __mockPrefill = text ?? ""; },
         getDefault: async () => "",
+      },
+      // Minimal document API: scan/remove/update by section id (the surface the
+      // onGenerationEnd cleanup uses). Sections are passed with a `.text`.
+      document: {
+        scan: async (cb?: (id: number, section: { text: string }, index: number) => void) => {
+          const res = __mockSections.map((s, index) => ({ sectionId: s.id, section: { text: s.text, origin: [], formatting: [] }, index }));
+          if (cb) for (const r of res) cb(r.sectionId, r.section, r.index);
+          return res;
+        },
+        removeParagraph: async (id: number) => { __mockSections = __mockSections.filter(s => s.id !== id); },
+        removeParagraphs: async (ids: number[]) => { const set = new Set(ids); __mockSections = __mockSections.filter(s => !set.has(s.id)); },
+        updateParagraph: async (id: number, section: { text?: string }) => { const s = __mockSections.find(x => x.id === id); if (s && typeof section?.text === "string") s.text = section.text; },
+        append: async (text: string) => { for (const part of String(text).split("\n")) __mockSections.push({ id: ++__mockSectionCounter, text: part }); },
+        appendParagraph: async (section: { text?: string }) => { __mockSections.push({ id: ++__mockSectionCounter, text: String(section?.text ?? "") }); },
       },
       ui: {
         window: { open: async (options: Record<string, unknown>) => __openMockWindow("window", options) },

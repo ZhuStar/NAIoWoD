@@ -893,14 +893,13 @@ component:
 - It **replaces** blood/willpower/resolve/quintessence and answers to their
   names and roles — every vitae trick (heal, `boost` a Physical), every power
   that burns Resolve or Willpower, all spell fuel.
-- **One point pays out as all four.** The plain spend
-  (`spend=living-resolve`) is the Willpower **and** the Resolve: **+1
-  un-cancelable success per point** (capped by Foundation) **and −2 difficulty**
-  (Devil's Due's Resolve). The Quintessence component is the casting knob
-  (`focus`, −1/point per the book's math) and the vitae the body knobs
-  (`heal`, `boost`) — a spend says which job the points are doing. `cast` is
-  Resolve's full bundle (+1 success, 8-again, −2 difficulty) when he throws it
-  into a spell wholesale.
+- **One point pays out as all four, at once** — it is never spent *as* one
+  component. A plain `spend=living-resolve` gives, per point: **+1 un-cancelable
+  success** (Willpower, capped by Foundation), **−2 difficulty** (Resolve), and
+  **−1 more on a casting** (Quintessence). The same holds inside `[[cast]]`:
+  Quintessence points spent there also pay their Willpower and Resolve. The
+  vitae is that same point aimed at flesh — `heal`, `boost` — not a different
+  way of spending it. **It is meant to be overwhelming.**
 - When a power *consumes* the Willpower as its activation cost, use `fuel` (no
   free success) — or `fuel-surge` (an extra point buys it anyway).
 - He has **no Willpower entry at all**: it is replaced, so a character created

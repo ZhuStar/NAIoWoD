@@ -4011,9 +4011,9 @@ describe("Living Resolve: the unique template and its fused-substance spends", (
     const plain = await CommandRouter.route("roll 3 spend=living-resolve", { rng: seqRng([2, 2, 2]) });
     expect(plain).toContain("+1 sure");
     expect(plain).toContain("1 success");            // all dice missed; the sure one stands
-    // focus: 3 points -> -3 difficulty but STILL only one sure success (once-op).
-    const focus = await CommandRouter.route("roll 3 spend=living-resolve:focus spend-amount=3", { rng: seqRng([2, 2, 2]) });
-    expect(focus).toContain("vs diff 3");
+    // 3 points on an ordinary roll: -2 each (Resolve), one sure success (Vis-less cap).
+    const focus = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=3", { rng: seqRng([2, 2, 2]) });
+    expect(focus).toContain("vs diff 2");
     expect(focus).toContain("+1 sure");
     expect(focus).not.toContain("+3 sure");
     // fuel!: the Willpower component is consumed by the activation - no free success.
@@ -4257,7 +4257,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
     expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 for -1 difficulty");
-    expect(r).toContain("the fused Willpower grants 1 un-cancelable success (capped at 1 by Vis 2)");
+    expect(r).toContain("the fused substance also spends as Willpower and Resolve: 1 un-cancelable success (capped at 1 by Vis 2), -4 difficulty");
     expect(r).toContain("+1 sure");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(28);
     // Sealing with the fused substance: one payment covers both components.
@@ -4734,13 +4734,12 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
     const two = await CommandRouter.route("roll wits spend=living-resolve spend-amount=2", { rng: seqRng([2, 2, 2]) });
     expect(two).toContain("vs diff 2");
     expect(two).toContain("+2 sure");
-    // The casting knob stays the book's Quintessence math (-1/point), unchanged.
-    const focus = await CommandRouter.route("roll wits spend=living-resolve:focus spend-amount=3", { rng: seqRng([3, 3, 3]) });
-    expect(focus).toContain("vs diff 3");                        // 6 - 3, not 6 - 3 - 6
-    // And the Resolve `cast` bundle is there when he wants it wholesale.
-    const bundle = await CommandRouter.route("roll wits spend=living-resolve:cast", { rng: seqRng([4, 4, 4]) });
-    expect(bundle).toContain("vs diff 4");
-    expect(bundle).toContain("+1 auto");
-    expect(bundle).toContain("+1 sure");
+    // A spell gets the Quintessence component too: -2 (Resolve) -1 (Quintessence).
+    const spell = await CommandRouter.route('roll wits tags="magic" spend=living-resolve', { rng: seqRng([3, 3, 3]) });
+    expect(spell).toContain("vs diff 3");                        // 6 - 2 - 1
+    // focus survives as a deprecated alias of the same thing.
+    const legacy = await CommandRouter.route("roll wits spend=living-resolve:focus", { rng: seqRng([4, 4, 4]) });
+    expect(legacy).toContain("vs diff 4");
+    expect(legacy).toContain("deprecated");
   });
 });

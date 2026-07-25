@@ -2281,13 +2281,19 @@ const LIVING_RESOLVE: ResourceDef = {
   description: "Vitae, Quintessence, Resolve and Willpower fused by ritual; 1 point spends as 1 of each. "
     + "Also regained by drinking vampiric vitae (immune to the bond) and consuming Tass - [[gain living-resolve N]]. "
     + "Spend up to 6/turn (ST-enforced)",
-  // ONE point is one of each component, so an ordinary spend pays out as both
-  // the Willpower (certainty) and the Resolve (-2 difficulty, Devil's Due).
-  // The Quintessence component is the casting knob (`focus`), and the vitae the
-  // body knobs (`heal`/`boost`) - a spend states which job it is doing.
+  // ONE point is one of each, ALL AT ONCE - it is never spent "as" one
+  // component (the owner's ruling; this resource is meant to be overwhelming).
+  // So the ordinary spend pays every roll-side component together: the
+  // Willpower's certainty, the Resolve's -2, and the Quintessence's -1 on top
+  // when the roll is a casting. The vitae is the same point aimed at flesh
+  // (`heal`/`boost`) - not a different way of spending, just a different target.
   effect: {
-    label: "Living Resolve: +1 un-cancelable success per point (capped by Foundation) and -2 difficulty (its Resolve)",
-    apply: [{ op: "uncancelable", amount: 1 }, { op: "difficulty", amount: -2 }],
+    label: "Living Resolve: per point, +1 un-cancelable success (capped by Foundation), -2 difficulty (Resolve) and -1 more when casting (Quintessence)",
+    apply: [
+      { op: "uncancelable", amount: 1 },
+      { op: "difficulty", amount: -2 },
+      { op: "difficulty", amount: -1, target: "magic" },
+    ],
   },
   effects: {
     heal: {
@@ -2308,23 +2314,16 @@ const LIVING_RESOLVE: ResourceDef = {
       apply: [{ op: "uncancelable", amount: 1 }],
       cost: { units: 2 },
     },
+    // @deprecated The plain spend already carries the casting reduction (and
+    // everything else). Kept so older saved rolls carrying spend=…:focus still
+    // resolve; it is simply the default effect by another name.
     focus: {
-      label: "Living Resolve focuses the casting: -1 difficulty per point (min diff 4, ST) + un-cancelable successes",
-      apply: [{ op: "difficulty", amount: -1 }, { op: "uncancelable", amount: 1 }],
-      limits: { maxPerUse: 3 },
-    },
-    // The Resolve component thrown into a spell wholesale (Devil's Due's
-    // Resolve `cast` bundle), for when he is spending it AS Resolve rather than
-    // as the book's Quintessence reduction.
-    cast: {
-      label: "Living Resolve fuels the spell as Resolve: +1 success, 8-again, -2 difficulty",
+      label: "Living Resolve focuses the casting (the plain spend does this and more - deprecated)",
       apply: [
-        { op: "successes", amount: 1 },
-        { op: "nagain", amount: 8 },
-        { op: "difficulty", amount: -2 },
         { op: "uncancelable", amount: 1 },
+        { op: "difficulty", amount: -2 },
+        { op: "difficulty", amount: -1, target: "magic" },
       ],
-      limits: { uses: { n: 3, per: "scene" } },
     },
   },
 };
@@ -6849,6 +6848,15 @@ function grantsUncancelableOnSpend(def: ResourceDef): boolean {
   return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable"));
 }
 
+// The UNTARGETED difficulty break a point of this resource carries by default
+// (Living Resolve's Resolve component, -2). Read from the data, so a re-tuned
+// def moves the casting maths with it. 0 when it has no such op.
+function resolveComponentBreak(def: ResourceDef): number {
+  return (def.effect?.apply ?? [])
+    .filter(o => o.op.toLowerCase() === "difficulty" && !o.target)
+    .reduce((sum, o) => sum + (o.amount ?? 0), 0);
+}
+
 // Which trait is this caster's Foundation? An explicit foundation= wins; else a
 // literal "foundation" trait; else the first FELLOWSHIPS entry whose Foundation
 // trait the caster actually has (Order of Hermes -> Modus). Returns the trait
@@ -6947,10 +6955,17 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
       if (applied < requested) notes.push(`only ${applied} of ${requested} reduction points could apply (cap ${rules.quintPerTurn}/turn, min diff ${rules.minDifficulty}, pool ${have})`);
       if (total > rules.quintFreeLimit) notes.push(`spending >${rules.quintFreeLimit}/turn needs the Fount Background (ST)`);
       if (grantsUncancelableOnSpend(fuelDef)) {
+        // The fused substance: every point spent here is ALSO a Willpower and a
+        // Resolve point, so the certainty and the Resolve difficulty break ride
+        // along on top of the Quintessence reduction already counted.
         const cap = uncancelableCap(foundationRating, rules);
         seed.uncancelableSuccesses = Math.min(total, cap);
-        notes.push(`the fused Willpower grants ${seed.uncancelableSuccesses} un-cancelable success${seed.uncancelableSuccesses === 1 ? "" : "es"}`
-          + `${total > cap ? ` (capped at ${cap} by ${disp(foundationTrait)} ${foundationRating})` : ""}`);
+        const resolveBreak = resolveComponentBreak(fuelDef) * total;
+        if (resolveBreak) seed.difficultyMod = (seed.difficultyMod ?? 0) + resolveBreak;
+        notes.push(`the fused substance also spends as Willpower and Resolve: `
+          + `${seed.uncancelableSuccesses} un-cancelable success${seed.uncancelableSuccesses === 1 ? "" : "es"}`
+          + `${total > cap ? ` (capped at ${cap} by ${disp(foundationTrait)} ${foundationRating})` : ""}`
+          + `${resolveBreak ? `, ${resolveBreak} difficulty` : ""}`);
       }
       difficulty -= applied;
     }

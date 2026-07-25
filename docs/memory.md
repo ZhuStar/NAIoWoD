@@ -1877,6 +1877,41 @@ and `prefill` are mocked/available but not yet written.
     and stacking Resolve's -2 on top of it per point would collapse them. The
     division is now explicit in the def's comments: default = Willpower+Resolve,
     focus = Quintessence, heal/boost = vitae, fuel = the consumed-cost case.
+    *SUPERSEDED THE SAME DAY by §7.39* - the owner overruled the split.
+39. **One point of Living Resolve is all four AT ONCE** (user: "Yes, Living
+    Resolve is supposed to be OP... It should not need to be spent in separate
+    ways. One point of it is the same as 1 point of Willpower AND Quintessence
+    AND Vitae AND Resolve, all at once").
+    §7.38 had divided the components by which job a spend was doing, and
+    deliberately kept the book's Quintessence maths intact for casting. The
+    owner's ruling replaces that: the DEFAULT effect now carries every roll-side
+    component together - `uncancelable +1`, `difficulty -2`, and
+    `difficulty -1 target:magic` (the Quintessence reduction, which the action-tag
+    gate confines to spell rolls, so an ordinary roll gets -2 and a casting -3).
+    `[[cast]]` matches it: when the magic-fuel payer is the fused substance,
+    every point spent there ALSO pays its Willpower (the capped un-cancelable
+    successes, already there) and its Resolve (`resolveComponentBreak` reads the
+    -2 off the def, so retuning the data moves the casting maths with it).
+    Two points on a difficulty-8 spell now land it at 2 with two sure successes -
+    that is the intended power level, not an overshoot.
+    `focus` survives ONLY as an @deprecated alias of the default (older saved
+    rolls carrying `spend=…:focus` still resolve); the `cast` bundle added an
+    hour earlier is gone, unused. `heal`/`boost` remain because they aim the same
+    point at flesh and need a target - not a separate way to spend.
+    *Lore, for the record* (the owner's, on why it is this strong): his mother
+    Velia, the unbondable Rafastio Matriarch of the Old Faith - ancient on
+    Tal'mahe'Ra cainite vitae, co-inventor of Thaumaturgy with Tremere's Seven,
+    a servant in the gardens of Enoch who met Inauhaten - built her own
+    Foundation, the Living Measure, then spent decades on a Baali-style organ
+    pit growing a perfected male twin of herself, stripped of instinct and
+    marked with Belial's celestial name and sigil. She summoned the Great Beast
+    to occupy both bodies, then took Inauhaten's road of death and rebirth to
+    reclaim her own, leaving Belial the male vessel. The son keeps the body
+    (millennia, used sparingly); Belial and Velia both ride his senses without
+    his knowing - which is why his arcana are sensory - and Belial uses them to
+    hunt Lucifer, the one thing the Beast actually wants. A novice in
+    everything else (ordinary Attributes and Abilities, one-dot Pillars), his
+    Living Resolve IS his potential.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

@@ -4194,7 +4194,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     await ladislav();
     const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity quintessence=3', { rng: allTens });
     expect(r).toContain("vs diff 4");
-    expect(r).toContain("only 2 of 3 reduction points could apply");
+    expect(r).toContain("only 2 of 3 points could be spent (min diff 4");
   });
 
   test("same-scene retries: +1 per failure, +2 per attempt after a botch, cleared by success or a new scene", async () => {
@@ -4258,7 +4258,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
     expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 for -1 difficulty");
-    expect(r).toContain("the fused substance also spends as Willpower and Resolve: "
+    expect(r).toContain("all 2 points also spend as Willpower and Resolve: "
       + "1 un-cancelable success (capped at 1), +2 automatic successes, 8-again, -4 difficulty");
     expect(r).toContain("+1 sure");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(28);
@@ -4578,12 +4578,14 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
 describe("certainty scales with Foundation: how many successes 1s can never touch", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("uncancelableCap is Foundation halved, and never below one", () => {
+  test("uncancelableCap: the first dot is entry, then one per two more", () => {
     const rules = magicRulesFrom({});
     expect(uncancelableCap(0, rules)).toBe(1);      // the unawakened still buy one
+    expect(uncancelableCap(1, rules)).toBe(1);
     expect(uncancelableCap(3, rules)).toBe(1);
-    expect(uncancelableCap(5, rules)).toBe(2);      // the user's case
-    expect(uncancelableCap(8, rules)).toBe(4);
+    expect(uncancelableCap(5, rules)).toBe(2);      // floor((5-1)/2) - Modus 5
+    expect(uncancelableCap(7, rules)).toBe(3);
+    expect(uncancelableCap(9, rules)).toBe(4);
     expect(uncancelableCap(5, magicRulesFrom({ "uncancelable-per-foundation": 3 }))).toBe(1);  // knob
   });
 
@@ -4813,5 +4815,41 @@ describe("the Resolve component pays in FULL, not just its difficulty break", ()
     expect(r).toContain("8-again");
     expect(r).toContain("-2 difficulty");                                // and its break, not double-counted
     expect(r).toContain("vs diff 2");                                    // 5 - 1 (quint) - 2 (resolve)
+  });
+});
+
+describe("a fused point is never wasted at the difficulty floor", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("Modus 5, difficulty 5, quintessence=2: both points spend, and both grant certainty", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 5, primus: 1 };
+    await CharacterStore.save(c);
+    const r = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    // Only one point may lower the difficulty (5 - 4 = 1 of headroom)...
+    expect(r).toContain("1 for -1 difficulty");
+    // ...but the second is spent anyway, because it is also Willpower and Resolve.
+    expect(r).toContain("1 past the difficulty floor (still spent");
+    expect(r).toContain("all 2 points also spend as Willpower and Resolve");
+    expect(r).toContain("2 un-cancelable successes");            // Modus 5 -> cap 2
+    expect(r).toContain("+2 automatic successes");
+    expect(r).toContain("-4 difficulty");
+    expect(r).toContain("+2 auto +2 sure");
+    const lr = CharacterResources.resolveDef(c, "living-resolve")!;
+    expect(await CharacterResources.current(c, lr)).toBe(28);     // both points left the pool
+  });
+
+  test("ordinary Quintessence still stops at the floor - it has nothing else to pay", async () => {
+    await CommandRouter.route('create-playable name="Hermetic" templates=mage');
+    const c = (await CharacterStore.getCurrent())!;
+    c.traits = { modus: 5, primus: 1 };
+    await CharacterStore.save(c);
+    await CharacterResources.gain(c, "quintessence", 10);
+    const r = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: allTens });
+    expect(r).toContain("1 for -1 difficulty");
+    expect(r).not.toContain("past the difficulty floor");
+    expect(r).toContain("min diff 4");
+    expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(9);
   });
 });

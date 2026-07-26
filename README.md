@@ -905,7 +905,10 @@ component:
   success** (Willpower, capped by Foundation); Resolve's **whole** payout —
   **+1 automatic success, 8-again and −2 difficulty**; and **−1 more on a
   casting** (Quintessence). The same holds inside `[[cast]]`: Quintessence points
-  spent there also pay their Willpower and their Resolve in full. The vitae is
+  spent there also pay their Willpower and their Resolve in full — and a point
+  the difficulty floor won't let *reduce* is still spent, because its other
+  three components have work to do (ordinary Quintessence stops at the floor,
+  having nothing else to give). The vitae is
   that same point aimed at flesh — `heal`, `boost` — not a different way of
   spending it. **It is meant to be overwhelming.**
 - When a power *consumes* the Willpower as its activation cost, use `fuel` (no
@@ -926,8 +929,9 @@ and rested-in-sanctum) — it just has no daily brew of its own.
 
 **Certainty is capped by Foundation.** Spent Willpower buys successes that
 rolled 1s can *never* cancel — one per point — but no mind holds unlimited
-certainty: the total per roll is **`max(1, Foundation ÷ 2)`** (the divisor is the
-`uncancelable-per-foundation` knob). At Modus 5 that's **2**; at Modus 3, **1**;
+certainty: the total per roll is **`max(1, (Foundation − 1) ÷ 2)`** — the first
+dot is the price of entry, then every two more buy another (the divisor is the
+`uncancelable-per-foundation` knob). At Modus 5 that's **2**, at 7 it's **3**;
 a character with no Foundation at all still gets 1. This applies to everyone:
 the Ouroboros gets them from *any* Living Resolve spend (the Willpower is in
 every point), while an ordinary character spends that many Willpower explicitly —

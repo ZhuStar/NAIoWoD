@@ -1370,36 +1370,52 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   const seed: Partial<RollModifier> = {};
   const mandatory = primary.required > foundationRating ? 1 : 0;
   const requested = Math.max(0, intOf(cmd.named["quintessence"] ?? cmd.named["quint"]) ?? 0);
-  let applied = Math.min(requested, Math.max(0, rules.quintPerTurn - mandatory), Math.max(0, difficulty - rules.minDifficulty));
   const fuelDef = CharacterResources.resolveDef(char, "magic-fuel");
   if (mandatory > 0 && !fuelDef) {
     return sys(`${disp(char.name)} can't cast: the effect (${disp(primary.name)} ${primary.required}) outstrips ${disp(foundationTrait)} ${foundationRating}, and casting then REQUIRES a point of Quintessence - but they have no magic-fuel resource.`);
   }
-  if (fuelDef && (mandatory > 0 || applied > 0)) {
+  // The FUSED substance is never wasted: a point whose Quintessence reduction
+  // the difficulty floor blocks still pays its Willpower and Resolve, so those
+  // points are spent anyway. Ordinary Quintessence has nothing else to give, so
+  // only the ones that actually lower the difficulty leave the pool.
+  const fused = !!fuelDef && grantsUncancelableOnSpend(fuelDef);
+  const reducing = Math.max(0, Math.min(requested, rules.quintPerTurn - mandatory, difficulty - rules.minDifficulty));
+  let applied = reducing;
+  let spare = fused ? Math.max(0, Math.min(requested, rules.quintPerTurn - mandatory) - reducing) : 0;
+  if (fuelDef && (mandatory > 0 || applied > 0 || spare > 0)) {
     const have = await CharacterResources.current(char, fuelDef);
     if (have < mandatory) {
       return sys(`${disp(char.name)} can't cast: ${disp(primary.name)} ${primary.required} outstrips ${disp(foundationTrait)} ${foundationRating}, so casting REQUIRES 1 ${fuelDef.name} - they have ${have}.`);
     }
     applied = Math.min(applied, have - mandatory);
-    const total = mandatory + applied;
+    spare = Math.min(spare, have - mandatory - applied);
+    const total = mandatory + applied + spare;
     if (total > 0) {
       await CharacterResources.spend(char, fuelDef.name, total);
       const bits: string[] = [];
       if (mandatory) bits.push(`1 to stabilize (${disp(primary.name)} ${primary.required} > ${disp(foundationTrait)} ${foundationRating})`);
       if (applied) bits.push(`${applied} for -${applied} difficulty`);
+      if (spare) bits.push(`${spare} past the difficulty floor (still spent - see below)`);
       notes.push(`${fuelDef.name}: ${bits.join(" + ")}`);
-      if (applied < requested) notes.push(`only ${applied} of ${requested} reduction points could apply (cap ${rules.quintPerTurn}/turn, min diff ${rules.minDifficulty}, pool ${have})`);
+      if (applied + spare < requested) {
+        // Name the limiter that actually bound. The difficulty floor only stops
+        // an ORDINARY Quintessence point - a fused one still has three other
+        // components to pay, so it is spent regardless.
+        const why = [`cap ${rules.quintPerTurn}/turn`, `pool ${have}`];
+        if (!fused && difficulty - rules.minDifficulty < requested) why.unshift(`min diff ${rules.minDifficulty}`);
+        notes.push(`only ${applied + spare} of ${requested} points could be spent (${why.join(", ")})`);
+      }
       if (total > rules.quintFreeLimit) notes.push(`spending >${rules.quintFreeLimit}/turn needs the Fount Background (ST)`);
-      if (grantsUncancelableOnSpend(fuelDef)) {
+      if (fused) {
         // The fused substance: every point spent here is ALSO a Willpower and a
         // Resolve point, so their whole payout rides along on top of the
         // Quintessence reduction already counted above.
-        const fused = fusedComponentExtra(fuelDef, total, uncancelableCap(foundationRating, rules));
-        for (const [k, v] of Object.entries(fused.extra) as Array<[keyof RollModifier, number]>) {
+        const rider = fusedComponentExtra(fuelDef, total, uncancelableCap(foundationRating, rules));
+        for (const [k, v] of Object.entries(rider.extra) as Array<[keyof RollModifier, number]>) {
           if (k === "nAgain") seed.nAgain = Math.min(seed.nAgain ?? 10, v);
           else (seed as Record<string, number>)[k] = ((seed as Record<string, number>)[k] ?? 0) + v;
         }
-        if (fused.bits.length) notes.push(`the fused substance also spends as Willpower and Resolve: ${fused.bits.join(", ")}`);
+        if (rider.bits.length) notes.push(`all ${total} point${total === 1 ? "" : "s"} also spend as Willpower and Resolve: ${rider.bits.join(", ")}`);
       }
       difficulty -= applied;
     }

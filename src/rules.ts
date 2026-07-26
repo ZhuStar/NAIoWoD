@@ -722,10 +722,12 @@ export const DEFAULT_MAGIC_RULES: MagicRules = {
 };
 
 // The most un-cancelable successes one roll can carry, for this character's
-// Foundation: the Willpower being spent is only worth so much certainty. A
-// character with no Foundation (the unawakened) can still buy exactly one.
+// Foundation: the Willpower being spent is only worth so much certainty. The
+// first dot is the price of entry, then each `uncancelablePerFoundation` dots
+// buys another - floor((Foundation - 1) / 2) by default, so Foundation 5 grants
+// 2. A character with no Foundation (the unawakened) can still buy exactly one.
 export function uncancelableCap(foundationRating: number, rules: MagicRules): number {
-  return Math.max(1, Math.floor(Math.max(0, foundationRating) / Math.max(1, rules.uncancelablePerFoundation)));
+  return Math.max(1, Math.floor((Math.max(0, foundationRating) - 1) / Math.max(1, rules.uncancelablePerFoundation)));
 }
 
 const MAGIC_KNOBS: Record<string, keyof MagicRules> = {

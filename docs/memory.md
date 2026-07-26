@@ -1949,6 +1949,30 @@ and `prefill` are mocked/available but not yet written.
     NOT carried over - this substance is not Resolve, it is the fusion, and the
     owner's ruling is that it is meant to be overwhelming.
 
+42. **The cap formula, and a fused point is never wasted at the floor** (user:
+    "It's supposed to be 2 un-cancelable... `modus` at 5 grants that extra
+    willpower bonus: floor((5 - 1) / 2)").
+    TWO things, only one of which was the cause. The formula: §7.36 shipped
+    `max(1, floor(F / 2))`, the owner states `floor((F - 1) / 2)` - the first dot
+    is the price of entry, then every two more buy another. They AGREE at
+    Foundation 5 (both 2), so the formula was never why he saw 1; adopted
+    anyway, since he is the rules authority and they differ at even ratings
+    (F=8: 4 -> 3). Modus was being read as the Foundation correctly all along
+    (the Hermes fellowship resolves it; the pool printed "Modus + Primus").
+    The REAL cause: he asked for `quintessence=2` on a difficulty-5 spell, and
+    the min-difficulty floor left room for only ONE reduction - so cmdCast
+    refused to spend the second point at all, and one point grants one
+    un-cancelable success. That was §7.39's split creeping back in: the point
+    was being judged purely as Quintessence. A fused point is never wasted -
+    its Willpower and Resolve still have work to do - so the Quintessence block
+    now separates `reducing` (points the floor lets lower the difficulty) from
+    `spare` (the rest), spends BOTH for a fused payer, and applies the
+    Quintessence -1 only to `reducing`. Ordinary Quintessence still stops at the
+    floor, having nothing else to give; the "could not be spent" note names
+    whichever limiter actually bound.
+    Result on the owner's exact command: +2 auto, +2 sure, -4 difficulty from
+    the pair instead of one point's worth.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:

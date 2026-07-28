@@ -60,7 +60,7 @@ export const TEXT_KEYS = new Set([
 export const LIST_KEYS = new Set([
   "roles", "replaces", "tags", "templates", "meritsflaws", "targetmustbe",
   "apply", "passive", "rows", "steps", "startoptions", "members", "scope",
-  "tiers", "bindings",
+  "tiers", "bindings", "limits",
 ]);
 
 // A comma-joined TOKEN string the engine splits itself (EffectOp.target):
@@ -85,6 +85,8 @@ const FIELD_ALIASES: Record<string, string> = {
   "per-turn-limit": "perTurnLimit",
   "from-generation": "fromGeneration",
   "at-most-one-at": "atMostOneAt",
+  "at-rating": "atRating",
+  "per-kind": "perKind",
   "max-from-trait": "maxFromTrait",
   "fill-to-cap": "fillToCap",
   "requires-resource": "requiresResource",

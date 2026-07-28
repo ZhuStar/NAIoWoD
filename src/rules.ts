@@ -906,6 +906,13 @@ export interface MeritFlawRequirements {
   tags?: string[];        // ALL listed tags must be present on the character
   meritsFlaws?: string[]; // ALL listed merits/flaws must already be taken
 }
+// One cross-instance ceiling on a parameterized def.
+export interface InstanceLimit {
+  atRating: number;                  // the rating being rationed
+  slots: number;                     // how many instances may hold it (or more)
+  perKind?: Record<string, number>;  // and at most this many of a trait KIND
+}
+
 export interface MeritFlawDef {
   name: string;
   kind: MeritFlawKind;
@@ -921,9 +928,14 @@ export interface MeritFlawDef {
   // by the points the instance was taken at (trait-affinity at 2 points =
   // -2 difficulty). Roll ops honor the actionTag (`target`) and `trait` gates.
   passive?: EffectOp[];
-  // Cross-instance cap: at most ONE instance of this def may sit at this
-  // points value (trait-affinity: 3 - one favoured trait). ADVISORY - the
-  // constraint check reports violations; the creation engine will enforce.
+  // How many instances of this def may sit at a TOP rating, and - because the
+  // book cares which KIND of trait they are - how many of those may be an
+  // Attribute, an Ability, and so on. "Two favoured traits may reach 3, at most
+  // one of them an Attribute" is one entry: {atRating: 3, slots: 2,
+  // perKind: {attribute: 1}}. ADVISORY, like everything creation-side: the
+  // check reports violations and take-merit refuses (waivable).
+  limits?: InstanceLimit[];
+  /** @deprecated Use `limits`: {atRating: N, slots: 1}. Still read. */
   atMostOneAt?: number;
   // The rating ceiling is a TRAIT, not a constant: "may not be purchased more
   // times than his Resolve". The name is resolved the way every trait name is
@@ -931,6 +943,16 @@ export interface MeritFlawDef {
   // so a character whose Resolve IS Living Resolve is capped by that), and the
   // reading is the PERMANENT rating, never the spent-down current.
   maxFromTrait?: string;
+}
+
+// A def's limits with the deprecated single-slot field folded in, so callers
+// read one shape however the def was written.
+export function instanceLimitsOf(def: MeritFlawDef): InstanceLimit[] {
+  const out = [...(def.limits ?? [])];
+  if (def.atMostOneAt !== undefined && !out.some(l => l.atRating === def.atMostOneAt)) {
+    out.push({ atRating: def.atMostOneAt, slots: 1 });
+  }
+  return out;
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
@@ -1100,6 +1122,21 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
   if (passive.length) def.passive = passive;
   const atMostOneAt = asNumber(body["atMostOneAt"]);
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const limits: InstanceLimit[] = [];
+  for (const raw of asList(body["limits"])) {
+    const m = asMap(raw);
+    const atRating = asNumber(m["atRating"]);
+    if (atRating === undefined) continue;
+    const limit: InstanceLimit = { atRating, slots: Math.max(0, asNumber(m["slots"]) ?? 1) };
+    const perKind: Record<string, number> = {};
+    for (const [kind, n] of Object.entries(asMap(m["perKind"]))) {
+      const v = asNumber(n);
+      if (v !== undefined) perKind[StringUtil.normalize(kind)] = v;
+    }
+    if (Object.keys(perKind).length) limit.perKind = perKind;
+    limits.push(limit);
+  }
+  if (limits.length) def.limits = limits;
   const maxFromTrait = asText(body["maxFromTrait"]);
   if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   return def;
@@ -1108,9 +1145,12 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
 export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
   {
-    name: "Trait Affinity", kind: "merit", points: [1, 2, 3], param: "trait", atMostOneAt: 3,
+    name: "Trait Affinity", kind: "merit", points: [1, 2, 3], param: "trait",
+    limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
-    description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait. One favoured trait may reach 3; every other caps at 2.",
+    description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
+      + "([[take-merit trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
+      + "Abilities; every other trait caps at 2.",
   },
   {
     name: "Trait Enhancement", kind: "merit", points: [1, 2, 3], param: "trait",

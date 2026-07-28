@@ -4213,15 +4213,36 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(r).toContain("vs diff 5");   // Erik's side
   });
 
-  test("atMostOneAt: two traits at 3 is flagged by check-constraints (advisory)", async () => {
+  test("two Abilities may reach 3; a THIRD trait at 3 is refused (waivable) and flagged", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    await CommandRouter.route("take-merit trait-affinity::melee 3");
-    await CommandRouter.route("take-merit trait-affinity::brawl 3");
+    // Two Abilities at the top rating is exactly what the arcanum allows.
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 pts");
+    expect(await CommandRouter.route("take-merit trait-affinity::brawl 3")).toContain("3 pts");
     await CommandRouter.route('define-constraint name="noop" relation=exclusive domain=background members="status"');
+    expect(await CommandRouter.route("check-constraints")).toContain("satisfies all 1 constraint group");
+    // A third one is over the ration - refused at the door...
+    const refused = await CommandRouter.route("take-merit trait-affinity::stealth 3");
+    expect(refused).toContain("allows 2 traits at 3");
+    expect((await CharacterStore.load("Kvar"))!.meritsFlaws["trait-affinity:stealth"]).toBeUndefined();
+    // ...and reported if it gets in anyway (a waiver, or a hand-edited sheet).
+    await CommandRouter.route("take-merit trait-affinity::stealth 3 waive=true");
     const report = await CommandRouter.route("check-constraints");
-    expect(report).toContain("only ONE instance at the top value");
+    expect(report).toContain("allows 2 traits at 3");
     expect(report).toContain("melee");
-    expect(report).toContain("brawl");
+    expect(report).toContain("stealth");
+  });
+
+  test("the SECOND top slot may not be another Attribute", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    expect(await CommandRouter.route("take-merit trait-affinity::strength 3")).toContain("3 pts");
+    // One Attribute is fine; a second Attribute at 3 breaks the per-kind ration
+    // even though the two slots are not full yet.
+    const refused = await CommandRouter.route("take-merit trait-affinity::dexterity 3");
+    expect(refused).toContain("allows 1 attribute at 3");
+    // An Ability takes the other slot happily.
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 pts");
+    // And a trait BELOW the top rating is never rationed.
+    expect(await CommandRouter.route("take-merit trait-affinity::stealth 2")).toContain("2 pts");
   });
 
   test("merit findings surface even with zero constraint groups defined", async () => {
@@ -4231,8 +4252,9 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(clean).toContain("check out");
     await CommandRouter.route("take-merit trait-affinity::melee 3");
     await CommandRouter.route("take-merit trait-affinity::brawl 3");
+    await CommandRouter.route("take-merit trait-affinity::stealth 3 waive=true");
     const report = await CommandRouter.route("check-constraints");
-    expect(report).toContain("only ONE instance at the top value");
+    expect(report).toContain("allows 2 traits at 3");
   });
 
   test("Trait Enhancement grows the pool, stacks with boosts, and reports the ceiling", async () => {

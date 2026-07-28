@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `ce304b3`** ("The words move out
-> of the windows"). Prior: `38d2007` ("A floor for the
+> **Last synced with the code as of commit `3cb162a`** ("Rationed top
+> ratings"). Prior: `ce304b3` ("The words move out
+> of the windows"); `38d2007` ("A floor for the
 > die target, and the knob the card format was eating"); `e72acb5`
 > ("One point, one
 > difficulty break; stacking Willpower is a spellcasting rule");
@@ -2241,6 +2242,38 @@ and `prefill` are mocked/available but not yet written.
     literal reappears** after `text:` / `placeholder:` / `label:` / `title:` in
     window.ts. Verified by reintroducing one and watching it fail; template
     literals pass, because they interpolate data or UI_TEXT.
+
+49. **Rationed top ratings, and the parameterized def that already existed**
+    (user: "Should we create a 'define-merit' that leaves its target trait to be
+    chosen at [[take-merit]]?... you may choose 1 attribute and 1 ability (or 2
+    abilities) to buy the arcanum for three times. All other traits... a maximum
+    of two times").
+    The first half was already built: `param` (§7.28) makes a def parameterized,
+    owned as `name::value`, with `$param` substituted into its passive ops -
+    `define-merit ... param=trait passive="difficulty -1 if=$trait"`, taken as
+    `[[take-merit trait-affinity::melee 2]]`. Said so rather than building it
+    twice.
+    The second half was NOT expressible. `atMostOneAt` says "one instance at
+    this rating", and the real rule rations TWO slots with a per-KIND ceiling
+    inside them. New **`InstanceLimit {atRating, slots, perKind?}`** +
+    `limits: InstanceLimit[]`, with `atMostOneAt` kept as a `@deprecated` shim
+    folded in by `instanceLimitsOf`. "Two traits at 3, at most one an Attribute"
+    is one entry, and it IS "one Attribute and one Ability, or two Abilities" -
+    the same statement without enumerating the combinations.
+    `instanceLimitBreaches(char, def, pending?)` is the single checker, used
+    BOTH by `cmdTakeMerit` (refuses, `waive=true` overrides, naming which limit
+    bound) and by `meritInstanceFindings` (reports a sheet already over the
+    line - a waiver, or a hand-edited card). Trait KIND comes from
+    `traitKindOf(char, name)` (state.ts): the character's own buckets answer
+    first, so a chronicle that invents an Ability is believed, with
+    ALL_ATTRIBUTES catching an Attribute the sheet has not rated yet; undefined
+    means the engine does not guess.
+    Authored with `limit-at` / `limit-slots` / `limit-per-kind=attribute:1`; the
+    card writes it as a `limits:` block.
+    **Trait Affinity's own rule was corrected** from `atMostOneAt: 3` ("one
+    favoured trait may reach 3", the narrower guess) to the owner's statement.
+    If his "Trait Aptitude" is a SEPARATE arcanum rather than this one under
+    another name, it is one define-merit away - flagged to him.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

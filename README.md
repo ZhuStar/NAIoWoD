@@ -1404,6 +1404,35 @@ The shipped Devil's Due arcana:
   raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
   `base → effective` and the advisory ceiling.
 
+### Rationed top ratings — "two traits may reach 3, at most one an Attribute"
+
+A parameterized def (`param=trait`) is taken once per trait, and some arcana
+ration how many of those may sit at the top rating — and which **kind** they may
+be. `limits` says it:
+
+```
+[[define-merit name=`Trait Aptitude` points=`1,2,3` param=trait
+  limit-at=3 limit-slots=2 limit-per-kind=attribute:1
+  passive=`dice +1 if=$trait`]]
+```
+
+Two traits may reach 3, at most one of them an Attribute — which is exactly
+"one Attribute and one Ability, or two Abilities". `[[take-merit]]` refuses
+over the ration (with `waive=true`), naming which one bound:
+
+```
+[[take-merit trait-affinity::intelligence 3]]
+→ trait-affinity allows 2 traits at 3 (have 3: occult, perception, intelligence);
+  trait-affinity allows 1 attribute at 3 (have 2: perception, intelligence).
+```
+
+Ratings **below** the rationed one are never counted, and
+`[[check-constraints]]` reports a sheet that got over the line anyway (a waiver,
+a hand-edited card). The kind of a trait is read off the character's own
+buckets, so a chronicle that invents an Ability is believed. `atMostOneAt` is
+the old one-slot spelling and still reads — it is `limits: [{atRating: N,
+slots: 1}]`.
+
 ### Trait-bounded ceilings — when the cap is a rating, not a number
 
 Some arcana cap their own purchases against a trait: *Sharpened Senses* "may

@@ -409,7 +409,7 @@ const TEXT_KEYS = new Set([
 const LIST_KEYS = new Set([
   "roles", "replaces", "tags", "templates", "meritsflaws", "targetmustbe",
   "apply", "passive", "rows", "steps", "startoptions", "members", "scope",
-  "tiers", "bindings",
+  "tiers", "bindings", "limits",
 ]);
 
 // A comma-joined TOKEN string the engine splits itself (EffectOp.target):
@@ -434,6 +434,8 @@ const FIELD_ALIASES: Record<string, string> = {
   "per-turn-limit": "perTurnLimit",
   "from-generation": "fromGeneration",
   "at-most-one-at": "atMostOneAt",
+  "at-rating": "atRating",
+  "per-kind": "perKind",
   "max-from-trait": "maxFromTrait",
   "fill-to-cap": "fillToCap",
   "requires-resource": "requiresResource",
@@ -3214,6 +3216,13 @@ interface MeritFlawRequirements {
   tags?: string[];        // ALL listed tags must be present on the character
   meritsFlaws?: string[]; // ALL listed merits/flaws must already be taken
 }
+// One cross-instance ceiling on a parameterized def.
+interface InstanceLimit {
+  atRating: number;                  // the rating being rationed
+  slots: number;                     // how many instances may hold it (or more)
+  perKind?: Record<string, number>;  // and at most this many of a trait KIND
+}
+
 interface MeritFlawDef {
   name: string;
   kind: MeritFlawKind;
@@ -3229,9 +3238,14 @@ interface MeritFlawDef {
   // by the points the instance was taken at (trait-affinity at 2 points =
   // -2 difficulty). Roll ops honor the actionTag (`target`) and `trait` gates.
   passive?: EffectOp[];
-  // Cross-instance cap: at most ONE instance of this def may sit at this
-  // points value (trait-affinity: 3 - one favoured trait). ADVISORY - the
-  // constraint check reports violations; the creation engine will enforce.
+  // How many instances of this def may sit at a TOP rating, and - because the
+  // book cares which KIND of trait they are - how many of those may be an
+  // Attribute, an Ability, and so on. "Two favoured traits may reach 3, at most
+  // one of them an Attribute" is one entry: {atRating: 3, slots: 2,
+  // perKind: {attribute: 1}}. ADVISORY, like everything creation-side: the
+  // check reports violations and take-merit refuses (waivable).
+  limits?: InstanceLimit[];
+  /** @deprecated Use `limits`: {atRating: N, slots: 1}. Still read. */
   atMostOneAt?: number;
   // The rating ceiling is a TRAIT, not a constant: "may not be purchased more
   // times than his Resolve". The name is resolved the way every trait name is
@@ -3239,6 +3253,16 @@ interface MeritFlawDef {
   // so a character whose Resolve IS Living Resolve is capped by that), and the
   // reading is the PERMANENT rating, never the spent-down current.
   maxFromTrait?: string;
+}
+
+// A def's limits with the deprecated single-slot field folded in, so callers
+// read one shape however the def was written.
+function instanceLimitsOf(def: MeritFlawDef): InstanceLimit[] {
+  const out = [...(def.limits ?? [])];
+  if (def.atMostOneAt !== undefined && !out.some(l => l.atRating === def.atMostOneAt)) {
+    out.push({ atRating: def.atMostOneAt, slots: 1 });
+  }
+  return out;
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
@@ -3408,6 +3432,21 @@ function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefine
   if (passive.length) def.passive = passive;
   const atMostOneAt = asNumber(body["atMostOneAt"]);
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const limits: InstanceLimit[] = [];
+  for (const raw of asList(body["limits"])) {
+    const m = asMap(raw);
+    const atRating = asNumber(m["atRating"]);
+    if (atRating === undefined) continue;
+    const limit: InstanceLimit = { atRating, slots: Math.max(0, asNumber(m["slots"]) ?? 1) };
+    const perKind: Record<string, number> = {};
+    for (const [kind, n] of Object.entries(asMap(m["perKind"]))) {
+      const v = asNumber(n);
+      if (v !== undefined) perKind[StringUtil.normalize(kind)] = v;
+    }
+    if (Object.keys(perKind).length) limit.perKind = perKind;
+    limits.push(limit);
+  }
+  if (limits.length) def.limits = limits;
   const maxFromTrait = asText(body["maxFromTrait"]);
   if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   return def;
@@ -3416,9 +3455,12 @@ function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefine
 const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
   {
-    name: "Trait Affinity", kind: "merit", points: [1, 2, 3], param: "trait", atMostOneAt: 3,
+    name: "Trait Affinity", kind: "merit", points: [1, 2, 3], param: "trait",
+    limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
-    description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait. One favoured trait may reach 3; every other caps at 2.",
+    description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
+      + "([[take-merit trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
+      + "Abilities; every other trait caps at 2.",
   },
   {
     name: "Trait Enhancement", kind: "merit", points: [1, 2, 3], param: "trait",
@@ -5396,6 +5438,23 @@ function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
   const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
   for (const b of buckets) if (n in b) return b[n];
   return 0;
+}
+
+// Which KIND of trait a name is, for the rules that ration by kind ("at most
+// one Attribute may reach 3"). The character's own buckets answer first, so a
+// chronicle that invents an Ability is believed; ALL_ATTRIBUTES catches an
+// Attribute the sheet has not rated yet. Undefined = the engine cannot say,
+// and the caller reports rather than guesses.
+function traitKindOf(char: PlayableCharacter, name: string): string | undefined {
+  const key = StringUtil.normalize(name);
+  const buckets: Array<[string, Record<string, number>]> = [
+    ["attribute", char.attributes], ["ability", char.abilities],
+    ["background", char.backgrounds], ["virtue", char.virtues],
+    ["discipline", char.disciplines], ["trait", char.traits], ["pool", char.poolStarts],
+  ];
+  for (const [kind, bucket] of buckets) if (key in (bucket ?? {})) return kind;
+  if (ALL_ATTRIBUTES.some(a => StringUtil.normalize(a) === key)) return "attribute";
+  return undefined;
 }
 
 // A character's PERMANENT rating in a name that may not be a rated trait at
@@ -9459,26 +9518,58 @@ function meritTraitCeiling(char: PlayableCharacter, def: MeritFlawDef): { trait:
   return { trait, cap: permanentRatingOf(char, trait) };
 }
 
-// Advisory merit-instance findings: unknown/malformed keys and atMostOneAt
+// Which instances of `def` would sit at or above a limit's rating, if `pending`
+// were also taken. Returns one complaint per limit that would be broken - by
+// total slots, or by how many of a KIND fill them.
+function instanceLimitBreaches(
+  char: PlayableCharacter, def: MeritFlawDef, pending?: { key: string; points: number },
+): string[] {
+  const limits = instanceLimitsOf(def);
+  if (!limits.length) return [];
+  const held = ownedMeritInstances(char)
+    .filter(i => StringUtil.normalize(i.def.name) === StringUtil.normalize(def.name) && i.key !== pending?.key)
+    .map(i => ({ label: i.param ?? i.key, points: i.points }));
+  if (pending) held.push({ label: pending.key.includes(":") ? pending.key.slice(pending.key.lastIndexOf(":") + 1) : pending.key, points: pending.points });
+
+  const out: string[] = [];
+  const name = StringUtil.normalize(def.name);
+  for (const limit of limits) {
+    const at = held.filter(h => h.points >= limit.atRating);
+    if (at.length > limit.slots) {
+      out.push(`${name} allows ${limit.slots} trait${limit.slots === 1 ? "" : "s"} at ${limit.atRating} `
+        + `(have ${at.length}: ${at.map(h => h.label).join(", ")})`);
+    }
+    for (const [kind, allowed] of Object.entries(limit.perKind ?? {})) {
+      const ofKind = at.filter(h => traitKindOf(char, h.label) === kind);
+      if (ofKind.length > allowed) {
+        out.push(`${name} allows ${allowed} ${kind}${allowed === 1 ? "" : "s"} at ${limit.atRating} `
+          + `(have ${ofKind.length}: ${ofKind.map(h => h.label).join(", ")})`);
+      }
+    }
+  }
+  return out;
+}
+
+// Advisory merit-instance findings: unknown/malformed keys and instance-limit
 // violations ("one favoured trait" caps). Reported, never enforced - the
 // creation engine will enforce.
 function meritInstanceFindings(char: PlayableCharacter): string[] {
   const findings: string[] = [];
-  const atTop = new Map<string, string[]>();   // def name -> instance keys at the capped value
   const known = new Set<string>();
+  const checkedDefs = new Set<string>();
   for (const inst of ownedMeritInstances(char)) {
     known.add(inst.key);
-    const cap = inst.def.atMostOneAt;
-    if (cap !== undefined && inst.points >= cap) {
-      const list = atTop.get(inst.def.name) ?? [];
-      list.push(inst.param ?? inst.key);
-      atTop.set(inst.def.name, list);
-    }
     // The ceiling is a trait, so it can MOVE: a Resolve that drops leaves the
     // purchases stranded above it. Reported, never silently trimmed.
     const ceiling = meritTraitCeiling(char, inst.def);
     if (ceiling && inst.points > ceiling.cap) {
       findings.push(`${StringUtil.normalize(inst.def.name)} is at ${inst.points} but ${ceiling.trait} is only ${ceiling.cap}`);
+    }
+    // Cross-instance limits are about the DEF, so ask each one once.
+    const defKey = StringUtil.normalize(inst.def.name);
+    if (!checkedDefs.has(defKey)) {
+      checkedDefs.add(defKey);
+      findings.push(...instanceLimitBreaches(char, inst.def));
     }
   }
   for (const key of Object.keys(char.meritsFlaws)) {
@@ -9493,9 +9584,6 @@ function meritInstanceFindings(char: PlayableCharacter): string[] {
       findings.push(`pool "${StringUtil.normalize(name)}" is not granted by ${char.templates.join("+")} - `
         + `trait lookups will still find it`);
     }
-  }
-  for (const [defName, traits] of atTop) {
-    if (traits.length > 1) findings.push(`${StringUtil.normalize(defName)} allows only ONE instance at the top value (have: ${traits.join(", ")})`);
   }
   return findings;
 }
@@ -9576,6 +9664,18 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
   const atMostOneAt = intOrUndef(cmd.named["at-most-one-at"] ?? "");
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const limitAt = intOrUndef(cmd.named["limit-at"] ?? "");
+  if (limitAt !== undefined) {
+    const limit: InstanceLimit = { atRating: limitAt, slots: intOrUndef(cmd.named["limit-slots"] ?? "") ?? 1 };
+    const perKind: Record<string, number> = {};
+    for (const pair of (cmd.named["limit-per-kind"] ?? "").split(",").map(x => x.trim()).filter(Boolean)) {
+      const [kind, n] = pair.split(":");
+      const v = intOrUndef(n ?? "");
+      if (kind && v !== undefined) perKind[StringUtil.normalize(kind)] = v;
+    }
+    if (Object.keys(perKind).length) limit.perKind = perKind;
+    def.limits = [limit];
+  }
   const maxFromTrait = (cmd.named["max-from-trait"] ?? "").trim();
   if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   if (cmd.named["passive"]?.trim()) {
@@ -9638,7 +9738,10 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   if (!def) return sys(`No merit/flaw "${key}". [[merit]] lists them.`);
   const bits = [`${def.kind} "${def.name}"`, `${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} point${def.points === 1 ? "" : "s"}`];
   if (def.param) bits.push(`parameterized by ${def.param}`);
-  if (def.atMostOneAt) bits.push(`at most one instance at ${def.atMostOneAt} (advisory)`);
+  for (const l of instanceLimitsOf(def)) {
+    const kinds = Object.entries(l.perKind ?? {}).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`);
+    bits.push(`at most ${l.slots} at ${l.atRating}${kinds.length ? ` (of those, ${kinds.join(", ")})` : ""} - advisory`);
+  }
   if (def.maxFromTrait) bits.push(`never more purchases than ${disp(def.maxFromTrait)}`);
   if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
   if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
@@ -9669,6 +9772,10 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const missing = unmetRequirements(char, hit.def.requires);
   if (missing.length && cmd.named["waive"] !== "true") {
     return sys(`${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.`);
+  }
+  const breaches = instanceLimitBreaches(char, hit.def, { key, points });
+  if (breaches.length && cmd.named["waive"] !== "true") {
+    return sys(`${breaches.join("; ")}. Lower another instance first, or add waive=true to override.`);
   }
   const ceiling = meritTraitCeiling(char, hit.def);
   if (ceiling && points > ceiling.cap && cmd.named["waive"] !== "true") {
@@ -10678,7 +10785,10 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS' },
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
-    { key: "at-most-one-at", kind: "named", type: "int", desc: "Only one instance may sit at this rating (advisory)" },
+    { key: "at-most-one-at", kind: "named", type: "int", desc: "Deprecated - use limit-at/limit-slots" },
+    { key: "limit-at", kind: "named", type: "int", desc: "The rating that is rationed across instances", example: "3" },
+    { key: "limit-slots", kind: "named", type: "int", desc: "How many instances may hold that rating (default 1)", example: "2" },
+    { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
     { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait (\"no more purchases than his Resolve\")", example: "resolve" },
     { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
   ],

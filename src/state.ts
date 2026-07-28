@@ -772,6 +772,23 @@ export function resolveTraitFromRecord(char: PlayableCharacter, name: string): n
   return 0;
 }
 
+// Which KIND of trait a name is, for the rules that ration by kind ("at most
+// one Attribute may reach 3"). The character's own buckets answer first, so a
+// chronicle that invents an Ability is believed; ALL_ATTRIBUTES catches an
+// Attribute the sheet has not rated yet. Undefined = the engine cannot say,
+// and the caller reports rather than guesses.
+export function traitKindOf(char: PlayableCharacter, name: string): string | undefined {
+  const key = StringUtil.normalize(name);
+  const buckets: Array<[string, Record<string, number>]> = [
+    ["attribute", char.attributes], ["ability", char.abilities],
+    ["background", char.backgrounds], ["virtue", char.virtues],
+    ["discipline", char.disciplines], ["trait", char.traits], ["pool", char.poolStarts],
+  ];
+  for (const [kind, bucket] of buckets) if (key in (bucket ?? {})) return kind;
+  if (ALL_ATTRIBUTES.some(a => StringUtil.normalize(a) === key)) return "attribute";
+  return undefined;
+}
+
 // A character's PERMANENT rating in a name that may not be a rated trait at
 // all. Rated buckets first; failing that, the RESOURCE that owns the name (its
 // own name, a role it fills, or a name it replaced) read at the value the

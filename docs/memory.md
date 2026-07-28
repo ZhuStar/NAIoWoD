@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `b182c7d`** ("Say each thing
-> once"). Prior: `e26e005` ("One arithmetic,
+> **Last synced with the code as of commit `72c0076`** ("Successes the
+> Storyteller simply grants"). Prior: `b182c7d` ("Say each thing
+> once"); `e26e005` ("One arithmetic,
 > and a way to point at the sheet"); `725fa3a` ("The budget a
 > character is built against"); `5778ec5` ("Backgrounds get a bag
 > of their own"); `cb386af` ("An arcanum is not
@@ -2712,6 +2713,28 @@ and `prefill` are mocked/available but not yet written.
       to pick, so the fix was a **`ROADS` registry + `roadByName` + `[[choose
       road …]]`**, not a deletion. Unused DATA and unused CODE are different
       findings.
+
+57. **Successes the Storyteller simply grants** (user: "we also need a way to
+    add automatic successes and un-cancelable successes to a roll manually").
+    Both concepts already existed inside the engine - `RollModifier
+    .autoSuccesses` / `.uncancelableSuccesses` - but were reachable ONLY through
+    a spend, a tag or a passive. They are now **`RollSpec` fields**, which is
+    the choice that matters: a spec is serializable, so `[[name-roll
+    potence-punch strength+brawl successes=2]]` bakes them into a saved roll and
+    `describeSpec` reports them. `resolveSpec` seeds its counters from the spec
+    instead of 0, so tags/spends/passives still ADD rather than replace.
+    Named `successes=` / `uncancelable=` to match the effect-grammar op names
+    (`successes`, `uncancelable`) a merit's passive already uses; `auto=`/`sure=`
+    are accepted as the report's own shorthand.
+    **A bug fell out of it**: there were TWO named-argument readers -
+    `extractRollArgs` (for `[[roll]]`/`[[roll-for]]`) and
+    `rollOverridesFromNamed` (for saved rolls and contests) - each reading the
+    same knobs separately, so a knob added to one was silently missing from the
+    other. `extractRollArgs` now delegates and adds only what is peculiar to
+    typing a roll out: the pool and the POSITIONAL difficulty/diff-mod.
+    (§7.56's duplicate finder missed this pair: their shared lines are not
+    contiguous.) The window needed no change - it is spec-driven, so
+    `[[win-roll]]` grew both fields from the `ROLL_KNOBS` list alone.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

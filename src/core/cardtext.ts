@@ -73,6 +73,8 @@ const TOKEN_TEXT_KEYS = new Set(["target"]);
 // never be renamed. The camelCase spelling is also accepted on input.
 const FIELD_ALIASES: Record<string, string> = {
   "difficulty-expr": "difficultyExpr",
+  "auto-successes": "autoSuccesses",
+  "uncancelable-successes": "uncancelableSuccesses",
   "difficulty-mod": "difficultyMod",
   "difficulty-cap": "difficultyCap",
   "min-difficulty": "minDifficulty",

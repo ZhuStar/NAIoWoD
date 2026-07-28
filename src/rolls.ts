@@ -27,6 +27,13 @@ export interface RollSpec {
   difficultyMod: number;  // +/- applied to difficulty (default 0)
   requires: number;       // successes needed to count as a success (default 1)
   diceMod: number;        // +/- dice added to the resolved pool (default 0)
+  // Successes granted before a die is thrown. `autoSuccesses` are ordinary ones
+  // that a rolled 1 can cancel; `uncancelableSuccesses` are the certain kind
+  // (fused Willpower). Both exist on the spend/passive path already - these are
+  // the SPEC's own, so a Storyteller can hand them out and a named roll can
+  // bake them in ("Potence punch: +2 automatic").
+  autoSuccesses?: number;
+  uncancelableSuccesses?: number;
   tags: string[];         // contextual mechanic keys (normalized)
   difficultyCap?: number; // ceiling the die target clamps to (default 10); anything
                           // above it becomes +1 required success per point - Mage
@@ -47,6 +54,8 @@ export function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollS
     diceMod: parts.diceMod ?? 0,
     tags: (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0),
   };
+  if (parts.autoSuccesses) spec.autoSuccesses = parts.autoSuccesses;
+  if (parts.uncancelableSuccesses) spec.uncancelableSuccesses = parts.uncancelableSuccesses;
   if (parts.difficultyExpr && parts.difficultyExpr.trim()) spec.difficultyExpr = parts.difficultyExpr.trim();
   if (parts.difficultyCap !== undefined) spec.difficultyCap = Math.max(2, Math.min(10, parts.difficultyCap));
   if (parts.minDifficulty !== undefined) spec.minDifficulty = Math.max(2, Math.min(10, parts.minDifficulty));
@@ -169,8 +178,8 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
   const baseDifficulty = spec.difficultyExpr ? parsePoolExpression(spec.difficultyExpr, resolve).total : spec.difficulty;
   let difficulty = baseDifficulty + spec.difficultyMod;
   let dice = breakdown.total + spec.diceMod;
-  let automaticSuccesses = 0;
-  let uncancelableSuccesses = 0;
+  let automaticSuccesses = spec.autoSuccesses ?? 0;
+  let uncancelableSuccesses = spec.uncancelableSuccesses ?? 0;
   let nAgain = 10;
   const appliedTags: string[] = [];
   const unknownTags: string[] = [];
@@ -289,6 +298,8 @@ export function describeSpec(spec: RollSpec): string {
   const parts = [spec.pool, `diff ${spec.difficultyExpr ?? spec.difficulty}${mod}`];
   if (spec.requires !== 1) parts.push(`requires ${spec.requires}`);
   if (spec.diceMod) parts.push(`dice ${spec.diceMod > 0 ? "+" : ""}${spec.diceMod}`);
+  if (spec.autoSuccesses) parts.push(`+${spec.autoSuccesses} auto`);
+  if (spec.uncancelableSuccesses) parts.push(`+${spec.uncancelableSuccesses} sure`);
   if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);
   if (spec.difficultyCap !== undefined && spec.difficultyCap !== 10) parts.push(`cap ${spec.difficultyCap}`);
   return parts.join(", ");

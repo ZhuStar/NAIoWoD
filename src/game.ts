@@ -386,28 +386,28 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
 // [[roll-for "Name" ...]]). Difficulty and its modifier may be positional OR
 // named (named wins); requires, dice-modifier and tags are named-only.
 function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> {
-  const args: Partial<RollSpec> = {};
+  // The NAMED knobs are the same everywhere a roll can be described, so they
+  // are read in one place (rollOverridesFromNamed). This adds only what is
+  // peculiar to typing a roll out: the pool, and the positional difficulty and
+  // difficulty-modifier that follow it. (Keeping two readers is how `successes=`
+  // reached saved rolls but not `[[roll]]` itself.)
+  const args: Partial<RollSpec> = rollOverridesFromNamed(cmd);
   const pool = cmd.positional[offset];
   if (pool !== undefined) args.pool = pool;
   // Difficulty may be a plain integer OR an expression (a trait / calculation
   // like "stamina+3"). A strict integer test keeps "3+2" an expression (-> 5),
-  // not the number 3.
-  const diffRaw = (cmd.named["difficulty"] ?? cmd.positional[offset + 1])?.trim();
-  if (diffRaw) {
+  // not the number 3. Named wins; this is the positional fallback.
+  const diffRaw = cmd.positional[offset + 1]?.trim();
+  if (diffRaw && args.difficulty === undefined && args.difficultyExpr === undefined) {
     if (/^-?\d+$/.test(diffRaw)) args.difficulty = parseInt(diffRaw, 10);
     else args.difficultyExpr = diffRaw;
   }
-  const difficultyMod = intOrUndef(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2]);
-  if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
+  if (args.difficultyMod === undefined) {
+    const difficultyMod = intOrUndef(cmd.positional[offset + 2]);
+    if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
+  }
   const requires = intOrUndef(cmd.named["requires"]);
   if (requires !== undefined) args.requires = requires;
-  const diceMod = intOrUndef(cmd.named["dice-modifier"]);
-  if (diceMod !== undefined) args.diceMod = diceMod;
-  const minDifficulty = intOrUndef(cmd.named["min-difficulty"]);
-  if (minDifficulty !== undefined) args.minDifficulty = minDifficulty;
-  if (cmd.named["tags"] !== undefined) {
-    args.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
-  }
   return args;
 }
 
@@ -1199,6 +1199,10 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
   if (diceMod !== undefined) o.diceMod = diceMod;
   const minDifficulty = intOrUndef(cmd.named["min-difficulty"]);
   if (minDifficulty !== undefined) o.minDifficulty = minDifficulty;
+  const autoSuccesses = intOrUndef(cmd.named["successes"] ?? cmd.named["auto"]);
+  if (autoSuccesses !== undefined) o.autoSuccesses = autoSuccesses;
+  const uncancelable = intOrUndef(cmd.named["uncancelable"] ?? cmd.named["sure"]);
+  if (uncancelable !== undefined) o.uncancelableSuccesses = uncancelable;
   if (cmd.named["tags"] !== undefined) o.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   return o;
 }
@@ -4415,6 +4419,8 @@ const ROLL_KNOBS: ParamSpec[] = [
   { key: "requires", kind: "named", type: "int", desc: "Successes required" },
   { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
   { key: "min-difficulty", kind: "named", type: "int", desc: "Floor the die target never drops below (overrides the chronicle's)" },
+  { key: "successes", kind: "named", type: "int", desc: "Automatic successes, granted before the dice (a rolled 1 can cancel these)" },
+  { key: "uncancelable", kind: "named", type: "int", desc: "Un-cancelable successes: certain ones no rolled 1 can ever take away" },
   { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
   { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE,
     desc: 'Resource to spend on the roll — "::effect" picks a named effect, "!" means no payment, no roll' },

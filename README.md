@@ -685,6 +685,18 @@ are reported, not crashed.
   removes dice; **`tags`** are contextual keys matched against the
   `RollModifierRegistry` (e.g. `acute-senses` → −2 difficulty, `willpower` → +1
   automatic success) — the hook for rules-driven modifiers like Merits & Flaws.
+- **`successes=N`** and **`uncancelable=N`** hand out successes *before a die is
+  thrown*. The difference is what a rolled **1** can do to them:
+
+  ```
+  [[roll strength 6 successes=1]]      → +1 auto  · a 1 cancels it (Failure)
+  [[roll strength 6 uncancelable=1]]   → +1 sure  · nothing can touch it
+  ```
+
+  Both live on the spec, so a **named roll bakes them in** — `[[name-roll
+  potence-punch strength+brawl successes=2]]`, and `[[roll-info]]` says
+  `+2 auto`. Spends, tags and passives *add* to them rather than replacing them,
+  because those grant successes through the same two fields.
 
 ### Minimum difficulty — a floor per roll, and one for the chronicle
 

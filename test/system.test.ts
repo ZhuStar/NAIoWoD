@@ -61,6 +61,7 @@ import {
   evaluateExpr, mapScope, exprRefs, describeTerms, evalNumeric,
   traitValueOf, derivedValuesOf, evalOn,
   ROADS, roadByName, ROAD_OF_KINGS,
+  savedRollToCard, savedRollFromCard,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -5969,5 +5970,72 @@ describe("one definition, one behaviour: what the cleanup pass consolidated", ()
     const def = MeritFlawRegistry.get("everything")!;
     expect(def.passive!.length).toBe(6);
     expect(await CommandRouter.route("arcanum everything")).toContain("seduction");
+  });
+});
+
+// =============================================================================
+// MANUAL SUCCESSES - the Storyteller hands some out, before a die is thrown
+// =============================================================================
+describe("successes= and uncancelable=: granted successes, by hand", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the spec carries them, and resolveSpec folds them in beside tags and spends", () => {
+    const resolve = (n: string): number => ({ strength: 3, brawl: 2 } as Record<string, number>)[n] ?? 0;
+    const plain = resolveSpec(makeRollSpec({ pool: "strength+brawl" }), resolve);
+    expect(plain.automaticSuccesses).toBe(0);
+    expect(plain.uncancelableSuccesses).toBe(0);
+    const granted = resolveSpec(makeRollSpec({ pool: "strength+brawl", autoSuccesses: 2, uncancelableSuccesses: 1 }), resolve);
+    expect(granted.automaticSuccesses).toBe(2);
+    expect(granted.uncancelableSuccesses).toBe(1);
+    expect(granted.dice).toBe(5);                                  // the pool is untouched
+    // A tag and a spend still ADD to the spec's own, rather than replacing them.
+    const both = resolveSpec(
+      makeRollSpec({ pool: "strength", autoSuccesses: 2, tags: ["willpower"] }),
+      resolve, { extra: { tag: "x", describe: "x", autoSuccesses: 1, uncancelableSuccesses: 4 } });
+    expect(both.automaticSuccesses).toBe(4);                       // 2 spec + 1 tag + 1 extra
+    expect(both.uncancelableSuccesses).toBe(4);
+  });
+
+  test("an automatic success can be cancelled by a 1; an un-cancelable one never is", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("set-trait strength 2");
+    // Two dice: a botching 1 and a plain failure. The granted success is eaten.
+    const auto = await CommandRouter.route("roll strength 6 successes=1", { rng: seqRng([1, 3]) });
+    expect(auto).toContain("+1 auto");
+    expect(auto).toContain("Failure");                             // the 1 ate the granted success
+    // The same roll with a CERTAIN success survives the 1 - that is the whole
+    // difference between the two knobs.
+    const sure = await CommandRouter.route("roll strength 6 uncancelable=1", { rng: seqRng([1, 3]) });
+    expect(sure).toContain("+1 sure");
+    expect(sure).toContain("1 success");
+    expect(sure).not.toContain("BOTCH");
+  });
+
+  test("a named roll bakes them in, and [[roll-info]] says so", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("set-trait strength 3");
+    await CommandRouter.route("name-roll potence-punch strength successes=2 uncancelable=1");
+    expect(await CommandRouter.route("roll-info potence-punch")).toContain("+2 auto, +1 sure");
+    const rolled = await CommandRouter.route("roll @potence-punch", { rng: seqRng([2, 2, 2]) });
+    expect(rolled).toContain("+2 auto +1 sure");
+    expect(rolled).toContain("3 successes");                       // every die failed
+    // ...and they survive the trip through the lorebook card.
+    const card = savedRollToCard((await NamedRollStore.get("potence-punch"))!);
+    expect(savedRollFromCard(card)!.autoSuccesses).toBe(2);
+    expect(savedRollFromCard(card)!.uncancelableSuccesses).toBe(1);
+  });
+
+  test("the knobs reach [[roll]] itself, not only saved rolls - one arg reader now", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("set-trait strength 3");
+    // The bug this consolidation fixed: extractRollArgs (for [[roll]]) and
+    // rollOverridesFromNamed (for saved rolls) each read the named knobs, so a
+    // knob added to one was silently missing from the other.
+    expect(await CommandRouter.route("roll strength successes=2", { rng: seqRng([2, 2, 2]) })).toContain("+2 auto");
+    expect(await CommandRouter.route('roll-for "Rok" strength successes=2', { rng: seqRng([2, 2, 2]) })).toContain("+2 auto");
+    // The positional difficulty and diff-mod still work beside them.
+    const positional = await CommandRouter.route("roll strength 8 1 successes=1", { rng: seqRng([9, 9, 9]) });
+    expect(positional).toContain("vs diff 9");
+    expect(positional).toContain("+1 auto");
   });
 });

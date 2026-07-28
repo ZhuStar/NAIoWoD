@@ -420,6 +420,8 @@ const TOKEN_TEXT_KEYS = new Set(["target"]);
 // never be renamed. The camelCase spelling is also accepted on input.
 const FIELD_ALIASES: Record<string, string> = {
   "difficulty-expr": "difficultyExpr",
+  "auto-successes": "autoSuccesses",
+  "uncancelable-successes": "uncancelableSuccesses",
   "difficulty-mod": "difficultyMod",
   "difficulty-cap": "difficultyCap",
   "min-difficulty": "minDifficulty",
@@ -2003,6 +2005,13 @@ interface RollSpec {
   difficultyMod: number;  // +/- applied to difficulty (default 0)
   requires: number;       // successes needed to count as a success (default 1)
   diceMod: number;        // +/- dice added to the resolved pool (default 0)
+  // Successes granted before a die is thrown. `autoSuccesses` are ordinary ones
+  // that a rolled 1 can cancel; `uncancelableSuccesses` are the certain kind
+  // (fused Willpower). Both exist on the spend/passive path already - these are
+  // the SPEC's own, so a Storyteller can hand them out and a named roll can
+  // bake them in ("Potence punch: +2 automatic").
+  autoSuccesses?: number;
+  uncancelableSuccesses?: number;
   tags: string[];         // contextual mechanic keys (normalized)
   difficultyCap?: number; // ceiling the die target clamps to (default 10); anything
                           // above it becomes +1 required success per point - Mage
@@ -2023,6 +2032,8 @@ function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollSpec {
     diceMod: parts.diceMod ?? 0,
     tags: (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0),
   };
+  if (parts.autoSuccesses) spec.autoSuccesses = parts.autoSuccesses;
+  if (parts.uncancelableSuccesses) spec.uncancelableSuccesses = parts.uncancelableSuccesses;
   if (parts.difficultyExpr && parts.difficultyExpr.trim()) spec.difficultyExpr = parts.difficultyExpr.trim();
   if (parts.difficultyCap !== undefined) spec.difficultyCap = Math.max(2, Math.min(10, parts.difficultyCap));
   if (parts.minDifficulty !== undefined) spec.minDifficulty = Math.max(2, Math.min(10, parts.minDifficulty));
@@ -2145,8 +2156,8 @@ function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficu
   const baseDifficulty = spec.difficultyExpr ? parsePoolExpression(spec.difficultyExpr, resolve).total : spec.difficulty;
   let difficulty = baseDifficulty + spec.difficultyMod;
   let dice = breakdown.total + spec.diceMod;
-  let automaticSuccesses = 0;
-  let uncancelableSuccesses = 0;
+  let automaticSuccesses = spec.autoSuccesses ?? 0;
+  let uncancelableSuccesses = spec.uncancelableSuccesses ?? 0;
   let nAgain = 10;
   const appliedTags: string[] = [];
   const unknownTags: string[] = [];
@@ -2265,6 +2276,8 @@ function describeSpec(spec: RollSpec): string {
   const parts = [spec.pool, `diff ${spec.difficultyExpr ?? spec.difficulty}${mod}`];
   if (spec.requires !== 1) parts.push(`requires ${spec.requires}`);
   if (spec.diceMod) parts.push(`dice ${spec.diceMod > 0 ? "+" : ""}${spec.diceMod}`);
+  if (spec.autoSuccesses) parts.push(`+${spec.autoSuccesses} auto`);
+  if (spec.uncancelableSuccesses) parts.push(`+${spec.uncancelableSuccesses} sure`);
   if (spec.tags.length) parts.push(`tags ${spec.tags.join(",")}`);
   if (spec.difficultyCap !== undefined && spec.difficultyCap !== 10) parts.push(`cap ${spec.difficultyCap}`);
   return parts.join(", ");
@@ -6780,6 +6793,8 @@ function savedRollToCard(roll: SavedRoll): CardMap {
   else if (roll.difficulty !== DEFAULT_DIFFICULTY) out["difficulty"] = roll.difficulty;
   if (roll.difficultyMod) out["difficultyMod"] = roll.difficultyMod;
   if (roll.diceMod) out["diceMod"] = roll.diceMod;
+  if (roll.autoSuccesses) out["autoSuccesses"] = roll.autoSuccesses;
+  if (roll.uncancelableSuccesses) out["uncancelableSuccesses"] = roll.uncancelableSuccesses;
   if (roll.requires > 1) out["requires"] = roll.requires;
   if (roll.difficultyCap !== undefined) out["difficultyCap"] = roll.difficultyCap;
   if (roll.minDifficulty !== undefined) out["minDifficulty"] = roll.minDifficulty;
@@ -6811,6 +6826,10 @@ function savedRollFromCard(body: CardMap): SavedRoll | undefined {
   if (cap !== undefined) roll.difficultyCap = cap;
   const floor = asNumber(body["minDifficulty"]);
   if (floor !== undefined) roll.minDifficulty = floor;
+  const auto = asNumber(body["autoSuccesses"]);
+  if (auto) roll.autoSuccesses = auto;
+  const sure = asNumber(body["uncancelableSuccesses"]);
+  if (sure) roll.uncancelableSuccesses = sure;
   for (const key of ["spend", "specialty", "table", "description"] as const) {
     const v = asText(body[key]);
     if (v) roll[key] = v;
@@ -8250,28 +8269,28 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
 // [[roll-for "Name" ...]]). Difficulty and its modifier may be positional OR
 // named (named wins); requires, dice-modifier and tags are named-only.
 function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> {
-  const args: Partial<RollSpec> = {};
+  // The NAMED knobs are the same everywhere a roll can be described, so they
+  // are read in one place (rollOverridesFromNamed). This adds only what is
+  // peculiar to typing a roll out: the pool, and the positional difficulty and
+  // difficulty-modifier that follow it. (Keeping two readers is how `successes=`
+  // reached saved rolls but not `[[roll]]` itself.)
+  const args: Partial<RollSpec> = rollOverridesFromNamed(cmd);
   const pool = cmd.positional[offset];
   if (pool !== undefined) args.pool = pool;
   // Difficulty may be a plain integer OR an expression (a trait / calculation
   // like "stamina+3"). A strict integer test keeps "3+2" an expression (-> 5),
-  // not the number 3.
-  const diffRaw = (cmd.named["difficulty"] ?? cmd.positional[offset + 1])?.trim();
-  if (diffRaw) {
+  // not the number 3. Named wins; this is the positional fallback.
+  const diffRaw = cmd.positional[offset + 1]?.trim();
+  if (diffRaw && args.difficulty === undefined && args.difficultyExpr === undefined) {
     if (/^-?\d+$/.test(diffRaw)) args.difficulty = parseInt(diffRaw, 10);
     else args.difficultyExpr = diffRaw;
   }
-  const difficultyMod = intOrUndef(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2]);
-  if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
+  if (args.difficultyMod === undefined) {
+    const difficultyMod = intOrUndef(cmd.positional[offset + 2]);
+    if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
+  }
   const requires = intOrUndef(cmd.named["requires"]);
   if (requires !== undefined) args.requires = requires;
-  const diceMod = intOrUndef(cmd.named["dice-modifier"]);
-  if (diceMod !== undefined) args.diceMod = diceMod;
-  const minDifficulty = intOrUndef(cmd.named["min-difficulty"]);
-  if (minDifficulty !== undefined) args.minDifficulty = minDifficulty;
-  if (cmd.named["tags"] !== undefined) {
-    args.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
-  }
   return args;
 }
 
@@ -9063,6 +9082,10 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
   if (diceMod !== undefined) o.diceMod = diceMod;
   const minDifficulty = intOrUndef(cmd.named["min-difficulty"]);
   if (minDifficulty !== undefined) o.minDifficulty = minDifficulty;
+  const autoSuccesses = intOrUndef(cmd.named["successes"] ?? cmd.named["auto"]);
+  if (autoSuccesses !== undefined) o.autoSuccesses = autoSuccesses;
+  const uncancelable = intOrUndef(cmd.named["uncancelable"] ?? cmd.named["sure"]);
+  if (uncancelable !== undefined) o.uncancelableSuccesses = uncancelable;
   if (cmd.named["tags"] !== undefined) o.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   return o;
 }
@@ -12279,6 +12302,8 @@ const ROLL_KNOBS: ParamSpec[] = [
   { key: "requires", kind: "named", type: "int", desc: "Successes required" },
   { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
   { key: "min-difficulty", kind: "named", type: "int", desc: "Floor the die target never drops below (overrides the chronicle's)" },
+  { key: "successes", kind: "named", type: "int", desc: "Automatic successes, granted before the dice (a rolled 1 can cancel these)" },
+  { key: "uncancelable", kind: "named", type: "int", desc: "Un-cancelable successes: certain ones no rolled 1 can ever take away" },
   { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
   { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE,
     desc: 'Resource to spend on the roll — "::effect" picks a named effect, "!" means no payment, no roll' },

@@ -1246,6 +1246,8 @@ export function savedRollToCard(roll: SavedRoll): CardMap {
   else if (roll.difficulty !== DEFAULT_DIFFICULTY) out["difficulty"] = roll.difficulty;
   if (roll.difficultyMod) out["difficultyMod"] = roll.difficultyMod;
   if (roll.diceMod) out["diceMod"] = roll.diceMod;
+  if (roll.autoSuccesses) out["autoSuccesses"] = roll.autoSuccesses;
+  if (roll.uncancelableSuccesses) out["uncancelableSuccesses"] = roll.uncancelableSuccesses;
   if (roll.requires > 1) out["requires"] = roll.requires;
   if (roll.difficultyCap !== undefined) out["difficultyCap"] = roll.difficultyCap;
   if (roll.minDifficulty !== undefined) out["minDifficulty"] = roll.minDifficulty;
@@ -1277,6 +1279,10 @@ export function savedRollFromCard(body: CardMap): SavedRoll | undefined {
   if (cap !== undefined) roll.difficultyCap = cap;
   const floor = asNumber(body["minDifficulty"]);
   if (floor !== undefined) roll.minDifficulty = floor;
+  const auto = asNumber(body["autoSuccesses"]);
+  if (auto) roll.autoSuccesses = auto;
+  const sure = asNumber(body["uncancelableSuccesses"]);
+  if (sure) roll.uncancelableSuccesses = sure;
   for (const key of ["spend", "specialty", "table", "description"] as const) {
     const v = asText(body[key]);
     if (v) roll[key] = v;

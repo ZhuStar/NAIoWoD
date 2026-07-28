@@ -27,6 +27,7 @@ import {
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
+  BackgroundDef, makeBackgroundDef, DEFAULT_BACKGROUNDS, grantsFromBackgrounds,
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
   EffectOp, resolveMeritInstance, passiveOpsOf,
 } from "./rules";
@@ -860,6 +861,20 @@ export function traitKindOf(char: PlayableCharacter, name: string): string | und
   return undefined;
 }
 
+// Everything this character's Backgrounds CONFER - the Talisman that is a place
+// granting that place's ratings. Highest wins; the source is kept so the sheet
+// can say where a rating came from.
+export function grantedTraitsOf(char: PlayableCharacter): Record<string, { rating: number; from: string }> {
+  return grantsFromBackgrounds(char.backgrounds ?? {}, BackgroundRegistry.all());
+}
+
+// A trait as the engine should READ it: the sheet's own rating, or a granted
+// one when that is higher. Nothing on the sheet has to duplicate a grant.
+export function effectiveTraitOf(char: PlayableCharacter, name: string): number {
+  const key = StringUtil.normalize(name);
+  return Math.max(resolveTraitFromRecord(char, key), grantedTraitsOf(char)[key]?.rating ?? 0);
+}
+
 // A character's PERMANENT rating in a name that may not be a rated trait at
 // all. Rated buckets first; failing that, the RESOURCE that owns the name (its
 // own name, a role it fills, or a name it replaced) read at the value the
@@ -1535,6 +1550,27 @@ export const RollRulesConfig = new MapConfigStore<number>({
   ],
 });
 
+// Background definitions: the bag Backgrounds never had. Shipped defaults
+// (Fount's ladder, the Awakened places, Mentor, Resources) overlaid by the
+// entry, exactly like afflictions.
+export const BACKGROUNDS_ENTRY = "wod:config:backgrounds";
+export const BackgroundRegistry = new ListConfigStore<BackgroundDef>({
+  entry: BACKGROUNDS_ENTRY,
+  header: [
+    "Background definitions for this chronicle (overlaid on the built-ins).",
+    "Below the marker each one is its NAME, then indented: max (the ceiling,",
+    "usually 5), templates (who may take it), description, and either",
+    "  tiers   - a ladder, for Backgrounds that read as a table (Fount), each",
+    "            rung `at-least` plus what it sets (max, per-turn)",
+    "  grants  - other traits this one CONFERS, each `trait` + `rating`:",
+    "            a Talisman that IS a place grants that place's ratings.",
+    "Dots are not cost: what a Background actually cost lives on the sheet",
+    "([[paid]]), so a Background you were GIVEN rates 5 and costs nothing.",
+  ],
+  make: makeBackgroundDef,
+  defaults: DEFAULT_BACKGROUNDS,
+});
+
 // Advancement prices: the CHRONICLE's cost table, never the character's. One
 // card, `kind:` with a price per purse indented under it (see
 // DEFAULT_ADVANCEMENT_COSTS). Values are text - nothing evaluates them yet.
@@ -2018,7 +2054,8 @@ export class CrayStore {
   private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `cray:${StringUtil.normalize(name)}`; }
 
-  static rating(char: PlayableCharacter): number { return resolveTraitFromRecord(char, "cray"); }
+  // A cray CONFERRED by a Talisman is as real a site as a bought one.
+  static rating(char: PlayableCharacter): number { return effectiveTraitOf(char, "cray"); }
   static capacity(char: PlayableCharacter): number { return CrayStore.rating(char) * 5; }
 
   // A cray starts full (it has been bubbling away untended).

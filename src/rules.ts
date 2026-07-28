@@ -800,6 +800,116 @@ export function magicRulesFrom(overrides: Record<string, number>): MagicRules {
 }
 
 // =============================================================================
+// BACKGROUNDS - a bag of their own, with dots that need not equal cost
+// -----------------------------------------------------------------------------
+// Backgrounds used to be only a list of NAMES in the lorebook, which is why
+// they were the one thing with no definitions, no ceiling and no way to say
+// what one DOES. They are their own currency (Background dots), and two things
+// make them irregular:
+//   - DOTS ARE NOT COST. Usually a thing costs what it rates, but a chronicle
+//     hands some out: a Talisman you were given rates 5 and cost nothing. The
+//     rating lives on the sheet, what it cost lives in `paid` (§7.50).
+//   - ONE MAY CONFER OTHERS. A Talisman that IS a place - Cosmos Within the
+//     Measure, which opens the Library of the Unseen - grants Cray, Library and
+//     Sanctum ratings without those being bought at all.
+// =============================================================================
+export interface TraitGrant {
+  trait: string;
+  rating: number;
+  atLeast?: number;   // the granting rating this starts at (default 1)
+  note?: string;
+}
+// A rung of a Background's own ladder, for the ones that read as a table.
+export interface BackgroundTier {
+  atLeast: number;
+  note?: string;
+  max?: number;       // a resource capacity this rung sets (Fount: 12/14/16/18/20)
+  perTurn?: number;   // and what may be spent per turn (Fount: 2/3/4/5/6)
+}
+export interface BackgroundDef {
+  name: string;
+  description?: string;
+  max?: number;               // the usual 5, but a Sanctum can run deeper
+  templates?: string[];       // who may take it (empty = anyone)
+  resource?: string;          // the resource its tiers size (Fount -> quintessence)
+  tiers?: BackgroundTier[];
+  grants?: TraitGrant[];
+  note?: string;
+}
+
+export const DEFAULT_BACKGROUNDS: BackgroundDef[] = [
+  {
+    name: "fount", max: 5, templates: ["mage", "ouroboros"], resource: "quintessence",
+    description: "Affinity for holding and channelling Quintessence. Without it a mage holds ten points and spends two per turn.",
+    tiers: [
+      { atLeast: 1, max: 12, perTurn: 2 }, { atLeast: 2, max: 14, perTurn: 3 },
+      { atLeast: 3, max: 16, perTurn: 4 }, { atLeast: 4, max: 18, perTurn: 5 },
+      { atLeast: 5, max: 20, perTurn: 6 },
+    ],
+    note: "The Ouroboros' Living Resolve already bakes this in: Fount 5 (20, six per turn) plus ten dots of vitae is the 30/6 pool.",
+  },
+  { name: "sanctum", max: 10, templates: ["mage", "ouroboros"],
+    description: "A warded place of working. Rating-scaled: see the in-sanctum affliction." },
+  { name: "library", max: 10, templates: ["mage", "ouroboros"],
+    description: "Books, scrolls and the finding of things in them. See the in-library affliction." },
+  { name: "cray", max: 5, templates: ["mage", "ouroboros"],
+    description: "A site of gathered Quintessence, drainable and exhaustible ([[cray]], [[harvest]], [[absorb]])." },
+  { name: "talisman", max: 5, templates: ["mage", "ouroboros"],
+    description: "An object of power. A Talisman that IS a place grants the ratings of that place - see `grants`.",
+    note: "Cosmos Within the Measure is the worked example: at 5 it opens the Library of the Unseen, which IS a Cray 5, a Library 5 and a Sanctum 5. Redefine it for your own chronicle with [[define-background]]." },
+  { name: "mentor", max: 5, description: "Someone older and wiser who owes you time. More than one may be held." },
+  { name: "resources", max: 5, description: "Money, goods and the credit of a household." },
+];
+
+// Every trait a character's Backgrounds CONFER, by name -> {rating, from}.
+// Highest wins when two backgrounds grant the same thing.
+export function grantsFromBackgrounds(
+  backgrounds: Record<string, number>, defs: BackgroundDef[],
+): Record<string, { rating: number; from: string }> {
+  const out: Record<string, { rating: number; from: string }> = {};
+  for (const [rawName, rating] of Object.entries(backgrounds ?? {})) {
+    const name = StringUtil.normalize(rawName);
+    const def = defs.find(d => StringUtil.normalize(d.name) === name);
+    for (const g of def?.grants ?? []) {
+      if (rating < (g.atLeast ?? 1)) continue;
+      const key = StringUtil.normalize(g.trait);
+      if ((out[key]?.rating ?? 0) >= g.rating) continue;
+      out[key] = { rating: g.rating, from: def!.name };
+    }
+  }
+  return out;
+}
+
+// The tier a rating sits on (the deepest rung it reaches).
+export function backgroundTierAt(def: BackgroundDef, rating: number): BackgroundTier | undefined {
+  return [...(def.tiers ?? [])].filter(t => rating >= t.atLeast).sort((a, b) => b.atLeast - a.atLeast)[0];
+}
+
+export function makeBackgroundDef(parts: Partial<BackgroundDef> & { name: string }): BackgroundDef {
+  const def: BackgroundDef = { name: StringUtil.normalize(parts.name) };
+  if (parts.description?.trim()) def.description = parts.description.trim();
+  if (parts.max !== undefined) def.max = parts.max;
+  const templates = asStringList(parts.templates as unknown as CardValue).map(t => StringUtil.normalize(t));
+  if (templates.length) def.templates = templates;
+  if (parts.resource?.trim()) def.resource = StringUtil.normalize(parts.resource);
+  if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
+  const grants = asList(parts.grants as unknown as CardValue).map(raw => {
+    const m = asMap(raw);
+    const trait = asText(m["trait"]);
+    if (!trait) return undefined;
+    const g: TraitGrant = { trait: StringUtil.normalize(trait), rating: asNumber(m["rating"]) ?? 1 };
+    const atLeast = asNumber(m["atLeast"]);
+    if (atLeast !== undefined) g.atLeast = atLeast;
+    const note = asText(m["note"]);
+    if (note) g.note = note;
+    return g;
+  }).filter((g): g is TraitGrant => g !== undefined);
+  if (grants.length) def.grants = grants;
+  if (parts.note?.trim()) def.note = parts.note.trim();
+  return def;
+}
+
+// =============================================================================
 // SUPERNATURAL TRAIT CATEGORIES - what KIND of power a rated trait is
 // -----------------------------------------------------------------------------
 // A rated supernatural trait is not just a number in a bucket: Disciplines,

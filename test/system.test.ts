@@ -55,6 +55,7 @@ import {
   asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
   ROLLS_CONFIG_ENTRY, RollRulesConfig, rollFloorFrom, SuccessTableRow,
+  BACKGROUNDS_ENTRY, BackgroundRegistry, grantedTraitsOf, effectiveTraitOf,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -2838,7 +2839,7 @@ describe("config stores: reload/reset-all", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
       AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY, MAGIC_CONFIG_ENTRY,
       COSTS_CONFIG_ENTRY,
-      ROLLS_CONFIG_ENTRY,
+      ROLLS_CONFIG_ENTRY, BACKGROUNDS_ENTRY,
     ].sort());
   });
 
@@ -2944,6 +2945,88 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
     const t = SuccessTableRegistry.get("fear")!;
     expect(t.rows![1]).toEqual({ at: 4, label: "Panicked" });   // literal composition kept the case
     expect(t.cap).toBe(5);
+  });
+});
+
+// =============================================================================
+// BACKGROUNDS - a bag of their own; dots are not cost; one may confer others
+// =============================================================================
+describe("backgrounds: definitions, grants, and dots that are not cost", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a Talisman that IS a place confers that place's ratings, and they are real", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route('define-background name=`Talisman` max=5 grants=`cray:5,library:5,sanctum:5`');
+    await CommandRouter.route("set-trait talisman 5 paid=0");
+    const char = (await CharacterStore.load("Visvaldas"))!;
+    // Nothing was written into the backgrounds bucket for them...
+    expect(char.backgrounds.sanctum).toBeUndefined();
+    // ...but the engine reads them anyway.
+    expect(grantedTraitsOf(char).sanctum).toEqual({ rating: 5, from: "talisman" });
+    expect(effectiveTraitOf(char, "library")).toBe(5);
+    // And the places they open actually work.
+    expect(await CommandRouter.route("measure-door")).toContain("Library of the Unseen");
+    expect(await CommandRouter.route("afflictions")).toContain("sanctum 5");
+  });
+
+  test("his five Background dots: what he was given costs nothing, what he bought costs what it rates", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route('define-background name=`Talisman` grants=`cray:5,library:5,sanctum:5`');
+    await CommandRouter.route("set-trait fount 5 paid=0");
+    await CommandRouter.route("set-trait talisman 5 paid=0");
+    await CommandRouter.route("set-trait mentor 5 note=`Velia` paid=0");
+    await CommandRouter.route("set-trait mentor 3 add=true note=`Daujotas` paid=3");
+    await CommandRouter.route("set-trait resources 2");
+    const report = await CommandRouter.route("budget");
+    expect(report).toContain("background: 5 spent");            // 3 + 2, and nothing else
+    expect(report).toContain("fount 5 (paid 0)");
+    expect(report).toContain("sanctum 5 (from talisman, free)"); // conferred, never bought
+  });
+
+  test("Fount reads as a ladder, and says where the Ouroboros' 30/6 pool comes from", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5");
+    const one = await CommandRouter.route("background fount");
+    expect(one).toContain("• 5: hold 20, 6/turn");               // the rung he is on
+    expect(one).toContain("1: hold 12, 2/turn");
+    expect(one).toContain("plus ten dots of vitae is the 30/6 pool");
+  });
+
+  test("a custom background shadows the built-in; forgetting it brings the built-in back", async () => {
+    await CommandRouter.route('define-background name=`Mentor` max=7 description=`Bigger mentors here.`');
+    expect(BackgroundRegistry.get("mentor")!.max).toBe(7);
+    expect(await CommandRouter.route("forget-background mentor")).toContain("resurfaces");
+    expect(BackgroundRegistry.get("mentor")!.max).toBe(5);
+  });
+});
+
+// =============================================================================
+// THE ARCANA VOCABULARY - the same machinery, under the names the domain uses
+// =============================================================================
+describe("arcana verbs: take/drop/define/list, and they insist on the family", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("[[arcana]] lists only arcana and taints - merits stay out of it", async () => {
+    const listed = await CommandRouter.route("arcana");
+    expect(listed).toContain("celestial-radiance");
+    expect(listed).toContain("trait-affinity");
+    expect(listed).not.toContain("iron-will");                   // a merit
+  });
+
+  test("take-arcanum refuses a merit and points at the other verb", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    const wrong = await CommandRouter.route("take-arcanum iron-will");
+    expect(wrong).toContain("is a merit, not an arcanum or taint");
+    expect(wrong).toContain("take-merit iron-will");
+    expect(await CommandRouter.route("take-arcanum celestial-radiance")).toContain("7 arcana points");
+  });
+
+  test("define-arcanum defaults the kind, so the purse is right without saying so", async () => {
+    await CommandRouter.route('define-arcanum name=`Borrowed Sight` points=3 description=`Another\'s eyes.`');
+    expect(MeritFlawRegistry.get("borrowed-sight")!.kind).toBe("arcanum");
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    await CommandRouter.route("take-arcanum borrowed-sight 3");
+    expect(await CommandRouter.route("budget")).toContain("arcana: 3/25");
   });
 });
 

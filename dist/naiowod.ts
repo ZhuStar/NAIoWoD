@@ -3110,6 +3110,116 @@ function magicRulesFrom(overrides: Record<string, number>): MagicRules {
 }
 
 // =============================================================================
+// BACKGROUNDS - a bag of their own, with dots that need not equal cost
+// -----------------------------------------------------------------------------
+// Backgrounds used to be only a list of NAMES in the lorebook, which is why
+// they were the one thing with no definitions, no ceiling and no way to say
+// what one DOES. They are their own currency (Background dots), and two things
+// make them irregular:
+//   - DOTS ARE NOT COST. Usually a thing costs what it rates, but a chronicle
+//     hands some out: a Talisman you were given rates 5 and cost nothing. The
+//     rating lives on the sheet, what it cost lives in `paid` (§7.50).
+//   - ONE MAY CONFER OTHERS. A Talisman that IS a place - Cosmos Within the
+//     Measure, which opens the Library of the Unseen - grants Cray, Library and
+//     Sanctum ratings without those being bought at all.
+// =============================================================================
+interface TraitGrant {
+  trait: string;
+  rating: number;
+  atLeast?: number;   // the granting rating this starts at (default 1)
+  note?: string;
+}
+// A rung of a Background's own ladder, for the ones that read as a table.
+interface BackgroundTier {
+  atLeast: number;
+  note?: string;
+  max?: number;       // a resource capacity this rung sets (Fount: 12/14/16/18/20)
+  perTurn?: number;   // and what may be spent per turn (Fount: 2/3/4/5/6)
+}
+interface BackgroundDef {
+  name: string;
+  description?: string;
+  max?: number;               // the usual 5, but a Sanctum can run deeper
+  templates?: string[];       // who may take it (empty = anyone)
+  resource?: string;          // the resource its tiers size (Fount -> quintessence)
+  tiers?: BackgroundTier[];
+  grants?: TraitGrant[];
+  note?: string;
+}
+
+const DEFAULT_BACKGROUNDS: BackgroundDef[] = [
+  {
+    name: "fount", max: 5, templates: ["mage", "ouroboros"], resource: "quintessence",
+    description: "Affinity for holding and channelling Quintessence. Without it a mage holds ten points and spends two per turn.",
+    tiers: [
+      { atLeast: 1, max: 12, perTurn: 2 }, { atLeast: 2, max: 14, perTurn: 3 },
+      { atLeast: 3, max: 16, perTurn: 4 }, { atLeast: 4, max: 18, perTurn: 5 },
+      { atLeast: 5, max: 20, perTurn: 6 },
+    ],
+    note: "The Ouroboros' Living Resolve already bakes this in: Fount 5 (20, six per turn) plus ten dots of vitae is the 30/6 pool.",
+  },
+  { name: "sanctum", max: 10, templates: ["mage", "ouroboros"],
+    description: "A warded place of working. Rating-scaled: see the in-sanctum affliction." },
+  { name: "library", max: 10, templates: ["mage", "ouroboros"],
+    description: "Books, scrolls and the finding of things in them. See the in-library affliction." },
+  { name: "cray", max: 5, templates: ["mage", "ouroboros"],
+    description: "A site of gathered Quintessence, drainable and exhaustible ([[cray]], [[harvest]], [[absorb]])." },
+  { name: "talisman", max: 5, templates: ["mage", "ouroboros"],
+    description: "An object of power. A Talisman that IS a place grants the ratings of that place - see `grants`.",
+    note: "Cosmos Within the Measure is the worked example: at 5 it opens the Library of the Unseen, which IS a Cray 5, a Library 5 and a Sanctum 5. Redefine it for your own chronicle with [[define-background]]." },
+  { name: "mentor", max: 5, description: "Someone older and wiser who owes you time. More than one may be held." },
+  { name: "resources", max: 5, description: "Money, goods and the credit of a household." },
+];
+
+// Every trait a character's Backgrounds CONFER, by name -> {rating, from}.
+// Highest wins when two backgrounds grant the same thing.
+function grantsFromBackgrounds(
+  backgrounds: Record<string, number>, defs: BackgroundDef[],
+): Record<string, { rating: number; from: string }> {
+  const out: Record<string, { rating: number; from: string }> = {};
+  for (const [rawName, rating] of Object.entries(backgrounds ?? {})) {
+    const name = StringUtil.normalize(rawName);
+    const def = defs.find(d => StringUtil.normalize(d.name) === name);
+    for (const g of def?.grants ?? []) {
+      if (rating < (g.atLeast ?? 1)) continue;
+      const key = StringUtil.normalize(g.trait);
+      if ((out[key]?.rating ?? 0) >= g.rating) continue;
+      out[key] = { rating: g.rating, from: def!.name };
+    }
+  }
+  return out;
+}
+
+// The tier a rating sits on (the deepest rung it reaches).
+function backgroundTierAt(def: BackgroundDef, rating: number): BackgroundTier | undefined {
+  return [...(def.tiers ?? [])].filter(t => rating >= t.atLeast).sort((a, b) => b.atLeast - a.atLeast)[0];
+}
+
+function makeBackgroundDef(parts: Partial<BackgroundDef> & { name: string }): BackgroundDef {
+  const def: BackgroundDef = { name: StringUtil.normalize(parts.name) };
+  if (parts.description?.trim()) def.description = parts.description.trim();
+  if (parts.max !== undefined) def.max = parts.max;
+  const templates = asStringList(parts.templates as unknown as CardValue).map(t => StringUtil.normalize(t));
+  if (templates.length) def.templates = templates;
+  if (parts.resource?.trim()) def.resource = StringUtil.normalize(parts.resource);
+  if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
+  const grants = asList(parts.grants as unknown as CardValue).map(raw => {
+    const m = asMap(raw);
+    const trait = asText(m["trait"]);
+    if (!trait) return undefined;
+    const g: TraitGrant = { trait: StringUtil.normalize(trait), rating: asNumber(m["rating"]) ?? 1 };
+    const atLeast = asNumber(m["atLeast"]);
+    if (atLeast !== undefined) g.atLeast = atLeast;
+    const note = asText(m["note"]);
+    if (note) g.note = note;
+    return g;
+  }).filter((g): g is TraitGrant => g !== undefined);
+  if (grants.length) def.grants = grants;
+  if (parts.note?.trim()) def.note = parts.note.trim();
+  return def;
+}
+
+// =============================================================================
 // SUPERNATURAL TRAIT CATEGORIES - what KIND of power a rated trait is
 // -----------------------------------------------------------------------------
 // A rated supernatural trait is not just a number in a bucket: Disciplines,
@@ -5697,6 +5807,20 @@ function traitKindOf(char: PlayableCharacter, name: string): string | undefined 
   return undefined;
 }
 
+// Everything this character's Backgrounds CONFER - the Talisman that is a place
+// granting that place's ratings. Highest wins; the source is kept so the sheet
+// can say where a rating came from.
+function grantedTraitsOf(char: PlayableCharacter): Record<string, { rating: number; from: string }> {
+  return grantsFromBackgrounds(char.backgrounds ?? {}, BackgroundRegistry.all());
+}
+
+// A trait as the engine should READ it: the sheet's own rating, or a granted
+// one when that is higher. Nothing on the sheet has to duplicate a grant.
+function effectiveTraitOf(char: PlayableCharacter, name: string): number {
+  const key = StringUtil.normalize(name);
+  return Math.max(resolveTraitFromRecord(char, key), grantedTraitsOf(char)[key]?.rating ?? 0);
+}
+
 // A character's PERMANENT rating in a name that may not be a rated trait at
 // all. Rated buckets first; failing that, the RESOURCE that owns the name (its
 // own name, a role it fills, or a name it replaced) read at the value the
@@ -6372,6 +6496,27 @@ const RollRulesConfig = new MapConfigStore<number>({
   ],
 });
 
+// Background definitions: the bag Backgrounds never had. Shipped defaults
+// (Fount's ladder, the Awakened places, Mentor, Resources) overlaid by the
+// entry, exactly like afflictions.
+const BACKGROUNDS_ENTRY = "wod:config:backgrounds";
+const BackgroundRegistry = new ListConfigStore<BackgroundDef>({
+  entry: BACKGROUNDS_ENTRY,
+  header: [
+    "Background definitions for this chronicle (overlaid on the built-ins).",
+    "Below the marker each one is its NAME, then indented: max (the ceiling,",
+    "usually 5), templates (who may take it), description, and either",
+    "  tiers   - a ladder, for Backgrounds that read as a table (Fount), each",
+    "            rung `at-least` plus what it sets (max, per-turn)",
+    "  grants  - other traits this one CONFERS, each `trait` + `rating`:",
+    "            a Talisman that IS a place grants that place's ratings.",
+    "Dots are not cost: what a Background actually cost lives on the sheet",
+    "([[paid]]), so a Background you were GIVEN rates 5 and costs nothing.",
+  ],
+  make: makeBackgroundDef,
+  defaults: DEFAULT_BACKGROUNDS,
+});
+
 // Advancement prices: the CHRONICLE's cost table, never the character's. One
 // card, `kind:` with a price per purse indented under it (see
 // DEFAULT_ADVANCEMENT_COSTS). Values are text - nothing evaluates them yet.
@@ -6855,7 +7000,8 @@ class CrayStore {
   private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `cray:${StringUtil.normalize(name)}`; }
 
-  static rating(char: PlayableCharacter): number { return resolveTraitFromRecord(char, "cray"); }
+  // A cray CONFERRED by a Talisman is as real a site as a bought one.
+  static rating(char: PlayableCharacter): number { return effectiveTraitOf(char, "cray"); }
   static capacity(char: PlayableCharacter): number { return CrayStore.rating(char) * 5; }
 
   // A cray starts full (it has been bubbling away untended).
@@ -7613,7 +7759,7 @@ function afflictionRollExtra(char: PlayableCharacter, active: ActiveAffliction[]
     const def = AfflictionRegistry.get(inst.def);
     if (!def?.tiers?.length) continue;
     if (def.requiresAwakened && !awakened) continue;
-    const rating = def.scalesWith ? resolveTraitFromRecord(char, def.scalesWith) : 0;
+    const rating = def.scalesWith ? effectiveTraitOf(char, def.scalesWith) : 0;
     if (def.scalesWith && rating <= 0) continue;
     for (const op of foldAfflictionTiers(rating, def.tiers).ops) {
       const kind = op.op.toLowerCase();
@@ -8530,6 +8676,26 @@ function evalBudget(expr: string, resolve: TraitResolver): number {
 // paid is not price listed - a Storyteller may simply GRANT a thing.
 function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<string, { spent: number; items: string[] }> {
   const out: Record<string, { spent: number; items: string[] }> = {};
+  // Background DOTS are a purse of their own, and dots are not cost: a
+  // Background the chronicle handed you rates 5 and cost nothing, which is
+  // exactly what `paid` records. A CONFERRED rating never cost anything either.
+  const conferred = grantedTraitsOf(char);
+  const backgrounds = { spent: 0, items: [] as string[] };
+  for (const [name, rating] of Object.entries(char.backgrounds ?? {})) {
+    if (rating <= 0) continue;
+    const held = char.instances?.[name];
+    const each = held?.length ? held : [{ rating, paid: char.paid?.[name] }];
+    for (const one of each) {
+      const override = (one as { paid?: string }).paid;
+      const cost = override !== undefined ? evalBudget(override, resolve) : one.rating;
+      backgrounds.spent += cost;
+      backgrounds.items.push(`${name} ${one.rating}${override !== undefined ? ` (paid ${cost})` : ""}`);
+    }
+  }
+  for (const [name, g] of Object.entries(conferred)) {
+    backgrounds.items.push(`${name} ${g.rating} (from ${g.from}, free)`);
+  }
+  if (backgrounds.items.length) out["background"] = backgrounds;
   for (const inst of ownedMeritInstances(char)) {
     const purse = budgetOfKind(inst.def);
     const override = char.paid?.[inst.key];
@@ -8596,6 +8762,83 @@ async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   const value = evalBudget(expr, resolver);
   return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
     + `[[budget]] counts it.`);
+}
+
+// backgrounds / background <name> - the bag Backgrounds never had.
+async function cmdBackgrounds(): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  const defs = BackgroundRegistry.all();
+  const held = char?.backgrounds ?? {};
+  const granted = char ? grantedTraitsOf(char) : {};
+  const mine = Object.entries(held).filter(([, v]) => v > 0)
+    .map(([n, v]) => `${disp(n)} ${v}${char?.paid?.[n] !== undefined ? ` (paid ${char.paid![n]})` : ""}`);
+  const conferred = Object.entries(granted).map(([n, g]) => `${disp(n)} ${g.rating} (from ${disp(g.from)})`);
+  const parts = [`Defined: ${defs.map(d => d.name).join(", ")}`];
+  if (mine.length) parts.push(`${disp(char!.name)} holds: ${mine.join(", ")}`);
+  if (conferred.length) parts.push(`Conferred: ${conferred.join(", ")}`);
+  return sys(`${parts.join(". ")}. [[background <name>]] for one; [[set-trait <name> <n>]] rates one; `
+    + `[[define-background]] adds one.`);
+}
+
+async function cmdBackground(cmd: ParsedCommand): Promise<string> {
+  const raw = cmd.positional[0]?.trim();
+  if (!raw) return cmdBackgrounds();
+  const def = BackgroundRegistry.get(StringUtil.normalize(raw));
+  if (!def) return sys(`No background "${raw}". [[backgrounds]] lists them.`);
+  const char = await CharacterStore.getCurrent();
+  const rating = char ? char.backgrounds?.[StringUtil.normalize(def.name)] ?? 0 : 0;
+  const bits = [`background "${disp(def.name)}"`, `max ${def.max ?? 5}`];
+  if (def.templates?.length) bits.push(`only ${def.templates.join("/")}`);
+  if (char) bits.push(`${disp(char.name)} has ${rating}`);
+  const tier = backgroundTierAt(def, rating);
+  for (const t of def.tiers ?? []) {
+    const marks = [t.max !== undefined ? `hold ${t.max}` : "", t.perTurn !== undefined ? `${t.perTurn}/turn` : "", t.note ?? ""].filter(Boolean);
+    bits.push(`${t === tier ? "• " : ""}${t.atLeast}: ${marks.join(", ")}`);
+  }
+  for (const g of def.grants ?? []) {
+    bits.push(`grants ${disp(g.trait)} ${g.rating}${(g.atLeast ?? 1) > 1 ? ` at ${g.atLeast}+` : ""}${g.note ? ` - ${g.note}` : ""}`);
+  }
+  return sys(`${bits.join("; ")}.${def.description ? ` ${def.description}` : ""}${def.note ? ` ${def.note}` : ""}`);
+}
+
+// define-background name=... [max=] [templates=] [grants="sanctum:5,library:5"] [description=]
+async function cmdDefineBackground(cmd: ParsedCommand): Promise<string> {
+  const rawName = cmd.named["name"] ?? cmd.positional[0];
+  if (!rawName?.trim()) {
+    return sys(`define-background needs a name, e.g. [[define-background name=\`Talisman\` max=5 `
+      + `grants=\`cray:5,library:5,sanctum:5\` description=\`…\`]].`);
+  }
+  const parts: Partial<BackgroundDef> & { name: string } = { name: rawName.trim() };
+  const max = intOrUndef(cmd.named["max"] ?? "");
+  if (max !== undefined) parts.max = max;
+  const templates = (cmd.named["templates"] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  if (templates.length) parts.templates = templates;
+  const description = cmd.named["description"]?.trim();
+  if (description) parts.description = description;
+  const grants = (cmd.named["grants"] ?? "").split(",").map(g => g.trim()).filter(Boolean)
+    .map(g => { const [t, n] = g.split(":"); return { trait: t, rating: intOrUndef(n ?? "") ?? 1 }; })
+    .filter(g => g.trait);
+  if (grants.length) parts.grants = grants as TraitGrant[];
+  const def = makeBackgroundDef(parts);
+  const shadows = BackgroundRegistry.get(def.name) && !BackgroundRegistry.all().some(d => d.name === def.name && d !== def) ? "" : "";
+  await BackgroundRegistry.put(def);
+  const grantBits = (def.grants ?? []).map(g => `${disp(g.trait)} ${g.rating}`);
+  return sys(`Defined background "${disp(def.name)}" (max ${def.max ?? 5})`
+    + `${grantBits.length ? `, granting ${grantBits.join(", ")}` : ""}${shadows}. `
+    + `Rate it with [[set-trait ${def.name} <n>]].`);
+}
+
+async function cmdForgetBackground(cmd: ParsedCommand): Promise<string> {
+  const raw = cmd.positional[0]?.trim() ?? cmd.named["name"]?.trim();
+  if (!raw) return sys(`forget-background needs a name.`);
+  const key = StringUtil.normalize(raw);
+  const removed = await BackgroundRegistry.remove(key);
+  if (!removed) {
+    return BackgroundRegistry.get(key)
+      ? sys(`"${key}" is a built-in - it can be shadowed with [[define-background]] but not deleted.`)
+      : sys(`No custom background "${key}".`);
+  }
+  return sys(`Forgot custom ${key}.${BackgroundRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : ""}`);
 }
 
 // supernatural [category] - which families of power this character may have,
@@ -8678,7 +8921,7 @@ const LIBRARY_STATES = ["in-sanctum", "in-umbra", "in-library"];
 async function cmdMeasureDoor(): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
-  if (resolveTraitFromRecord(char, "library") <= 0) {
+  if (effectiveTraitOf(char, "library") <= 0) {
     return sys(`${disp(char.name)} has no Library to open a door onto (the Talisman measures the way to YOUR library).`);
   }
   const clock = await StoryClock.get();
@@ -8818,7 +9061,7 @@ async function cmdResearch(cmd: ParsedCommand, ctx: CommandContext): Promise<str
   if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
   const topic = cmd.positional.join(" ").trim() || cmd.named["topic"]?.trim();
   if (!topic) return sys(`research needs a topic, e.g. [[research \`the seals of Belial\` difficulty=8]].`);
-  const rating = resolveTraitFromRecord(char, "library");
+  const rating = effectiveTraitOf(char, "library");
   if (rating <= 0) return sys(`${disp(char.name)} has no Library to search.`);
   const present = (await CharacterAfflictions.list(char.name)).some(a => a.def === "in-library");
   if (!present) return sys(`${disp(char.name)} is not in their library - [[measure-door]] opens the way, or [[afflict in-library]] if they are simply there.`);
@@ -9229,7 +9472,7 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
         const needs = rule.requires === undefined ? [] : Array.isArray(rule.requires) ? rule.requires : [rule.requires];
         if (!needs.every(n => gates.has(StringUtil.normalize(n)))) continue;
         // A Background threshold too (the sanctum's sleep point is Sanctum 4's).
-        if (rule.requiresTrait && resolveTraitFromRecord(char, rule.requiresTrait.trait) < rule.requiresTrait.atLeast) continue;
+        if (rule.requiresTrait && effectiveTraitOf(char, rule.requiresTrait.trait) < rule.requiresTrait.atLeast) continue;
         const times = rule.per === "day" ? days : moons;
         if (times <= 0) continue;
         credit += rule.amount * times;
@@ -10352,7 +10595,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
     if (def.requiresAwakened && !isAwakened(char.templates)) {
       bits.push(`- ${def.scalesWith ?? "its"} benefits need the Awakened`);
     } else {
-      const rating = def.scalesWith ? resolveTraitFromRecord(char, def.scalesWith) : 0;
+      const rating = def.scalesWith ? effectiveTraitOf(char, def.scalesWith) : 0;
       const folded = foldAfflictionTiers(rating, def.tiers);
       const ops = folded.ops.map(o => {
         const amount = o.amount ?? 1;
@@ -11149,6 +11392,27 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
+CommandRouter.register("backgrounds", cmdBackgrounds, {
+  summary: "the backgrounds this chronicle defines, what you hold, and what they confer",
+});
+CommandRouter.register("background", cmdBackground, {
+  summary: "one background in full: ceiling, ladder, and what it grants",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "fount" }],
+});
+CommandRouter.register("define-background", cmdDefineBackground, {
+  summary: "define/replace a background (a Talisman that IS a place grants that place's ratings)",
+  params: [
+    { key: "name", kind: "named", required: true, type: "literal", desc: "Name - BACKTICKS", example: "Talisman" },
+    { key: "max", kind: "named", type: "int", desc: "Ceiling (default 5)", example: "5" },
+    { key: "templates", kind: "named", hint: '"a,b"', desc: "Who may take it (blank = anyone)" },
+    { key: "grants", kind: "named", hint: '"trait:n,trait:n"', desc: "Other traits it confers", example: "cray:5,library:5,sanctum:5" },
+    { key: "description", kind: "named", type: "literal", desc: "Description - BACKTICKS" },
+  ],
+});
+CommandRouter.register("forget-background", cmdForgetBackground, {
+  summary: "remove a custom background (a built-in resurfaces)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
 CommandRouter.register("supernatural", cmdSupernatural, {
   summary: "the families of power open to this character (disciplines, magic, sorcery, blood-sorcery)",
   params: [{ key: "category", kind: "positional", hint: "[category]", example: "blood-sorcery" }],
@@ -11312,6 +11576,46 @@ CommandRouter.register("forget-constraint", cmdForgetConstraint, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts (incl. merit-instance caps)" });
+// --- THE ARCANA VOCABULARY ---------------------------------------------------
+// Arcana and Taints go through the SAME registry and the same handlers as
+// Merits and Flaws - one owned-power mechanism, four kinds. What they lacked
+// was a vocabulary that says what they are, so these are the same verbs under
+// the names the domain uses. `define-arcanum` defaults kind=arcanum; the
+// listings filter by purse so neither family drowns the other.
+async function cmdDefineArcanum(cmd: ParsedCommand): Promise<string> {
+  return cmdDefineMerit(cmd.named["kind"] ? cmd : { ...cmd, named: { ...cmd.named, kind: "arcanum" } });
+}
+const isArcanumKind = (k: MeritFlawKind): boolean => k === "arcanum" || k === "taint";
+
+async function cmdArcana(cmd: ParsedCommand): Promise<string> {
+  const raw = cmd.positional[0]?.trim();
+  if (raw) return cmdMeritInfo(cmd);
+  const defs = MeritFlawRegistry.all().filter(d => isArcanumKind(d.kind));
+  if (!defs.length) return sys(`No arcana or taints defined. [[define-arcanum]] adds one.`);
+  const items = defs.map(d => `${StringUtil.normalize(d.name)}${d.kind === "taint" ? " (taint)" : ""}`).join(", ");
+  return sys(`Defined arcana & taints: ${items}. [[arcanum <name>]] for detail; [[take-arcanum <name>]] takes one; `
+    + `[[budget]] tracks the arcana purse.`);
+}
+
+// take-arcanum / drop-arcanum insist on the KIND, so the vocabulary means
+// something: asking for a merit here points you at the other verb.
+function wrongFamily(cmd: ParsedCommand, wantArcanum: boolean): string | undefined {
+  const raw = cmd.positional[0]?.trim();
+  if (!raw) return undefined;
+  const hit = resolveMeritInstance(StringUtil.normalize(raw), n => MeritFlawRegistry.get(n));
+  if (!hit) return undefined;
+  const isArc = isArcanumKind(hit.def.kind);
+  if (isArc === wantArcanum) return undefined;
+  return sys(`${hit.def.name} is a ${hit.def.kind}, not ${wantArcanum ? "an arcanum or taint" : "a merit or flaw"}. `
+    + `Use [[${isArc ? "take-arcanum" : "take-merit"} ${StringUtil.normalize(raw)}]].`);
+}
+async function cmdTakeArcanum(cmd: ParsedCommand): Promise<string> {
+  return wrongFamily(cmd, true) ?? cmdTakeMerit(cmd);
+}
+async function cmdDropArcanum(cmd: ParsedCommand): Promise<string> {
+  return wrongFamily(cmd, true) ?? cmdDropMerit(cmd);
+}
+
 CommandRouter.register("take-merit", cmdTakeMerit, {
   summary: "take a merit/flaw; parameterized defs take name::param instances",
   params: [
@@ -11327,6 +11631,44 @@ CommandRouter.register("drop-merit", cmdDropMerit, {
 });
 CommandRouter.register("merits", cmdMerits, {
   summary: "list owned merits/flaws, enhancement totals and advisory issues",
+});
+CommandRouter.register("arcana", cmdArcana, {
+  summary: "the arcana & taints this chronicle defines (they trade in the arcana budget, not freebies)",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
+});
+CommandRouter.register("arcanum", cmdMeritInfo, {
+  summary: "one arcanum or taint in full (the same detail [[merit]] gives)",
+  params: [{ key: "name", kind: "positional", hint: "<name>", example: "celestial-radiance" }],
+});
+CommandRouter.register("define-arcanum", cmdDefineArcanum, {
+  summary: "define an arcanum or taint (define-merit with kind=arcanum)",
+  note: "per-template= gives it a price per splat; kind=taint makes it GRANT points",
+  params: [
+    { key: "name", kind: "named", required: true, type: "literal", desc: "Name - BACKTICKS" },
+    { key: "kind", kind: "named", type: "enum", options: ["arcanum", "taint"], desc: "Default arcanum" },
+    { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings" },
+    { key: "per-template", kind: "named", hint: '"demon:7,thrall:5"', desc: "Price per template; `no` closes it to one" },
+    { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
+    { key: "passive", kind: "named", type: "literal", desc: 'Always-on ops, ";"-separated - BACKTICKS' },
+    { key: "description", kind: "named", type: "literal", desc: "Description - BACKTICKS" },
+  ],
+});
+CommandRouter.register("take-arcanum", cmdTakeArcanum, {
+  summary: "take an arcanum or taint (take-merit, but it insists on the family)",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
+    { key: "points", kind: "positional", hint: "[points]" },
+    { key: "paid", kind: "named", desc: "What it REALLY cost (0 = the Storyteller granted it)" },
+    { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive prerequisites / template limits" },
+  ],
+});
+CommandRouter.register("drop-arcanum", cmdDropArcanum, {
+  summary: "drop an owned arcanum or taint",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
+});
+CommandRouter.register("forget-arcanum", cmdForgetMerit, {
+  summary: "remove a custom arcanum/taint definition (a built-in resurfaces)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("define-merit", cmdDefineMerit, {
   summary: "define a merit, flaw or arcanum (writes the srd:merits-flaws overlay)",

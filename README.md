@@ -1404,6 +1404,55 @@ The shipped Devil's Due arcana:
   raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
   `base → effective` and the advisory ceiling.
 
+### Backgrounds — a bag of their own
+
+Backgrounds used to be the one thing with no definitions: a list of names in the
+lorebook and nothing else. They now have a registry (`wod:config:backgrounds`,
+overlaid on built-ins), a ceiling, a ladder where the book prints one, and two
+irregularities the rules actually need:
+
+**Dots are not cost.** A thing usually costs what it rates — but a chronicle
+hands some out. The rating lives on the sheet, what it *cost* lives in `paid`:
+
+```
+[[set-trait fount 5 paid=0]]                        given
+[[set-trait mentor 5 note=`Velia` paid=0]]          given
+[[set-trait mentor 3 add=true note=`Daujotas` paid=3]]   bought
+[[set-trait resources 2]]                           bought (costs what it rates)
+
+[[budget]] → background: 5 spent
+```
+
+**One may confer others.** A Talisman that *is* a place grants that place's
+ratings, and the granted ratings are as real as bought ones — they open the
+door, they scale the affliction tiers, and they cost nothing:
+
+```
+[[define-background name=`Talisman` grants=`cray:5,library:5,sanctum:5`]]
+[[set-trait talisman 5 paid=0]]
+
+[[backgrounds]] → Conferred: Cray 5 (from Talisman), Library 5, Sanctum 5
+[[measure-door]] → …it opens onto the Library of the Unseen
+```
+
+`[[background <name>]]` shows one in full — ceiling, who may take it, its ladder
+with your rung marked, and what it grants. *Fount* ships with the book's table
+(1: hold 12, spend 2/turn … 5: hold 20, spend 6/turn).
+
+### The arcana vocabulary
+
+Arcana and Taints go through the **same** registry and handlers as Merits and
+Flaws — one owned-power mechanism, four kinds — but they now have verbs that say
+what they are: `[[define-arcanum]]` (kind defaults to `arcanum`),
+`[[take-arcanum]]`, `[[drop-arcanum]]`, `[[arcana]]`, `[[arcanum <name>]]`,
+`[[forget-arcanum]]`. The listings filter by purse, and taking insists on the
+family:
+
+```
+[[take-arcanum iron-will]]
+→ Iron Will is a merit, not an arcanum or taint. Use [[take-merit iron-will]].
+```
+
 ### Setting a rating — `[[set-trait]]`
 
 Merits have `[[take-merit]]` and specialties have `[[specialty]]`; **every other

@@ -7,7 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `cb386af`** ("An arcanum is not
+> **Last synced with the code as of commit `5778ec5`** ("Backgrounds get a bag
+> of their own"). Prior: `cb386af` ("An arcanum is not
 > filed under merits; set-trait; families of power"). Prior: `84c5aa0` ("Arcana are not
 > Merits: their own purse, priced per template"). Prior: `3cb162a` ("Rationed top
 > ratings"); `ce304b3` ("The words move out
@@ -2365,6 +2366,53 @@ and `prefill` are mocked/available but not yet written.
     **`[[supernatural]]`** lists what a character holds per family and flags a
     path whose parent Discipline is missing; `[[supernatural <category>]]`
     details one. Data only - no powers engine, nothing enforced.
+
+52. **Backgrounds get a bag of their own** (user: "the background should have
+    their own bag too... those two are free: mentor 5 and talisman 5. But the
+    Talisman 5, Cosmos Within the Measure, grants me access to the Library of
+    the Unseen... Anything usually has the same cost as it has dots... We are
+    creating a case where number of dots and cost can be different").
+    Backgrounds were the one trait family with NO definitions - a list of names
+    in the lorebook and nothing else, which is why they had no ceiling, no
+    ladder and no way to say what one DOES. Now:
+    **`BackgroundDef`** (name, description, max, templates, `resource`, `tiers`,
+    `grants`) + **`BackgroundRegistry`** (`wod:config:backgrounds`, a
+    ListConfigStore over `DEFAULT_BACKGROUNDS`) + `[[backgrounds]]`,
+    `[[background <name>]]`, `[[define-background]]`, `[[forget-background]]`.
+    - **DOTS ARE NOT COST.** §7.50's `paid` already said this for merits; the
+      new **background purse** in `purseLedger` applies it here, walking the
+      bucket AND its instances so two Mentors price separately. The owner's own
+      sheet is the test: Fount 5, Talisman 5 and Mentor 5 given (paid 0),
+      Mentor 3 and Resources 2 bought - `[[budget]]` reports exactly `background:
+      5 spent`, which is what he actually paid.
+    - **ONE MAY CONFER OTHERS.** `grants: TraitGrant[]` - the Talisman that IS a
+      place (Cosmos Within the Measure) grants Cray 5, Library 5, Sanctum 5.
+      `grantedTraitsOf` + **`effectiveTraitOf`** (max of bucket and grant) is
+      folded into the roll env resolver, the affliction TIER lookups (both of
+      them), `[[measure-door]]`, `[[research]]`, `CrayStore.rating` and
+      recovery's `requiresTrait` - so a conferred Sanctum opens the door and
+      scales the tiers exactly like a bought one, while costing nothing.
+    - **Fount** ships with the book's ladder (1: hold 12, spend 2/turn ... 5:
+      hold 20, spend 6/turn) as `tiers`, and records the derivation the owner
+      reminded me of: Fount 5 plus ten dots of vitae IS Living Resolve's 30/6
+      pool. Nothing recomputes it - the pool already carries those numbers - but
+      now the sheet says WHY.
+    Bug caught by the live smoke: registry defaults must be stored NORMALIZED
+    (like DEFAULT_AFFLICTIONS), or `ListConfigStore.get` - which compares a
+    normalized name - can never find them. `[[background fount]]` said "no
+    background fount" until the defaults were lower-cased.
+
+53. **The arcana vocabulary** (user: "I hope now we have commands equivalent to
+    those of Merits and Flaws, except for Arcana and Taints").
+    They always shared the machinery - one registry, four kinds - and what was
+    missing was names that mean it. `define-arcanum` (kind defaults to
+    `arcanum`), `take-arcanum`, `drop-arcanum`, `arcana`, `arcanum`,
+    `forget-arcanum`, all thin wrappers over the merit handlers. `[[arcana]]`
+    and `[[merits]]` filter by purse so neither family drowns the other, and
+    `wrongFamily()` makes the vocabulary MEAN something: `take-arcanum
+    iron-will` refuses and points at `[[take-merit]]`. Wrappers rather than a
+    parallel implementation - there is one owned-power mechanism and it stays
+    one.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

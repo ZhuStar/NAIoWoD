@@ -1404,6 +1404,50 @@ The shipped Devil's Due arcana:
   raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
   `base → effective` and the advisory ceiling.
 
+### Setting a rating — `[[set-trait]]`
+
+Merits have `[[take-merit]]` and specialties have `[[specialty]]`; **every other
+rating** — an Attribute, an Ability, a Background, a Discipline, a Pillar, a pool
+start — used to have only the lorebook card. `[[set-trait]]` is the writing
+counterpart of `[[sheet]]`:
+
+```
+[[set-trait sanctum 8]]                              → background Sanctum: 8
+[[set-trait thaumaturgy 3 group=discipline]]         → discipline Thaumaturgy: 3
+[[set-trait mentor 5 note=`his mother` paid=0]]
+[[set-trait mentor 3 add=true note=`Daujotas, his Hermetic Master` paid=3]]
+                → background Mentor: 5 (his mother) + 3 (Daujotas, his Hermetic Master)
+```
+
+The group is inferred: the character's own buckets first, then the chronicle's
+**SRD lists** (so a Background nobody has rated yet still files as a Background),
+then `group=` if you name one, then the free `traits` bucket. `add=true` holds
+*another* of the same thing rather than replacing it.
+
+> **A group left OFF the card is a group erased** — the card is the source of
+> truth, which is exactly how a sheet quietly loses its Backgrounds. It is no
+> longer quiet: the sync says `⚠ A whole group went empty: … (3 gone)` and points
+> at `[[set-trait]]`.
+
+### Families of power — `[[supernatural]]`
+
+Disciplines, Awakened magic, static Sorcery and Blood Sorcery are different
+families, open to different templates, and some of them **nest**: a Thaumaturgical
+path is only reachable through Thaumaturgy, a Mortis path through Mortis — while
+Koldunic sorcery answers to no Discipline at all.
+
+```
+[[supernatural]]
+→ Disciplines: Thaumaturgy 3; Blood Sorcery: Rego Vitae 2, Koldunic Sorcery 1
+
+(lose Thaumaturgy)
+→ ⚠ Rego Vitae needs Thaumaturgy (Storyteller-adjudicated)
+```
+
+`[[supernatural <category>]]` details one: who may have it, which sheet group
+holds its ratings, and which known members hang from a parent. Reported, never
+enforced — like everything creation-side.
+
 ### Arcana are not Merits — the purse, and what a purchase really cost
 
 An arcanum does **not** spend bonus points. Counting it as a merit would make a

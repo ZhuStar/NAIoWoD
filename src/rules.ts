@@ -800,6 +800,73 @@ export function magicRulesFrom(overrides: Record<string, number>): MagicRules {
 }
 
 // =============================================================================
+// SUPERNATURAL TRAIT CATEGORIES - what KIND of power a rated trait is
+// -----------------------------------------------------------------------------
+// A rated supernatural trait is not just a number in a bucket: Disciplines,
+// Awakened magic, static Sorcery and Blood Sorcery are different families, open
+// to different templates and bought from different budgets. And some of them
+// NEST: a Thaumaturgy path is only reachable through Thaumaturgy, a Mortis path
+// through Mortis - while Koldunic sorcery answers to no Discipline at all.
+// `parent` says which Discipline (if any) a member hangs from; the members
+// themselves are ratings on the sheet, so nothing here duplicates the character.
+// Enforced nowhere yet: [[supernatural]] reports, the Storyteller decides.
+// =============================================================================
+export interface SupernaturalCategory {
+  name: string;
+  label?: string;
+  templates?: string[];   // who may have it at all (empty = anyone)
+  bucket?: string;        // which sheet group its ratings live in (default: traits)
+  budget?: string;        // which purse buys it, when it is bought
+  // A member needs this trait to exist first ("thaumaturgy"). Set per MEMBER,
+  // not per category, because Koldunic sorcery needs no Discipline while the
+  // Thaumaturgical paths need theirs.
+  note?: string;
+}
+
+// A named power inside a category - a Thaumaturgical path, a Sphere, a Pillar.
+export interface SupernaturalTraitDef {
+  name: string;
+  category: string;
+  parent?: string;        // the Discipline it hangs from, when it hangs from one
+  note?: string;
+}
+
+export const DEFAULT_SUPERNATURAL_CATEGORIES: SupernaturalCategory[] = [
+  { name: "disciplines", label: "Disciplines", templates: ["vampire", "ghoul", "revenant", "ouroboros"], bucket: "disciplines",
+    note: "The Cainite powers proper - rated 1-5 on the sheet." },
+  { name: "magic", label: "Awakened magic", templates: ["mage", "ouroboros"], bucket: "traits", budget: "freebie",
+    note: "Foundation + Pillars (see [[fellowships]]); the Awakened arts." },
+  { name: "sorcery", label: "Sorcery", bucket: "traits",
+    note: "Static, ritual magic - paths and rituals learned rather than Awakened. Open to anyone the chronicle allows." },
+  { name: "blood-sorcery", label: "Blood Sorcery", templates: ["vampire", "ghoul", "revenant", "ouroboros"], bucket: "traits",
+    note: "Paths worked through vitae. MOST hang from a Discipline - a Thaumaturgical path needs Thaumaturgy, a Mortis path needs Mortis - but not all: Koldunic sorcery answers to none." },
+];
+
+// The Dark Ages paths this engine ships knowing about. The list is data and the
+// chronicle extends it; the POINT of the entries is the `parent` gate.
+export const DEFAULT_SUPERNATURAL_TRAITS: SupernaturalTraitDef[] = [
+  { name: "Rego Vitae", category: "blood-sorcery", parent: "thaumaturgy",
+    note: "The Path of Blood, as the Dark Ages name it - Thaumaturgy's first path." },
+  { name: "Rego Motus", category: "blood-sorcery", parent: "thaumaturgy", note: "The Lure of Flames' Dark Ages sibling." },
+  { name: "Mortis", category: "blood-sorcery", note: "The Cappadocian art; its paths hang from Mortis itself." },
+  { name: "Koldunic Sorcery", category: "blood-sorcery",
+    note: "The Tzimisce way of the land - it answers to no Discipline." },
+];
+
+// Which category a supernatural trait belongs to, and what it needs first.
+export function supernaturalTraitOf(name: string, defs: SupernaturalTraitDef[] = DEFAULT_SUPERNATURAL_TRAITS): SupernaturalTraitDef | undefined {
+  const key = StringUtil.normalize(name);
+  return defs.find(d => StringUtil.normalize(d.name) === key);
+}
+
+// Is this category open to these templates?
+export function categoryOpenTo(cat: SupernaturalCategory, templates: string[]): boolean {
+  if (!cat.templates?.length) return true;
+  const mine = templates.map(t => StringUtil.normalize(t));
+  return cat.templates.some(t => mine.includes(StringUtil.normalize(t)));
+}
+
+// =============================================================================
 // ADVANCEMENT COSTS - what a dot costs, from each purse
 // -----------------------------------------------------------------------------
 // Prices are CHRONICLE RULES, not character data: they are the same for every
@@ -1235,7 +1302,7 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
 export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
   {
-    name: "Trait Affinity", kind: "merit", points: [1, 2, 3], param: "trait",
+    name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
@@ -1243,12 +1310,12 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
       + "Abilities; every other trait caps at 2.",
   },
   {
-    name: "Trait Enhancement", kind: "merit", points: [1, 2, 3], param: "trait",
+    name: "Trait Enhancement", kind: "arcanum", points: [1, 2, 3], param: "trait",
     passive: [{ op: "enhance", amount: 1, target: "$trait" }],
     description: "Devil's Due: permanently raises the trait's effective value AND its advancement ceiling by the points taken; XP still prices from the un-enhanced base.",
   },
   {
-    name: "Sharpened Senses", kind: "merit", points: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    name: "Sharpened Senses", kind: "arcanum", points: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     maxFromTrait: "resolve",
     passive: [{ op: "difficulty", amount: -1, trait: "perception" }],
     description: "Devil's Due: attunes preternatural awareness to unravel the hidden details and secrets of the world. Each purchase is a CUMULATIVE -1 to Perception difficulties (the points taken ARE the purchases). May not be purchased more times than the character's Resolve.",

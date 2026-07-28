@@ -32,6 +32,7 @@ import {
   uncancelableAllowance, isCastingRoll, CASTING_TAGS,
   rollFloorFrom,
   advancementCostsFrom, CostTable, COST_PURSES,
+  DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, supernaturalTraitOf, categoryOpenTo,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
   meritFlawFromCard, InstanceLimit, instanceLimitsOf,
   meritCostFor, budgetOfKind, kindSpends, MERIT_FLAW_KINDS, MeritFlawKind,
@@ -59,7 +60,7 @@ import {
 } from "./command";
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, characterToCard,
-  permanentRatingOf, traitKindOf,
+  permanentRatingOf, traitKindOf, TraitInstance,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   StoryClock, DateBook, Scene, SceneStore, GenCounter,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
@@ -301,10 +302,16 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
     return sys(`Creator mode ON. You may now edit entries in "${PLAYER_CHARACTERS_CATEGORY}" directly; edits are synced in when you issue a command or turn creator mode off.`);
   }
   // Leaving creator mode: capture any final lorebook edits, then switch off.
-  const { synced, failed } = await syncFromCreatorEdits();
+  const { synced, failed, emptied: justNow } = await syncFromCreatorEdits();
+  const emptied = justNow.length ? justNow : lastEmptied;
+  lastEmptied = [];
   await CreatorMode.set(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
+  // The card is the source of truth, so a group left off it is a group erased.
+  // That is correct, and it is exactly how a sheet quietly loses its
+  // Backgrounds - so it is never quiet.
+  if (emptied.length) parts.push(`⚠ A whole group went empty: ${emptied.join("; ")} - a group left OFF the card is erased. [[set-trait]] puts ratings back.`);
   if (failed.length) parts.push(`Could not read: ${failed.join(", ")} - a sheet needs at least a name and a template. Fix the card and sync again; the convert-cards command rewrites any card still holding the old JSON.`);
   return sys(`${parts.join(" ")}`);
 }
@@ -1691,6 +1698,50 @@ async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   const value = evalBudget(expr, resolver);
   return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
     + `[[budget]] counts it.`);
+}
+
+// supernatural [category] - which families of power this character may have,
+// what they hold in each, and whether anything hangs from a Discipline they do
+// not have. Reports; enforces nothing.
+async function cmdSupernatural(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const which = cmd.positional[0]?.trim();
+  const cats = DEFAULT_SUPERNATURAL_CATEGORIES;
+  if (which) {
+    const key = StringUtil.normalize(which);
+    const cat = cats.find(c => StringUtil.normalize(c.name) === key);
+    if (!cat) return sys(`No supernatural category "${which}". Known: ${cats.map(c => c.name).join(", ")}.`);
+    const open = categoryOpenTo(cat, char.templates);
+    const members = DEFAULT_SUPERNATURAL_TRAITS.filter(t => StringUtil.normalize(t.category) === key);
+    const memberBits = members.map(m => `${m.name}${m.parent ? ` (needs ${disp(m.parent)})` : ""}`);
+    return sys(`${cat.label ?? cat.name} - ${open ? `open to ${disp(char.name)}` : `NOT open to ${char.templates.join("+")}`}`
+      + `${cat.templates?.length ? ` (templates: ${cat.templates.join(", ")})` : " (anyone)"}; `
+      + `ratings live in the ${cat.bucket ?? "traits"} group.${cat.note ? ` ${cat.note}` : ""}`
+      + `${memberBits.length ? ` Known: ${memberBits.join(", ")}.` : ""}`);
+  }
+  const lines: string[] = [];
+  for (const cat of cats) {
+    if (!categoryOpenTo(cat, char.templates)) continue;
+    const bucket = (char[(cat.bucket ?? "traits") as keyof PlayableCharacter] ?? {}) as Record<string, number>;
+    const held = Object.entries(bucket).filter(([, v]) => v > 0);
+    const mine = held.filter(([n]) => {
+      const def = supernaturalTraitOf(n);
+      return def ? StringUtil.normalize(def.category) === StringUtil.normalize(cat.name) : cat.bucket === "disciplines";
+    });
+    lines.push(`${cat.label ?? cat.name}: ${mine.length ? mine.map(([n, v]) => `${disp(n)} ${v}`).join(", ") : "nothing yet"}`);
+  }
+  // A path that hangs from a Discipline the character does not have.
+  const orphans: string[] = [];
+  for (const [name, rating] of Object.entries({ ...char.traits, ...char.disciplines })) {
+    if (rating <= 0) continue;
+    const def = supernaturalTraitOf(name);
+    if (!def?.parent) continue;
+    if (resolveTraitFromRecord(char, def.parent) <= 0) orphans.push(`${disp(name)} needs ${disp(def.parent)}`);
+  }
+  if (orphans.length) lines.push(`⚠ ${orphans.join("; ")} (Storyteller-adjudicated)`);
+  return sys(`${disp(char.name)} - ${lines.join("; ")}. [[supernatural <category>]] for one; `
+    + `set a rating with [[set-trait <name> <n>]].`);
 }
 
 // costs [kind] - what a dot costs, from each purse. Prices are CHRONICLE rules
@@ -3696,6 +3747,87 @@ async function cmdCharacters(): Promise<string> {
   return sys(`Characters: ${items.join("; ")}. [[play name="..."]] to switch.`);
 }
 
+// set-trait <name> <rating> - the writing counterpart of [[sheet]]. Merits have
+// [[take-merit]] and specialties have [[specialty]]; every OTHER rating - an
+// Attribute, an Ability, a Background, a Discipline, a Pillar - had only the
+// lorebook card, which is fine until you want one command. The group is
+// inferred from what the trait already is (traitKindOf), named with group=, or
+// falls back to the free `traits` bucket.
+const TRAIT_GROUPS: Record<string, keyof PlayableCharacter> = {
+  attribute: "attributes", attributes: "attributes",
+  ability: "abilities", abilities: "abilities",
+  background: "backgrounds", backgrounds: "backgrounds",
+  virtue: "virtues", virtues: "virtues",
+  discipline: "disciplines", disciplines: "disciplines",
+  trait: "traits", traits: "traits",
+  pool: "poolStarts", pools: "poolStarts", "pool-starts": "poolStarts",
+};
+
+// What the chronicle's own lists say a name is - the lorebook is the authority
+// on which Abilities and Backgrounds exist.
+async function srdGroupOf(trait: string): Promise<string | undefined> {
+  const key = StringUtil.normalize(trait);
+  const has = (list: string[]): boolean => list.some(n => StringUtil.normalize(n) === key);
+  if (has(await LorebookManager.allBackgrounds())) return "background";
+  for (const list of [LorebookManager.allTalents, LorebookManager.allSkills, LorebookManager.allKnowledges]) {
+    if (has(await list())) return "ability";
+  }
+  return undefined;
+}
+
+async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const rawName = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!rawName) {
+    return sys(`set-trait needs a trait and a rating, e.g. [[set-trait sanctum 8]] or `
+      + `[[set-trait mentor 5 note=\`his mother\` paid=0]]. Groups: ${Object.keys(TRAIT_GROUPS).filter(g => !g.endsWith("s")).join(", ")}.`);
+  }
+  const trait = StringUtil.normalize(rawName);
+  const rating = intOrUndef((cmd.named["rating"] ?? cmd.positional[1]) ?? "");
+  if (rating === undefined) return sys(`set-trait needs a rating, e.g. [[set-trait ${trait} 3]].`);
+
+  // The character's own buckets answer first; failing that the chronicle's SRD
+  // lists do, so a Background nobody has rated yet still files as a Background
+  // rather than landing in the free `traits` bucket.
+  const askedGroup = StringUtil.normalize(cmd.named["group"] ?? "");
+  const kind = traitKindOf(char, trait) ?? await srdGroupOf(trait);
+  const group = askedGroup ? TRAIT_GROUPS[askedGroup] : TRAIT_GROUPS[kind ?? ""] ?? "traits";
+  if (askedGroup && !group) {
+    return sys(`No trait group "${askedGroup}". Known: ${[...new Set(Object.values(TRAIT_GROUPS))].join(", ")}.`);
+  }
+  const bucket = char[group] as Record<string, number>;
+  const had = trait in bucket ? bucket[trait] : undefined;
+
+  const note = cmd.named["note"]?.trim();
+  const paid = cmd.named["paid"]?.trim();
+  const add = (cmd.named["add"] ?? "").toLowerCase() === "true";
+  if (add || note !== undefined || (char.instances?.[trait]?.length ?? 0) > 1) {
+    // More than one of the same Background: keep them as instances, each with
+    // its own note and its own price.
+    const list = add ? [...(char.instances?.[trait] ?? [])] : [];
+    if (add && !list.length && had !== undefined) list.push({ rating: had });
+    const inst: TraitInstance = { rating };
+    if (note) inst.note = note;
+    if (paid !== undefined) inst.paid = paid;
+    list.push(inst);
+    char.instances = { ...(char.instances ?? {}), [trait]: list };
+    bucket[trait] = Math.max(...list.map(i => i.rating));
+  } else {
+    bucket[trait] = rating;
+    if (char.instances?.[trait]) { const rest = { ...char.instances }; delete rest[trait]; char.instances = rest; }
+    if (paid !== undefined) char.paid = { ...(char.paid ?? {}), [trait]: paid };
+  }
+  await CharacterStore.save(char);
+  const held = char.instances?.[trait];
+  const shown = held && held.length > 1
+    ? held.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(" + ")
+    : String(bucket[trait]);
+  return sys(`${disp(char.name)} ${group === "poolStarts" ? "pool start" : StringUtil.normalize(group).replace(/ies$/, "y").replace(/s$/, "")} `
+    + `${disp(trait)}: ${shown}${had !== undefined && !add ? ` (was ${had})` : ""}`
+    + `${paid !== undefined ? `, paid ${paid}` : ""}. [[sheet]] shows the whole record.`);
+}
+
 // --- MIGRATION: the one place that still understands the old JSON cards ------
 // Cards written before the readable format hold JSON. Nothing READS that any
 // more (core/cardtext.ts is the only card language), so this rewrites them in
@@ -3745,6 +3877,7 @@ async function cmdConvertCards(): Promise<string> {
   const bits = [`Converted ${converted.length} card${converted.length === 1 ? "" : "s"} from JSON: ${converted.join(", ")}.`];
   if (failed.length) bits.push(`Left alone (unreadable): ${failed.join(", ")}.`);
   if (sync.synced.length) bits.push(`Re-synced ${sync.synced.map(n => StringUtil.toTitleCase(n)).join(", ")}.`);
+  if (sync.emptied.length) bits.push(`⚠ A whole group went empty: ${sync.emptied.join("; ")} - the card is the source of truth, so a group left OFF it is a group erased.`);
   return sys(`${bits.join(" ")} Open a card to see the new format; [[sheet]] confirms what the engine reads.`);
 }
 
@@ -3831,10 +3964,15 @@ async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
 // While creator mode is on, the player may have hand-edited character entries
 // or any wod:config entry: re-sync characters (player edits win) and reload
 // every config store before a command runs, and again when leaving the mode.
-async function syncFromCreatorEdits(): Promise<{ synced: string[]; failed: string[] }> {
+// The beforeRoute hook syncs BEFORE the command runs, so by the time
+// [[creator-mode set=false]] does its own sync there is nothing left to notice.
+// Whatever the last sync saw is kept here so the reply can still say it.
+let lastEmptied: string[] = [];
+async function syncFromCreatorEdits(): Promise<{ synced: string[]; failed: string[]; emptied: string[] }> {
   await reconcileLorebook();   // tracked-card drift first (may open modals)
   const result = await CharacterStore.syncFromLorebook();
   await reloadAllConfigStores();
+  if (result.emptied.length) lastEmptied = result.emptied;
   return result;
 }
 CommandRouter.beforeRoute(async () => {
@@ -3892,6 +4030,18 @@ CommandRouter.register("characters", cmdCharacters, {
 CommandRouter.register("sheet", cmdSheet, {
   summary: "show a character's record as the engine reads it (effective values marked)",
   params: [{ key: "character", kind: "positional", hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("set-trait", cmdSetTrait, {
+  summary: "set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start)",
+  note: "merits use [[take-merit]]; specialties use [[specialty]]",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<trait>", example: "sanctum" },
+    { key: "rating", kind: "positional", required: true, hint: "<n>", example: "8" },
+    { key: "group", kind: "named", desc: "Which group it belongs to (inferred when the trait is already known)", example: "background" },
+    { key: "note", kind: "named", type: "literal", desc: "Whose/which one this is - keeps it as a separate instance" },
+    { key: "paid", kind: "named", desc: "What it really cost (0 = the Storyteller granted it)" },
+    { key: "add", kind: "named", type: "enum", options: ["true"], desc: "Hold ANOTHER of the same trait rather than replacing" },
+  ],
 });
 CommandRouter.register("convert-cards", cmdConvertCards, {
   summary: "rewrite any lorebook card still holding JSON in the readable format (one-shot)",
@@ -4100,6 +4250,10 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pillar", kind: "named", type: "int", required: true, desc: "Highest Pillar level involved" },
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
+});
+CommandRouter.register("supernatural", cmdSupernatural, {
+  summary: "the families of power open to this character (disciplines, magic, sorcery, blood-sorcery)",
+  params: [{ key: "category", kind: "positional", hint: "[category]", example: "blood-sorcery" }],
 });
 CommandRouter.register("budget", cmdBudget, {
   summary: "what each purse allows, what is spent, what is left (advisory)",

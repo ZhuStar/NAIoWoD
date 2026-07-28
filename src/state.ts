@@ -632,18 +632,30 @@ export class CharacterStore {
 
   // Lorebook -> storage. The player's lorebook edits win; unreadable entries
   // are reported, not synced. Returns what happened for the OOC reply.
-  static async syncFromLorebook(): Promise<{ synced: string[]; failed: string[] }> {
+  static async syncFromLorebook(): Promise<{ synced: string[]; failed: string[]; emptied: string[] }> {
     const synced: string[] = [];
     const failed: string[] = [];
+    const emptied: string[] = [];
     for (const entry of await LorebookManager.entriesInCategory(PLAYER_CHARACTERS_CATEGORY)) {
       const label = (entry.displayName ?? "").trim();
       const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
       const char = characterFromCard(parseCardText(body));
       if (!char) { if (label) failed.push(label); continue; }
+      // The card is the source of truth, so a group left off it is a group
+      // emptied. That is correct and it is also how a sheet loses its
+      // Backgrounds without anyone noticing - so SAY it.
+      const before = await CharacterStore.load(char.name);
+      if (before) {
+        for (const [field] of CHARACTER_BUCKETS) {
+          const was = Object.keys((before[field] ?? {}) as Record<string, number>).length;
+          const now = Object.keys((char[field] ?? {}) as Record<string, number>).length;
+          if (was > 0 && now === 0) emptied.push(`${char.name}: ${field} (${was} gone)`);
+        }
+      }
       await CharacterStore._storage.set(CharacterStore._key(char.name), char);
       synced.push(char.name);
     }
-    return { synced, failed };
+    return { synced, failed, emptied };
   }
 }
 
@@ -662,9 +674,29 @@ const CHARACTER_BUCKETS: Array<[keyof PlayableCharacter, string]> = [
   ["poolStarts", "poolStarts"],
   ["meritsFlaws", "meritsFlaws"],
 ];
+// One bucket holds every owned power, but the CARD files them by what they are:
+// an arcanum drawing on the arcana budget must not appear under merits-flaws.
+// Both blocks read back into the one bucket, so nothing needs migrating.
+const OWNED_POWER_BLOCKS: Array<[string, (kind: string) => boolean]> = [
+  ["meritsFlaws", k => k === "merit" || k === "flaw"],
+  ["arcana", k => k === "arcanum" || k === "taint"],
+];
 // `pools` / `merits` read as the longer engine names, so a player may write
 // either spelling on the card.
-const BUCKET_SYNONYMS: Record<string, string> = { pools: "poolStarts", merits: "meritsFlaws" };
+const BUCKET_SYNONYMS: Record<string, string> = {
+  pools: "poolStarts", merits: "meritsFlaws",
+  // Written apart on the card, read into the one bucket the engine keeps.
+  arcana: "meritsFlaws", taints: "meritsFlaws", "merits-flaws": "meritsFlaws",
+};
+
+// Is this owned power an arcanum or a taint? The registry knows; an unregistered
+// key is treated as a merit, which is where [[check-constraints]] already
+// reports it as unknown.
+function isArcanumKey(key: string): boolean {
+  const hit = resolveMeritInstance(StringUtil.normalize(key), n => MeritFlawRegistry.get(n));
+  return hit ? !kindSpendsFreebies(hit.def.kind) : false;
+}
+const kindSpendsFreebies = (kind: string): boolean => kind === "merit" || kind === "flaw";
 
 // A merit instance key ("trait-affinity:melee") keeps its parameter; only the
 // def's own name is title-cased for display.
@@ -680,7 +712,10 @@ export function characterToCard(char: PlayableCharacter): CardMap {
   const specialties = char.specialties ?? {};
   for (const [field, key] of CHARACTER_BUCKETS) {
     const bucket = (char[field] ?? {}) as Record<string, number>;
-    const names = Object.keys(bucket);
+    let names = Object.keys(bucket);
+    // Owned powers split by kind: merits and flaws here, arcana and taints in
+    // their own block below, because they are not the same currency.
+    if (field === "meritsFlaws") names = names.filter(n => !isArcanumKey(n));
     if (!names.length) continue;
     const block: CardMap = {};
     for (const name of names) {
@@ -719,6 +754,13 @@ export function characterToCard(char: PlayableCharacter): CardMap {
     orphans[displayTraitName(trait)] = labels.length === 1 ? labels[0] : labels;
   }
   if (Object.keys(orphans).length) card["specialties"] = orphans;
+  const arcana: CardMap = {};
+  for (const [name, points] of Object.entries(char.meritsFlaws ?? {})) {
+    if (!isArcanumKey(name)) continue;
+    const paid = char.paid?.[StringUtil.normalize(name)];
+    arcana[displayTraitName(name)] = paid === undefined ? points : { [CARD_VALUE_KEY]: points, paid };
+  }
+  if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (Object.keys(char.budgets ?? {}).length) card["budgets"] = { ...char.budgets } as CardMap;
   return card;
 }

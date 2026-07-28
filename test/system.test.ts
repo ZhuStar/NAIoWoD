@@ -2948,6 +2948,79 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
 });
 
 // =============================================================================
+// SET-TRAIT - the writing counterpart of [[sheet]]
+// =============================================================================
+describe("set-trait: putting ratings back without hand-editing the card", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the group is inferred from the chronicle's own lists, not guessed", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    // Sanctum is a Background on the SRD card even though nobody has rated one.
+    expect(await CommandRouter.route("set-trait sanctum 8")).toContain("background Sanctum: 8");
+    expect((await CharacterStore.load("Visvaldas"))!.backgrounds.sanctum).toBe(8);
+    // Occult is an Ability; Modus is neither, so it lands in the free bucket.
+    expect(await CommandRouter.route("set-trait occult 5")).toContain("ability Occult: 5");
+    expect(await CommandRouter.route("set-trait modus 5")).toContain("trait Modus: 5");
+    expect((await CharacterStore.load("Visvaldas"))!.traits.modus).toBe(5);
+    // ...and group= wins when the chronicle disagrees.
+    expect(await CommandRouter.route("set-trait thaumaturgy 3 group=discipline")).toContain("discipline Thaumaturgy: 3");
+  });
+
+  test("two of the same Background, each with its own note and price", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait mentor 5 note=`his mother` paid=0");
+    const second = await CommandRouter.route("set-trait mentor 3 add=true note=`Daujotas, his Hermetic Master` paid=3");
+    expect(second).toContain("5 (his mother) + 3 (Daujotas, his Hermetic Master)");
+    const char = (await CharacterStore.load("Visvaldas"))!;
+    expect(char.backgrounds.mentor).toBe(5);                       // the slot takes the highest
+    expect(char.instances!.mentor.map(i => i.paid)).toEqual(["0", "3"]);
+  });
+
+  test("a card that drops a whole group says so - that is how ratings vanish", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait sanctum 8");
+    await CommandRouter.route("creator-mode set=true");
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
+      "oops\n=====\nname: Visvaldas\ntemplates: ouroboros\n\ntraits:\n  Modus: 5");
+    const off = await CommandRouter.route("creator-mode set=false");
+    expect(off).toContain("A whole group went empty");
+    expect(off).toContain("backgrounds (1 gone)");
+    expect(off).toContain("set-trait");
+  });
+});
+
+// =============================================================================
+// SUPERNATURAL CATEGORIES - which family a power belongs to, and what it needs
+// =============================================================================
+describe("supernatural categories: disciplines, magic, sorcery, blood-sorcery", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a blood-sorcery path hangs from its Discipline - unless it is Koldunic", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait thaumaturgy 3 group=discipline");
+    await CommandRouter.route("set-trait rego-vitae 2");
+    await CommandRouter.route("set-trait koldunic-sorcery 1");
+    const held = await CommandRouter.route("supernatural");
+    expect(held).toContain("Blood Sorcery: Rego Vitae 2, Koldunic Sorcery 1");
+    expect(held).not.toContain("needs Thaumaturgy");
+    // Lose the parent Discipline and the path is flagged - Koldunic never is.
+    await CommandRouter.route("set-trait thaumaturgy 0 group=discipline");
+    const orphaned = await CommandRouter.route("supernatural");
+    expect(orphaned).toContain("Rego Vitae needs Thaumaturgy");
+    expect(orphaned).not.toContain("Koldunic Sorcery needs");
+  });
+
+  test("a category names who may have it at all", async () => {
+    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    const listed = await CommandRouter.route("supernatural");
+    expect(listed).toContain("Awakened magic");
+    expect(listed).not.toContain("Blood Sorcery");          // not open to a mage
+    expect(await CommandRouter.route("supernatural blood-sorcery")).toContain("NOT open to mage");
+    expect(await CommandRouter.route("supernatural sorcery")).toContain("(anyone)");
+  });
+});
+
+// =============================================================================
 // BUDGETS - arcana are not merits, and price paid is not price listed
 // =============================================================================
 describe("arcana budgets: their own purse, priced per template", () => {
@@ -4221,7 +4294,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     const refused = await CommandRouter.route("take-merit sharpened-senses 5");
     expect(refused).toContain("may not be taken more times than Resolve (3)");
     expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
-    expect(await CommandRouter.route("take-merit sharpened-senses 5 waive=true")).toContain("5 freebie points");
+    expect(await CommandRouter.route("take-merit sharpened-senses 5 waive=true")).toContain("5 arcana points");
     // A ceiling that MOVES strands the purchases above it - reported, never trimmed.
     expect(await CommandRouter.route("check-constraints")).toContain("sharpened-senses is at 5 but resolve is only 3");
   });
@@ -4303,8 +4376,8 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
   test("two Abilities may reach 3; a THIRD trait at 3 is refused (waivable) and flagged", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     // Two Abilities at the top rating is exactly what the arcanum allows.
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 freebie points");
-    expect(await CommandRouter.route("take-merit trait-affinity::brawl 3")).toContain("3 freebie points");
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 arcana points");
+    expect(await CommandRouter.route("take-merit trait-affinity::brawl 3")).toContain("3 arcana points");
     await CommandRouter.route('define-constraint name="noop" relation=exclusive domain=background members="status"');
     expect(await CommandRouter.route("check-constraints")).toContain("satisfies all 1 constraint group");
     // A third one is over the ration - refused at the door...
@@ -4321,15 +4394,15 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
 
   test("the SECOND top slot may not be another Attribute", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    expect(await CommandRouter.route("take-merit trait-affinity::strength 3")).toContain("3 freebie points");
+    expect(await CommandRouter.route("take-merit trait-affinity::strength 3")).toContain("3 arcana points");
     // One Attribute is fine; a second Attribute at 3 breaks the per-kind ration
     // even though the two slots are not full yet.
     const refused = await CommandRouter.route("take-merit trait-affinity::dexterity 3");
     expect(refused).toContain("allows 1 attribute at 3");
     // An Ability takes the other slot happily.
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 freebie points");
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 arcana points");
     // And a trait BELOW the top rating is never rationed.
-    expect(await CommandRouter.route("take-merit trait-affinity::stealth 2")).toContain("2 freebie points");
+    expect(await CommandRouter.route("take-merit trait-affinity::stealth 2")).toContain("2 arcana points");
   });
 
   test("merit findings surface even with zero constraint groups defined", async () => {

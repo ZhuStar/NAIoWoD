@@ -7,7 +7,8 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `84c5aa0`** ("Arcana are not
+> **Last synced with the code as of commit `cb386af`** ("An arcanum is not
+> filed under merits; set-trait; families of power"). Prior: `84c5aa0` ("Arcana are not
 > Merits: their own purse, priced per template"). Prior: `3cb162a` ("Rationed top
 > ratings"); `ce304b3` ("The words move out
 > of the windows"); `38d2007` ("A floor for the
@@ -2324,6 +2325,46 @@ and `prefill` are mocked/available but not yet written.
     LEFT for the creation engine: pricing ATTRIBUTE and ABILITY dots per
     priority (the `wod:config:costs` table from §7.44 is the seam), and the
     legality verdict itself.
+
+51. **An arcanum is not filed under merits; [[set-trait]]; families of power**
+    (user: "Trait Aptitude is not merit-flaw, it's an arcanum... How do I take
+    the Backgrounds again? The conversion tool deleted them... I think we should
+    have different categories of things, I would call these
+    supernatural-traits").
+    Three things, one of them a scare.
+    **(a) The card files owned powers by KIND.** §7.50 gave arcana their own
+    purse but left them printed under `merits-flaws`, which is what he was
+    looking at. `characterToCard` now writes an `arcana:` block beside
+    `merits-flaws:`, and BOTH read back into the one `meritsFlaws` bucket via
+    BUCKET_SYNONYMS - so nothing migrates and the card stops lying. The Devil's
+    Due powers were re-kinded with it: Trait Affinity, Trait Enhancement and
+    Sharpened Senses are `arcanum`, not `merit`, and now draw on the arcana
+    budget.
+    **(b) The conversion did NOT delete his Backgrounds** - reproduced with a
+    full JSON sheet and they survive intact. The real hole was that there was no
+    way to put a rating BACK except hand-editing the card: `take-merit` exists,
+    `specialty` exists, and every other rating had nothing. New
+    **`[[set-trait <name> <n> [group=] [note=] [paid=] [add=true]]]`**, with the
+    group inferred from the character's buckets, then the chronicle's SRD lists
+    (`srdGroupOf` - so a Background nobody has rated still files as one), then
+    `group=`, then the free `traits` bucket. `add=true` builds the §7.43
+    instances, note and price included.
+    And the thing that should have warned him: `syncFromLorebook` now reports a
+    group that went from N entries to ZERO, because the card is the source of
+    truth and a group left off it IS erased. First attempt printed nothing - the
+    beforeRoute hook syncs BEFORE the command runs, so `creator-mode set=false`
+    had nothing left to notice; `lastEmptied` carries the hook's finding into
+    the reply.
+    **(c) `SupernaturalCategory` + `SupernaturalTraitDef`** (rules.ts): the
+    families - disciplines, magic, sorcery, blood-sorcery - each with the
+    templates it is open to and the sheet bucket its ratings live in, plus a
+    per-MEMBER `parent`, because that is where the irregularity lives: a
+    Thaumaturgical path needs Thaumaturgy and a Mortis path needs Mortis, while
+    Koldunic sorcery needs no Discipline. Put on the member rather than the
+    category precisely so the exception costs nothing to say.
+    **`[[supernatural]]`** lists what a character holds per family and flags a
+    path whose parent Discipline is missing; `[[supernatural <category>]]`
+    details one. Data only - no powers engine, nothing enforced.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

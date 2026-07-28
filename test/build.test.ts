@@ -32,3 +32,21 @@ test("the release redefines NO NovelAI type and no `api` (they are ambient on-ho
   // (the header comments may name the file; the mock CODE must be absent).
   expect(out).not.toMatch(/__uiClickButton|__resetStorageMock|__openMockWindow|__mockStore/);
 });
+
+// window.ts is layout and behaviour; the words live in ui-text.ts (or on the
+// verb's CommandSpec, for a field the spec already describes). This fails the
+// build if a bare string literal creeps back into a window's part tree, which
+// is the only way the two can drift apart.
+test("window.ts holds no user-facing copy of its own", async () => {
+  const src = await Bun.file(new URL("../src/window.ts", import.meta.url).pathname).text();
+  const offenders: string[] = [];
+  for (const line of src.split("\n")) {
+    if (line.trim().startsWith("//")) continue;
+    // `text:` / `placeholder:` / `label:` / `title:` followed by a quoted
+    // literal. Template literals are fine: they interpolate data or UI_TEXT.
+    for (const m of line.matchAll(/\b(text|placeholder|label|title)\s*:\s*(['"])(.*?)\2/g)) {
+      if (m[3].trim().length) offenders.push(`${m[1]}: "${m[3]}"`);
+    }
+  }
+  expect(offenders).toEqual([]);
+});

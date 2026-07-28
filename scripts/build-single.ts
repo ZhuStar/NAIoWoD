@@ -29,6 +29,7 @@ const MODULES = [
   "src/services.ts",
   "src/state.ts",
   "src/game.ts",
+  "src/ui-text.ts",
   "src/window.ts",
   "src/index.ts",
   "src/main.ts",

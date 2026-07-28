@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `38d2007`** ("A floor for the
-> die target, and the knob the card format was eating"). Prior: `e72acb5`
+> **Last synced with the code as of commit `ce304b3`** ("The words move out
+> of the windows"). Prior: `38d2007` ("A floor for the
+> die target, and the knob the card format was eating"); `e72acb5`
 > ("One point, one
 > difficulty break; stacking Willpower is a spellcasting rule");
 > `46e362c` ("A mage has no
@@ -105,6 +106,7 @@ src/rules.ts         DATA: templates, resources, effect grammar, roads, SRD seed
 src/command.ts       the command bus: parser, CommandSpec/describe/compose, router+hooks
 src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry, generic config stores
 src/state.ts         the character model + EVERY persistent store (config registries, live state)
+src/ui-text.ts       pure: THE window copy - every user-facing window string (§7.48)
 src/game.ts          the verbs: effect interpreter, wizards, handlers + spec registrations
 src/window.ts        api.v1.ui windows that EMIT commands - forms DERIVED from CommandSpecs
 src/index.ts         re-exports * + init()  (importing = zero side effects)
@@ -2214,6 +2216,31 @@ and `prefill` are mocked/available but not yet written.
     already had `example`, which window.ts prefers - so the grammar stays in
     `hint` for `[[help]]` and the friendly text goes in `example`, with the
     `desc` (the field's label) now explaining what `::effect` and `!` mean.
+
+48. **The words move out of the windows** (user: "Are window texts (like text
+    fields used and labels, and those help text used inside text input) inside
+    the window itself or in a kind of 'string resources' thingy? If they are
+    inside, we should move them").
+    Half the answer was already yes: the labels and placeholders he was looking
+    at come from the verb's `ParamSpec` (`desc` / `example` / `hint`), the same
+    spec `[[help]]` derives from - §7.20's one-source-of-truth rule, which
+    stays. But window.ts also carried ~40 strings of its own: titles, blurbs,
+    button labels, refusals, the ad-hoc labels of fields no single spec owns
+    (the roll window multiplexes three verbs), and the `win-*` OOC replies.
+    Those moved to **`src/ui-text.ts`** - one `UI_TEXT` object, pure, no
+    imports, grouped per window with a `common` block for chrome and functions
+    for the parameterized ones (`chooseButton(key)`, `needs(label)`,
+    `bindingLabel(slot)`). window.ts is now layout and behaviour only.
+    One duplication was RETIRED rather than moved: the afflict window hand-wrote
+    "On (blank = the current character)" while `[[afflict]]`'s own spec already
+    said "Who (default: the current character)" - a new `labelOf(spec, key)`
+    reads it off the spec. The roll window's "For"/"Pool"/"Opposed" framing
+    deliberately stays in UI_TEXT: those fields are shared by roll / roll-for /
+    name-roll, so no single spec's wording is right for the form.
+    Enforced, not just tidied: **test/build.test.ts fails if a bare quoted
+    literal reappears** after `text:` / `placeholder:` / `label:` / `title:` in
+    window.ts. Verified by reintroducing one and watching it fail; template
+    literals pass, because they interpolate data or UI_TEXT.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

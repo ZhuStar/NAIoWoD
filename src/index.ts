@@ -18,6 +18,7 @@ export * from "./command";
 export * from "./services";
 export * from "./state";
 export * from "./game";
+export * from "./ui-text";
 export * from "./window";
 
 import { log } from "./host";

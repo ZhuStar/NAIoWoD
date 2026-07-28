@@ -1309,6 +1309,21 @@ for you** (hand-editing stays equally valid).
   possession or fear system to enforce an immunity against *yet*.
 - `[[merit]]` lists every definition; `[[merit <name>]]` shows one in full.
 
+### Where the words live
+
+A window shows three kinds of text, and none of them is written inside
+`window.ts`:
+
+| Text | Comes from | Why |
+| --- | --- | --- |
+| A field's **label** | the verb's `ParamSpec.desc` | the form and `[[help]]` describe the same argument, so they cannot drift |
+| A field's **placeholder** | `ParamSpec.example` (falling back to `hint`) | `hint` is the *grammar* `[[help]]` prints (`res[::effect][!]`); `example` is something a player could type |
+| Everything else — titles, blurbs, buttons, refusals, a window's own framing of a field three verbs share | **`src/ui-text.ts`** | no spec can own it, so it lives in one place you can read without reading layout code |
+
+`window.ts` is layout and behaviour only, and a **build test fails** if a bare
+string literal reappears in a part tree there — which is the only way the two
+could ever disagree.
+
 ### Windows are just command emitters
 
 `[[win-constraint]]` opens an **`api.v1.ui` window** — a form (name; relation and

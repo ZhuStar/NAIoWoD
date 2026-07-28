@@ -10920,10 +10920,110 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
 }
 //#endregion src/game.ts
 
+//#region src/ui-text.ts
+// =============================================================================
+// UI TEXT - every user-facing string the windows show
+// -----------------------------------------------------------------------------
+// window.ts holds LAYOUT and BEHAVIOUR; this holds the words. Change a label,
+// a button, a placeholder or a refusal here and nowhere else - a test fails the
+// build if a bare string literal creeps back into a window's part tree.
+//
+// What is deliberately NOT here: the labels and placeholders of a field that a
+// CommandSpec already describes. Those come from the spec's `desc` (the label),
+// `example` (the placeholder a form shows) and `hint` (the grammar [[help]]
+// prints), so the window and the help text can never drift apart - that is the
+// same one-source-of-truth rule the forms themselves are built on. These
+// entries are only the strings no spec can own: window chrome, buttons, the
+// windows' own framing of a shared field, and their refusals.
+//
+// Pure: no imports, no host access.
+// =============================================================================
+
+const UI_TEXT = {
+  // Chrome every window shares.
+  common: {
+    create: "Create",
+    close: "Close",
+    cancel: "Cancel",
+    clear: "(clear)",
+    // The picker: a button beside a field, and the modal it opens.
+    chooseButton: (key: string): string => `Choose ${key}…`,
+    chooseTitle: (key: string): string => `Choose ${key}`,
+    // A required field left blank, named by its own label.
+    needs: (label: string): string => `Needs ${label}.`,
+  },
+
+  constraint: {
+    title: "Define constraint group",
+    blurb: "**Define a constraint group** (exclusive / restricted / forbidden)",
+    opened: "Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).",
+  },
+
+  table: {
+    title: "Define success table",
+    blurb: "**Define a success table** (ladder rows, numeric output, or both)",
+    opened: "Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).",
+  },
+
+  affliction: {
+    title: "Define affliction",
+    blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
+    opened: "Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).",
+  },
+
+  afflict: {
+    title: "Afflict an affliction",
+    blurb: "**Afflict an affliction** - pick one; its binding slots appear below.",
+    afflictionLabel: "Affliction",
+    afflictionPlaceholder: "e.g. feral-whispers",
+    // `on` takes its label from [[afflict]]'s own spec; this is only the hint
+    // inside the empty field.
+    targetPlaceholder: "name or @alias",
+    // One field per binding slot the chosen def declares - the def's vocabulary
+    // is the Storyteller's, so the slot name is the label.
+    bindingLabel: (slot: string): string => `Binding: ${slot}`,
+    afflictButton: "Afflict",
+    needsAffliction: "Pick an affliction first.",
+    opened: "Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).",
+  },
+
+  roll: {
+    title: "Build a roll",
+    blurb: "**Build a roll** - Roll fires it; Save stores it as a named roll.",
+    // "For" and "Pool" are this window's framing of fields three verbs share
+    // ([[roll]] / [[roll-for]] / [[name-roll]]), so they are its words, not a
+    // spec's.
+    forLabel: "For (blank = the current character)",
+    forPlaceholder: "name",
+    poolLabel: "Pool",
+    poolPlaceholder: "e.g. dexterity+melee, or @saved",
+    opposedLabel: "Opposed (Save bakes a contest; opponent supplied at play via vs=)",
+    opposedNone: "none",
+    vsPoolLabel: "vs-pool (opposition's pool; blank = your own pool)",
+    vsPoolPlaceholder: "e.g. perception+alertness",
+    vsDifficultyLabel: "vs-difficulty (opposition's difficulty; optional)",
+    saveAsLabel: "Save as (optional - Save stores the roll under this name)",
+    saveAsPlaceholder: "e.g. strike",
+    rollButton: "Roll",
+    saveButton: "Save",
+    needsPool: "Needs a pool.",
+    needsSaveName: "Needs a Save-as name to save.",
+    opened: "Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).",
+  },
+} as const;
+//#endregion src/ui-text.ts
+
 //#region src/window.ts
 // =============================================================================
 // WINDOWS - api.v1.ui forms that EMIT commands (no separate execution path)
 // -----------------------------------------------------------------------------
+// This module is LAYOUT and BEHAVIOUR only: every word it shows comes from
+// somewhere else. A field the verb's CommandSpec describes takes its label from
+// `desc` and its placeholder from `example`, so the form and [[help]] can never
+// disagree; everything a spec cannot own (titles, buttons, refusals, a window's
+// own framing of a shared field) lives in ui-text.ts. A test fails the build if
+// a bare string literal reappears in a part tree here.
+//
 // A wizard-window is a UI over the command layer: it renders a form with UI
 // Parts, binds fields to tempStorage via storageKey, and on submit composes a
 // [[command]] string and routes it through the SAME CommandRouter every other
@@ -10941,6 +11041,14 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
 // =============================================================================
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
+
+// A field the spec describes labels itself: `desc` is the label, `example` the
+// placeholder. Falling back to the bare key keeps a spec that says nothing
+// from rendering an empty label.
+const labelOf = (spec: CommandSpec | undefined, key: string): string => {
+  const p = (spec?.params ?? []).find(x => x.key === key);
+  return p?.desc ?? key;
+};
 
 // A row of buttons behaving as a single-select: the current value is marked
 // with a bullet; clicking one writes it to tempStorage and re-renders.
@@ -10966,7 +11074,7 @@ async function openPickerModal(key: string, storageKey: string, options: () => P
   const temp = api.v1.tempStorage;
   const current = String((await temp.get(storageKey)) ?? "").trim();
   const opts = await options();
-  const handle = await api.v1.ui.modal.open({ title: `Choose ${key}`, size: "small", content: [] });
+  const handle = await api.v1.ui.modal.open({ title: UI_TEXT.common.chooseTitle(key), size: "small", content: [] });
   const pick = (value: string) => async (): Promise<void> => {
     await temp.set(storageKey, value);
     await handle.close();
@@ -10974,8 +11082,8 @@ async function openPickerModal(key: string, storageKey: string, options: () => P
   };
   await handle.update({ content: [part.column({ content: [
     ...opts.map(o => part.button({ text: `${o.value === current ? "✅ " : ""}${o.label ?? o.value}`, callback: pick(o.value) })),
-    part.button({ text: "(clear)", callback: pick("") }),
-    part.button({ text: "Cancel", callback: () => handle.close() }),
+    part.button({ text: UI_TEXT.common.clear, callback: pick("") }),
+    part.button({ text: UI_TEXT.common.cancel, callback: () => handle.close() }),
   ] })] });
 }
 
@@ -10991,7 +11099,7 @@ function pickerField(part: UiPartHelpers, opts: {
     part.text({ text: opts.label }),
     part.row({ content: [
       part.textInput({ storageKey: opts.storageKey, placeholder: opts.placeholder }),
-      part.button({ text: `Choose ${opts.key}…`, callback: () => openPickerModal(opts.key, opts.storageKey, opts.options, opts.rerender) }),
+      part.button({ text: UI_TEXT.common.chooseButton(opts.key), callback: () => openPickerModal(opts.key, opts.storageKey, opts.options, opts.rerender) }),
     ] }),
   ] });
 }
@@ -11004,7 +11112,7 @@ async function submitCommand(verb: string, spec: CommandSpec, rerender: (result?
     values[p.key] = String((await api.v1.tempStorage.get(WKEY(verb, p.key))) ?? "").trim();
   }
   const required = (spec.params ?? []).find(p => p.required && !values[p.key] && !p.default);
-  if (required) { await rerender(`Needs ${required.desc ?? required.key}.`); return; }
+  if (required) { await rerender(UI_TEXT.common.needs(required.desc ?? required.key)); return; }
   const reply = await CommandRouter.route(composeCommand(verb, values, spec));
   await rerender(reply);
 }
@@ -11053,8 +11161,8 @@ async function openCommandWindow(verb: string, opts?: {
       }
     }
     content.push(part.row({ content: [
-      part.button({ text: opts?.submitLabel ?? "Create", callback: () => submitCommand(verb, spec, render) }),
-      part.button({ text: "Close", callback: () => handle.close() }),
+      part.button({ text: opts?.submitLabel ?? UI_TEXT.common.create, callback: () => submitCommand(verb, spec, render) }),
+      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
     ] }));
     if (result) content.push(part.box({ content: [part.text({ text: result })] }));
     await handle.update({ content });
@@ -11067,15 +11175,15 @@ async function openCommandWindow(verb: string, opts?: {
 // The constraint-group window: [[define-constraint]]'s spec rendered as a form.
 async function openConstraintWindow(): Promise<void> {
   await openCommandWindow("define-constraint", {
-    title: "Define constraint group",
-    blurb: "**Define a constraint group** (exclusive / restricted / forbidden)",
+    title: UI_TEXT.constraint.title,
+    blurb: UI_TEXT.constraint.blurb,
   });
 }
 
 // [[win-constraint]] - a UI over [[define-constraint]], derived from its spec.
 async function cmdWinConstraint(): Promise<string> {
   await openConstraintWindow();
-  return sys(`Opened the constraint-group window. Fill it in and press Create (it runs [[define-constraint]]).`);
+  return sys(UI_TEXT.constraint.opened);
 }
 
 CommandRouter.register("win-constraint", cmdWinConstraint, {
@@ -11085,10 +11193,10 @@ CommandRouter.register("win-constraint", cmdWinConstraint, {
 // [[win-table]] - a UI over [[define-table]], derived from its spec.
 async function cmdWinTable(): Promise<string> {
   await openCommandWindow("define-table", {
-    title: "Define success table",
-    blurb: "**Define a success table** (ladder rows, numeric output, or both)",
+    title: UI_TEXT.table.title,
+    blurb: UI_TEXT.table.blurb,
   });
-  return sys(`Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).`);
+  return sys(UI_TEXT.table.opened);
 }
 
 CommandRouter.register("win-table", cmdWinTable, {
@@ -11104,11 +11212,11 @@ const afflictionOptions = async (): Promise<PickerOption[]> =>
 // `mirror` fields get pickers over the existing afflictions (typing still works).
 async function cmdWinAffliction(): Promise<string> {
   await openCommandWindow("define-affliction", {
-    title: "Define affliction",
-    blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
+    title: UI_TEXT.affliction.title,
+    blurb: UI_TEXT.affliction.blurb,
     pickers: { then: afflictionOptions, mirror: afflictionOptions },
   });
-  return sys(`Opened the affliction window. Fill it in and press Create (it runs [[define-affliction]]).`);
+  return sys(UI_TEXT.affliction.opened);
 }
 
 // [[win-afflict]] - the first DOMAIN-driven window: pick an affliction and its
@@ -11121,28 +11229,29 @@ async function openAfflictWindow(): Promise<void> {
   const part = api.v1.ui.part;
   const temp = api.v1.tempStorage;
   const spec = CommandRouter.specFor("afflict")!;
-  const handle = await api.v1.ui.window.open({ title: "Afflict an affliction", content: [], defaultWidth: 480, defaultHeight: 480 });
+  const handle = await api.v1.ui.window.open({ title: UI_TEXT.afflict.title, content: [], defaultWidth: 480, defaultHeight: 480 });
 
   const render = async (result?: string): Promise<void> => {
     const chosen = String((await temp.get(AKEY("affliction"))) ?? "").trim();
     const def = chosen ? AfflictionRegistry.get(chosen) : undefined;
     const content: UIPart[] = [
-      part.text({ text: "**Afflict an affliction** - pick one; its binding slots appear below.", markdown: true }),
+      part.text({ text: UI_TEXT.afflict.blurb, markdown: true }),
       pickerField(part, {
-        key: "affliction", label: "Affliction", storageKey: AKEY("affliction"),
-        options: afflictionOptions, rerender: () => render(), placeholder: "e.g. feral-whispers",
+        key: "affliction", label: UI_TEXT.afflict.afflictionLabel, storageKey: AKEY("affliction"),
+        options: afflictionOptions, rerender: () => render(), placeholder: UI_TEXT.afflict.afflictionPlaceholder,
       }),
-      part.text({ text: "On (blank = the current character)" }),
-      part.textInput({ storageKey: AKEY("on"), placeholder: "name or @alias" }),
+      // `on` is [[afflict]]'s own param, so its label is the spec's.
+      part.text({ text: labelOf(spec, "on") }),
+      part.textInput({ storageKey: AKEY("on"), placeholder: UI_TEXT.afflict.targetPlaceholder }),
     ];
     for (const slot of def?.bindings ?? []) {
-      content.push(part.text({ text: `Binding: ${slot}` }));
-      content.push(part.textInput({ storageKey: AKEY(`bind:${slot}`), placeholder: "name or @alias" }));
+      content.push(part.text({ text: UI_TEXT.afflict.bindingLabel(slot) }));
+      content.push(part.textInput({ storageKey: AKEY(`bind:${slot}`), placeholder: UI_TEXT.afflict.targetPlaceholder }));
     }
     content.push(part.row({ content: [
-      part.button({ text: "Afflict", callback: async () => {
+      part.button({ text: UI_TEXT.afflict.afflictButton, callback: async () => {
         const affliction = String((await temp.get(AKEY("affliction"))) ?? "").trim();
-        if (!affliction) { await render("Pick an affliction first."); return; }
+        if (!affliction) { await render(UI_TEXT.afflict.needsAffliction); return; }
         const values: Record<string, string> = {
           affliction,
           on: String((await temp.get(AKEY("on"))) ?? "").trim(),
@@ -11155,7 +11264,7 @@ async function openAfflictWindow(): Promise<void> {
         const reply = await CommandRouter.route(composeCommand("afflict", values, spec));
         await render(reply);
       } }),
-      part.button({ text: "Close", callback: () => handle.close() }),
+      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
     ] }));
     if (result) content.push(part.box({ content: [part.text({ text: result })] }));
     await handle.update({ content });
@@ -11165,7 +11274,7 @@ async function openAfflictWindow(): Promise<void> {
 
 async function cmdWinAfflict(): Promise<string> {
   await openAfflictWindow();
-  return sys(`Opened the afflict window. Pick an affliction, fill its bindings, and press Afflict (it runs [[afflict]]).`);
+  return sys(UI_TEXT.afflict.opened);
 }
 
 CommandRouter.register("win-affliction", cmdWinAffliction, {
@@ -11219,7 +11328,7 @@ async function openRollWindow(): Promise<void> {
   const pickers: Record<string, () => Promise<PickerOption[]>> = {
     spend: spendOptions, specialty: specialtyOptions, table: tableOptions,
   };
-  const handle = await api.v1.ui.window.open({ title: "Build a roll", content: [], defaultWidth: 480, defaultHeight: 640 });
+  const handle = await api.v1.ui.window.open({ title: UI_TEXT.roll.title, content: [], defaultWidth: 480, defaultHeight: 640 });
 
   // Compose+route `verb`, reading each of ITS spec params from the form (the
   // field keys ARE the param keys); `extra` pre-binds cross-verb params.
@@ -11234,14 +11343,14 @@ async function openRollWindow(): Promise<void> {
   const render = async (result?: string): Promise<void> => {
     const knobs = (CommandRouter.specFor("roll")?.params ?? []).filter(p => p.key !== "pool" && p.key !== "diff-mod");
     const content: UIPart[] = [
-      part.text({ text: "**Build a roll** - Roll fires it; Save stores it as a named roll.", markdown: true }),
+      part.text({ text: UI_TEXT.roll.blurb, markdown: true }),
       pickerField(part, {
-        key: "for", label: "For (blank = the current character)", storageKey: RKEY("for"),
-        options: characterOptions, rerender: () => render(), placeholder: "name",
+        key: "for", label: UI_TEXT.roll.forLabel, storageKey: RKEY("for"),
+        options: characterOptions, rerender: () => render(), placeholder: UI_TEXT.roll.forPlaceholder,
       }),
       pickerField(part, {
-        key: "pool", label: "Pool", storageKey: RKEY("pool"),
-        options: savedRollOptions, rerender: () => render(), placeholder: "e.g. dexterity+melee, or @saved",
+        key: "pool", label: UI_TEXT.roll.poolLabel, storageKey: RKEY("pool"),
+        options: savedRollOptions, rerender: () => render(), placeholder: UI_TEXT.roll.poolPlaceholder,
       }),
     ];
     for (const p of knobs) {
@@ -11263,9 +11372,9 @@ async function openRollWindow(): Promise<void> {
     // params, so submit("name-roll") reads them straight from these fields by key.
     // vs-pool / vs-difficulty only show once a mode is chosen (collapse when off).
     const opposedNow = await field("opposed");
-    content.push(part.text({ text: "Opposed (Save bakes a contest; opponent supplied at play via vs=)" }));
+    content.push(part.text({ text: UI_TEXT.roll.opposedLabel }));
     content.push(part.row({ content: (["", "resisted", "contested"] as const).map(o => part.button({
-      text: `${o === opposedNow ? "• " : ""}${o === "" ? "none" : o}`,
+      text: `${o === opposedNow ? "• " : ""}${o === "" ? UI_TEXT.roll.opposedNone : o}`,
       callback: async () => {
         await temp.set(RKEY("opposed"), o);
         if (o === "") { await temp.set(RKEY("vs-pool"), ""); await temp.set(RKEY("vs-difficulty"), ""); }
@@ -11273,27 +11382,27 @@ async function openRollWindow(): Promise<void> {
       },
     })) }));
     if (opposedNow === "resisted" || opposedNow === "contested") {
-      content.push(part.text({ text: "vs-pool (opposition's pool; blank = your own pool)" }));
-      content.push(part.textInput({ storageKey: RKEY("vs-pool"), placeholder: "e.g. perception+alertness" }));
-      content.push(part.text({ text: "vs-difficulty (opposition's difficulty; optional)" }));
+      content.push(part.text({ text: UI_TEXT.roll.vsPoolLabel }));
+      content.push(part.textInput({ storageKey: RKEY("vs-pool"), placeholder: UI_TEXT.roll.vsPoolPlaceholder }));
+      content.push(part.text({ text: UI_TEXT.roll.vsDifficultyLabel }));
       content.push(part.numberInput({ storageKey: RKEY("vs-difficulty") }));
     }
-    content.push(part.text({ text: "Save as (optional - Save stores the roll under this name)" }));
-    content.push(part.textInput({ storageKey: RKEY("save-as"), placeholder: "e.g. strike" }));
+    content.push(part.text({ text: UI_TEXT.roll.saveAsLabel }));
+    content.push(part.textInput({ storageKey: RKEY("save-as"), placeholder: UI_TEXT.roll.saveAsPlaceholder }));
     content.push(part.row({ content: [
-      part.button({ text: "Roll", callback: async () => {
+      part.button({ text: UI_TEXT.roll.rollButton, callback: async () => {
         const pool = await field("pool");
-        if (!pool) { await render("Needs a pool."); return; }
+        if (!pool) { await render(UI_TEXT.roll.needsPool); return; }
         const forName = await field("for");
         await submit(forName ? "roll-for" : "roll", forName ? { character: forName } : {});
       } }),
-      part.button({ text: "Save", callback: async () => {
+      part.button({ text: UI_TEXT.roll.saveButton, callback: async () => {
         const name = await field("save-as");
-        if (!name) { await render("Needs a Save-as name to save."); return; }
-        if (!(await field("pool"))) { await render("Needs a pool."); return; }
+        if (!name) { await render(UI_TEXT.roll.needsSaveName); return; }
+        if (!(await field("pool"))) { await render(UI_TEXT.roll.needsPool); return; }
         await submit("name-roll", { name });
       } }),
-      part.button({ text: "Close", callback: () => handle.close() }),
+      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
     ] }));
     if (result) content.push(part.box({ content: [part.text({ text: result })] }));
     await handle.update({ content });
@@ -11303,7 +11412,7 @@ async function openRollWindow(): Promise<void> {
 
 async function cmdWinRoll(): Promise<string> {
   await openRollWindow();
-  return sys(`Opened the roll window. Build the pool and knobs, then Roll (runs [[roll]] / [[roll-for]]) or Save (runs [[name-roll]]).`);
+  return sys(UI_TEXT.roll.opened);
 }
 
 CommandRouter.register("win-roll", cmdWinRoll, {

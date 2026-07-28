@@ -2468,6 +2468,62 @@ const HUMANITY_MORALITY: MoralityConfig = {
 // =============================================================================
 // TEMPLATES - per-splat configuration including starting values
 // =============================================================================
+// THE CREATION BUDGET - what a fresh character is allowed to be
+// -----------------------------------------------------------------------------
+// Every Dark Ages template buys the same three priority ladders (Attributes
+// 7/5/3 over a free dot each, Abilities 13/9/5 from nothing, five Background
+// dots) and then its own splat pools on top: a vampire's four clan Discipline
+// dots and seven Virtue dots, a mage's starting Quintessence. Freebies are the
+// last purse, priced by the table in DEFAULT_ADVANCEMENT_COSTS.
+//
+// Nothing here ENFORCES: [[creation]] reports each pool against what the sheet
+// actually holds, and the Storyteller decides. The point is that the numbers
+// live in ONE place instead of in a book on someone's desk.
+// =============================================================================
+interface PriorityPools { primary: number; secondary: number; tertiary: number }
+// A trait whose start or ceiling differs from everyone else's - a Nosferatu has
+// no Appearance at all, and never will.
+interface TraitLimit { start?: number; max?: number; note?: string }
+
+interface CreationBudget {
+  attributes: PriorityPools;          // over one free dot in each
+  attributeStart: number;             // the free dot (1)
+  attributeMax: number;               // the usual ceiling (5)
+  abilities: PriorityPools;
+  abilityStart: number;               // nothing free (0)
+  abilityMax: number;
+  backgrounds: number;
+  freebies: number;
+  disciplines?: number;               // vampires: four dots of CLAN Disciplines
+  virtues?: number;                   // vampires: seven, over a free dot each
+  // Per-trait exceptions, by trait name.
+  limits?: Record<string, TraitLimit>;
+  notes?: string[];                   // the derived values a splat records
+}
+
+// What every Dark Ages character gets, whatever they are.
+const BASE_CREATION: CreationBudget = {
+  attributes: { primary: 7, secondary: 5, tertiary: 3 }, attributeStart: 1, attributeMax: 5,
+  abilities: { primary: 13, secondary: 9, tertiary: 5 }, abilityStart: 0, abilityMax: 5,
+  backgrounds: 5,
+  freebies: 15,
+};
+
+function creationBudget(over: Partial<CreationBudget> = {}): CreationBudget {
+  return { ...BASE_CREATION, ...over };
+}
+
+// Where a trait's own start/ceiling comes from: the template's exception first,
+// then the pool's default for its kind.
+function traitLimitFor(budget: CreationBudget, kind: "attribute" | "ability", trait: string): TraitLimit {
+  const override = budget.limits?.[StringUtil.normalize(trait)];
+  const base = kind === "attribute"
+    ? { start: budget.attributeStart, max: budget.attributeMax }
+    : { start: budget.abilityStart, max: budget.abilityMax };
+  return { ...base, ...(override ?? {}) };
+}
+
+// =============================================================================
 type PoolKind = "tracker" | "pool";
 // What spending `cost` points of a resource grants to a roll. Maps onto the
 // RollModifier fields in rolls.ts (difficulty/dice/auto-successes), so a resource
@@ -2671,7 +2727,10 @@ class TemplateConfig {
     // terms of another. A sheet may override any of them (PlayableCharacter
     // .budgets). A purse with no budget anywhere is the Storyteller's call, and
     // [[budget]] says so rather than inventing a number.
-    public readonly Budgets: Record<string, string> = {}
+    public readonly Budgets: Record<string, string> = {},
+    // What a fresh character of this template may be (see CreationBudget).
+    // Reported by [[creation]], enforced by nobody yet.
+    public readonly Creation: CreationBudget = BASE_CREATION
   ) {}
 
   // Resources is the modern name for Pools (trackers + pools with roles/effects).
@@ -2715,7 +2774,19 @@ const TEMPLATE_VAMPIRE = new TemplateConfig(
   VAMPIRE_SOAK,
   HUMANITY_MORALITY, true,
   STANDARD_HEALTH_LEVELS,
-  [new UndeadPhysiology()]   // bullets & blades to bashing; fire/sunlight stay aggravated
+  [new UndeadPhysiology()],   // bullets & blades to bashing; fire/sunlight stay aggravated
+  false, {},
+  creationBudget({
+    disciplines: 4,   // among CLAN Disciplines
+    virtues: 7,       // over a free dot in each Road Virtue and in Courage
+    notes: [
+      "Four Discipline dots, among the CLAN's three ([[clan]] names them).",
+      "Seven Virtue dots, over one free dot in each Road Virtue and in Courage.",
+      "Road rating = the sum of the Road Virtues; Willpower = Courage.",
+      "Starting blood = one die + one per dot of Domain and Herd.",
+      "Generation starts at 12th; the Generation Background buys it lower.",
+    ],
+  })
 );
 
 // Dark Ages: Mage works magic through Foundation & Pillars (its answer to the
@@ -2742,7 +2813,15 @@ const TEMPLATE_MAGE = new TemplateConfig(
   ],
   MAGE_SOAK,
   null, false,   // Mages have no Road/Humanity and no Virtues
-  STANDARD_HEALTH_LEVELS, [], true   // Awakened
+  STANDARD_HEALTH_LEVELS, [], true,   // Awakened
+  {},
+  creationBudget({
+    notes: [
+      "Starting Willpower 5; note the Aura modifier, if any.",
+      "Starting Quintessence = Cray + Fount Backgrounds, or 5, whichever is higher.",
+      "The Fellowship sets the Foundation and the four Pillars ([[fellowships]]).",
+    ],
+  })
 );
 
 // Dark Ages: Devil's Due.
@@ -2926,7 +3005,16 @@ const TEMPLATE_OUROBOROS = new TemplateConfig(
   GHOUL_SOAK,
   // Like a mage: the ritual burned the Road away. No morality, no Virtues.
   null, false,
-  STANDARD_HEALTH_LEVELS, [], true   // Awakened
+  STANDARD_HEALTH_LEVELS, [], true,   // Awakened
+  {},
+  creationBudget({
+    notes: [
+      "Starting Willpower 5; note the Aura modifier, if any.",
+      "One pool, not four: Living Resolve starts at Cray + Fount, or 5, whichever is higher.",
+      "The Fellowship sets the Foundation and the four Pillars ([[fellowships]]) - his is the Order of Hermes.",
+      "Arcana and Taints come out of the arcana purse, not out of freebies ([[budget]]).",
+    ],
+  })
 );
 
 const TEMPLATES: Record<string, TemplateConfig> = {
@@ -2996,6 +3084,27 @@ function healthLevelsForTemplates(keys: string[]): HealthLevelDef[] {
   return (t ?? TEMPLATE_MORTAL).HealthLevels;
 }
 
+// The budget a character of these templates is built against. Templates STACK
+// here rather than shadowing one another (a vampire-and-mage owes both sets of
+// dots), so each one's numbers override in turn and its notes are appended.
+function creationBudgetFor(keys: string[]): CreationBudget {
+  let budget = BASE_CREATION;
+  const notes: string[] = [];
+  const limits: Record<string, TraitLimit> = {};
+  for (const key of keys) {
+    const tpl = TEMPLATES[StringUtil.normalize(key)];
+    if (!tpl) continue;
+    budget = { ...budget, ...tpl.Creation };
+    Object.assign(limits, tpl.Creation.limits ?? {});
+    for (const note of tpl.Creation.notes ?? []) if (!notes.includes(note)) notes.push(note);
+  }
+  return {
+    ...budget,
+    ...(Object.keys(limits).length ? { limits } : {}),
+    ...(notes.length ? { notes } : {}),
+  };
+}
+
 // =============================================================================
 // FELLOWSHIPS - a mystic society's Foundation & Pillars, as data
 // -----------------------------------------------------------------------------
@@ -3007,19 +3116,137 @@ function healthLevelsForTemplates(keys: string[]): HealthLevelDef[] {
 // =============================================================================
 interface Fellowship {
   name: string;
+  aliases?: string[];                 // the other names it goes by
+  theme?: string;                     // what its Pillars ARE ("The Runes", "Archangels")
   foundation: string;                 // the Foundation TRAIT name
   foundationGloss?: string;
   pillars: Record<string, string>;    // pillar trait name -> gloss
 }
 
 const FELLOWSHIPS: Record<string, Fellowship> = {
+  "ahl-i-batin": {
+    name: "Ahl-i-Batin", aliases: ["batin", "batini", "batine"], theme: "Ubbadan (Faith)",
+    foundation: "al-ikhlas",
+    pillars: {
+      "al-anbiya": "perception and time", "al-fatiha": "mental contact and communication",
+      "al-hajj": "scrying and travel", "al-layl": "illusion and stealth",
+    },
+  },
+  "messianic-voices": {
+    name: "Messianic Voices", aliases: ["messianic", "messianics"], theme: "Archangels",
+    foundation: "divinity",
+    pillars: {
+      "gavri-el": "the messenger Angel of Fire", "mikha-el": "the Angel of War",
+      "repha-el": "the Angel of the Creative Spirit", "uri-el": "the Angel of Death",
+    },
+  },
+  "old-faith": {
+    name: "Old Faith", aliases: ["aedun", "aeduna", "living-faith"], theme: "The Seasons",
+    foundation: "spontaneity",
+    pillars: {
+      autumn: "Earth and the Harvest", spring: "Air and Rebirth",
+      summer: "Fire and Vitality", winter: "Death and Water",
+    },
+  },
   "order-of-hermes": {
-    name: "Order of Hermes",
+    name: "Order of Hermes", aliases: ["hermetic-order", "hermetic", "hermetics"], theme: 'Forma ("Forms")',
     foundation: "modus",
     foundationGloss: "the Ouroboros - knowledge begets discipline and focus, which begets more knowledge",
     pillars: { anima: "life", corona: "mind", primus: "magic itself", vires: "forces" },
   },
+  "spirit-talkers": {
+    name: "Spirit-Talkers", aliases: ["spirit-talker"], theme: "Totems",
+    foundation: "sensitivity",
+    pillars: {
+      chieftain: "the voices of leaders", trickster: "the thief, the lover and the fool",
+      warrior: "the brave fighter", "wise-one": "the venerable lessons of the ages",
+    },
+  },
+  valdaermen: {
+    name: "Valdaermen", aliases: ["valdaerman", "runecrafter", "runecrafters", "spae-crafter", "spa-crafter"],
+    theme: "The Runes", foundation: "blot",
+    pillars: {
+      fara: "wanderlust and conveyance", forlog: "wealth and good fortune",
+      galdrar: "all that is hidden or forbidden", hjaldar: "those who make war",
+    },
+  },
 };
+
+// A fellowship by name OR by any of the names it also goes by; the id rides
+// along, for the same reason it does on a clan.
+function fellowshipByName(name: string): (Fellowship & { id: string }) | undefined {
+  const key = StringUtil.normalize(name);
+  for (const [id, f] of Object.entries(FELLOWSHIPS)) {
+    if (id === key || StringUtil.normalize(f.name) === key) return { ...f, id };
+    if ((f.aliases ?? []).some(a => StringUtil.normalize(a) === key)) return { ...f, id };
+  }
+  return undefined;
+}
+
+// =============================================================================
+// CLANS - the thirteen (and the Assamite castes), by their Disciplines
+// =============================================================================
+interface Clan {
+  name: string;
+  disciplines: string[];
+  aliases?: string[];
+  // The clan a CASTE belongs to: the three Assamite castes pick different
+  // Disciplines but are one clan, so anything "clan-exclusive" is theirs alike.
+  // Absent means the entry is its own clan.
+  family?: string;
+  // Traits the clan itself bounds - a Nosferatu's Appearance is 0 and stays 0.
+  limits?: Record<string, TraitLimit>;
+  note?: string;
+}
+const CLANS: Record<string, Clan> = {
+  brujah: { name: "Brujah", disciplines: ["celerity", "potence", "presence"] },
+  cappadocian: { name: "Cappadocians", aliases: ["cappadocians"], disciplines: ["auspex", "fortitude", "mortis"] },
+  lasombra: { name: "Lasombra", disciplines: ["dominate", "obtenebration", "potence"] },
+  toreador: { name: "Toreador", disciplines: ["auspex", "celerity", "presence"] },
+  tzimisce: { name: "Tzimisce", disciplines: ["animalism", "auspex", "vicissitude"] },
+  ventrue: { name: "Ventrue", disciplines: ["dominate", "fortitude", "presence"] },
+  "assamite-warrior": { name: "Assamite (Warrior)", aliases: ["assamite"], family: "assamite", disciplines: ["celerity", "obfuscate", "quietus"] },
+  "assamite-sorcerer": { name: "Assamite (Sorcerer)", family: "assamite", disciplines: ["assamite-sorcery", "auspex", "quietus"] },
+  "assamite-vizier": { name: "Assamite (Vizier)", family: "assamite", disciplines: ["auspex", "celerity", "quietus"] },
+  "followers-of-set": { name: "Followers of Set", aliases: ["setite", "setites"], disciplines: ["obfuscate", "presence", "serpentis"] },
+  gangrel: { name: "Gangrel", disciplines: ["animalism", "fortitude", "protean"] },
+  malkavian: { name: "Malkavians", aliases: ["malkavians"], disciplines: ["auspex", "dementation", "obfuscate"] },
+  nosferatu: {
+    name: "Nosferatu", disciplines: ["animalism", "obfuscate", "potence"],
+    limits: { appearance: { start: 0, max: 0, note: "A Nosferatu has no Appearance and never will." } },
+  },
+  ravnos: { name: "Ravnos", disciplines: ["animalism", "chimerstry", "fortitude"] },
+  tremere: { name: "Tremere", disciplines: ["auspex", "dominate", "thaumaturgy"] },
+};
+// A clan by its id, its name, or any name it also goes by. The id rides along
+// because THAT is what a sheet records ([[choose clan …]]) - "Assamite
+// (Warrior)" is a title, `assamite-warrior` is the name of the thing.
+function clanByName(name: string): (Clan & { id: string }) | undefined {
+  const key = StringUtil.normalize(name);
+  for (const [id, c] of Object.entries(CLANS)) {
+    if (id === key || StringUtil.normalize(c.name) === key) return { ...c, id };
+    if ((c.aliases ?? []).some(a => StringUtil.normalize(a) === key)) return { ...c, id };
+  }
+  return undefined;
+}
+
+// The thirteen: one entry per CLAN, castes folded into theirs. The label drops
+// the parenthetical, so the three Assamite castes answer to "Assamite".
+function clanFamilies(): Array<{ id: string; name: string }> {
+  const seen = new Map<string, string>();
+  for (const [id, c] of Object.entries(CLANS)) {
+    const family = c.family ?? id;
+    if (!seen.has(family)) seen.set(family, c.name.replace(/\s*\([^)]*\)\s*$/, "").trim());
+  }
+  return [...seen].map(([id, name]) => ({ id, name }));
+}
+
+// Which clan a pick belongs to - the answer a clan-exclusive gate compares.
+// An unknown name is its own family, so a chronicle's homebrew clan still works.
+function clanFamilyOf(name: string): string {
+  const clan = clanByName(name);
+  return clan ? (clan.family ?? clan.id) : StringUtil.normalize(name);
+}
 
 // =============================================================================
 // MAGIC RULES - the Dark Ages: Mage "How Magic Works" numbers, as data
@@ -3307,8 +3534,9 @@ const DEFAULT_ADVANCEMENT_COSTS: CostTable = {
   ability: { experience: "current x 2 (a new one: 3)", freebie: "2", maturation: "current x 2" },
   background: { experience: "current x 2", freebie: "1", maturation: "current x 2" },
   discipline: { experience: "current x 5 (out of clan: current x 7)", freebie: "7", maturation: "current x 5" },
-  pillar: { experience: "current x 7", freebie: "7", maturation: "current x 7" },
-  foundation: { experience: "current x 8", freebie: "10", maturation: "current x 8" },
+  pillar: { experience: "current x 7", freebie: "3", maturation: "current x 7" },
+  foundation: { experience: "current x 8", freebie: "5", maturation: "current x 8" },
+  specialty: { experience: "-", freebie: "1", maturation: "-" },
   virtue: { experience: "current x 2", freebie: "2", maturation: "current x 2" },
   willpower: { experience: "current", freebie: "1", maturation: "current" },
   road: { experience: "current x 2", freebie: "1", maturation: "current x 2" },
@@ -3434,6 +3662,10 @@ interface MeritFlawRequirements {
   templates?: string[];   // met if the character's template matches ANY listed
   tags?: string[];        // ALL listed tags must be present on the character
   meritsFlaws?: string[]; // ALL listed merits/flaws must already be taken
+  // A CHOICE the character made - {clan: "nosferatu"}, {fellowship:
+  // "valdaermen"}. Clans and Fellowships are not templates, so the things
+  // exclusive to them gate on the pick rather than on the splat.
+  choices?: Record<string, string>;
 }
 // One cross-instance ceiling on a parameterized def.
 interface InstanceLimit {
@@ -3719,7 +3951,31 @@ function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefine
   return def;
 }
 
+// One exclusive Merit and Flaw per clan and per fellowship, so the SHAPE exists
+// and the chronicle can fill in what they actually do. They gate on the CHOICE
+// (see MeritFlawRequirements.choices), which is what makes them exclusive.
+function exclusiveDefs(kindOfChoice: "clan" | "fellowship", id: string, label: string): MeritFlawDef[] {
+  return [
+    {
+      name: `${label} Exclusive Merit`, kind: "merit", points: 1,
+      requires: { choices: { [kindOfChoice]: id } },
+      description: `A placeholder for whatever ${label} alone may buy. Redefine it with [[define-merit]].`,
+    },
+    {
+      name: `${label} Exclusive Flaw`, kind: "flaw", points: 1,
+      requires: { choices: { [kindOfChoice]: id } },
+      description: `A placeholder for whatever ${label} alone must carry. Redefine it with [[define-merit]].`,
+    },
+  ];
+}
+const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
+  // Thirteen, not fifteen: an Assamite Vizier may buy what Assamites may buy.
+  ...clanFamilies().flatMap(c => exclusiveDefs("clan", c.id, c.name)),
+  ...Object.entries(FELLOWSHIPS).flatMap(([id, f]) => exclusiveDefs("fellowship", id, f.name)),
+];
+
 const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
+  ...EXCLUSIVE_MERITS_FLAWS,
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
   {
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
@@ -5470,6 +5726,14 @@ interface PlayableCharacter {
   // granting it outright (a Background you simply have, an arcanum you were
   // made with). Anything not listed here paid the listed price.
   paid?: Record<string, string>;
+  // The choices a template asks for: a vampire's clan, a mage's fellowship.
+  // They are not traits - they STEER traits (a clan names its Disciplines, a
+  // fellowship its Foundation and Pillars) - so they live in their own map.
+  choices?: Record<string, string>;
+  // Which Attribute / Ability categories the player made primary, secondary and
+  // tertiary. The creation pools are per category, so the report cannot check
+  // anything until it knows which is which.
+  priorities?: Record<string, string>;
 }
 // One of several things of the same name (two Mentors), with what THIS one cost.
 interface TraitInstance { rating: number; note?: string; paid?: string }
@@ -5709,6 +5973,8 @@ function characterToCard(char: PlayableCharacter): CardMap {
   }
   if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (Object.keys(char.budgets ?? {}).length) card["budgets"] = { ...char.budgets } as CardMap;
+  if (Object.keys(char.choices ?? {}).length) card["choices"] = { ...char.choices } as CardMap;
+  if (Object.keys(char.priorities ?? {}).length) card["priorities"] = { ...char.priorities } as CardMap;
   return card;
 }
 
@@ -5772,6 +6038,14 @@ function characterFromCard(raw: CardValue | undefined): PlayableCharacter | unde
     if (expr) budgets[StringUtil.normalize(purse)] = expr;
   }
   if (Object.keys(budgets).length) char.budgets = budgets;
+  for (const key of ["choices", "priorities"] as const) {
+    const map: Record<string, string> = {};
+    for (const [k, raw] of Object.entries(asMap(card[key]))) {
+      const v = asText(raw);
+      if (v) map[StringUtil.normalize(k)] = StringUtil.normalize(v);
+    }
+    if (Object.keys(map).length) char[key] = map;
+  }
   for (const [rawName, value] of Object.entries(asMap(card["specialties"]))) {
     addSpecialties(StringUtil.normalize(rawName), value);
   }
@@ -8386,8 +8660,15 @@ function fusedComponentExtra(def: ResourceDef, points: number, uncancelableLimit
 // literal "foundation" trait; else the first FELLOWSHIPS entry whose Foundation
 // trait the caster actually has (Order of Hermes -> Modus). Returns the trait
 // name plus the fellowship it came from, when that's how it was found.
-function resolveFoundation(arg: string | undefined, resolve: (n: string) => number): { trait: string; rating: number; fellowship?: string } {
+function resolveFoundation(arg: string | undefined, resolve: (n: string) => number, chosen?: string): { trait: string; rating: number; fellowship?: string } {
   if (arg?.trim()) { const t = StringUtil.normalize(arg); return { trait: t, rating: resolve(t) }; }
+  // A character who CHOSE a fellowship casts on its Foundation, whatever else
+  // they happen to have a rating in.
+  const picked = chosen ? fellowshipByName(chosen) : undefined;
+  if (picked) {
+    const t = StringUtil.normalize(picked.foundation);
+    return { trait: t, rating: resolve(t), fellowship: picked.name };
+  }
   if (resolve("foundation") > 0) return { trait: "foundation", rating: resolve("foundation") };
   for (const f of Object.values(FELLOWSHIPS)) {
     const t = StringUtil.normalize(f.foundation);
@@ -8420,7 +8701,7 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   }
   // ...and have a Foundation to channel it through (their fellowship's, when
   // the sheet carries it - Order of Hermes casts on Modus).
-  const found = resolveFoundation(cmd.named["foundation"], env.resolver);
+  const found = resolveFoundation(cmd.named["foundation"], env.resolver, char.choices?.["fellowship"]);
   const foundationTrait = found.trait;
   const foundationRating = env.resolver(foundationTrait);
   if (foundationRating <= 0) {
@@ -8633,7 +8914,7 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   const entries = Object.entries(FELLOWSHIPS);
   if (which) {
     const key = StringUtil.normalize(which);
-    const hit = entries.find(([k, f]) => k === key || StringUtil.normalize(f.name) === key)?.[1];
+    const hit = fellowshipByName(key);
     if (!hit) return sys(`No fellowship "${which}". Known: ${entries.map(([k]) => k).join(", ")}.`);
     const pillars = Object.entries(hit.pillars).map(([p, gloss]) => `${disp(p)} (${gloss})`).join(", ");
     return sys(`${hit.name} - Foundation: ${disp(hit.foundation)}${hit.foundationGloss ? ` (${hit.foundationGloss})` : ""}. `
@@ -8656,7 +8937,10 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
 
 // Every purse this character has a budget for, template first, sheet on top.
 function budgetsOf(char: PlayableCharacter): Record<string, string> {
-  const out: Record<string, string> = {};
+  // The creation budget already answers two of these purses; [[budget]] and
+  // [[creation]] must not disagree about how many Background dots you get.
+  const creation = creationBudgetFor(char.templates);
+  const out: Record<string, string> = { background: String(creation.backgrounds), freebie: String(creation.freebies) };
   for (const t of char.templates) {
     const tpl = TEMPLATES[StringUtil.normalize(t)];
     for (const [purse, expr] of Object.entries(tpl?.Budgets ?? {})) out[StringUtil.normalize(purse)] = expr;
@@ -8762,6 +9046,188 @@ async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   const value = evalBudget(expr, resolver);
   return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
     + `[[budget]] counts it.`);
+}
+
+// =============================================================================
+// CREATION - the budget a fresh character is built against
+// -----------------------------------------------------------------------------
+// Reports, never enforces. The numbers live in the template's CreationBudget
+// (rules.ts); this walks the sheet and says what each pool has actually taken.
+// =============================================================================
+// The trait names in one priority category. Attributes come from the fixed
+// three (rules.ts); Abilities come from the CHRONICLE's own lists, so a
+// house-ruled Ability counts in whichever of them names it. Both the plural and
+// the singular answer, because both are what a player types.
+async function categoryTraits(kind: "attributes" | "abilities"): Promise<{ order: string[]; of: Record<string, string[]> }> {
+  const order: string[] = [];
+  const of: Record<string, string[]> = {};
+  const put = (category: string, names: readonly string[]): void => {
+    const list = names.map(n => StringUtil.normalize(n));
+    order.push(category);
+    of[category] = list;
+    if (category.endsWith("s")) of[category.slice(0, -1)] = list;
+  };
+  if (kind === "attributes") {
+    for (const [category, names] of Object.entries(ATTRIBUTES)) put(category, names);
+    return { order, of };
+  }
+  put("talents", await LorebookManager.allTalents());
+  put("skills", await LorebookManager.allSkills());
+  put("knowledges", await LorebookManager.allKnowledges());
+  return { order, of };
+}
+
+// The template's budget (templates stack - see creationBudgetFor).
+function creationOf(char: PlayableCharacter): CreationBudget {
+  return creationBudgetFor(char.templates);
+}
+
+// The trait limits in force: the template's, plus the chosen clan's (a
+// Nosferatu's Appearance is 0 and stays 0).
+function limitsFor(char: PlayableCharacter): Record<string, TraitLimit> {
+  const clan = char.choices?.["clan"] ? clanByName(char.choices["clan"]) : undefined;
+  return { ...(creationOf(char).limits ?? {}), ...(clan?.limits ?? {}) };
+}
+
+// choose <what> <value> - the picks a template asks for.
+async function cmdChoose(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const what = StringUtil.normalize(cmd.positional[0] ?? cmd.named["what"] ?? "");
+  const value = (cmd.positional[1] ?? cmd.named["value"] ?? "").trim();
+  if (!what) {
+    const made = Object.entries(char.choices ?? {}).map(([k, v]) => `${k}: ${disp(v)}`);
+    return sys(`${disp(char.name)} - ${made.length ? made.join(", ") : "nothing chosen yet"}. `
+      + `[[choose clan <name>]] ([[clans]]), [[choose fellowship <name>]] ([[fellowships]]), `
+      + `[[choose attributes physical,social,mental]] (primary, secondary, tertiary).`);
+  }
+  if (what === "attributes" || what === "abilities") {
+    const groups = await categoryTraits(what);
+    const order = value.split(",").map(x => StringUtil.normalize(x)).filter(Boolean);
+    const wrong = order.filter(c => !(c in groups.of));
+    if (order.length !== 3 || wrong.length) {
+      return sys(`${wrong.length ? `No ${what} category ${wrong.map(w => `"${w}"`).join(", ")}. ` : ""}`
+        + `${what} needs three categories in priority order, e.g. [[choose ${what} ${groups.order.join(",")}]]. `
+        + `Known: ${groups.order.join(", ")}.`);
+    }
+    char.priorities = { ...(char.priorities ?? {}) };
+    (["primary", "secondary", "tertiary"] as const).forEach((slot, i) => { char.priorities![`${what}-${slot}`] = order[i]; });
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)} ${what}: ${order.map((o, i) => `${["primary", "secondary", "tertiary"][i]} ${disp(o)}`).join(", ")}. [[creation]] checks the pools.`);
+  }
+  if (!value) return sys(`[[choose ${what} <value>]] needs a value.`);
+  if (what === "clan") {
+    const clan = clanByName(value);
+    if (!clan) return sys(`No clan "${value}". [[clans]] lists them.`);
+    char.choices = { ...(char.choices ?? {}), clan: clan.id };
+    await CharacterStore.save(char);
+    const bounds = Object.values(clan.limits ?? {}).map(l => l.note).filter(Boolean).join(" ");
+    return sys(`${disp(char.name)} is ${clan.name}. Clan Disciplines: ${clan.disciplines.map(d => disp(d)).join(", ")}. `
+      + `${bounds ? `${bounds} ` : ""}Rate them with [[set-trait <discipline> <n> group=discipline]].`);
+  }
+  if (what === "fellowship") {
+    const f = fellowshipByName(value);
+    if (!f) return sys(`No fellowship "${value}". [[fellowships]] lists them.`);
+    char.choices = { ...(char.choices ?? {}), fellowship: f.id };
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)} follows the ${f.name}${f.theme ? ` (${f.theme})` : ""}. `
+      + `Foundation: ${disp(f.foundation)}. Pillars: ${Object.entries(f.pillars).map(([p, g]) => `${disp(p)} (${g})`).join(", ")}. `
+      + `Rate them with [[set-trait <pillar> <n>]].`);
+  }
+  char.choices = { ...(char.choices ?? {}), [what]: StringUtil.normalize(value) };
+  await CharacterStore.save(char);
+  return sys(`${disp(char.name)} ${what}: ${disp(value)} (recorded; the engine knows no rules for it).`);
+}
+
+// clans / clan <name>
+async function cmdClans(cmd: ParsedCommand): Promise<string> {
+  const which = cmd.positional[0]?.trim();
+  if (which) {
+    const clan = clanByName(which);
+    if (!clan) return sys(`No clan "${which}". Known: ${Object.values(CLANS).map(c => c.name).join(", ")}.`);
+    const limits = Object.entries(clan.limits ?? {}).map(([t, l]) => `${disp(t)} ${l.start ?? 0}-${l.max ?? 5}${l.note ? ` (${l.note})` : ""}`);
+    return sys(`${clan.name} - Disciplines: ${clan.disciplines.map(d => disp(d)).join(", ")}`
+      + `${limits.length ? `; ${limits.join("; ")}` : ""}. [[choose clan ${clan.id}]] picks it.`);
+  }
+  return sys(`Clans: ${Object.values(CLANS).map(c => `${c.name} (${c.disciplines.map(d => disp(d)).join("/")})`).join("; ")}. `
+    + `[[clan <name>]] for one; [[choose clan <name>]] picks it.`);
+}
+
+// creation - every pool, against what the sheet actually holds.
+async function cmdCreation(cmd: ParsedCommand): Promise<string> {
+  const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
+  const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const budget = creationOf(char);
+  const limits = limitsFor(char);
+  const lines: string[] = [];
+
+  // Attributes and Abilities are per CATEGORY, so the priorities must be set.
+  for (const kind of ["attributes", "abilities"] as const) {
+    const pools = kind === "attributes" ? budget.attributes : budget.abilities;
+    const free = kind === "attributes" ? budget.attributeStart : budget.abilityStart;
+    const groups = await categoryTraits(kind);
+    const slots = (["primary", "secondary", "tertiary"] as const).map(slot => ({
+      slot, category: char.priorities?.[`${kind}-${slot}`], allowed: pools[slot],
+    }));
+    if (slots.some(x => !x.category)) {
+      lines.push(`${kind}: ${slots.map(x => `${x.allowed}`).join("/")} to spend - `
+        + `[[choose ${kind} ${groups.order.join(",")}]] first (primary, secondary, tertiary)`);
+      continue;
+    }
+    const bucket = (kind === "attributes" ? char.attributes : char.abilities) ?? {};
+    const counted = new Set<string>();
+    const bits = slots.map(x => {
+      const names = groups.of[x.category!];
+      if (!names) return `${x.slot} ${disp(x.category!)} ?/${x.allowed} ⚠ no such category`;
+      const spent = names.reduce((sum, n) => {
+        counted.add(n);
+        return sum + Math.max(0, (bucket[n] ?? free) - (limits[n]?.start ?? free));
+      }, 0);
+      return `${x.slot} ${disp(x.category!)} ${spent}/${x.allowed}`;
+    });
+    // Dots on the sheet that no priority category claims: an Ability the
+    // chronicle's lists don't name, or a category the player never made a
+    // priority. They are real dots, and silently dropping them would lie.
+    const stray = Object.entries(bucket)
+      .filter(([n, v]) => !counted.has(n) && v > (limits[n]?.start ?? free))
+      .map(([n]) => disp(n));
+    lines.push(`${kind}: ${bits.join(", ")}${stray.length ? ` ⚠ uncounted: ${stray.join(", ")}` : ""}`);
+  }
+
+  const bgSpent = Object.entries(char.backgrounds ?? {}).reduce((sum, [n, v]) => {
+    const held = char.instances?.[n];
+    const each = held?.length ? held : [{ rating: v, paid: char.paid?.[n] }];
+    return sum + each.reduce((s, one) => s + ((one as { paid?: string }).paid !== undefined ? parseInt((one as { paid?: string }).paid!, 10) || 0 : one.rating), 0);
+  }, 0);
+  lines.push(`backgrounds: ${bgSpent}/${budget.backgrounds}`);
+
+  if (budget.disciplines !== undefined) {
+    const clan = char.choices?.["clan"] ? clanByName(char.choices["clan"]) : undefined;
+    const inClan = (clan?.disciplines ?? []).map(d => StringUtil.normalize(d));
+    const spent = Object.entries(char.disciplines ?? {}).reduce((sum, [, v]) => sum + v, 0);
+    const out = Object.keys(char.disciplines ?? {}).filter(d => inClan.length && !inClan.includes(d));
+    lines.push(`disciplines: ${spent}/${budget.disciplines}${clan ? ` (${clan.name}: ${inClan.map(d => disp(d)).join(", ")})` : " - [[choose clan]] first"}`
+      + `${out.length ? ` ⚠ out of clan: ${out.map(d => disp(d)).join(", ")}` : ""}`);
+  }
+  if (budget.virtues !== undefined) {
+    const spent = Object.values(char.virtues ?? {}).reduce((a, b) => a + b, 0) - Object.keys(char.virtues ?? {}).length;
+    lines.push(`virtues: ${Math.max(0, spent)}/${budget.virtues} (over one free dot each)`);
+  }
+  lines.push(`freebies: ${budget.freebies} to spend ([[costs]] prices them)`);
+  const caps = Object.entries(limits).map(([t, l]) => `${disp(t)} ${l.start ?? 0}-${l.max ?? 5}`);
+  // A rating the limit forbids: a Nosferatu sheet still carrying the free
+  // Appearance dot every other character gets. Said, not corrected.
+  const over = Object.entries(limits).flatMap(([t, l]) => {
+    const rating = char.attributes?.[t] ?? char.abilities?.[t];
+    return rating !== undefined && l.max !== undefined && rating > l.max ? [`${disp(t)} ${rating} > ${l.max}`] : [];
+  });
+  if (caps.length) lines.push(`limits: ${caps.join(", ")}${over.length ? ` ⚠ over: ${over.join(", ")}` : ""}`);
+  // The notes are whole sentences the splat's own book states; they follow the
+  // pools rather than joining them, so the punctuation stays readable.
+  const notes = budget.notes?.length ? ` ${budget.notes.join(" ")}` : "";
+
+  return sys(`${disp(char.name)} creation - ${lines.join("; ")}.${notes} Advisory: nothing is enforced.`);
 }
 
 // backgrounds / background <name> - the bag Backgrounds never had.
@@ -10239,6 +10705,16 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
   const tags = char.tags.map(t => StringUtil.normalize(t));
   for (const t of req.tags ?? []) if (!tags.includes(StringUtil.normalize(t))) missing.push(`tag:${StringUtil.normalize(t)}`);
   for (const m of req.meritsFlaws ?? []) if (!(StringUtil.normalize(m) in char.meritsFlaws)) missing.push(`merit-flaw:${StringUtil.normalize(m)}`);
+  // A choice, not a template: what only a Nosferatu or only a Valdaermen may
+  // have. A clan matches by CLAN, so all three Assamite castes pass an
+  // Assamite-exclusive gate.
+  for (const [what, want] of Object.entries(req.choices ?? {})) {
+    const key = StringUtil.normalize(what);
+    const has = StringUtil.normalize(char.choices?.[key] ?? "");
+    const asked = StringUtil.normalize(want);
+    const met = key === "clan" ? has !== "" && clanFamilyOf(has) === clanFamilyOf(asked) : has === asked;
+    if (!met) missing.push(`${key}:${asked}`);
+  }
   return missing;
 }
 
@@ -11392,6 +11868,25 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
+CommandRouter.register("creation", cmdCreation, {
+  summary: "the creation budget: every pool against what the sheet holds (advisory)",
+  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
+});
+CommandRouter.register("choose", cmdChoose, {
+  summary: "pick a clan, a fellowship, or the Attribute/Ability priorities",
+  params: [
+    { key: "what", kind: "positional", hint: "<clan|fellowship|attributes|abilities>", example: "clan" },
+    { key: "value", kind: "positional", hint: "<value>", example: "tremere" },
+  ],
+});
+CommandRouter.register("clans", cmdClans, {
+  summary: "the clans and their Disciplines",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "nosferatu" }],
+});
+CommandRouter.register("clan", cmdClans, {
+  summary: "one clan: its Disciplines and what it bounds",
+  params: [{ key: "name", kind: "positional", hint: "<name>", example: "nosferatu" }],
+});
 CommandRouter.register("backgrounds", cmdBackgrounds, {
   summary: "the backgrounds this chronicle defines, what you hold, and what they confer",
 });
@@ -11798,6 +12293,9 @@ const QUIET_VERBS = new Set<string>([
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "merit", "specialties", "affliction", "afflictions",
   "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
+  // The creation-side listings: all read-only, all for the player's eyes.
+  "creation", "clans", "clan", "budget", "paid", "costs", "backgrounds", "background",
+  "arcana", "arcanum", "supernatural",
 ]);
 
 // =============================================================================

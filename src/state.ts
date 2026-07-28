@@ -524,6 +524,14 @@ export interface PlayableCharacter {
   // granting it outright (a Background you simply have, an arcanum you were
   // made with). Anything not listed here paid the listed price.
   paid?: Record<string, string>;
+  // The choices a template asks for: a vampire's clan, a mage's fellowship.
+  // They are not traits - they STEER traits (a clan names its Disciplines, a
+  // fellowship its Foundation and Pillars) - so they live in their own map.
+  choices?: Record<string, string>;
+  // Which Attribute / Ability categories the player made primary, secondary and
+  // tertiary. The creation pools are per category, so the report cannot check
+  // anything until it knows which is which.
+  priorities?: Record<string, string>;
 }
 // One of several things of the same name (two Mentors), with what THIS one cost.
 export interface TraitInstance { rating: number; note?: string; paid?: string }
@@ -763,6 +771,8 @@ export function characterToCard(char: PlayableCharacter): CardMap {
   }
   if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (Object.keys(char.budgets ?? {}).length) card["budgets"] = { ...char.budgets } as CardMap;
+  if (Object.keys(char.choices ?? {}).length) card["choices"] = { ...char.choices } as CardMap;
+  if (Object.keys(char.priorities ?? {}).length) card["priorities"] = { ...char.priorities } as CardMap;
   return card;
 }
 
@@ -826,6 +836,14 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
     if (expr) budgets[StringUtil.normalize(purse)] = expr;
   }
   if (Object.keys(budgets).length) char.budgets = budgets;
+  for (const key of ["choices", "priorities"] as const) {
+    const map: Record<string, string> = {};
+    for (const [k, raw] of Object.entries(asMap(card[key]))) {
+      const v = asText(raw);
+      if (v) map[StringUtil.normalize(k)] = StringUtil.normalize(v);
+    }
+    if (Object.keys(map).length) char[key] = map;
+  }
   for (const [rawName, value] of Object.entries(asMap(card["specialties"]))) {
     addSpecialties(StringUtil.normalize(rawName), value);
   }

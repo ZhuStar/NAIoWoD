@@ -56,6 +56,8 @@ import {
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
   ROLLS_CONFIG_ENTRY, RollRulesConfig, rollFloorFrom, SuccessTableRow,
   BACKGROUNDS_ENTRY, BackgroundRegistry, grantedTraitsOf, effectiveTraitOf,
+  BASE_CREATION, creationBudgetFor, CLANS, clanByName, clanFamilies, clanFamilyOf,
+  fellowshipByName, EXCLUSIVE_MERITS_FLAWS,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -2978,7 +2980,7 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
     await CommandRouter.route("set-trait mentor 3 add=true note=`Daujotas` paid=3");
     await CommandRouter.route("set-trait resources 2");
     const report = await CommandRouter.route("budget");
-    expect(report).toContain("background: 5 spent");            // 3 + 2, and nothing else
+    expect(report).toContain("background: 5/5, 0 left");         // 3 + 2, against the creation budget
     expect(report).toContain("fount 5 (paid 0)");
     expect(report).toContain("sanctum 5 (from talisman, free)"); // conferred, never bought
   });
@@ -3138,14 +3140,14 @@ describe("arcana budgets: their own purse, priced per template", () => {
     const report = await CommandRouter.route("budget");
     expect(report).toContain("arcana: 7/25");
     expect(report).toContain("celestial-radiance 7");
-    expect(report).toContain("freebie: 3 spent");                 // counted apart
+    expect(report).toContain("freebie: 3/15");                    // counted apart
     expect(report).not.toContain("arcana: 10");                   // never summed together
   });
 
   test("a flaw GRANTS rather than costs, and the sheet may override the template's budget", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     await CommandRouter.route("take-merit dark-secret");           // a flaw, 1 point
-    expect(await CommandRouter.route("budget")).toContain("freebie: -1 spent");
+    expect(await CommandRouter.route("budget")).toContain("freebie: -1/15, 16 left");
     const char = (await CharacterStore.load("Azazel"))!;
     char.budgets = { arcana: "10" };
     await CharacterStore.save(char);
@@ -4828,7 +4830,9 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
   test("the caster cannot exceed their own Pillar; unknown Foundations refuse with guidance", async () => {
     await ladislav();
     expect(await CommandRouter.route('cast pillars="chieftain:3" foundation=sensitivity')).toContain("has Chieftain 2 - the effect needs 3");
-    expect(await CommandRouter.route('cast pillars="trickster:2"')).toContain("has no Foundation rating");
+    // Sensitivity IS his Foundation now that the Spirit-Talkers are defined, so
+    // the refusal needs a Foundation nobody's fellowship names.
+    expect(await CommandRouter.route('cast pillars="trickster:2" foundation=geometry')).toContain("has no Geometry rating");
   });
 
   test("the battle-fury: complex pool, highest-required primary, mandatory + extra Quintessence", async () => {
@@ -5525,5 +5529,209 @@ describe("a fused point is never wasted at the difficulty floor", () => {
     expect(r).not.toContain("past the difficulty floor");
     expect(r).toContain("min diff 4");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(9);
+  });
+});
+
+// =============================================================================
+// CHARACTER CREATION - the budget every fresh character is built against
+// =============================================================================
+describe("creation: the pools, the picks, and what the sheet has actually taken", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("every character buys the same three ladders; a splat adds its own on top", () => {
+    expect(BASE_CREATION.attributes).toEqual({ primary: 7, secondary: 5, tertiary: 3 });
+    expect(BASE_CREATION.abilities).toEqual({ primary: 13, secondary: 9, tertiary: 5 });
+    expect(BASE_CREATION.attributeStart).toBe(1);     // one free dot in each Attribute
+    expect(BASE_CREATION.abilityStart).toBe(0);       // and none in any Ability
+    expect(BASE_CREATION.backgrounds).toBe(5);
+    expect(BASE_CREATION.freebies).toBe(15);
+    expect(BASE_CREATION.disciplines).toBeUndefined();
+    // A vampire owes four Discipline dots and seven Virtue dots besides.
+    const vampire = creationBudgetFor(["vampire"]);
+    expect(vampire.disciplines).toBe(4);
+    expect(vampire.virtues).toBe(7);
+    expect(vampire.attributes).toEqual(BASE_CREATION.attributes);
+    expect(vampire.notes!.some(n => n.includes("Generation starts at 12th"))).toBe(true);
+    // A mage owes neither, and records what its own numbers derive from.
+    const mage = creationBudgetFor(["mage"]);
+    expect(mage.disciplines).toBeUndefined();
+    expect(mage.notes!.some(n => n.includes("Cray + Fount"))).toBe(true);
+  });
+
+  test("templates STACK: a vampire-and-mage owes both sets of dots and both sets of notes", () => {
+    const both = creationBudgetFor(["vampire", "mage"]);
+    expect(both.disciplines).toBe(4);                 // the vampire's, not shadowed
+    expect(both.notes!.some(n => n.includes("Seven Virtue dots"))).toBe(true);
+    expect(both.notes!.some(n => n.includes("Cray + Fount"))).toBe(true);
+    // An unknown template contributes nothing rather than resetting the budget.
+    expect(creationBudgetFor(["vampire", "nonesuch"]).disciplines).toBe(4);
+    expect(creationBudgetFor([])).toEqual(BASE_CREATION);
+  });
+
+  test("[[creation]] reports each pool against the sheet, once the priorities are set", async () => {
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    // With no priorities it cannot know which pool is which, and says so.
+    const blind = await CommandRouter.route("creation");
+    expect(blind).toContain("attributes: 7/5/3 to spend - [[choose attributes physical,social,mental]] first");
+    expect(blind).toContain("abilities: 13/9/5 to spend - [[choose abilities talents,skills,knowledges]] first");
+
+    await CommandRouter.route("choose attributes physical,social,mental");
+    await CommandRouter.route("choose abilities talents,skills,knowledges");
+    await CommandRouter.route("set-trait strength 4");        // 3 over the free dot
+    await CommandRouter.route("set-trait dexterity 3");        // 2 more
+    await CommandRouter.route("set-trait brawl 3");            // a Talent
+    await CommandRouter.route("set-trait occult 2");           // a Knowledge
+    const r = await CommandRouter.route("creation");
+    expect(r).toContain("attributes: primary Physical 5/7, secondary Social 0/5, tertiary Mental 0/3");
+    // Abilities land in the category the CHRONICLE's own lists put them in.
+    expect(r).toContain("abilities: primary Talents 3/13, secondary Skills 0/9, tertiary Knowledges 2/5");
+    expect(r).toContain("backgrounds: 0/5");
+    expect(r).toContain("freebies: 15 to spend");
+    expect(r).toContain("Advisory: nothing is enforced.");
+    // ...and [[budget]] draws its Background and freebie purses from the SAME
+    // numbers, so the two reports can never disagree.
+    await CommandRouter.route("set-trait herd 2");
+    expect(await CommandRouter.route("creation")).toContain("backgrounds: 2/5");
+    expect(await CommandRouter.route("budget")).toContain("background: 2/5, 3 left");
+  });
+
+  test("a Nosferatu's Appearance is 0 and stays 0, and the free dot it never had is not spent", async () => {
+    expect(clanByName("nosferatu")!.limits!.appearance).toEqual({
+      start: 0, max: 0, note: "A Nosferatu has no Appearance and never will.",
+    });
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    expect(await CommandRouter.route("clan nosferatu")).toContain("Appearance 0-0");
+    expect(await CommandRouter.route("choose clan nosferatu")).toContain("no Appearance and never will");
+    await CommandRouter.route("choose attributes social,physical,mental");
+    const r = await CommandRouter.route("creation");
+    expect(r).toContain("limits: Appearance 0-0");
+    // The factory hands every Attribute the free dot; a Nosferatu may not keep
+    // that one, so the report says the sheet is over its own ceiling...
+    expect(r).toContain("⚠ over: Appearance 1 > 0");
+    // ...and counts it, because a dot above their start IS a dot spent.
+    expect(r).toContain("primary Social 1/7");
+    await CommandRouter.route("set-trait appearance 0");
+    const fixed = await CommandRouter.route("creation");
+    expect(fixed).not.toContain("⚠ over");
+    expect(fixed).toContain("primary Social 0/7");
+  });
+
+  test("clan Disciplines are named, and anything else is flagged as out of clan", async () => {
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    await CommandRouter.route("choose clan nosferatu");
+    await CommandRouter.route("set-trait obfuscate 2 group=discipline");
+    await CommandRouter.route("set-trait celerity 1 group=discipline");
+    const r = await CommandRouter.route("creation");
+    expect(r).toContain("disciplines: 3/4 (Nosferatu: Animalism, Obfuscate, Potence)");
+    expect(r).toContain("out of clan: Celerity");
+    // Without a clan it has nothing to compare against, and asks.
+    await CommandRouter.route('create-playable name="Anon" templates=vampire');
+    await CommandRouter.route('play name="Anon"');
+    expect(await CommandRouter.route("creation")).toContain("disciplines: 0/4 - [[choose clan]] first");
+  });
+
+  test("dots no priority category claims are reported rather than silently dropped", async () => {
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    await CommandRouter.route("choose attributes physical,social,mental");
+    await CommandRouter.route("choose abilities talents,skills,knowledges");
+    await CommandRouter.route("set-trait haggling 3 group=ability");   // in nobody's SRD list
+    expect(await CommandRouter.route("creation")).toContain("⚠ uncounted: Haggling");
+  });
+
+  test("[[choose]] insists on categories that exist, and remembers what was picked", async () => {
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    const wrong = await CommandRouter.route("choose abilities physical,social,mental");
+    expect(wrong).toContain('No abilities category "physical", "social", "mental"');
+    expect(wrong).toContain("Known: talents, skills, knowledges");
+    expect(await CommandRouter.route("choose attributes physical")).toContain("needs three categories");
+    await CommandRouter.route("choose clan tremere");
+    await CommandRouter.route("choose attributes mental,physical,social");
+    const char = (await CharacterStore.load("Nos"))!;
+    expect(char.choices).toEqual({ clan: "tremere" });
+    expect(char.priorities).toEqual({
+      "attributes-primary": "mental", "attributes-secondary": "physical", "attributes-tertiary": "social",
+    });
+    // ...and they survive the trip through the lorebook card.
+    expect(characterFromCard(characterToCard(char))!.choices).toEqual({ clan: "tremere" });
+    expect(await CommandRouter.route("choose")).toContain("clan: Tremere");
+  });
+});
+
+// =============================================================================
+// CLANS & FELLOWSHIPS - the picks, and what only their own may buy
+// =============================================================================
+describe("clans & fellowships: thirteen and six, with exclusives gated on the pick", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the Assamite castes pick different Disciplines but are one clan", () => {
+    expect(Object.keys(CLANS).length).toBe(15);            // the castes are entries...
+    expect(clanFamilies().length).toBe(13);                // ...but there are thirteen clans
+    expect(clanByName("assamite-vizier")!.disciplines).toEqual(["auspex", "celerity", "quietus"]);
+    expect(clanByName("assamite-sorcerer")!.disciplines).toContain("assamite-sorcery");
+    expect(clanFamilyOf("assamite-vizier")).toBe("assamite");
+    expect(clanFamilyOf("assamite-warrior")).toBe("assamite");
+    expect(clanFamilies().find(c => c.id === "assamite")!.name).toBe("Assamite");
+    // Aliases and ids both find a clan; the id is what a sheet records.
+    expect(clanByName("setites")!.id).toBe("followers-of-set");
+    expect(clanByName("Malkavians")!.id).toBe("malkavian");
+    expect(clanByName("nope")).toBeUndefined();
+  });
+
+  test("one exclusive Merit and Flaw per clan and per fellowship, gated on the choice", async () => {
+    expect(EXCLUSIVE_MERITS_FLAWS.length).toBe((13 + 6) * 2);
+    expect(MeritFlawRegistry.get("tremere-exclusive-merit")!.requires!.choices).toEqual({ clan: "tremere" });
+    expect(MeritFlawRegistry.get("valdaermen-exclusive-flaw")!.kind).toBe("flaw");
+
+    await CommandRouter.route('create-playable name="Tariq" templates=vampire');
+    await CommandRouter.route("choose clan assamite-vizier");
+    // A Vizier may buy what Assamites may buy - the gate is the CLAN...
+    expect(await CommandRouter.route("take-merit assamite-exclusive-merit")).toContain("takes Assamite Exclusive Merit");
+    // ...and nobody else's.
+    const refused = await CommandRouter.route("take-merit brujah-exclusive-flaw");
+    expect(refused).toContain("prerequisites not met: clan:brujah");
+    expect(refused).toContain("waive=true");
+  });
+
+  test("all six fellowships ship with their Foundation, their four Pillars and their other names", async () => {
+    expect(Object.keys(FELLOWSHIPS).sort()).toEqual([
+      "ahl-i-batin", "messianic-voices", "old-faith", "order-of-hermes", "spirit-talkers", "valdaermen",
+    ]);
+    for (const f of Object.values(FELLOWSHIPS)) expect(Object.keys(f.pillars).length).toBe(4);
+    expect(fellowshipByName("batini")!.foundation).toBe("al-ikhlas");
+    expect(fellowshipByName("runecrafters")!.id).toBe("valdaermen");
+    expect(fellowshipByName("Old Faith")!.pillars.winter).toBe("Death and Water");
+    expect(fellowshipByName("aedun")!.foundation).toBe("spontaneity");
+    expect(fellowshipByName("hermetic")!.id).toBe("order-of-hermes");
+    expect(fellowshipByName("messianics")!.theme).toBe("Archangels");
+    expect(await CommandRouter.route("fellowships spirit-talkers")).toContain("Foundation: Sensitivity");
+  });
+
+  test("the chosen fellowship IS the caster's Foundation, whatever else they can roll", async () => {
+    await CommandRouter.route('create-playable name="Runa" templates=mage');
+    const c = (await CharacterStore.getCurrent())!;
+    // She has a rating in Modus, which would otherwise be auto-detected first.
+    c.traits = { modus: 4, blot: 3, galdrar: 2 };
+    await CharacterStore.save(c);
+    expect(await CommandRouter.route('cast pillars="galdrar:2"', { rng: allTens })).toContain("Modus + Galdrar");
+    await CommandRouter.route("choose fellowship valdaermen");
+    expect(await CommandRouter.route('cast pillars="galdrar:2"', { rng: allTens })).toContain("Blot + Galdrar");
+  });
+
+  test("the freebie table prices a Foundation, a Pillar and a Specialty", async () => {
+    const costs = await CommandRouter.route("costs");
+    expect(costs).toContain("Foundation: experience current x 8, freebie 5");
+    expect(costs).toContain("Pillar: experience current x 7, freebie 3");
+    expect(costs).toContain("Specialty: experience -, freebie 1, maturation -");
+    expect(costs).toContain("Attribute: experience current x 4, freebie 5");
+    expect(costs).toContain("Ability: experience current x 2 (a new one: 3), freebie 2");
+  });
+
+  test("the creation-side listings are queries: they stop the turn and stay out of context", async () => {
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    for (const verb of ["creation", "clans", "budget", "costs", "backgrounds", "arcana"]) {
+      const r = await processAdventureInput(`Hm. [[${verb}]] Right.`);
+      expect(r!.stopGeneration).toBe(true);
+      expect(stripCtxSkip(r!.inputText!)).not.toContain("[SYSTEM:");   // never reaches the AI
+    }
   });
 });

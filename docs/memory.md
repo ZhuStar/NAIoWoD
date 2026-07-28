@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `5778ec5`** ("Backgrounds get a bag
-> of their own"). Prior: `cb386af` ("An arcanum is not
+> **Last synced with the code as of commit `725fa3a`** ("The budget a
+> character is built against"). Prior: `5778ec5` ("Backgrounds get a bag
+> of their own"); `cb386af` ("An arcanum is not
 > filed under merits; set-trait; families of power"). Prior: `84c5aa0` ("Arcana are not
 > Merits: their own purse, priced per template"). Prior: `3cb162a` ("Rationed top
 > ratings"); `ce304b3` ("The words move out
@@ -454,6 +455,23 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   `RecoveryRule.requiresTrait`; `MagicRules.uncancelablePerFoundation` +
   **`uncancelableCap`** (§7.36); Mage Backgrounds (Cray/Fount/Library/Sanctum/
   Talisman) in the SRD seed; `DEFAULT_ROLL_MODIFIERS` gained the place tags.
+- **§7.54 additions — the creation budget** (all ABOVE `TemplateConfig`, which
+  defaults a constructor argument to `BASE_CREATION`): `PriorityPools`,
+  `TraitLimit {start?, max?, note?}`, `CreationBudget {attributes,
+  attributeStart, attributeMax, abilities, abilityStart, abilityMax,
+  backgrounds, freebies, disciplines?, virtues?, limits?, notes?}`,
+  **`BASE_CREATION`** (7/5/3 over 1, 13/9/5 over 0, 5 Backgrounds, 15
+  freebies), `creationBudget(over)`, `traitLimitFor(budget, kind, trait)`, and
+  **`creationBudgetFor(keys[])`** (stacks templates, concatenates notes).
+  `TemplateConfig.Creation` is the trailing field; vampire, mage and Ouroboros
+  carry their own. **`Clan {name, disciplines, aliases?, family?, limits?}`** +
+  **`CLANS`** (15 entries, 13 clans — Nosferatu's `limits.appearance {0,0}`) +
+  `clanByName` (returns `& {id}`) + **`clanFamilies()`** + `clanFamilyOf()`.
+  `Fellowship` gained `aliases`/`theme`; **all six FELLOWSHIPS**;
+  `fellowshipByName` (returns `& {id}`). `MeritFlawRequirements.choices` +
+  `exclusiveDefs()` + **`EXCLUSIVE_MERITS_FLAWS`** (13+6 pairs, prepended to
+  `DEFAULT_MERITS_FLAWS`). `DEFAULT_ADVANCEMENT_COSTS`: foundation freebie 5,
+  pillar 3, new `specialty` row.
 - `bloodForGeneration(gen)` — classic table gen 3–15 → `{max, perTurn}`.
 - Roads: `RoadDefinition {name, virtues[3], ratingVirtues[2]}` —
   `ROAD_OF_HUMANITY` (conscience/self-control/courage), `ROAD_OF_KINGS`
@@ -681,7 +699,10 @@ and the future "ready character" path):
   from storyStorage even if the lorebook entry is deleted), name, templates[]
   (1+, hybrids legal, merge resolved later), stage: "potential"|"ready",
   attributes, abilities, backgrounds, virtues, disciplines, traits,
-  poolStarts, meritsFlaws, tags[]}`.
+  poolStarts, meritsFlaws, tags[]}` — plus the optional sidecars added later:
+  `specialties`, `instances` (§7.43), `budgets`/`paid` (§7.50), and
+  `choices`/`priorities` (§7.54: the clan/fellowship picks, and which
+  Attribute/Ability categories are primary/secondary/tertiary).
 - `CharacterStore` — `newPotential(name, templates)` seeds **all nine
   attributes at 1, every lorebook ability at 0, willpower poolStart 0, empty
   meritsFlaws/backgrounds** ("play before allocating anything" principle);
@@ -836,6 +857,19 @@ place JSON is still understood) and `cmdCosts`; `cmdSheet` reports
 "Held more than once" for a trait with `instances`. §7.45 added
 `meritTraitCeiling` (the `maxFromTrait` ceiling, checked in `cmdTakeMerit` and
 reported by `meritInstanceFindings`).
+
+**§7.54 additions — the CREATION section** (just before `cmdBackgrounds`):
+`categoryTraits(kind)` → `{order, of}` (Attributes from `ATTRIBUTES`, Abilities
+from the chronicle's `srd:abilities` lists; plural AND singular both answer),
+`creationOf(char)` = `creationBudgetFor(char.templates)`, `limitsFor(char)`
+(template limits + the chosen clan's), **`cmdCreation`** (per-category spend vs
+pool, `⚠ uncounted` dots, the Background purse, in/out-of-clan Disciplines,
+Virtues over their free dots, freebies, `limits` + `⚠ over:`, then the budget's
+notes as sentences), **`cmdChoose`** (clan / fellowship / the two priority
+triples; unknown categories refused with the known list), **`cmdClans`**
+(`clans` + `clan <name>`). `resolveFoundation` gained a `chosen` argument that
+WINS over auto-detection; `unmetRequirements` gained the `choices` gate, which
+compares clans by FAMILY. Registrations: `creation`, `choose`, `clans`, `clan`.
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -1461,6 +1495,12 @@ and `prefill` are mocked/available but not yet written.
     (it feeds help + windows, lower layers). `processAdventureInput` tests each
     match with `CommandParser.parse(body).name`. Querying the system never makes
     the AI narrate; an in-fiction action wrapped in prose still generates.
+    **§7.54 caught a drift here**: a set is a list somebody has to remember to
+    add to, and four passes of listings (`budget`, `paid`, `costs`,
+    `backgrounds`, `background`, `arcana`, `arcanum`, `supernatural`) had never
+    been added — so those replies were reaching the AI as noise. They are in now,
+    with `creation`/`clans`/`clan`, and a test asserts a listing both stops the
+    turn and leaves nothing in the context.
 28. **Named procedures — a saved roll that can be EXTENDED and carry a table +
     description; ship a starter Drama set** (user, live-testing Dark Ages:
     Vampire's *Drama* named rolls, Climbing first — "I still think it's a saved
@@ -2414,6 +2454,71 @@ and `prefill` are mocked/available but not yet written.
     parallel implementation - there is one owned-power mechanism and it stays
     one.
 
+54. **The creation budget: pools as data, clans and fellowships as CHOICES**
+    (user: "We should, by this point, create the actual budget for character
+    creation", with the whole allocation - per-template starts and maxima,
+    priority pools, the vampire and mage extras, the freebie table, all six
+    Fellowships and every clan's Disciplines).
+    - **`CreationBudget` is per template, and templates STACK.** `BASE_CREATION`
+      carries what every Dark Ages character gets (Attributes 7/5/3 over one
+      free dot, Abilities 13/9/5 from nothing, 5 Background dots, 15 freebies);
+      `TemplateConfig.Creation` overrides it, and **`creationBudgetFor(keys[])`**
+      folds several templates by overriding numbers in turn and CONCATENATING
+      notes. Stacking rather than last-wins because a vampire-and-mage owes both
+      sets of dots - shadowing would silently delete one splat's obligations.
+      Vampire: `disciplines: 4`, `virtues: 7`. Mage and Ouroboros: notes only.
+    - **The derived values ship as NOTES, not as computation.** Road = the sum of
+      the Road Virtues, Willpower = Courage, blood = 1d10 + Domain + Herd,
+      generation starts at 12th, Quintessence = max(Cray + Fount, 5). Every one
+      of these needs a subsystem that does not exist (Road tracking, generation,
+      a creation-time roll), so the standing rule applies: **store it, surface
+      it, never block on it.** `[[creation]]` prints them verbatim.
+    - **`[[creation]]` reports, never enforces**, like everything creation-side.
+      It needs the player's priorities to say anything per-category, so
+      **`[[choose attributes physical,social,mental]]`** /
+      **`[[choose abilities talents,skills,knowledges]]`** record them in
+      `PlayableCharacter.priorities`, and until they exist the report says
+      `7/5/3 to spend - [[choose …]] first`.
+    - **Which Ability is a Talent is the CHRONICLE's call.** `categoryTraits()`
+      reads the `srd:abilities` talents/skills/knowledges lists rather than a
+      hard-coded table, so a house-ruled Ability counts in whichever list names
+      it. Corollary: dots in no list would vanish from the arithmetic, so they
+      are reported as **`⚠ uncounted`**. Same honesty for a rating a clan limit
+      forbids: **`⚠ over: Appearance 1 > 0`**, said and not corrected.
+    - **A clan/fellowship is not a template**, so it does not belong in
+      `templates[]`: it steers traits (naming Disciplines, a Foundation and four
+      Pillars) instead of being a splat. `PlayableCharacter.choices` is its own
+      map, written by **`[[choose clan …]]` / `[[choose fellowship …]]`**, and
+      the value stored is the registry **id** (`assamite-vizier`), never the
+      display name (`Assamite (Warrior)` normalizes to something nobody types).
+      A chosen fellowship now WINS over auto-detection in `resolveFoundation`:
+      a Valdaermen with a Modus rating still casts on Blot.
+    - **Thirteen clans, fifteen entries.** The three Assamite castes pick
+      different Disciplines, so they are separate `CLANS` entries, but they are
+      one clan: `Clan.family` + `clanFamilies()` (13) + `clanFamilyOf()` make
+      **`EXCLUSIVE_MERITS_FLAWS`** thirteen pairs rather than fifteen, and the
+      gate in `unmetRequirements` compares CLANS, so a Vizier may buy what
+      Assamites may buy. `MeritFlawRequirements.choices` is the new gate kind -
+      templates and tags could not express "only a Nosferatu".
+    - **All six Fellowships** ship with their Foundation, four Pillars, theme and
+      `aliases`, findable through `fellowshipByName` (`batini`, `aedun`,
+      `runecrafters`, `hermetic`, …). Consequence caught by a test: Sensitivity
+      is now somebody's Foundation, so the "no Foundation" refusal needed a
+      trait no fellowship names.
+    - **Freebie prices corrected** from the book the user quoted: Foundation 5
+      (was 10), Pillar 3 (was 7), and a new `specialty` row at 1.
+    - **One number, two reports.** `budgetsOf` now SEEDS the `background` and
+      `freebie` purses from the creation budget, so `[[budget]]` says
+      `background: 2/5, 3 left` where it used to say "no budget set (Storyteller's
+      call)" while `[[creation]]` was already saying `2/5`. Two commands quoting
+      different numbers for the same pool is exactly the kind of drift this file
+      exists to prevent. Template `Budgets` and the sheet's own `budgets` block
+      still override, in that order.
+    Load-order bug worth remembering: `BASE_CREATION` is referenced by
+    `TemplateConfig`'s constructor default, so the whole creation-budget block
+    has to sit ABOVE it in rules.ts or the module crashes with "used before
+    initialization" at import time.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
@@ -2462,19 +2567,27 @@ Ordered roughly by unlock value:
    `targetMustBe` field already stored), enemy-resistance effects (`resist`
    op); `roll-for` and now the `resist`/`contest` two-side machinery are the
    precedents — a spend effect that opposes a target can reuse `compareRolls`.
-5. **Allocation + creation budgets** — customizable per-template budgets;
-   attribute/ability **priorities (primary/secondary/tertiary)**; freebies;
-   merits/flaws taken at creation (`meritsFlaws` bucket exists, empty);
-   ALL OPT-IN (play-before-allocating stays sacred); **hybrids need a
-   budget-merge rule**; probably delivered as a creation wizard on the
-   existing engine + allocation commands. **Constraint groups** (§7.17) already
-   exist as data + `[[check-constraints]]`; creation is where they become
+5. **Allocation + creation budgets** — the BUDGET is **shipped** (§7.54:
+   `CreationBudget` per template, `creationBudgetFor` stacking them, the
+   priority pools, per-trait `TraitLimit`s, the freebie table, `[[creation]]` /
+   `[[choose]]`). LEFT: **spending** through it — nothing decrements a pool, so
+   `[[creation]]` counts what the sheet holds instead of gating what may be
+   bought; **freebie arithmetic** (the `[[costs]]` values are still text, so
+   nobody multiplies "current x 2"); the **XP/maturation engine** the same table
+   is waiting for; the **creation WIZARD** (the wizard engine exists — this is a
+   script over it); and the derived values that need other subsystems (Road from
+   Virtues, generation, the starting-blood die). **Constraint groups** (§7.17)
+   exist as data + `[[check-constraints]]`; creation is where they would become
    enforced (block/allow backgrounds & merits/flaws) instead of advisory.
-6. **Template choices** — clans (vampires), families (revenants), fellowships
-   (mages) as selectable data configuring the character (in-clan disciplines,
-   allowed roads/morality, and **the constraint groups they own via `scope`**).
-   `DISCIPLINES` already carries clan lists; a Choice primitive is the next data
-   atom after constraints, referenced by the template-definer window.
+   ALL OPT-IN stays sacred — play-before-allocating is untouched.
+6. **Template choices** — **shipped for clans and fellowships** (§7.54:
+   `CLANS` with their Disciplines and `TraitLimit`s, all six `FELLOWSHIPS`,
+   `PlayableCharacter.choices`, `[[choose]]`/`[[clans]]`, and
+   `MeritFlawRequirements.choices` as the exclusivity gate). LEFT: **revenant
+   families** (the third choice kind, same shape, no data yet); a clan/
+   fellowship owning **constraint groups via `scope`**; allowed roads/morality
+   per clan; and making a choice a **generic data atom** a template-definer
+   window could edit, instead of two hard-coded records in rules.ts.
 7. **Sorcerer Paths** (static magic) + the "other powers". The **Dark Ages:
    Mage casting PROCEDURE is SHIPPED** (§7.33: `[[cast]]`/`[[seal-spell]]`,
    simple/complex/extended/ongoing, Quintessence, retries, the cap knob), as are

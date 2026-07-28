@@ -33,6 +33,7 @@ import {
   rollFloorFrom,
   advancementCostsFrom, CostTable, COST_PURSES,
   BackgroundDef, makeBackgroundDef, backgroundTierAt, TraitGrant,
+  CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, fellowshipByName, ATTRIBUTES,
   DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, supernaturalTraitOf, categoryOpenTo,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
   meritFlawFromCard, InstanceLimit, instanceLimitsOf,
@@ -1344,8 +1345,15 @@ function fusedComponentExtra(def: ResourceDef, points: number, uncancelableLimit
 // literal "foundation" trait; else the first FELLOWSHIPS entry whose Foundation
 // trait the caster actually has (Order of Hermes -> Modus). Returns the trait
 // name plus the fellowship it came from, when that's how it was found.
-function resolveFoundation(arg: string | undefined, resolve: (n: string) => number): { trait: string; rating: number; fellowship?: string } {
+function resolveFoundation(arg: string | undefined, resolve: (n: string) => number, chosen?: string): { trait: string; rating: number; fellowship?: string } {
   if (arg?.trim()) { const t = StringUtil.normalize(arg); return { trait: t, rating: resolve(t) }; }
+  // A character who CHOSE a fellowship casts on its Foundation, whatever else
+  // they happen to have a rating in.
+  const picked = chosen ? fellowshipByName(chosen) : undefined;
+  if (picked) {
+    const t = StringUtil.normalize(picked.foundation);
+    return { trait: t, rating: resolve(t), fellowship: picked.name };
+  }
   if (resolve("foundation") > 0) return { trait: "foundation", rating: resolve("foundation") };
   for (const f of Object.values(FELLOWSHIPS)) {
     const t = StringUtil.normalize(f.foundation);
@@ -1378,7 +1386,7 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   }
   // ...and have a Foundation to channel it through (their fellowship's, when
   // the sheet carries it - Order of Hermes casts on Modus).
-  const found = resolveFoundation(cmd.named["foundation"], env.resolver);
+  const found = resolveFoundation(cmd.named["foundation"], env.resolver, char.choices?.["fellowship"]);
   const foundationTrait = found.trait;
   const foundationRating = env.resolver(foundationTrait);
   if (foundationRating <= 0) {
@@ -1591,7 +1599,7 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   const entries = Object.entries(FELLOWSHIPS);
   if (which) {
     const key = StringUtil.normalize(which);
-    const hit = entries.find(([k, f]) => k === key || StringUtil.normalize(f.name) === key)?.[1];
+    const hit = fellowshipByName(key);
     if (!hit) return sys(`No fellowship "${which}". Known: ${entries.map(([k]) => k).join(", ")}.`);
     const pillars = Object.entries(hit.pillars).map(([p, gloss]) => `${disp(p)} (${gloss})`).join(", ");
     return sys(`${hit.name} - Foundation: ${disp(hit.foundation)}${hit.foundationGloss ? ` (${hit.foundationGloss})` : ""}. `
@@ -1614,7 +1622,10 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
 
 // Every purse this character has a budget for, template first, sheet on top.
 function budgetsOf(char: PlayableCharacter): Record<string, string> {
-  const out: Record<string, string> = {};
+  // The creation budget already answers two of these purses; [[budget]] and
+  // [[creation]] must not disagree about how many Background dots you get.
+  const creation = creationBudgetFor(char.templates);
+  const out: Record<string, string> = { background: String(creation.backgrounds), freebie: String(creation.freebies) };
   for (const t of char.templates) {
     const tpl = TEMPLATES[StringUtil.normalize(t)];
     for (const [purse, expr] of Object.entries(tpl?.Budgets ?? {})) out[StringUtil.normalize(purse)] = expr;
@@ -1720,6 +1731,188 @@ async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   const value = evalBudget(expr, resolver);
   return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
     + `[[budget]] counts it.`);
+}
+
+// =============================================================================
+// CREATION - the budget a fresh character is built against
+// -----------------------------------------------------------------------------
+// Reports, never enforces. The numbers live in the template's CreationBudget
+// (rules.ts); this walks the sheet and says what each pool has actually taken.
+// =============================================================================
+// The trait names in one priority category. Attributes come from the fixed
+// three (rules.ts); Abilities come from the CHRONICLE's own lists, so a
+// house-ruled Ability counts in whichever of them names it. Both the plural and
+// the singular answer, because both are what a player types.
+async function categoryTraits(kind: "attributes" | "abilities"): Promise<{ order: string[]; of: Record<string, string[]> }> {
+  const order: string[] = [];
+  const of: Record<string, string[]> = {};
+  const put = (category: string, names: readonly string[]): void => {
+    const list = names.map(n => StringUtil.normalize(n));
+    order.push(category);
+    of[category] = list;
+    if (category.endsWith("s")) of[category.slice(0, -1)] = list;
+  };
+  if (kind === "attributes") {
+    for (const [category, names] of Object.entries(ATTRIBUTES)) put(category, names);
+    return { order, of };
+  }
+  put("talents", await LorebookManager.allTalents());
+  put("skills", await LorebookManager.allSkills());
+  put("knowledges", await LorebookManager.allKnowledges());
+  return { order, of };
+}
+
+// The template's budget (templates stack - see creationBudgetFor).
+function creationOf(char: PlayableCharacter): CreationBudget {
+  return creationBudgetFor(char.templates);
+}
+
+// The trait limits in force: the template's, plus the chosen clan's (a
+// Nosferatu's Appearance is 0 and stays 0).
+function limitsFor(char: PlayableCharacter): Record<string, TraitLimit> {
+  const clan = char.choices?.["clan"] ? clanByName(char.choices["clan"]) : undefined;
+  return { ...(creationOf(char).limits ?? {}), ...(clan?.limits ?? {}) };
+}
+
+// choose <what> <value> - the picks a template asks for.
+async function cmdChoose(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const what = StringUtil.normalize(cmd.positional[0] ?? cmd.named["what"] ?? "");
+  const value = (cmd.positional[1] ?? cmd.named["value"] ?? "").trim();
+  if (!what) {
+    const made = Object.entries(char.choices ?? {}).map(([k, v]) => `${k}: ${disp(v)}`);
+    return sys(`${disp(char.name)} - ${made.length ? made.join(", ") : "nothing chosen yet"}. `
+      + `[[choose clan <name>]] ([[clans]]), [[choose fellowship <name>]] ([[fellowships]]), `
+      + `[[choose attributes physical,social,mental]] (primary, secondary, tertiary).`);
+  }
+  if (what === "attributes" || what === "abilities") {
+    const groups = await categoryTraits(what);
+    const order = value.split(",").map(x => StringUtil.normalize(x)).filter(Boolean);
+    const wrong = order.filter(c => !(c in groups.of));
+    if (order.length !== 3 || wrong.length) {
+      return sys(`${wrong.length ? `No ${what} category ${wrong.map(w => `"${w}"`).join(", ")}. ` : ""}`
+        + `${what} needs three categories in priority order, e.g. [[choose ${what} ${groups.order.join(",")}]]. `
+        + `Known: ${groups.order.join(", ")}.`);
+    }
+    char.priorities = { ...(char.priorities ?? {}) };
+    (["primary", "secondary", "tertiary"] as const).forEach((slot, i) => { char.priorities![`${what}-${slot}`] = order[i]; });
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)} ${what}: ${order.map((o, i) => `${["primary", "secondary", "tertiary"][i]} ${disp(o)}`).join(", ")}. [[creation]] checks the pools.`);
+  }
+  if (!value) return sys(`[[choose ${what} <value>]] needs a value.`);
+  if (what === "clan") {
+    const clan = clanByName(value);
+    if (!clan) return sys(`No clan "${value}". [[clans]] lists them.`);
+    char.choices = { ...(char.choices ?? {}), clan: clan.id };
+    await CharacterStore.save(char);
+    const bounds = Object.values(clan.limits ?? {}).map(l => l.note).filter(Boolean).join(" ");
+    return sys(`${disp(char.name)} is ${clan.name}. Clan Disciplines: ${clan.disciplines.map(d => disp(d)).join(", ")}. `
+      + `${bounds ? `${bounds} ` : ""}Rate them with [[set-trait <discipline> <n> group=discipline]].`);
+  }
+  if (what === "fellowship") {
+    const f = fellowshipByName(value);
+    if (!f) return sys(`No fellowship "${value}". [[fellowships]] lists them.`);
+    char.choices = { ...(char.choices ?? {}), fellowship: f.id };
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)} follows the ${f.name}${f.theme ? ` (${f.theme})` : ""}. `
+      + `Foundation: ${disp(f.foundation)}. Pillars: ${Object.entries(f.pillars).map(([p, g]) => `${disp(p)} (${g})`).join(", ")}. `
+      + `Rate them with [[set-trait <pillar> <n>]].`);
+  }
+  char.choices = { ...(char.choices ?? {}), [what]: StringUtil.normalize(value) };
+  await CharacterStore.save(char);
+  return sys(`${disp(char.name)} ${what}: ${disp(value)} (recorded; the engine knows no rules for it).`);
+}
+
+// clans / clan <name>
+async function cmdClans(cmd: ParsedCommand): Promise<string> {
+  const which = cmd.positional[0]?.trim();
+  if (which) {
+    const clan = clanByName(which);
+    if (!clan) return sys(`No clan "${which}". Known: ${Object.values(CLANS).map(c => c.name).join(", ")}.`);
+    const limits = Object.entries(clan.limits ?? {}).map(([t, l]) => `${disp(t)} ${l.start ?? 0}-${l.max ?? 5}${l.note ? ` (${l.note})` : ""}`);
+    return sys(`${clan.name} - Disciplines: ${clan.disciplines.map(d => disp(d)).join(", ")}`
+      + `${limits.length ? `; ${limits.join("; ")}` : ""}. [[choose clan ${clan.id}]] picks it.`);
+  }
+  return sys(`Clans: ${Object.values(CLANS).map(c => `${c.name} (${c.disciplines.map(d => disp(d)).join("/")})`).join("; ")}. `
+    + `[[clan <name>]] for one; [[choose clan <name>]] picks it.`);
+}
+
+// creation - every pool, against what the sheet actually holds.
+async function cmdCreation(cmd: ParsedCommand): Promise<string> {
+  const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
+  const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const budget = creationOf(char);
+  const limits = limitsFor(char);
+  const lines: string[] = [];
+
+  // Attributes and Abilities are per CATEGORY, so the priorities must be set.
+  for (const kind of ["attributes", "abilities"] as const) {
+    const pools = kind === "attributes" ? budget.attributes : budget.abilities;
+    const free = kind === "attributes" ? budget.attributeStart : budget.abilityStart;
+    const groups = await categoryTraits(kind);
+    const slots = (["primary", "secondary", "tertiary"] as const).map(slot => ({
+      slot, category: char.priorities?.[`${kind}-${slot}`], allowed: pools[slot],
+    }));
+    if (slots.some(x => !x.category)) {
+      lines.push(`${kind}: ${slots.map(x => `${x.allowed}`).join("/")} to spend - `
+        + `[[choose ${kind} ${groups.order.join(",")}]] first (primary, secondary, tertiary)`);
+      continue;
+    }
+    const bucket = (kind === "attributes" ? char.attributes : char.abilities) ?? {};
+    const counted = new Set<string>();
+    const bits = slots.map(x => {
+      const names = groups.of[x.category!];
+      if (!names) return `${x.slot} ${disp(x.category!)} ?/${x.allowed} ⚠ no such category`;
+      const spent = names.reduce((sum, n) => {
+        counted.add(n);
+        return sum + Math.max(0, (bucket[n] ?? free) - (limits[n]?.start ?? free));
+      }, 0);
+      return `${x.slot} ${disp(x.category!)} ${spent}/${x.allowed}`;
+    });
+    // Dots on the sheet that no priority category claims: an Ability the
+    // chronicle's lists don't name, or a category the player never made a
+    // priority. They are real dots, and silently dropping them would lie.
+    const stray = Object.entries(bucket)
+      .filter(([n, v]) => !counted.has(n) && v > (limits[n]?.start ?? free))
+      .map(([n]) => disp(n));
+    lines.push(`${kind}: ${bits.join(", ")}${stray.length ? ` ⚠ uncounted: ${stray.join(", ")}` : ""}`);
+  }
+
+  const bgSpent = Object.entries(char.backgrounds ?? {}).reduce((sum, [n, v]) => {
+    const held = char.instances?.[n];
+    const each = held?.length ? held : [{ rating: v, paid: char.paid?.[n] }];
+    return sum + each.reduce((s, one) => s + ((one as { paid?: string }).paid !== undefined ? parseInt((one as { paid?: string }).paid!, 10) || 0 : one.rating), 0);
+  }, 0);
+  lines.push(`backgrounds: ${bgSpent}/${budget.backgrounds}`);
+
+  if (budget.disciplines !== undefined) {
+    const clan = char.choices?.["clan"] ? clanByName(char.choices["clan"]) : undefined;
+    const inClan = (clan?.disciplines ?? []).map(d => StringUtil.normalize(d));
+    const spent = Object.entries(char.disciplines ?? {}).reduce((sum, [, v]) => sum + v, 0);
+    const out = Object.keys(char.disciplines ?? {}).filter(d => inClan.length && !inClan.includes(d));
+    lines.push(`disciplines: ${spent}/${budget.disciplines}${clan ? ` (${clan.name}: ${inClan.map(d => disp(d)).join(", ")})` : " - [[choose clan]] first"}`
+      + `${out.length ? ` ⚠ out of clan: ${out.map(d => disp(d)).join(", ")}` : ""}`);
+  }
+  if (budget.virtues !== undefined) {
+    const spent = Object.values(char.virtues ?? {}).reduce((a, b) => a + b, 0) - Object.keys(char.virtues ?? {}).length;
+    lines.push(`virtues: ${Math.max(0, spent)}/${budget.virtues} (over one free dot each)`);
+  }
+  lines.push(`freebies: ${budget.freebies} to spend ([[costs]] prices them)`);
+  const caps = Object.entries(limits).map(([t, l]) => `${disp(t)} ${l.start ?? 0}-${l.max ?? 5}`);
+  // A rating the limit forbids: a Nosferatu sheet still carrying the free
+  // Appearance dot every other character gets. Said, not corrected.
+  const over = Object.entries(limits).flatMap(([t, l]) => {
+    const rating = char.attributes?.[t] ?? char.abilities?.[t];
+    return rating !== undefined && l.max !== undefined && rating > l.max ? [`${disp(t)} ${rating} > ${l.max}`] : [];
+  });
+  if (caps.length) lines.push(`limits: ${caps.join(", ")}${over.length ? ` ⚠ over: ${over.join(", ")}` : ""}`);
+  // The notes are whole sentences the splat's own book states; they follow the
+  // pools rather than joining them, so the punctuation stays readable.
+  const notes = budget.notes?.length ? ` ${budget.notes.join(" ")}` : "";
+
+  return sys(`${disp(char.name)} creation - ${lines.join("; ")}.${notes} Advisory: nothing is enforced.`);
 }
 
 // backgrounds / background <name> - the bag Backgrounds never had.
@@ -3197,6 +3390,16 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
   const tags = char.tags.map(t => StringUtil.normalize(t));
   for (const t of req.tags ?? []) if (!tags.includes(StringUtil.normalize(t))) missing.push(`tag:${StringUtil.normalize(t)}`);
   for (const m of req.meritsFlaws ?? []) if (!(StringUtil.normalize(m) in char.meritsFlaws)) missing.push(`merit-flaw:${StringUtil.normalize(m)}`);
+  // A choice, not a template: what only a Nosferatu or only a Valdaermen may
+  // have. A clan matches by CLAN, so all three Assamite castes pass an
+  // Assamite-exclusive gate.
+  for (const [what, want] of Object.entries(req.choices ?? {})) {
+    const key = StringUtil.normalize(what);
+    const has = StringUtil.normalize(char.choices?.[key] ?? "");
+    const asked = StringUtil.normalize(want);
+    const met = key === "clan" ? has !== "" && clanFamilyOf(has) === clanFamilyOf(asked) : has === asked;
+    if (!met) missing.push(`${key}:${asked}`);
+  }
   return missing;
 }
 
@@ -4350,6 +4553,25 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
+CommandRouter.register("creation", cmdCreation, {
+  summary: "the creation budget: every pool against what the sheet holds (advisory)",
+  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
+});
+CommandRouter.register("choose", cmdChoose, {
+  summary: "pick a clan, a fellowship, or the Attribute/Ability priorities",
+  params: [
+    { key: "what", kind: "positional", hint: "<clan|fellowship|attributes|abilities>", example: "clan" },
+    { key: "value", kind: "positional", hint: "<value>", example: "tremere" },
+  ],
+});
+CommandRouter.register("clans", cmdClans, {
+  summary: "the clans and their Disciplines",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "nosferatu" }],
+});
+CommandRouter.register("clan", cmdClans, {
+  summary: "one clan: its Disciplines and what it bounds",
+  params: [{ key: "name", kind: "positional", hint: "<name>", example: "nosferatu" }],
+});
 CommandRouter.register("backgrounds", cmdBackgrounds, {
   summary: "the backgrounds this chronicle defines, what you hold, and what they confer",
 });
@@ -4756,6 +4978,9 @@ const QUIET_VERBS = new Set<string>([
   "resources", "health", "tables", "constraints", "constraint",
   "check-constraints", "merits", "merit", "specialties", "affliction", "afflictions",
   "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
+  // The creation-side listings: all read-only, all for the player's eyes.
+  "creation", "clans", "clan", "budget", "paid", "costs", "backgrounds", "background",
+  "arcana", "arcanum", "supernatural",
 ]);
 
 // =============================================================================

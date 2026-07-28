@@ -401,6 +401,11 @@ Values are **text**: there is no advancement engine yet, so the engine records
 and surfaces them and the Storyteller applies them — the standing rule for a
 subsystem that doesn't exist.
 
+The **freebie** column is the one the creation budget spends: Attribute 5,
+Ability 2, Specialty 1, Background 1, Virtue 2, Road 1, Willpower 1,
+Discipline 7, **Foundation 5**, **Pillar 3**, and a Merit or Flaw for its own
+points.
+
 ## Player commands & character creation
 
 In adventure mode, `[[…]]` blocks in the input box are commands. The
@@ -434,29 +439,30 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
   **default** (and current) automatically.
 - The character is written to **both** a lorebook entry (`pc:<name>` in the
   `wod:player-characters` category — instructions above a `=====` marker, the
-  sheet as JSON below it) and `storyStorage`; its `id` is a UUID that stays its
-  identity for good. **The lorebook entry is the source of truth.**
+  sheet in **card text** below it) and `storyStorage`; its `id` is a UUID that
+  stays its identity for good. **The lorebook entry is the source of truth.**
 - **`creator-mode set=true`** lets the player edit those entries directly; edits
   sync **lorebook → storage** whenever a command runs and when creator mode is
   turned off. Unparseable edits are reported and skipped, never synced.
   > ⚠️ **Edits made while creator mode is OFF are not picked up.** The router
   > deliberately doesn't re-read the lorebook on every command, so a hand-edited
   > sheet stays invisible until you turn creator mode on (the next command syncs
-  > it) or off again. That — and a stray **trailing comma**, which makes the JSON
-  > unparseable — are the two reasons a trait you *can see in the card* reads as
-  > 0. `[[sheet]]` always shows what the engine actually has, and `[[cast]]`
-  > says so when it refuses.
+  > it) or off again. That — and an edit the reader can't make sense of — are
+  > the two reasons a trait you *can see in the card* reads as 0. `[[sheet]]`
+  > always shows what the engine actually has, and `[[cast]]` says so when it
+  > refuses.
   **Manual fill works today**: with creator mode on, open the `pc:<name>`
-  entry and edit the JSON below the `=====` line — set attribute/ability dots,
-  add keys to any numeric bucket (anything there is rollable by name), set
-  `poolStarts` (e.g. `"willpower": 5` — resources start there), add
-  `specialties`/`meritsFlaws`. Keep the header and marker line intact, and
-  don't touch `id`/`name` (they're the identity).
+  entry and edit the card text below the `=====` line — set attribute/ability
+  dots, add keys to any numeric bucket (anything there is rollable by name), set
+  `pool-starts` (e.g. `willpower: 5` — resources start there), add
+  `specialties`/`merits-flaws`. Keep the header and marker line intact, and
+  don't touch `id`/`name` (they're the identity). `[[set-trait]]` does the same
+  job from a command, without opening the card at all.
 - **`sheet [name]`** shows a character's record **as the engine reads it** —
   every numeric bucket, merits, specialties — with the *effective* value
   marked wherever enhancements or boosts change what a roll will use
   (`strength 1 (3 eff)`). It's the verification half of the manual-fill loop:
-  edit the JSON, run `[[sheet]]`, see exactly what synced.
+  edit the card, run `[[sheet]]`, see exactly what synced.
 - **`play name="…"`** selects who to act as; **`play`** with no name hands
   control back to the default. **`roll <pool> …`** rolls for the current
   character; **`roll-for "Name" <pool> …`** rolls on another character's behalf
@@ -464,6 +470,73 @@ Parsing and dispatch are separate: **`CommandParser`** turns a body into
 - **`characters`** lists your playable characters (marking current and default);
   **`set-default name="…"`** changes which one `play` returns to. **`help`**
   lists every command, and **`help <verb>`** shows one command's usage.
+
+### The creation budget — what a fresh character may be
+
+Every Dark Ages character is built against the same three priority ladders, and
+then its splat's own pools on top. The numbers are **data**
+(`CreationBudget` in `rules.ts`, one per template), and **`[[creation]]`**
+reports each pool against what the sheet actually holds. Nothing is enforced —
+the report is for the Storyteller, who decides.
+
+| Pool | Primary | Secondary | Tertiary | Notes |
+|---|---|---|---|---|
+| Attributes | 7 | 5 | 3 | **over** one free dot in each (so Strength 4 costs 3) |
+| Abilities | 13 | 9 | 5 | from nothing; none may start above 3 at creation |
+| Backgrounds | 5 | | | one bag, priced by what was *paid* — see below |
+| Freebies | 15 | | | priced by `[[costs]]` |
+
+A **vampire** owes four **clan** Discipline dots and seven **Virtue** dots
+besides (over one free dot each); its Road rating is the sum of its Road
+Virtues, its Willpower equals Courage, its starting blood is a die plus Domain
+and Herd, and it starts at **12th generation**. A **mage** starts at Willpower
+5, with Quintessence = Cray + Fount, or 5, whichever is higher. Those derived
+values ship as **notes** on the budget — the engine states them rather than
+computing them, because the subsystems that would (Road, generation) are the
+Storyteller's.
+
+Templates **stack**: `creationBudgetFor(["vampire", "mage"])` owes both sets of
+dots and prints both sets of notes.
+
+```
+[[choose attributes physical,social,mental]]   # primary, secondary, tertiary
+[[choose abilities talents,skills,knowledges]]
+[[choose clan nosferatu]]                      # [[clans]] lists all thirteen
+[[choose fellowship valdaermen]]               # [[fellowships]] lists all six
+[[creation]]
+```
+
+> `Nos creation — attributes: primary Physical 5/7, secondary Social 0/5,
+> tertiary Mental 0/3; abilities: primary Talents 3/13, secondary Skills 0/9,
+> tertiary Knowledges 2/5; backgrounds: 0/5; disciplines: 3/4 (Nosferatu:
+> Animalism, Obfuscate, Potence) ⚠ out of clan: Celerity; virtues: 0/7; freebies:
+> 15 to spend; limits: Appearance 0-0 ⚠ over: Appearance 1 > 0. …`
+
+Which **Ability** belongs to which category is the **chronicle's** call, not the
+engine's: the counts come straight from the `srd:abilities` talents/skills/
+knowledges lists, so a house-ruled Ability counts wherever you filed it. A dot
+that no priority category claims is reported as **`⚠ uncounted`** rather than
+silently dropped.
+
+**Clan and Fellowship are choices, not templates** — they steer traits rather
+than being one. They live in their own `choices` map on the sheet:
+
+- **`[[clans]]`** / **`[[clan <name>]]`** — the thirteen clans and their three
+  Disciplines. The three **Assamite castes** are separate entries (they pick
+  different Disciplines) but **one clan**: anything Assamite-exclusive is open to
+  all three. A clan may also **bound a trait**: a Nosferatu's Appearance is
+  `0-0`, and `[[creation]]` flags a sheet still carrying the free dot everyone
+  else gets.
+- **`[[fellowships]]`** / **`[[fellowships <name>]]`** — all six, each with its
+  Foundation and its four Pillars, findable by the other names they go by
+  (`batini`, `aedun`, `runecrafters`, `hermetic`, …). Once chosen, the
+  fellowship's Foundation is what **`[[cast]]`** channels through, whatever else
+  the caster happens to have a rating in.
+- Each clan and each fellowship ships one **`<name>-exclusive-merit`** and one
+  **`<name>-exclusive-flaw`**: placeholders gated on the *choice*, so the shape
+  exists and `[[define-merit]]` can fill in what they actually do. Taking one
+  you have no right to is refused with `prerequisites not met: clan:brujah`
+  (and `waive=true` overrides, as everywhere else).
 
 ### Normalization — one internal form for every string
 
@@ -1518,7 +1591,9 @@ are left as prose for the Storyteller — the engine stores and shows them.)
 sheet's `budgets:` block — `"25"` is twenty-five, and the expression form is
 what will let a later chronicle write one budget in terms of another. A purse
 with no budget anywhere is the Storyteller's call, and `[[budget]]` says so
-rather than inventing a number.
+rather than inventing a number. Two purses always have one: `background` and
+`freebie` come from the **creation budget**, so `[[budget]]` and `[[creation]]`
+can never quote different numbers for the same pool.
 
 **Prices differ per template**, which is what a printed *Celestial Radiance
 (7/5)* means — and the difference can run deeper than money:

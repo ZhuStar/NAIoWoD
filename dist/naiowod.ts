@@ -2945,12 +2945,17 @@ interface RecoveryRule {
 interface ResourceDef {
   name: string;
   kind: PoolKind;
-  start: number;            // default starting value
+  // start / max / perTurnLimit are NUMERIC: a number, or an expression over the
+  // character (core/expr.ts). A mage's Quintessence capacity is not 20 - it is
+  // "10 + 2 * background:fount", the Fount ladder said once. A fused pool is
+  // "resource:quintessence:max + resource:blood:max", which is what Living
+  // Resolve actually IS.
+  start: Numeric;           // default starting value
   startMin?: number;        // inclusive lower bound for a chosen start
   startMax?: number;        // inclusive upper bound for a chosen start
   startOptions?: number[];  // discrete allowed starts (overrides min/max if set)
-  max: number;              // permanent cap (tracker) / capacity (pool)
-  perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
+  max: Numeric;             // permanent cap (tracker) / capacity (pool)
+  perTurnLimit?: Numeric;   // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
   roles?: string[];         // abstract capabilities this resource fills
   // "Specifically replace any other resource": this resource takes over the
@@ -3156,7 +3161,11 @@ const TEMPLATE_MAGE = new TemplateConfig(
   RulesetConfig.MAGE,
   [
     willpowerResource(5),
-    { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"],
+    // The Fount Background IS the capacity: no Fount holds 10 and spends 2 a
+    // turn; each dot adds two to the store and (from the second) one per turn.
+    { name: "quintessence", kind: "pool", start: 0,
+      max: "10 + 2 * background:fount", perTurnLimit: "max(2, background:fount + 1)",
+      roles: ["magic-fuel"],
       effect: {
         label: "Quintessence: -1 casting difficulty per point (min diff 4; >2/turn needs the Fount Background)",
         apply: [{ op: "difficulty", amount: -1 }],
@@ -3278,7 +3287,14 @@ const TEMPLATE_SORCERER = new TemplateConfig(
 // each full moon; drinking vampiric vitae (immune to the bond) and consuming
 // Tass are [[gain living-resolve N]] moments.
 const LIVING_RESOLVE: ResourceDef = {
-  name: "living-resolve", kind: "pool", start: 30, max: 30, perTurnLimit: 6,
+  name: "living-resolve", kind: "pool",
+  // It IS the two it fuses: a mage's Quintessence capacity (the Fount ladder)
+  // plus a revenant's ten points of vitae - and it spends at the Quintessence
+  // rate, because that is the one with a ladder. Written this way, raising the
+  // Fount raises the fused pool without anyone editing a number.
+  start: "resource:quintessence:max + resource:blood:max",
+  max: "resource:quintessence:max + resource:blood:max",
+  perTurnLimit: "resource:quintessence:per-turn",
   roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
   replaces: ["blood", "willpower", "resolve", "quintessence"],
   rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
@@ -3417,7 +3433,10 @@ const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
     extends: "mage",
     description: "Ouroboros (unique: revenant + laham + Awakened)",
     soak: "ghoul",
-    resources: [LIVING_RESOLVE],
+    // The revenant's vitae joins the mage's Quintessence, and Living Resolve is
+    // their sum - which is why all three are listed. `replaces` then hides the
+    // two (and Willpower, and Resolve) behind the one that stands for them.
+    resources: [bloodResource({ start: 10, max: 10 }), LIVING_RESOLVE],
     creation: {
       notes: [
         "Starting Willpower 5; note the Aura modifier, if any.",
@@ -6088,10 +6107,11 @@ class CharacterFactory {
       const explicit = opts.poolStarts?.[def.name] ?? opts.poolStarts?.[key];
       const chosen = CharacterFactory._resolveStart(def, explicit);
       if (def.kind === "tracker") {
-        trackers.set(key, new Tracker(def.name, Category.TRACKER, chosen, def.max, def.max));
+        const cap = typeof def.max === "number" ? def.max : 10;
+        trackers.set(key, new Tracker(def.name, Category.TRACKER, chosen, cap, cap));
       } else {
-        let max = def.max;
-        let perTurn = def.perTurnLimit ?? Infinity;
+        let max = typeof def.max === "number" ? def.max : 10;
+        let perTurn = typeof def.perTurnLimit === "number" ? def.perTurnLimit : Infinity;
         let start = chosen;
         if (def.fromGeneration && opts.generation !== undefined) {
           const bs = bloodForGeneration(opts.generation);
@@ -6157,13 +6177,17 @@ class CharacterFactory {
   }
 
   // Validates a chosen starting value against the ResourceDef constraints.
+  // NOTE: the legacy LiveCharacter path has no PlayableCharacter to evaluate an
+  // expression against, so a numeric field is used as-is and an expression
+  // reads as 0 here. The modern path (CharacterResources) resolves properly.
   private static _resolveStart(def: ResourceDef, chosen: number | undefined): number {
-    if (chosen === undefined) return def.start;
+    const flat = (v: Numeric | undefined, fallback = 0): number => (typeof v === "number" ? v : fallback);
+    if (chosen === undefined) return flat(def.start);
     if (def.startOptions && !def.startOptions.includes(chosen)) {
       throw new Error(`${def.name} must start at one of [${def.startOptions.join(", ")}], got ${chosen}.`);
     }
     const min = def.startMin ?? 0;
-    const max = def.startMax ?? def.max;
+    const max = def.startMax ?? flat(def.max, 10);
     if (chosen < min || chosen > max) {
       throw new Error(`${def.name} must start between ${min} and ${max}, got ${chosen}.`);
     }
@@ -6679,6 +6703,7 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
   const byTrait = new Map(defs.map(d => [d.trait, d]));
   const done = new Map<string, DerivedValue>();
   const running = new Set<string>();
+  const resourceDepth = new Set<string>();
   const granted = grantedTraitsOf(char);
 
   // The value a bare name is worth: the sheet, then a Background's grant, then
@@ -6742,6 +6767,24 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
         // still comes back unknown, which is the whole point.
         return knownTraitNames(head).includes(name) ? { value: 0 } : undefined;
       }
+      // `resource:quintessence:max` - what a POOL is worth, so one resource can
+      // be defined from others. The def is read BEFORE replacement filtering, so
+      // Living Resolve can still name the Quintessence it hides.
+      if (head === "resource") {
+        const [resName, ...fieldParts] = rest;
+        const field = StringUtil.normalize(fieldParts.join(":") || "max");
+        const def = resourcesForTemplates(char.templates, ResourceOverrides.current())
+          .find(d => StringUtil.normalize(d.name) === StringUtil.normalize(resName));
+        if (!def) return undefined;
+        // A resource that names ITSELF would spin; the guard makes it 0 and the
+        // caller's `unknown`/error path reports the nonsense.
+        if (resourceDepth.has(StringUtil.normalize(resName))) return { value: 0, from: "circular" };
+        resourceDepth.add(StringUtil.normalize(resName));
+        try {
+          const raw = field === "start" ? def.start : field === "per-turn" ? def.perTurnLimit : def.max;
+          return { value: raw === undefined ? 0 : evalNumeric(raw, scope, 0) };
+        } finally { resourceDepth.delete(StringUtil.normalize(resName)); }
+      }
       if (head === "derived") return byTrait.has(name) ? { value: derive(name).value } : undefined;
       if (head === "granted") return granted[name] ? { value: granted[name].rating, from: `from ${granted[name].from}` } : undefined;
       return extend?.(path);
@@ -6753,6 +6796,20 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
   // ([[derived]], [[sheet]]) gets it without re-walking.
   for (const d of defs) derive(d.trait);
   return { scope, derived: defs.map(d => done.get(d.trait)!), valueOf };
+}
+
+// A resource's numbers FOR THIS CHARACTER. start/max/perTurnLimit may be
+// expressions over the sheet, so they are not knowable from the def alone: a
+// mage's Quintessence capacity is a Fount rating away, and a fused pool is the
+// sum of the two it stands in for.
+function resourceNumbers(char: PlayableCharacter, def: ResourceDef, extend?: ScopeExtension): { start: number; max: number; perTurn?: number } {
+  const scope = characterScope(char, extend);
+  const max = Math.max(0, evalNumeric(def.max, scope, 0));
+  return {
+    start: Math.max(0, Math.min(max, evalNumeric(def.start, scope, 0))),
+    max,
+    ...(def.perTurnLimit !== undefined ? { perTurn: Math.max(0, evalNumeric(def.perTurnLimit, scope, 0)) } : {}),
+  };
 }
 
 // THE seam: an expression scope over this character.
@@ -6820,7 +6877,7 @@ function permanentRatingOf(char: PlayableCharacter, name: string): number {
   if (direct) return direct;
   const owner = CharacterResources.resolveDef(char, name);
   if (!owner) return 0;
-  return resolveTraitFromRecord(char, owner.name) || owner.start;
+  return resolveTraitFromRecord(char, owner.name) || resourceNumbers(char, owner).start;
 }
 
 // --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
@@ -7813,7 +7870,8 @@ class CharacterResources {
 
   private static _startOf(char: PlayableCharacter, def: ResourceDef): number {
     const chosen = char.poolStarts?.[StringUtil.normalize(def.name)];
-    return Math.max(0, Math.min(chosen ?? def.start, def.max));
+    const n = resourceNumbers(char, def);
+    return Math.max(0, Math.min(chosen ?? n.start, n.max));
   }
 
   private static async _values(char: PlayableCharacter): Promise<Record<string, number>> {
@@ -7830,7 +7888,7 @@ class CharacterResources {
     const values = await CharacterResources._values(char);
     return CharacterResources.defsFor(char).map(def => {
       const k = StringUtil.normalize(def.name);
-      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: def.max };
+      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: resourceNumbers(char, def).max };
     });
   }
 
@@ -7854,7 +7912,7 @@ class CharacterResources {
     const values = await CharacterResources._values(char);
     const k = StringUtil.normalize(def.name);
     const have = k in values ? values[k] : CharacterResources._startOf(char, def);
-    const value = Math.max(0, Math.min(have + amount, def.max));
+    const value = Math.max(0, Math.min(have + amount, resourceNumbers(char, def).max));
     values[k] = value;
     await CharacterResources._storage.set(CharacterResources._key(char.name), values);
     return { value, def };
@@ -8249,6 +8307,12 @@ const rw = {
   },
 };
 
+// A resource number the WIZARD can show: it edits one resource at a time with
+// no character in hand, so an expression (a Fount-scaled capacity) has nothing
+// to evaluate against and shows as 0 - typing a number over it replaces the
+// expression with a flat one, which is exactly what a house rule wants.
+const flatNumber = (v: Numeric | undefined): number => (typeof v === "number" ? v : 0);
+
 const RESOURCES_WIZARD: WizardDefinition = {
   id: "resources",
   title: "Resource configuration",
@@ -8268,7 +8332,7 @@ const RESOURCES_WIZARD: WizardDefinition = {
         if (reply === "customize") {
           state.current = state.queue.shift()!;
           state.phase = "start";
-          return { state: rwState(state), prompt: rw.numberPrompt(state, "start", rw.def(state, state.current).start) };
+          return { state: rwState(state), prompt: rw.numberPrompt(state, "start", flatNumber(rw.def(state, state.current).start)) };
         }
         state.queue.shift();
         return rw.advance(state);
@@ -8278,7 +8342,7 @@ const RESOURCES_WIZARD: WizardDefinition = {
         const def = rw.def(state, state.current);
         if (v !== def.start) rw.patch(state, state.current).start = v;
         state.phase = "max";
-        return { state: rwState(state), prompt: rw.numberPrompt(state, "max", def.max) };
+        return { state: rwState(state), prompt: rw.numberPrompt(state, "max", flatNumber(def.max)) };
       }
       case "max": {
         const v = parseInt(reply, 10);
@@ -9329,6 +9393,9 @@ async function cmdResources(): Promise<string> {
   const uses = await EffectUses.counts(char);
   const items = views.map(v => {
     const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
+    // The per-turn limit may be an expression (Quintessence's is the Fount
+    // ladder), so it is resolved for THIS character rather than printed raw.
+    const perTurn = resourceNumbers(char, v.def).perTurn;
     const named = Object.keys(v.def.effects ?? {}).map(n => {
       const used = uses[`${StringUtil.normalize(v.def.name)}:${StringUtil.normalize(n)}`] ?? 0;
       return `${n}${used > 0 ? ` (used ${used})` : ""}`;
@@ -9336,7 +9403,7 @@ async function cmdResources(): Promise<string> {
     const meta = [
       v.def.replaces?.length ? `replaces: ${v.def.replaces.join("/")}` : "",
       roles.length ? `roles: ${roles.join("/")}` : "",
-      v.def.perTurnLimit !== undefined && Number.isFinite(v.def.perTurnLimit) ? `${v.def.perTurnLimit}/turn (ST)` : "",
+      perTurn !== undefined && Number.isFinite(perTurn) ? `${perTurn}/turn (ST)` : "",
       v.def.rollAs ? `pools as min(${v.def.rollAs.cap ?? "∞"}, current)${v.def.rollAs.negatesPenaltiesAbove !== undefined ? `; points over ${v.def.rollAs.negatesPenaltiesAbove} shield penalties` : ""}` : "",
       v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${(Array.isArray(r.requires) ? r.requires : [r.requires]).join("+")}` : ""}`).join(", ")}` : "",
       v.def.effect ? describeEffect(v.def.effect) : "",
@@ -9661,7 +9728,7 @@ async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
     const cost = Math.max(sealQ, sealW);
     const { spent } = await CharacterResources.spend(char, fuelDef.name, cost);
     const now = await CharacterResources.current(char, fuelDef);
-    linesOut.push(`${spent}/${cost} ${fuelDef.name} (the fused substance covers both components) -> ${now}/${fuelDef.max}`);
+    linesOut.push(`${spent}/${cost} ${fuelDef.name} (the fused substance covers both components) -> ${now}/${resourceNumbers(char, fuelDef).max}`);
     if (spent < cost) linesOut.push(`${cost - spent} still owed - payable over time (ST tracks the debt)`);
   } else {
     if (fuelDef) {
@@ -10199,15 +10266,20 @@ async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
   const name = StringUtil.normalize(rawName);
   const kind = StringUtil.normalize(cmd.named["kind"] ?? "pool") === "tracker" ? "tracker" : "pool";
   const patch: Partial<ResourceDef> = { kind };
-  const start = intOrUndef(cmd.named["start"] ?? "");
-  const max = intOrUndef(cmd.named["max"] ?? "");
-  patch.start = start ?? 0;
-  patch.max = max ?? Math.max(10, patch.start);
+  // start / max / per-turn are NUMERIC: an integer, or an expression over the
+  // character ("10 + 2 * background:fount"). A bare integer stays a number.
+  const numeric = (raw: string | undefined): Numeric | undefined => {
+    const v = raw?.trim();
+    if (!v) return undefined;
+    return /^-?\d+$/.test(v) ? parseInt(v, 10) : v;
+  };
+  patch.start = numeric(cmd.named["start"]) ?? 0;
+  patch.max = numeric(cmd.named["max"]) ?? (typeof patch.start === "number" ? Math.max(10, patch.start) : 10);
   for (const key of ["roles", "replaces"] as const) {
     const list = (cmd.named[key] ?? "").split(",").map(r => StringUtil.normalize(r)).filter(Boolean);
     if (list.length) patch[key] = list;
   }
-  const perTurn = intOrUndef(cmd.named["per-turn"] ?? "");
+  const perTurn = numeric(cmd.named["per-turn"]);
   if (perTurn !== undefined) patch.perTurnLimit = perTurn;
   const description = cmd.named["description"]?.trim();
   if (description) patch.description = description;
@@ -10458,8 +10530,8 @@ async function drawFromCray(char: PlayableCharacter, want: number, ctx: CommandC
   const before = await CharacterResources.current(char, def);
   const { value } = await CharacterResources.gain(char, def.name, gained);
   notes.push(value - before < gained
-    ? `${value - before} of ${gained} fit - ${def.name} is at ${value}/${def.max}, the rest spills`
-    : `+${gained} ${def.name} -> ${value}/${def.max}`);
+    ? `${value - before} of ${gained} fit - ${def.name} is at ${value}/${resourceNumbers(char, def).max}, the rest spills`
+    : `+${gained} ${def.name} -> ${value}/${resourceNumbers(char, def).max}`);
   return { gained, notes };
 }
 
@@ -10558,7 +10630,7 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
     if (spent === 0) return sys(`${disp(char.name)} has no ${def.name} to spend.`);
     const now = await CharacterResources.current(char, def);
     const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
-    return sys(`${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.`);
+    return sys(`${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${resourceNumbers(char, def).max}.`);
   }
 
   // Does any increase op need the player to pick a trait within a constraint?
@@ -10576,7 +10648,7 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
   const now = await CharacterResources.current(char, def);
   const rollOnly = r.extra !== undefined && e.apply.every(isRollOp) && e.apply.length > 0;
   const tail = rollOnly ? " (roll modifiers apply only inside a roll - use [[roll ... spend=...]])" : "";
-  return sys(`${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}`);
+  return sys(`${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${resourceNumbers(char, def).max}.${tail}`);
 }
 
 async function cmdResetUses(): Promise<string> {
@@ -10640,7 +10712,7 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
   const def = CharacterResources.resolveDef(char, which);
   if (!def) return sys(`${disp(char.name)} has no resource "${which}".`);
   const { value } = await CharacterResources.gain(char, which, amount);
-  return sys(`${disp(char.name)} regains ${def.name}. Now ${value}/${def.max}.`);
+  return sys(`${disp(char.name)} regains ${def.name}. Now ${value}/${resourceNumbers(char, def).max}.`);
 }
 
 // =============================================================================
@@ -10931,7 +11003,7 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
       if (credit <= 0) continue;
       const had = await CharacterResources.current(char, def);
       const { value } = await CharacterResources.gain(char, def.name, credit);
-      if (value > had) lines.push(`${disp(char.name)} +${value - had} ${def.name} -> ${value}/${def.max} (${parts.join(", ")})`);
+      if (value > had) lines.push(`${disp(char.name)} +${value - had} ${def.name} -> ${value}/${resourceNumbers(char, def).max} (${parts.join(", ")})`);
     }
     // A cray bubbles back too - 1/day on the days it went untapped.
     if (CrayStore.rating(char) > 0) {

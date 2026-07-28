@@ -62,7 +62,7 @@ import {
   evaluateExpr, mapScope, exprRefs, describeTerms, evalNumeric,
   traitValueOf, derivedValuesOf, evalOn,
   ROADS, roadByName, ROAD_OF_KINGS,
-  savedRollToCard, savedRollFromCard,
+  savedRollToCard, savedRollFromCard, resourceNumbers,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -2973,6 +2973,7 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
 
   test("a Talisman that IS a place confers that place's ratings, and they are real", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     await CommandRouter.route('define-background name=`Talisman` max=5 grants=`cray:5,library:5,sanctum:5`');
     await CommandRouter.route("set-trait talisman 5 paid=0");
     const char = (await CharacterStore.load("Visvaldas"))!;
@@ -2988,6 +2989,7 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
 
   test("his five Background dots: what he was given costs nothing, what he bought costs what it rates", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     await CommandRouter.route('define-background name=`Talisman` grants=`cray:5,library:5,sanctum:5`');
     await CommandRouter.route("set-trait fount 5 paid=0");
     await CommandRouter.route("set-trait talisman 5 paid=0");
@@ -3055,6 +3057,7 @@ describe("set-trait: putting ratings back without hand-editing the card", () => 
 
   test("the group is inferred from the chronicle's own lists, not guessed", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     // Sanctum is a Background on the SRD card even though nobody has rated one.
     expect(await CommandRouter.route("set-trait sanctum 8")).toContain("background Sanctum: 8");
     expect((await CharacterStore.load("Visvaldas"))!.backgrounds.sanctum).toBe(8);
@@ -3068,6 +3071,7 @@ describe("set-trait: putting ratings back without hand-editing the card", () => 
 
   test("two of the same Background, each with its own note and price", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     await CommandRouter.route("set-trait mentor 5 note=`his mother` paid=0");
     const second = await CommandRouter.route("set-trait mentor 3 add=true note=`Daujotas, his Hermetic Master` paid=3");
     expect(second).toContain("5 (his mother) + 3 (Daujotas, his Hermetic Master)");
@@ -3078,13 +3082,14 @@ describe("set-trait: putting ratings back without hand-editing the card", () => 
 
   test("a card that drops a whole group says so - that is how ratings vanish", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     await CommandRouter.route("set-trait sanctum 8");
     await CommandRouter.route("creator-mode set=true");
     await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
       "oops\n=====\nname: Visvaldas\ntemplates: ouroboros\n\ntraits:\n  Modus: 5");
     const off = await CommandRouter.route("creator-mode set=false");
     expect(off).toContain("A whole group went empty");
-    expect(off).toContain("backgrounds (1 gone)");
+    expect(off).toContain("backgrounds (2 gone)");
     expect(off).toContain("set-trait");
   });
 });
@@ -3097,6 +3102,7 @@ describe("supernatural categories: disciplines, magic, sorcery, blood-sorcery", 
 
   test("a blood-sorcery path hangs from its Discipline - unless it is Koldunic", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     await CommandRouter.route("set-trait thaumaturgy 3 group=discipline");
     await CommandRouter.route("set-trait rego-vitae 2");
     await CommandRouter.route("set-trait koldunic-sorcery 1");
@@ -3191,6 +3197,7 @@ describe("arcana budgets: their own purse, priced per template", () => {
 
   test("two Mentors, one granted and one bought, survive the card", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const char = (await CharacterStore.load("Visvaldas"))!;
     char.backgrounds["mentor"] = 5;
     char.instances = { mentor: [
@@ -3451,6 +3458,7 @@ describe("[[convert-cards]]: migrating a story written before the readable forma
 
   test("a JSON sheet and a JSON merit card are rewritten, and the engine reads them again", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const old = { ...(await CharacterStore.load("Visvaldas"))!, traits: { modus: 5, primus: 1 } };
     await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
       `old header\n=====\n${JSON.stringify(old, null, 2)}`);
@@ -4410,6 +4418,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
 
   test("a Resolve that is really Living Resolve caps it just the same", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const char = (await CharacterStore.load("Visvaldas"))!;
     // One point of Living Resolve IS one Quintessence AND one Resolve AND one
     // blood point AND one Willpower, so every one of those names finds it.
@@ -4654,7 +4663,10 @@ describe("Living Resolve: the unique template and its fused-substance spends", (
 
   async function marius(): Promise<PlayableCharacter> {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
-    return (await CharacterStore.getCurrent())!;
+    // The fused pool is the SUM of the two it fuses, so its 30 is Fount 5's
+    // twenty Quintessence plus a revenant's ten of vitae - not a constant.
+    await CommandRouter.route("set-trait fount 5 paid=0");
+    return (await CharacterStore.load("Marius"))!;
   }
 
   test("the pool belongs to the UNIQUE template - nobody else in the world has it", async () => {
@@ -4766,6 +4778,7 @@ describe("recovery on the story clock: days, the Umbra gate, full moons", () => 
     __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
     await CommandRouter.route("story-start 1197-03-15-08");
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const char = (await CharacterStore.getCurrent())!;
     await CharacterResources.spend(char, "living-resolve", 25);            // down to 5
     const r1 = await CommandRouter.route("advance-time 3d");
@@ -4795,6 +4808,7 @@ describe("recovery on the story clock: days, the Umbra gate, full moons", () => 
     __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
     await CommandRouter.route("story-start 2000-01-15-00");                // 🌕 due Jan 21
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const marius = (await CharacterStore.load("Marius"))!;
     await CharacterResources.spend(marius, "living-resolve", 25);          // down to 5
     const reply = await CommandRouter.route("advance-time 8d");
@@ -4813,6 +4827,9 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     await CommandRouter.route('create-playable name="Ladislav" templates=mage');
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { sensitivity: 3, chieftain: 2, trickster: 4, warrior: 4, "wise-one": 3 };
+    // Capacity is the Fount ladder now: without the Background he holds ten.
+    // Fount 5 is what lets him hold the twenty these tests hand him.
+    if (quintessence > 10) c.backgrounds = { ...c.backgrounds, fount: 5 };
     await CharacterStore.save(c);
     await CharacterResources.gain(c, "willpower", 5);        // potentials seed Willpower at 0
     if (quintessence > 0) await CharacterResources.gain(c, "quintessence", quintessence);
@@ -4929,7 +4946,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     expect(quote).toContain("15 Quintessence + 2 Willpower");
     expect(quote).toContain("Payable over time");
     const paid = await CommandRouter.route("seal-spell pillar=3 pay=true");
-    expect(paid).toContain("15/15 quintessence");
+    expect(paid).toContain("15/15 quintessence");                // paid of owed
     expect(paid).toContain("2/2 willpower");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(5);
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "willpower")!)).toBe(3);
@@ -4937,6 +4954,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
 
   test("a Living Resolve caster: the fused substance fuels the spell and the sure success rides free", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { vis: 2, incantation: 3 };
     await CharacterStore.save(c);
@@ -4962,6 +4980,7 @@ describe("the rest gates: full-rested AND in-sanctum, on both fuels", () => {
   test("a multi-gate rule needs EVERY affliction at once", async () => {
     await CommandRouter.route("story-start 1197-03-15-00");
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const char = (await CharacterStore.getCurrent())!;
     char.backgrounds = { sanctum: 8, library: 8, cray: 5 };            // the sleep point is Sanctum 4's
     await CharacterStore.save(char);
@@ -4992,7 +5011,7 @@ describe("the rest gates: full-rested AND in-sanctum, on both fuels", () => {
     await CommandRouter.route("afflict full-rested");
     await CommandRouter.route("afflict in-sanctum");
     const rested = await CommandRouter.route("advance-time 2d");
-    expect(rested).toContain("Hermetic +2 quintessence -> 2/20");
+    expect(rested).toContain("Hermetic +2 quintessence -> 2/10");   // no Fount: the bare ten
     await CommandRouter.route("afflict in-umbra");
     expect(await CommandRouter.route("advance-time 1d")).toContain("+2 quintessence");   // both gates now
   });
@@ -5023,6 +5042,7 @@ describe("fellowships: the Order of Hermes, and finding a caster's Foundation", 
 
   test("cast finds Modus without being told, and says which Foundations it knows when it can't", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 3, anima: 2, corona: 4, primus: 3, vires: 2 };
     await CharacterStore.save(c);
@@ -5164,10 +5184,11 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
   async function marius(): Promise<PlayableCharacter> {
     await CommandRouter.route("story-start 1197-03-15-08");
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 3, anima: 2, corona: 4, primus: 3, vires: 2 };
     c.attributes = { ...c.attributes, wits: 3, intelligence: 4 };
-    c.backgrounds = { sanctum: 8, library: 8, cray: 5 };
+    c.backgrounds = { sanctum: 8, library: 8, cray: 5, fount: 5 };
     await CharacterStore.save(c);
     return c;
   }
@@ -5278,6 +5299,7 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
 
   test("stacking certainty is a SPELLCASTING rule: on a spell 2 points buy 2, elsewhere 1", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5, corona: 3, primus: 1 };
     await CharacterStore.save(c);
@@ -5314,6 +5336,7 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
 
   test("the resources wizard's roles step shows THIS character's resources", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const first = await CommandRouter.route("configure-resources");
     expect(first).toContain("living-resolve");
     // Plain input is the wizard's reply channel: keep the one resource as is.
@@ -5347,6 +5370,7 @@ describe("defining merits, flaws & arcana from a command", () => {
 
   test("Inviolate Soul: defined, taken, inspected - and it round-trips through the lorebook", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const defined = await CommandRouter.route("define-merit name=`Inviolate Soul` points=0 "
       + "passive=`immune:possession,soul-control,soul-suppression; immune:fear,supernatural-mind-control while=living-resolve` "
       + "description=`An inherent natal Investiture: the soul cannot be worn, steered or stilled.`");
@@ -5371,6 +5395,7 @@ describe("defining merits, flaws & arcana from a command", () => {
 
   test("a resource-gated passive fires only while the pool holds enough", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.attributes = { ...c.attributes, wits: 3 };
     await CharacterStore.save(c);
@@ -5398,6 +5423,7 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
 
   test("a character whose Willpower is replaced gets no willpower pool start", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const marius = (await CharacterStore.load("Marius"))!;
     expect(marius.poolStarts).toEqual({});                       // no phantom
     expect(resolveTraitFromRecord(marius, "willpower")).toBe(0);  // nothing for a trait lookup to find
@@ -5408,6 +5434,7 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
 
   test("[[sheet]] flags a leftover pool start for a resource the character lacks", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.poolStarts = { willpower: 10 };                            // the stale hand-edit
     await CharacterStore.save(c);
@@ -5418,6 +5445,7 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
 
   test("spending it pays out as Willpower AND Resolve: certainty plus -2 difficulty", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5 };
     c.attributes = { ...c.attributes, wits: 3 };
@@ -5446,6 +5474,7 @@ describe("stale sheets: a lorebook edit that never synced", () => {
 
   test("editing the pc: card with creator mode OFF leaves the engine on the old copy - and cast says so", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const base = (await CharacterStore.load("Visvaldas"))!;
     const edited = { ...base, traits: { modus: 5, primus: 1 } };
     await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
@@ -5466,6 +5495,7 @@ describe("stale sheets: a lorebook edit that never synced", () => {
 
   test("an edit that loses the sheet's identity is reported, not silently ignored", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     // The card format is forgiving, so the way to break a sheet is to lose what
     // makes it one: here the player deleted the templates line.
     await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
@@ -5483,6 +5513,7 @@ describe("the Resolve component pays in FULL, not just its difficulty break", ()
 
   test("one point carries Resolve's whole bundle: +1 automatic success and 8-again", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5 };
     c.attributes = { ...c.attributes, wits: 3 };
@@ -5501,6 +5532,7 @@ describe("the Resolve component pays in FULL, not just its difficulty break", ()
 
   test("a casting point breaks the difficulty ONCE - Resolve's -2 IS the Quintessence break", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
@@ -5521,6 +5553,7 @@ describe("a fused point is never wasted at the difficulty floor", () => {
 
   test("Modus 5, difficulty 5, quintessence=2: both points spend, and both grant certainty", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
@@ -6071,6 +6104,7 @@ describe("templates: extending one, from a def or a command", () => {
 
   test("...and Living Resolve still HIDES the four it replaces, so nothing doubles up", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
     const char = (await CharacterStore.load("Visvaldas"))!;
     const names = CharacterResources.defsFor(char).map(d => d.name);
     expect(names).toEqual(["living-resolve"]);
@@ -6144,5 +6178,80 @@ describe("templates: extending one, from a def or a command", () => {
     expect(await CommandRouter.route("forget-template ouroboros")).toContain("shipped one resurfaces");
     expect(TEMPLATES["ouroboros"].Soak).toBe(GHOUL_SOAK);
     expect(await CommandRouter.route("forget-template mage")).toContain("built-ins cannot be removed");
+  });
+});
+
+// =============================================================================
+// RESOURCES THAT READ THE SHEET - the Fount ladder, and a pool made of pools
+// =============================================================================
+describe("resource capacity as an expression: the Fount ladder, and fusing two pools", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a mage without the Fount holds ten and spends two; each dot raises both", async () => {
+    await CommandRouter.route('create-playable name="Hermetic" templates=mage');
+    const quintessence = (c: PlayableCharacter) =>
+      resourceNumbers(c, CharacterResources.resolveDef(c, "quintessence")!);
+    // The book's bare capacity, and its bare rate.
+    let char = (await CharacterStore.load("Hermetic"))!;
+    expect(quintessence(char).max).toBe(10);
+    expect(quintessence(char).perTurn).toBe(2);
+    // ...then the whole published ladder, from ONE pair of expressions.
+    const ladder: Array<[number, number, number]> = [[1, 12, 2], [2, 14, 3], [3, 16, 4], [4, 18, 5], [5, 20, 6]];
+    for (const [dots, max, perTurn] of ladder) {
+      await CommandRouter.route(`set-trait fount ${dots}`);
+      char = (await CharacterStore.load("Hermetic"))!;
+      expect(quintessence(char).max).toBe(max);
+      expect(quintessence(char).perTurn).toBe(perTurn);
+    }
+    expect(await CommandRouter.route("resources")).toContain("quintessence 0/20");
+  });
+
+  test("Living Resolve IS the two it fuses: Quintessence's capacity plus a revenant's ten", async () => {
+    await CommandRouter.route('create-playable name="Vis" templates=ouroboros');
+    const cap = async (): Promise<number> => {
+      const c = (await CharacterStore.load("Vis"))!;
+      return resourceNumbers(c, CharacterResources.resolveDef(c, "living-resolve")!).max;
+    };
+    expect(await cap()).toBe(20);                                  // 10 quintessence + 10 vitae
+    await CommandRouter.route("set-trait fount 2");
+    expect(await cap()).toBe(24);                                  // 14 + 10
+    await CommandRouter.route("set-trait fount 5");
+    expect(await cap()).toBe(30);                                  // 20 + 10 - his actual pool
+    // The rate comes from the Quintessence side, which is the one with a ladder.
+    const c = (await CharacterStore.load("Vis"))!;
+    expect(resourceNumbers(c, CharacterResources.resolveDef(c, "living-resolve")!).perTurn).toBe(6);
+    // And it still HIDES all four, so raising the Fount never un-fuses him.
+    expect(CharacterResources.defsFor(c).map(d => d.name)).toEqual(["living-resolve"]);
+  });
+
+  test("`resource:` reads a def's numbers, and a self-reference cannot spin", async () => {
+    await CommandRouter.route('create-playable name="Vis" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 3");
+    expect(await CommandRouter.route("eval resource:quintessence:max")).toContain("= 16");
+    expect(await CommandRouter.route("eval resource:blood:max")).toContain("= 10");
+    expect(await CommandRouter.route("eval resource:quintessence:per-turn")).toContain("= 4");
+    expect(await CommandRouter.route("eval resource:living-resolve:max")).toContain("= 26");
+    // A pool nobody defines is unknown, not zero-in-silence.
+    expect(await CommandRouter.route("eval resource:nonesuch:max")).toContain("⚠ nothing answers");
+    // A resource defined in terms of ITSELF terminates with a finite answer
+    // rather than blowing the stack: the guard bites on the first re-entry, so
+    // the outermost evaluation still completes.
+    await CommandRouter.route("define-resource name=`Ouroboric` kind=pool start=0 max=`resource:ouroboric:max + 1`");
+    const c = (await CharacterStore.load("Vis"))!;
+    const spun = resourceNumbers(c, CharacterResources.resolveDef(c, "ouroboric")!).max;
+    expect(Number.isFinite(spun)).toBe(true);
+    expect(spun).toBeLessThan(5);
+  });
+
+  test("spending and gaining respect the derived ceiling, not a constant", async () => {
+    await CommandRouter.route('create-playable name="Vis" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
+    const c = (await CharacterStore.load("Vis"))!;
+    expect(await CommandRouter.route("resources")).toContain("living-resolve 30/30");
+    expect(await CommandRouter.route("spend living-resolve 5")).toContain("living-resolve now 25/30");
+    expect(await CommandRouter.route("gain living-resolve 99")).toContain("30/30");   // clamped at the ceiling
+    // Drop the Fount and the ceiling drops with it - the pool is not a number.
+    await CommandRouter.route("set-trait fount 1");
+    expect(await CommandRouter.route("resources")).toContain("/22");
   });
 });

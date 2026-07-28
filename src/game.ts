@@ -80,7 +80,7 @@ import {
   RollRulesConfig, ROLLS_CONFIG_ENTRY,
   ActiveWizard, WizardSession, CreatorMode,
   characterScope, traitValueOf, evalOn, numericOn, derivedValuesOf, DerivedValue, ScopeExtension, roadOf,
-  TemplateRegistry, lastTemplateProblems,
+  TemplateRegistry, lastTemplateProblems, resourceNumbers,
 } from "./state";
 import { Numeric, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS } from "./core/expr";
 
@@ -185,6 +185,12 @@ const rw = {
   },
 };
 
+// A resource number the WIZARD can show: it edits one resource at a time with
+// no character in hand, so an expression (a Fount-scaled capacity) has nothing
+// to evaluate against and shows as 0 - typing a number over it replaces the
+// expression with a flat one, which is exactly what a house rule wants.
+const flatNumber = (v: Numeric | undefined): number => (typeof v === "number" ? v : 0);
+
 export const RESOURCES_WIZARD: WizardDefinition = {
   id: "resources",
   title: "Resource configuration",
@@ -204,7 +210,7 @@ export const RESOURCES_WIZARD: WizardDefinition = {
         if (reply === "customize") {
           state.current = state.queue.shift()!;
           state.phase = "start";
-          return { state: rwState(state), prompt: rw.numberPrompt(state, "start", rw.def(state, state.current).start) };
+          return { state: rwState(state), prompt: rw.numberPrompt(state, "start", flatNumber(rw.def(state, state.current).start)) };
         }
         state.queue.shift();
         return rw.advance(state);
@@ -214,7 +220,7 @@ export const RESOURCES_WIZARD: WizardDefinition = {
         const def = rw.def(state, state.current);
         if (v !== def.start) rw.patch(state, state.current).start = v;
         state.phase = "max";
-        return { state: rwState(state), prompt: rw.numberPrompt(state, "max", def.max) };
+        return { state: rwState(state), prompt: rw.numberPrompt(state, "max", flatNumber(def.max)) };
       }
       case "max": {
         const v = parseInt(reply, 10);
@@ -1265,6 +1271,9 @@ async function cmdResources(): Promise<string> {
   const uses = await EffectUses.counts(char);
   const items = views.map(v => {
     const roles = (v.def.roles ?? []).filter(r => StringUtil.normalize(r) !== StringUtil.normalize(v.def.name));
+    // The per-turn limit may be an expression (Quintessence's is the Fount
+    // ladder), so it is resolved for THIS character rather than printed raw.
+    const perTurn = resourceNumbers(char, v.def).perTurn;
     const named = Object.keys(v.def.effects ?? {}).map(n => {
       const used = uses[`${StringUtil.normalize(v.def.name)}:${StringUtil.normalize(n)}`] ?? 0;
       return `${n}${used > 0 ? ` (used ${used})` : ""}`;
@@ -1272,7 +1281,7 @@ async function cmdResources(): Promise<string> {
     const meta = [
       v.def.replaces?.length ? `replaces: ${v.def.replaces.join("/")}` : "",
       roles.length ? `roles: ${roles.join("/")}` : "",
-      v.def.perTurnLimit !== undefined && Number.isFinite(v.def.perTurnLimit) ? `${v.def.perTurnLimit}/turn (ST)` : "",
+      perTurn !== undefined && Number.isFinite(perTurn) ? `${perTurn}/turn (ST)` : "",
       v.def.rollAs ? `pools as min(${v.def.rollAs.cap ?? "∞"}, current)${v.def.rollAs.negatesPenaltiesAbove !== undefined ? `; points over ${v.def.rollAs.negatesPenaltiesAbove} shield penalties` : ""}` : "",
       v.def.recovery?.length ? `recovers ${v.def.recovery.map(r => `${r.amount}/${r.per}${r.requires ? ` if ${(Array.isArray(r.requires) ? r.requires : [r.requires]).join("+")}` : ""}`).join(", ")}` : "",
       v.def.effect ? describeEffect(v.def.effect) : "",
@@ -1597,7 +1606,7 @@ async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
     const cost = Math.max(sealQ, sealW);
     const { spent } = await CharacterResources.spend(char, fuelDef.name, cost);
     const now = await CharacterResources.current(char, fuelDef);
-    linesOut.push(`${spent}/${cost} ${fuelDef.name} (the fused substance covers both components) -> ${now}/${fuelDef.max}`);
+    linesOut.push(`${spent}/${cost} ${fuelDef.name} (the fused substance covers both components) -> ${now}/${resourceNumbers(char, fuelDef).max}`);
     if (spent < cost) linesOut.push(`${cost - spent} still owed - payable over time (ST tracks the debt)`);
   } else {
     if (fuelDef) {
@@ -2135,15 +2144,20 @@ async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
   const name = StringUtil.normalize(rawName);
   const kind = StringUtil.normalize(cmd.named["kind"] ?? "pool") === "tracker" ? "tracker" : "pool";
   const patch: Partial<ResourceDef> = { kind };
-  const start = intOrUndef(cmd.named["start"] ?? "");
-  const max = intOrUndef(cmd.named["max"] ?? "");
-  patch.start = start ?? 0;
-  patch.max = max ?? Math.max(10, patch.start);
+  // start / max / per-turn are NUMERIC: an integer, or an expression over the
+  // character ("10 + 2 * background:fount"). A bare integer stays a number.
+  const numeric = (raw: string | undefined): Numeric | undefined => {
+    const v = raw?.trim();
+    if (!v) return undefined;
+    return /^-?\d+$/.test(v) ? parseInt(v, 10) : v;
+  };
+  patch.start = numeric(cmd.named["start"]) ?? 0;
+  patch.max = numeric(cmd.named["max"]) ?? (typeof patch.start === "number" ? Math.max(10, patch.start) : 10);
   for (const key of ["roles", "replaces"] as const) {
     const list = (cmd.named[key] ?? "").split(",").map(r => StringUtil.normalize(r)).filter(Boolean);
     if (list.length) patch[key] = list;
   }
-  const perTurn = intOrUndef(cmd.named["per-turn"] ?? "");
+  const perTurn = numeric(cmd.named["per-turn"]);
   if (perTurn !== undefined) patch.perTurnLimit = perTurn;
   const description = cmd.named["description"]?.trim();
   if (description) patch.description = description;
@@ -2394,8 +2408,8 @@ async function drawFromCray(char: PlayableCharacter, want: number, ctx: CommandC
   const before = await CharacterResources.current(char, def);
   const { value } = await CharacterResources.gain(char, def.name, gained);
   notes.push(value - before < gained
-    ? `${value - before} of ${gained} fit - ${def.name} is at ${value}/${def.max}, the rest spills`
-    : `+${gained} ${def.name} -> ${value}/${def.max}`);
+    ? `${value - before} of ${gained} fit - ${def.name} is at ${value}/${resourceNumbers(char, def).max}, the rest spills`
+    : `+${gained} ${def.name} -> ${value}/${resourceNumbers(char, def).max}`);
   return { gained, notes };
 }
 
@@ -2494,7 +2508,7 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
     if (spent === 0) return sys(`${disp(char.name)} has no ${def.name} to spend.`);
     const now = await CharacterResources.current(char, def);
     const reason = cmd.named["reason"] ? ` (${cmd.named["reason"]})` : "";
-    return sys(`${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${def.max}.`);
+    return sys(`${disp(char.name)} spends ${spent} ${def.name}${reason}. Now ${now}/${resourceNumbers(char, def).max}.`);
   }
 
   // Does any increase op need the player to pick a trait within a constraint?
@@ -2512,7 +2526,7 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
   const now = await CharacterResources.current(char, def);
   const rollOnly = r.extra !== undefined && e.apply.every(isRollOp) && e.apply.length > 0;
   const tail = rollOnly ? " (roll modifiers apply only inside a roll - use [[roll ... spend=...]])" : "";
-  return sys(`${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${def.max}.${tail}`);
+  return sys(`${disp(char.name)} - ${r.notes.join("; ")}. ${def.name} now ${now}/${resourceNumbers(char, def).max}.${tail}`);
 }
 
 async function cmdResetUses(): Promise<string> {
@@ -2576,7 +2590,7 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
   const def = CharacterResources.resolveDef(char, which);
   if (!def) return sys(`${disp(char.name)} has no resource "${which}".`);
   const { value } = await CharacterResources.gain(char, which, amount);
-  return sys(`${disp(char.name)} regains ${def.name}. Now ${value}/${def.max}.`);
+  return sys(`${disp(char.name)} regains ${def.name}. Now ${value}/${resourceNumbers(char, def).max}.`);
 }
 
 // =============================================================================
@@ -2867,7 +2881,7 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
       if (credit <= 0) continue;
       const had = await CharacterResources.current(char, def);
       const { value } = await CharacterResources.gain(char, def.name, credit);
-      if (value > had) lines.push(`${disp(char.name)} +${value - had} ${def.name} -> ${value}/${def.max} (${parts.join(", ")})`);
+      if (value > had) lines.push(`${disp(char.name)} +${value - had} ${def.name} -> ${value}/${resourceNumbers(char, def).max} (${parts.join(", ")})`);
     }
     // A cray bubbles back too - 1/day on the days it went untapped.
     if (CrayStore.rating(char) > 0) {

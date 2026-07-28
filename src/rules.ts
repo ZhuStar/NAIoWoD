@@ -332,12 +332,17 @@ export interface RecoveryRule {
 export interface ResourceDef {
   name: string;
   kind: PoolKind;
-  start: number;            // default starting value
+  // start / max / perTurnLimit are NUMERIC: a number, or an expression over the
+  // character (core/expr.ts). A mage's Quintessence capacity is not 20 - it is
+  // "10 + 2 * background:fount", the Fount ladder said once. A fused pool is
+  // "resource:quintessence:max + resource:blood:max", which is what Living
+  // Resolve actually IS.
+  start: Numeric;           // default starting value
   startMin?: number;        // inclusive lower bound for a chosen start
   startMax?: number;        // inclusive upper bound for a chosen start
   startOptions?: number[];  // discrete allowed starts (overrides min/max if set)
-  max: number;              // permanent cap (tracker) / capacity (pool)
-  perTurnLimit?: number;    // pools only (e.g. blood expenditure per turn)
+  max: Numeric;             // permanent cap (tracker) / capacity (pool)
+  perTurnLimit?: Numeric;   // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
   roles?: string[];         // abstract capabilities this resource fills
   // "Specifically replace any other resource": this resource takes over the
@@ -543,7 +548,11 @@ export const TEMPLATE_MAGE = new TemplateConfig(
   RulesetConfig.MAGE,
   [
     willpowerResource(5),
-    { name: "quintessence", kind: "pool", start: 0, max: 20, roles: ["magic-fuel"],
+    // The Fount Background IS the capacity: no Fount holds 10 and spends 2 a
+    // turn; each dot adds two to the store and (from the second) one per turn.
+    { name: "quintessence", kind: "pool", start: 0,
+      max: "10 + 2 * background:fount", perTurnLimit: "max(2, background:fount + 1)",
+      roles: ["magic-fuel"],
       effect: {
         label: "Quintessence: -1 casting difficulty per point (min diff 4; >2/turn needs the Fount Background)",
         apply: [{ op: "difficulty", amount: -1 }],
@@ -665,7 +674,14 @@ export const TEMPLATE_SORCERER = new TemplateConfig(
 // each full moon; drinking vampiric vitae (immune to the bond) and consuming
 // Tass are [[gain living-resolve N]] moments.
 export const LIVING_RESOLVE: ResourceDef = {
-  name: "living-resolve", kind: "pool", start: 30, max: 30, perTurnLimit: 6,
+  name: "living-resolve", kind: "pool",
+  // It IS the two it fuses: a mage's Quintessence capacity (the Fount ladder)
+  // plus a revenant's ten points of vitae - and it spends at the Quintessence
+  // rate, because that is the one with a ladder. Written this way, raising the
+  // Fount raises the fused pool without anyone editing a number.
+  start: "resource:quintessence:max + resource:blood:max",
+  max: "resource:quintessence:max + resource:blood:max",
+  perTurnLimit: "resource:quintessence:per-turn",
   roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
   replaces: ["blood", "willpower", "resolve", "quintessence"],
   rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
@@ -804,7 +820,10 @@ export const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
     extends: "mage",
     description: "Ouroboros (unique: revenant + laham + Awakened)",
     soak: "ghoul",
-    resources: [LIVING_RESOLVE],
+    // The revenant's vitae joins the mage's Quintessence, and Living Resolve is
+    // their sum - which is why all three are listed. `replaces` then hides the
+    // two (and Willpower, and Resolve) behind the one that stands for them.
+    resources: [bloodResource({ start: 10, max: 10 }), LIVING_RESOLVE],
     creation: {
       notes: [
         "Starting Willpower 5; note the Aura modifier, if any.",

@@ -393,10 +393,11 @@ export class CharacterFactory {
       const explicit = opts.poolStarts?.[def.name] ?? opts.poolStarts?.[key];
       const chosen = CharacterFactory._resolveStart(def, explicit);
       if (def.kind === "tracker") {
-        trackers.set(key, new Tracker(def.name, Category.TRACKER, chosen, def.max, def.max));
+        const cap = typeof def.max === "number" ? def.max : 10;
+        trackers.set(key, new Tracker(def.name, Category.TRACKER, chosen, cap, cap));
       } else {
-        let max = def.max;
-        let perTurn = def.perTurnLimit ?? Infinity;
+        let max = typeof def.max === "number" ? def.max : 10;
+        let perTurn = typeof def.perTurnLimit === "number" ? def.perTurnLimit : Infinity;
         let start = chosen;
         if (def.fromGeneration && opts.generation !== undefined) {
           const bs = bloodForGeneration(opts.generation);
@@ -462,13 +463,17 @@ export class CharacterFactory {
   }
 
   // Validates a chosen starting value against the ResourceDef constraints.
+  // NOTE: the legacy LiveCharacter path has no PlayableCharacter to evaluate an
+  // expression against, so a numeric field is used as-is and an expression
+  // reads as 0 here. The modern path (CharacterResources) resolves properly.
   private static _resolveStart(def: ResourceDef, chosen: number | undefined): number {
-    if (chosen === undefined) return def.start;
+    const flat = (v: Numeric | undefined, fallback = 0): number => (typeof v === "number" ? v : fallback);
+    if (chosen === undefined) return flat(def.start);
     if (def.startOptions && !def.startOptions.includes(chosen)) {
       throw new Error(`${def.name} must start at one of [${def.startOptions.join(", ")}], got ${chosen}.`);
     }
     const min = def.startMin ?? 0;
-    const max = def.startMax ?? def.max;
+    const max = def.startMax ?? flat(def.max, 10);
     if (chosen < min || chosen > max) {
       throw new Error(`${def.name} must start between ${min} and ${max}, got ${chosen}.`);
     }
@@ -984,6 +989,7 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
   const byTrait = new Map(defs.map(d => [d.trait, d]));
   const done = new Map<string, DerivedValue>();
   const running = new Set<string>();
+  const resourceDepth = new Set<string>();
   const granted = grantedTraitsOf(char);
 
   // The value a bare name is worth: the sheet, then a Background's grant, then
@@ -1047,6 +1053,24 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
         // still comes back unknown, which is the whole point.
         return knownTraitNames(head).includes(name) ? { value: 0 } : undefined;
       }
+      // `resource:quintessence:max` - what a POOL is worth, so one resource can
+      // be defined from others. The def is read BEFORE replacement filtering, so
+      // Living Resolve can still name the Quintessence it hides.
+      if (head === "resource") {
+        const [resName, ...fieldParts] = rest;
+        const field = StringUtil.normalize(fieldParts.join(":") || "max");
+        const def = resourcesForTemplates(char.templates, ResourceOverrides.current())
+          .find(d => StringUtil.normalize(d.name) === StringUtil.normalize(resName));
+        if (!def) return undefined;
+        // A resource that names ITSELF would spin; the guard makes it 0 and the
+        // caller's `unknown`/error path reports the nonsense.
+        if (resourceDepth.has(StringUtil.normalize(resName))) return { value: 0, from: "circular" };
+        resourceDepth.add(StringUtil.normalize(resName));
+        try {
+          const raw = field === "start" ? def.start : field === "per-turn" ? def.perTurnLimit : def.max;
+          return { value: raw === undefined ? 0 : evalNumeric(raw, scope, 0) };
+        } finally { resourceDepth.delete(StringUtil.normalize(resName)); }
+      }
       if (head === "derived") return byTrait.has(name) ? { value: derive(name).value } : undefined;
       if (head === "granted") return granted[name] ? { value: granted[name].rating, from: `from ${granted[name].from}` } : undefined;
       return extend?.(path);
@@ -1058,6 +1082,20 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
   // ([[derived]], [[sheet]]) gets it without re-walking.
   for (const d of defs) derive(d.trait);
   return { scope, derived: defs.map(d => done.get(d.trait)!), valueOf };
+}
+
+// A resource's numbers FOR THIS CHARACTER. start/max/perTurnLimit may be
+// expressions over the sheet, so they are not knowable from the def alone: a
+// mage's Quintessence capacity is a Fount rating away, and a fused pool is the
+// sum of the two it stands in for.
+export function resourceNumbers(char: PlayableCharacter, def: ResourceDef, extend?: ScopeExtension): { start: number; max: number; perTurn?: number } {
+  const scope = characterScope(char, extend);
+  const max = Math.max(0, evalNumeric(def.max, scope, 0));
+  return {
+    start: Math.max(0, Math.min(max, evalNumeric(def.start, scope, 0))),
+    max,
+    ...(def.perTurnLimit !== undefined ? { perTurn: Math.max(0, evalNumeric(def.perTurnLimit, scope, 0)) } : {}),
+  };
 }
 
 // THE seam: an expression scope over this character.
@@ -1125,7 +1163,7 @@ export function permanentRatingOf(char: PlayableCharacter, name: string): number
   if (direct) return direct;
   const owner = CharacterResources.resolveDef(char, name);
   if (!owner) return 0;
-  return resolveTraitFromRecord(char, owner.name) || owner.start;
+  return resolveTraitFromRecord(char, owner.name) || resourceNumbers(char, owner).start;
 }
 
 // --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
@@ -2118,7 +2156,8 @@ export class CharacterResources {
 
   private static _startOf(char: PlayableCharacter, def: ResourceDef): number {
     const chosen = char.poolStarts?.[StringUtil.normalize(def.name)];
-    return Math.max(0, Math.min(chosen ?? def.start, def.max));
+    const n = resourceNumbers(char, def);
+    return Math.max(0, Math.min(chosen ?? n.start, n.max));
   }
 
   private static async _values(char: PlayableCharacter): Promise<Record<string, number>> {
@@ -2135,7 +2174,7 @@ export class CharacterResources {
     const values = await CharacterResources._values(char);
     return CharacterResources.defsFor(char).map(def => {
       const k = StringUtil.normalize(def.name);
-      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: def.max };
+      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: resourceNumbers(char, def).max };
     });
   }
 
@@ -2159,7 +2198,7 @@ export class CharacterResources {
     const values = await CharacterResources._values(char);
     const k = StringUtil.normalize(def.name);
     const have = k in values ? values[k] : CharacterResources._startOf(char, def);
-    const value = Math.max(0, Math.min(have + amount, def.max));
+    const value = Math.max(0, Math.min(have + amount, resourceNumbers(char, def).max));
     values[k] = value;
     await CharacterResources._storage.set(CharacterResources._key(char.name), values);
     return { value, def };

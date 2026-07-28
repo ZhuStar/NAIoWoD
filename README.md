@@ -542,6 +542,38 @@ than being one. They live in their own `choices` map on the sheet:
   you have no right to is refused with `prerequisites not met: clan:brujah`
   (and `waive=true` overrides, as everywhere else).
 
+### A pool's capacity can be an expression
+
+`start`, `max` and `perTurnLimit` on a resource are **`Numeric`** — a number, or
+an expression over the character. That is how the Fount ladder stops being a
+table somebody has to apply by hand:
+
+```
+quintessence:
+  max:      10 + 2 * background:fount     # 10, 12, 14, 16, 18, 20
+  per-turn: max(2, background:fount + 1)  #  2,  2,  3,  4,  5,  6
+```
+
+A mage with no Fount holds ten points and spends two a turn, exactly as the book
+says; each dot raises both, and **nothing anywhere stores the number**.
+
+**`resource:<name>:max`** (also `:start`, `:per-turn`) reads one pool's numbers,
+so a pool can be **made of other pools**. Living Resolve is not 30 — it *is* the
+Quintessence and the vitae it fuses:
+
+```
+living-resolve:
+  max:      resource:quintessence:max + resource:blood:max
+  per-turn: resource:quintessence:per-turn
+  replaces: blood, willpower, resolve, quintessence
+```
+
+At Fount 5 that is 20 + 10 = **30**; at Fount 2 it is 24. The def reads the
+resources it then **hides** — `replaces` filters what the character *sees*, not
+what an expression may *name*. `[[define-resource]]` accepts expressions too, so
+this is writable from a command. A resource defined in terms of itself
+terminates with a finite answer instead of spinning.
+
 ### Templates — extending one instead of writing one
 
 A **`TemplateConfig`** is what the engine reads; a **`TemplateDef`** is how you

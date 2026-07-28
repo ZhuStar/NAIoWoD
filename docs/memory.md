@@ -2783,6 +2783,41 @@ and `prefill` are mocked/available but not yet written.
       would buy nothing and would put the Ouroboros behind a store load that
       ~30 tests do not perform.
 
+59. **A pool that reads the sheet** (user, quoting the Fount Background's ladder:
+    "To define this resource, we have to use the reference to other parts that I
+    mentioned. Quintessence depends on Fount ... Living Resolve is equal to
+    Quintessence + Blood-Pool (10 for a revenant). We have first to have those
+    two resources, add them to get the resource we're making, then drop
+    Quintessence, Blood, and Willpower").
+    - **`ResourceDef.start`/`.max`/`.perTurnLimit` are `Numeric`.** The Fount
+      ladder - five rows of a printed table - is now two expressions:
+      `max: "10 + 2 * background:fount"`, `perTurn: "max(2, background:fount + 1)"`.
+      Both reproduce the published rows exactly, including the bare 10/2 for a
+      mage with no Fount at all.
+    - **`resource:<name>:max|start|per-turn`** is the new scope namespace, so a
+      pool can be made OF pools. Living Resolve is
+      `resource:quintessence:max + resource:blood:max` - which is what the owner
+      always said it was - and the Ouroboros def now carries the revenant's
+      blood BESIDE the mage's quintessence so there are two things to add. Its
+      30 is now derived (20 at Fount 5 + 10 vitae), and it was 30 hardcoded.
+    - **The def is read BEFORE replacement filtering**, which is the subtle part:
+      `replaces` hides what the CHARACTER sees, not what an expression may name,
+      so Living Resolve can be defined in terms of the Quintessence it hides.
+    - `resourceNumbers(char, def)` is the seam - every reader of a capacity now
+      goes through it (`CharacterResources`, the spend/gain/recovery reports,
+      `[[resources]]`'s per-turn line, `permanentRatingOf`). The legacy
+      `CharacterFactory` path has no PlayableCharacter to evaluate against and
+      falls back to a plain number; that is recorded, not hidden.
+    - A resource defined in terms of ITSELF terminates: the scope keeps a
+      `resourceDepth` guard, so the first re-entry is worth 0 and the outermost
+      evaluation still completes. `[[define-resource]]` takes expressions too.
+    - **Test fallout worth remembering**: ~30 tests asserted the old constant
+      capacities. Fixing them meant giving the modelled character the Fount 5 he
+      actually has - so the suite now asserts a DERIVED 30 rather than a
+      hardcoded one, which is the stronger claim. One helper overwrote
+      `backgrounds` wholesale and silently dropped the Fount that `set-trait`
+      had just written.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:

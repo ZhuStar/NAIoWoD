@@ -23,7 +23,7 @@ import {
   HealthTrack, HealthSummary, SoakSpec, SoakTypeRule,
 } from "./core/damage";
 import {
-  RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, ResourceDef,
+  RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, roadByName, ResourceDef,
   bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
@@ -953,12 +953,17 @@ function scopeFunctions(char: PlayableCharacter, value: (name: string) => number
   };
 }
 
-// The Road this character walks: an explicit choice, else the template's.
+// The Road this character walks: the explicit choice first (a Ventrue on the
+// Road of Kings sums different Virtues), else the template's own.
 export function roadOf(char: PlayableCharacter): RoadDefinition {
-  const chosen = StringUtil.normalize(char.choices?.["road"] ?? "");
+  const chosen = char.choices?.["road"];
+  if (chosen) {
+    const road = roadByName(chosen);
+    if (road) return road;
+  }
   for (const key of char.templates) {
     const road = TEMPLATES[StringUtil.normalize(key)]?.Morality?.road;
-    if (road && (!chosen || StringUtil.normalize(road.name) === chosen)) return road;
+    if (road) return road;
   }
   return ROAD_OF_HUMANITY;
 }
@@ -1076,15 +1081,6 @@ export function numericOn(char: PlayableCharacter, value: Numeric | undefined, f
   return evalNumeric(value, characterScope(char, extend), fallback);
 }
 
-// The trait limits in force, with every expression already resolved.
-export function resolvedLimit(char: PlayableCharacter, limit: TraitLimit, fallbackStart: number, fallbackMax: number, extend?: ScopeExtension): { start: number; max: number; note?: string } {
-  const scope = characterScope(char, extend);
-  return {
-    start: evalNumeric(limit.start, scope, fallbackStart),
-    max: evalNumeric(limit.max, scope, fallbackMax),
-    ...(limit.note ? { note: limit.note } : {}),
-  };
-}
 
 // Which KIND of trait a name is, for the rules that ration by kind ("at most
 // one Attribute may reach 3"). The character's own buckets answer first, so a

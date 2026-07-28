@@ -60,6 +60,7 @@ import {
   fellowshipByName, EXCLUSIVE_MERITS_FLAWS,
   evaluateExpr, mapScope, exprRefs, describeTerms, evalNumeric,
   traitValueOf, derivedValuesOf, evalOn,
+  ROADS, roadByName, ROAD_OF_KINGS,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -2234,6 +2235,16 @@ describe("extended contests (commands)", () => {
     expect(status).toContain("Long haul");
     expect(status).toContain("recent:");
     expect(await CommandRouter.route("cancel-contest")).toContain("Cancelled contest");
+    expect(await CommandRouter.route("contest-status")).toContain("No extended contest");
+  });
+
+  test("a contest decided on its FIRST round stops being the current one", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    // Target 1, so round one settles it: the launcher used to leave the finished
+    // contest sitting as "current" (only continue-contest ever cleared it).
+    const open = await CommandRouter.route("extended-contest 3 2 target=1 rounds=3", { rng: seqRng([6, 6, 6, 2, 2]) });
+    expect(open).toContain("WINS");
+    expect(open).not.toContain("Continue with");
     expect(await CommandRouter.route("contest-status")).toContain("No extended contest");
   });
 });
@@ -5417,10 +5428,10 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
     // break seen from another side, not another one to add.
     const spell = await CommandRouter.route('roll wits tags="magic" spend=living-resolve', { rng: seqRng([4, 4, 4]) });
     expect(spell).toContain("vs diff 4");                        // 6 - 2, once
-    // focus survives as a deprecated alias of the same thing.
-    const legacy = await CommandRouter.route("roll wits spend=living-resolve:focus", { rng: seqRng([4, 4, 4]) });
-    expect(legacy).toContain("vs diff 4");
-    expect(legacy).toContain("deprecated");
+    // The `focus` alias is gone: it only ever restated the plain spend, and its
+    // copy still carried the double difficulty break the fusion audit removed.
+    expect(await CommandRouter.route("roll wits spend=living-resolve:focus"))
+      .toContain(`living-resolve has no "focus" effect`);
   });
 });
 
@@ -5915,5 +5926,48 @@ describe("derived values: Generation, Road, Willpower, and the ceilings they mov
     // asking for a value whose expression names itself.
     expect(evalOn(looped, "generation").value).toBe(12);
     expect(evaluateExpr("x", { lookup: () => undefined }).value).toBe(0);
+  });
+});
+
+// =============================================================================
+// SIMPLIFICATION PASS - the seams that replaced duplicated code
+// =============================================================================
+describe("one definition, one behaviour: what the cleanup pass consolidated", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the other two Roads are reachable, and change what the rating sums", async () => {
+    expect(Object.keys(ROADS)).toEqual(["road-of-humanity", "road-of-kings", "road-of-the-beast"]);
+    expect(roadByName("Road of Kings")).toBe(ROAD_OF_KINGS);
+    expect(roadByName("kings")).toBe(ROAD_OF_KINGS);            // the short name too
+    expect(roadByName("nope")).toBeUndefined();
+
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    // On Humanity the rating is Conscience + Self-Control...
+    await CommandRouter.route("set-trait conscience 4");
+    expect(traitValueOf((await CharacterStore.load("Sasha"))!, "road")).toBe(5);
+    // ...on the Road of Kings it is Conviction + Self-Control, which this sheet
+    // has no Conviction for - so the choice really does change the arithmetic.
+    expect(await CommandRouter.route("choose road road-of-kings")).toContain("Conviction + Self Control");
+    await CommandRouter.route("set-trait conviction 2 group=virtue");
+    expect(traitValueOf((await CharacterStore.load("Sasha"))!, "road")).toBe(3);
+  });
+
+  test("[[creation]] and [[budget]] price a Background through the SAME ledger", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    await CommandRouter.route("set-trait courage 3");
+    // A price written as an EXPRESSION: the creation report used to parseInt this
+    // to 0 while the budget report evaluated it to 3.
+    await CommandRouter.route("set-trait herd 4 paid=courage");
+    expect(await CommandRouter.route("budget")).toContain("background: 3/5");
+    expect(await CommandRouter.route("creation")).toContain("backgrounds: 3/5");
+  });
+
+  test("every roll op moves exactly one modifier field, from one table", async () => {
+    // rollOpPatch is the single source: a def with all five ops folds each into
+    // its own field, and an op nobody interprets is reported rather than applied.
+    await CommandRouter.route('define-arcanum name=`Everything` points=1 passive=`difficulty -1; dice +2; successes +1; uncancelable +1; nagain 9; seduction +3`');
+    const def = MeritFlawRegistry.get("everything")!;
+    expect(def.passive!.length).toBe(6);
+    expect(await CommandRouter.route("arcanum everything")).toContain("seduction");
   });
 });

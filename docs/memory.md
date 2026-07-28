@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `e26e005`** ("One arithmetic,
-> and a way to point at the sheet"). Prior: `725fa3a` ("The budget a
+> **Last synced with the code as of commit `b182c7d`** ("Say each thing
+> once"). Prior: `e26e005` ("One arithmetic,
+> and a way to point at the sheet"); `725fa3a` ("The budget a
 > character is built against"); `5778ec5` ("Backgrounds get a bag
 > of their own"); `cb386af` ("An arcanum is not
 > filed under merits; set-trait; families of power"). Prior: `84c5aa0` ("Arcana are not
@@ -904,7 +905,9 @@ game.ts.
 
 ### src/game.ts (~3560) — the verbs (interpreter, wizards, handlers, registrations)
 
-**§7.33 additions**: `ROLL_OPS` + `"uncancelable"`; `applyEffectSpec` honors
+**§7.33 additions**: the roll ops incl. `"uncancelable"` (§7.56 turned the
+`ROLL_OPS` set into **`rollOpPatch`**, which both tests membership and says
+which field each op moves, plus `mergeRollExtra`); `applyEffectSpec` honors
 `EffectOp.once` (multiplier 1, not effectUnits) and maps uncancelable;
 `passiveRollExtra` maps it too. `RollAsBinding` + `characterRollEnv` returns
 `{resolver, penalty, rollAs}` (resolver answers a rollAs resource's own or
@@ -1802,7 +1805,7 @@ and `prefill` are mocked/available but not yet written.
     book's ordering by arithmetic (verified against the Ladislav example).
     `EffectOp.once` = fire once per spend regardless of units (the max-1-sure-
     success rule as data); interpreter honors it; `"uncancelable"` joined
-    ROLL_OPS and `passiveRollExtra`. `"magic"`/`"cast"` are registered as no-op
+    the roll ops (§7.56: `rollOpPatch`) and `passiveRollExtra`. `"magic"`/`"cast"` are registered as no-op
     identity tags (not typos; powers gate on them).
     *rollAs (game.ts):* `ResourceDef.rollAs {cap, negatesPenaltiesAbove}` —
     `characterRollEnv` returns bindings; the resolver answers the resource's
@@ -2660,6 +2663,55 @@ and `prefill` are mocked/available but not yet written.
       sheet stating no Willpower); and `-0` cannot carry a sign, which is why
       `ExprTerm.negated` exists (`12 - background:generation 0` printed as `+`
       until it did).
+
+56. **Say each thing once** (user: "look for anything we're doing that could be
+    simplified to become smaller ... duplicated code that could be turned into
+    one function ... remove anything we no longer use, anything that's
+    deprecated").
+    Found with two throwaway scripts rather than by eye: an export scanner
+    (declared, referenced nowhere including tests) and a 4-line-window duplicate
+    finder. Both are worth re-running before any future cleanup.
+    - **`rollOpPatch(op, amount)`** is now THE table of which roll op moves which
+      `RollModifier` field, and `undefined` doubles as the membership test - so
+      `ROLL_OPS` is gone and the set and the translation can no longer disagree.
+      **`mergeRollExtra(into, ...patches)`** replaced four hand-written folds
+      (two of them five-branch); it is also the one place that records that every
+      field ADDS except `nAgain`, which TIGHTENS.
+    - **`commitContestRound`** replaced three copies, and unified a real
+      divergence: the two verbs that OPEN a contest never cleared the "current
+      contest" pointer when a contest was decided on round one - only
+      `continue-contest` did. Now covered by a test that fails without the fix.
+    - **`[[creation]]`'s Background total now comes from `purseLedger`.** The
+      copy it used to keep read `paid` with `parseInt` while the ledger evaluated
+      it as an EXPRESSION, so `paid=courage` made the two reports disagree.
+    - `lookupTable` (the table-ref + registry lookup both readers repeated),
+      `noCharacter()` (**36** verbatim copies of one refusal string),
+      `intOrUndef` (five copies of the same three-line integer parse — four of
+      them local redefinitions shadowing the module-level one), `TWO_SIDED_PARAMS`
+      (`resist` and `contest` differ only in how the margin is read),
+      `closeButton`/`resultBox` (three windows agreeing on what a dismissal and a
+      reply look like), and `extended-contest` now calling `resolveOpponent`
+      instead of re-implementing it.
+    - `GHOUL_SOAK`/`MAGE_SOAK`/`WEREWOLF_SOAK` were byte-identical to
+      VAMPIRE/MORTAL/DEMON: now `{ ...OTHER }`, which SAYS the rule ("ghouls soak
+      like the half-vampires they are") and stays a separate object, so editing
+      one splat's soak cannot silently edit another's.
+    - **Deprecated, removed**: `MeritFlawDef.atMostOneAt` (superseded by
+      `limits: [{atRating, slots}]` — with its card alias, its `define-merit`
+      param and the fold in `instanceLimitsOf`), and LIVING_RESOLVE's `focus`
+      effect, which only ever restated the plain spend AND whose copy still
+      carried the double difficulty break §7.46 removed from the real one.
+    - **Dead, removed**: `UIHandle`, `__systemPrompt`/`__prefill`, `ROLL_KNOB_NAMES`,
+      `asNumberMap`, `EMPTY_SCOPE`, `evalNumber` (folded into `evalNumeric`), and
+      `traitLimitFor`/`resolvedLimit` — two helpers written speculatively in the
+      last two passes and never called. Writing a helper "for later" is how dead
+      code gets in; if the caller does not exist yet, neither should it.
+    - One thing the sweep FOUND rather than deleted: `ROAD_OF_KINGS` and
+      `ROAD_OF_THE_BEAST` were unreachable data, because §7.55's `roadOf` only
+      ever looked at template Roads. They are rules the chronicle should be able
+      to pick, so the fix was a **`ROADS` registry + `roadByName` + `[[choose
+      road …]]`**, not a deletion. Unused DATA and unused CODE are different
+      findings.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

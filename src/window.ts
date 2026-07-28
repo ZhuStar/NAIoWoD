@@ -34,6 +34,14 @@ import {
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
+// Every window ends the same two ways: a Close beside whatever buttons it owns,
+// and the last reply shown beneath. One definition, so all three agree on what
+// a dismissed window and a shown result look like.
+const closeButton = (part: UiPartHelpers, handle: { close: () => void }): UIPart =>
+  part.button({ text: UI_TEXT.common.close, callback: () => handle.close() });
+const resultBox = (part: UiPartHelpers, result: string | undefined): UIPart[] =>
+  result ? [part.box({ content: [part.text({ text: result })] })] : [];
+
 // A field the spec describes labels itself: `desc` is the label, `example` the
 // placeholder. Falling back to the bare key keeps a spec that says nothing
 // from rendering an empty label.
@@ -154,9 +162,9 @@ export async function openCommandWindow(verb: string, opts?: {
     }
     content.push(part.row({ content: [
       part.button({ text: opts?.submitLabel ?? UI_TEXT.common.create, callback: () => submitCommand(verb, spec, render) }),
-      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
+      closeButton(part, handle),
     ] }));
-    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    content.push(...resultBox(part, result));
     await handle.update({ content });
   };
 
@@ -256,9 +264,9 @@ export async function openAfflictWindow(): Promise<void> {
         const reply = await CommandRouter.route(composeCommand("afflict", values, spec));
         await render(reply);
       } }),
-      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
+      closeButton(part, handle),
     ] }));
-    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    content.push(...resultBox(part, result));
     await handle.update({ content });
   };
   await render();
@@ -394,9 +402,9 @@ export async function openRollWindow(): Promise<void> {
         if (!(await field("pool"))) { await render(UI_TEXT.roll.needsPool); return; }
         await submit("name-roll", { name });
       } }),
-      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
+      closeButton(part, handle),
     ] }));
-    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    content.push(...resultBox(part, result));
     await handle.update({ content });
   };
   await render();

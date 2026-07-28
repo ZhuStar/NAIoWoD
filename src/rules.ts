@@ -58,22 +58,12 @@ export const VAMPIRE_SOAK: SoakSpec = {
   aggravated: { soakable: true, pool: ["fortitude"] },
   difficulty: 6,
 };
-// Ghouls and revenants, though alive, soak like the half-vampires they are:
-// bashing & lethal with Stamina (+Fortitude), aggravated with Fortitude alone.
-// The rules just say so - the vitae in their veins does the knitting.
-export const GHOUL_SOAK: SoakSpec = {
-  bashing: { soakable: true, pool: ["stamina", "fortitude"] },
-  lethal: { soakable: true, pool: ["stamina", "fortitude"] },
-  aggravated: { soakable: true, pool: ["fortitude"] },
-  difficulty: 6,
-};
+// Ghouls and revenants, though alive, soak like the half-vampires they are -
+// the vitae in their veins does the knitting. A COPY, not an alias: a chronicle
+// that changes what a vampire soaks must not silently change ghouls too.
+export const GHOUL_SOAK: SoakSpec = { ...VAMPIRE_SOAK };
 // Mages innately soak like mortals (their real defence is magic, not modelled).
-export const MAGE_SOAK: SoakSpec = {
-  bashing: { soakable: true, pool: ["stamina"] },
-  lethal: { soakable: false, pool: [] },
-  aggravated: { soakable: false, pool: [] },
-  difficulty: 6,
-};
+export const MAGE_SOAK: SoakSpec = { ...MORTAL_SOAK };
 // Demons (manifested) soak all three with Stamina.
 export const DEMON_SOAK: SoakSpec = {
   bashing: { soakable: true, pool: ["stamina"] },
@@ -81,16 +71,11 @@ export const DEMON_SOAK: SoakSpec = {
   aggravated: { soakable: true, pool: ["stamina"] },
   difficulty: 6,
 };
-// Werewolves regenerate: they soak every severity with Stamina and shrug off
-// most punishment outright. Silver and fire are the exception - the
-// SilverVulnerability reaction marks those packets Unsoakable, so this generous
-// spec never even gets consulted for them.
-export const WEREWOLF_SOAK: SoakSpec = {
-  bashing: { soakable: true, pool: ["stamina"] },
-  lethal: { soakable: true, pool: ["stamina"] },
-  aggravated: { soakable: true, pool: ["stamina"] },
-  difficulty: 6,
-};
+// Werewolves regenerate: like a demon they soak every severity with Stamina,
+// and shrug off most punishment outright. Silver and fire are the exception -
+// the SilverVulnerability reaction marks those packets Unsoakable, so this
+// generous spec never even gets consulted for them.
+export const WEREWOLF_SOAK: SoakSpec = { ...DEMON_SOAK };
 
 export interface BloodStats { max: number; perTurn: number; }
 // Vampire blood pool by generation (standard table; clamped to 3rd-15th).
@@ -138,6 +123,21 @@ export const ROAD_OF_THE_BEAST: RoadDefinition = {
   virtues: ["conviction", "instinct", "courage"],
   ratingVirtues: ["conviction", "instinct"],
 };
+
+// The Roads a character may WALK, by the name `[[choose road …]]` records.
+// Without this the two beside Humanity were data nothing could ever reach.
+export const ROADS: Record<string, RoadDefinition> = {
+  "road-of-humanity": ROAD_OF_HUMANITY,
+  "road-of-kings": ROAD_OF_KINGS,
+  "road-of-the-beast": ROAD_OF_THE_BEAST,
+};
+export function roadByName(name: string): RoadDefinition | undefined {
+  const key = StringUtil.normalize(name);
+  for (const [id, road] of Object.entries(ROADS)) {
+    if (id === key || StringUtil.normalize(road.name) === key || `road-of-${key}` === id) return road;
+  }
+  return undefined;
+}
 
 // How a template's morality is configured: which trait it is, its polarity,
 // and how its starting value is derived.
@@ -207,17 +207,6 @@ export const BASE_CREATION: CreationBudget = {
 
 export function creationBudget(over: Partial<CreationBudget> = {}): CreationBudget {
   return { ...BASE_CREATION, ...over };
-}
-
-// Where a trait's own start/ceiling comes from: the template's exception first,
-// then the pool's default for its kind. Either may be an expression; the caller
-// evaluates against the character (state.ts `characterScope`).
-export function traitLimitFor(budget: CreationBudget, kind: "attribute" | "ability" | "discipline", trait: string): TraitLimit {
-  const override = budget.limits?.[StringUtil.normalize(trait)];
-  const base = kind === "attribute" ? { start: budget.attributeStart, max: budget.attributeMax }
-    : kind === "discipline" ? { start: 0, max: budget.disciplineMax ?? budget.abilityMax }
-    : { start: budget.abilityStart, max: budget.abilityMax };
-  return { ...base, ...(override ?? {}) };
 }
 
 // =============================================================================
@@ -731,19 +720,6 @@ export const LIVING_RESOLVE: ResourceDef = {
       label: "Required cost + 1 extra point: the un-cancelable success rides along",
       apply: [{ op: "uncancelable", amount: 1 }],
       cost: { units: 2 },
-    },
-    // @deprecated The plain spend already carries the casting reduction (and
-    // everything else). Kept so older saved rolls carrying spend=…:focus still
-    // resolve; it is simply the default effect by another name.
-    focus: {
-      label: "Living Resolve focuses the casting (an alias of the plain spend - deprecated)",
-      apply: [
-        { op: "uncancelable", amount: 1 },
-        { op: "successes", amount: 1 },
-        { op: "nagain", amount: 8 },
-        { op: "difficulty", amount: -2 },
-        { op: "difficulty", amount: -1, target: "magic" },
-      ],
     },
   },
 };
@@ -1336,7 +1312,6 @@ export function advancementCostsFrom(overrides: CostTable): CostTable {
 // name, which bounds how far QUINTESSENCE may talk a spell's difficulty down;
 // this one is the floor the die target itself never drops below.
 // =============================================================================
-export const ROLL_KNOB_NAMES = ["min-difficulty"];
 export function rollFloorFrom(overrides: Record<string, number>): number | undefined {
   for (const [k, v] of Object.entries(overrides ?? {})) {
     if (knobKey(k) !== "mindifficulty") continue;
@@ -1472,8 +1447,6 @@ export interface MeritFlawDef {
   // perKind: {attribute: 1}}. ADVISORY, like everything creation-side: the
   // check reports violations and take-merit refuses (waivable).
   limits?: InstanceLimit[];
-  /** @deprecated Use `limits`: {atRating: N, slots: 1}. Still read. */
-  atMostOneAt?: number;
   // The rating ceiling is a TRAIT, not a constant: "may not be purchased more
   // times than his Resolve". The name is resolved the way every trait name is
   // (a rated trait first, else the resource that fills or replaced that name -
@@ -1504,14 +1477,9 @@ export function meritCostFor(def: MeritFlawDef, templates: string[]): {
   return { points: def.points, available: true };
 }
 
-// A def's limits with the deprecated single-slot field folded in, so callers
-// read one shape however the def was written.
+// A def's cross-instance limits.
 export function instanceLimitsOf(def: MeritFlawDef): InstanceLimit[] {
-  const out = [...(def.limits ?? [])];
-  if (def.atMostOneAt !== undefined && !out.some(l => l.atRating === def.atMostOneAt)) {
-    out.push({ atRating: def.atMostOneAt, slots: 1 });
-  }
-  return out;
+  return [...(def.limits ?? [])];
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
@@ -1679,8 +1647,6 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
   if (param) def.param = StringUtil.normalize(param);
   const passive = effectOpsFromCard(body["passive"]);
   if (passive.length) def.passive = passive;
-  const atMostOneAt = asNumber(body["atMostOneAt"]);
-  if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
   const limits: InstanceLimit[] = [];
   for (const raw of asList(body["limits"])) {
     const m = asMap(raw);

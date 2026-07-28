@@ -372,7 +372,7 @@ The whole grammar:
   to force text; the writer quotes for you whenever it would be misread.
 - **`#` starts a comment** at the start of a line or after a space.
 - The engine's camelCase fields are written with hyphens — `difficulty-expr`,
-  `at-most-one-at`, `requires-resource` — and either spelling is accepted.
+  `requires-resource` — and either spelling is accepted.
 
 Names are yours: write `Animal Ken`, not `animal-ken`. The engine normalizes on
 the way in and title-cases on the way out. One caveat worth knowing: when the
@@ -527,6 +527,10 @@ than being one. They live in their own `choices` map on the sheet:
   all three. A clan may also **bound a trait**: a Nosferatu's Appearance is
   `0-0`, and `[[creation]]` flags a sheet still carrying the free dot everyone
   else gets.
+- **`[[choose road <name>]]`** — the Road of Humanity, of Kings, or of the
+  Beast. It decides which three Virtues the sheet carries and which **two** the
+  Road rating sums, so a Ventrue on the Road of Kings derives from Conviction +
+  Self-Control where a Humanity character derives from Conscience + Self-Control.
 - **`[[fellowships]]`** / **`[[fellowships <name>]]`** — all six, each with its
   Foundation and its four Pillars, findable by the other names they go by
   (`batini`, `aedun`, `runecrafters`, `hermetic`, …). Once chosen, the

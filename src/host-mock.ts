@@ -61,8 +61,6 @@ export function __document(): { id: number; text: string }[] { return __mockSect
 
 // Test/off-host helpers: read the mock author's note / system prompt / prefill.
 export function __authorNote(): string { return __mockAuthorNote; }
-export function __systemPrompt(): string { return __mockSystemPrompt; }
-export function __prefill(): string { return __mockPrefill; }
 // Fire the engine's onResponse hook with a fake generation and return its result
 // (the modified text the host would insert). No-op if nothing is registered.
 export async function __fireOnResponse(text: string[], final = true): Promise<{ text?: string[] } | undefined> {

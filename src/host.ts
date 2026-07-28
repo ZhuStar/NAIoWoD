@@ -18,8 +18,6 @@
 // The part-builder bundle (`api.v1.ui.part`), named for window.ts params.
 export type UiPartHelpers = typeof api.v1.ui.part;
 
-// The handle returned by opening a window/modal, named where an annotation helps.
-export type UIHandle = Awaited<ReturnType<typeof api.v1.ui.window.open>>;
 
 // Project-wide logger: routes through the host's logger (console.log off-host).
 export function log(...args: unknown[]): void { api.v1.log(...args); }

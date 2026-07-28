@@ -36,8 +36,6 @@
 // The part-builder bundle (`api.v1.ui.part`), named for window.ts params.
 type UiPartHelpers = typeof api.v1.ui.part;
 
-// The handle returned by opening a window/modal, named where an annotation helps.
-type UIHandle = Awaited<ReturnType<typeof api.v1.ui.window.open>>;
 
 // Project-wide logger: routes through the host's logger (console.log off-host).
 function log(...args: unknown[]): void { api.v1.log(...args); }
@@ -433,7 +431,6 @@ const FIELD_ALIASES: Record<string, string> = {
   "start-options": "startOptions",
   "per-turn-limit": "perTurnLimit",
   "from-generation": "fromGeneration",
-  "at-most-one-at": "atMostOneAt",
   "at-rating": "atRating",
   "per-kind": "perKind",
   "max-from-trait": "maxFromTrait",
@@ -847,15 +844,6 @@ function asMap(v: CardValue | undefined): CardMap {
   return isMap(v) ? v : {};
 }
 
-// name -> number, reading a rating written with an annotation block under it.
-function asNumberMap(v: CardValue | undefined): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [k, raw] of Object.entries(asMap(v))) {
-    const n = asNumber(raw);
-    if (n !== undefined) out[k] = n;
-  }
-  return out;
-}
 
 // A list of blocks that carry their own name: written either as a name-keyed
 // map (the readable form) or as "- name: x" items.
@@ -950,10 +938,6 @@ interface ExprScope {
   // Domain functions beyond the built-ins; `undefined` = no such function.
   call?(name: string, args: number[]): number | undefined;
 }
-
-// A scope that knows nothing: every reference is unknown. Useful for checking
-// that an expression PARSES without deciding what its names mean.
-const EMPTY_SCOPE: ExprScope = { lookup: () => undefined };
 
 // A scope over a plain map of numbers, for tests and for the simple callers.
 function mapScope(values: Record<string, number>): ExprScope {
@@ -1149,22 +1133,17 @@ function evaluateExpr(expr: string, scope: ExprScope): ExprResult {
   };
 }
 
-// Just the number, for the many callers that only want one. `fallback` covers
-// an empty or malformed expression, so a bad card falls back to the default
-// rather than to zero.
-function evalNumber(expr: string, scope: ExprScope, fallback = 0): number {
-  const out = evaluateExpr(expr, scope);
-  return out.error ? fallback : out.value;
-}
-
 // A number, or an expression that yields one. Every rules field that a
 // chronicle might want to write in terms of the character uses this type.
 type Numeric = number | string;
 
+// Resolve one. A malformed or empty expression falls back to the DEFAULT rather
+// than to zero, so a bad card degrades to the ordinary rule.
 function evalNumeric(value: Numeric | undefined, scope: ExprScope, fallback: number): number {
   if (value === undefined) return fallback;
   if (typeof value === "number") return value;
-  return evalNumber(value, scope, fallback);
+  const out = evaluateExpr(value, scope);
+  return out.error ? fallback : out.value;
 }
 
 // Every reference an expression makes, without evaluating it - what a cycle
@@ -2679,22 +2658,12 @@ const VAMPIRE_SOAK: SoakSpec = {
   aggravated: { soakable: true, pool: ["fortitude"] },
   difficulty: 6,
 };
-// Ghouls and revenants, though alive, soak like the half-vampires they are:
-// bashing & lethal with Stamina (+Fortitude), aggravated with Fortitude alone.
-// The rules just say so - the vitae in their veins does the knitting.
-const GHOUL_SOAK: SoakSpec = {
-  bashing: { soakable: true, pool: ["stamina", "fortitude"] },
-  lethal: { soakable: true, pool: ["stamina", "fortitude"] },
-  aggravated: { soakable: true, pool: ["fortitude"] },
-  difficulty: 6,
-};
+// Ghouls and revenants, though alive, soak like the half-vampires they are -
+// the vitae in their veins does the knitting. A COPY, not an alias: a chronicle
+// that changes what a vampire soaks must not silently change ghouls too.
+const GHOUL_SOAK: SoakSpec = { ...VAMPIRE_SOAK };
 // Mages innately soak like mortals (their real defence is magic, not modelled).
-const MAGE_SOAK: SoakSpec = {
-  bashing: { soakable: true, pool: ["stamina"] },
-  lethal: { soakable: false, pool: [] },
-  aggravated: { soakable: false, pool: [] },
-  difficulty: 6,
-};
+const MAGE_SOAK: SoakSpec = { ...MORTAL_SOAK };
 // Demons (manifested) soak all three with Stamina.
 const DEMON_SOAK: SoakSpec = {
   bashing: { soakable: true, pool: ["stamina"] },
@@ -2702,16 +2671,11 @@ const DEMON_SOAK: SoakSpec = {
   aggravated: { soakable: true, pool: ["stamina"] },
   difficulty: 6,
 };
-// Werewolves regenerate: they soak every severity with Stamina and shrug off
-// most punishment outright. Silver and fire are the exception - the
-// SilverVulnerability reaction marks those packets Unsoakable, so this generous
-// spec never even gets consulted for them.
-const WEREWOLF_SOAK: SoakSpec = {
-  bashing: { soakable: true, pool: ["stamina"] },
-  lethal: { soakable: true, pool: ["stamina"] },
-  aggravated: { soakable: true, pool: ["stamina"] },
-  difficulty: 6,
-};
+// Werewolves regenerate: like a demon they soak every severity with Stamina,
+// and shrug off most punishment outright. Silver and fire are the exception -
+// the SilverVulnerability reaction marks those packets Unsoakable, so this
+// generous spec never even gets consulted for them.
+const WEREWOLF_SOAK: SoakSpec = { ...DEMON_SOAK };
 
 interface BloodStats { max: number; perTurn: number; }
 // Vampire blood pool by generation (standard table; clamped to 3rd-15th).
@@ -2759,6 +2723,21 @@ const ROAD_OF_THE_BEAST: RoadDefinition = {
   virtues: ["conviction", "instinct", "courage"],
   ratingVirtues: ["conviction", "instinct"],
 };
+
+// The Roads a character may WALK, by the name `[[choose road …]]` records.
+// Without this the two beside Humanity were data nothing could ever reach.
+const ROADS: Record<string, RoadDefinition> = {
+  "road-of-humanity": ROAD_OF_HUMANITY,
+  "road-of-kings": ROAD_OF_KINGS,
+  "road-of-the-beast": ROAD_OF_THE_BEAST,
+};
+function roadByName(name: string): RoadDefinition | undefined {
+  const key = StringUtil.normalize(name);
+  for (const [id, road] of Object.entries(ROADS)) {
+    if (id === key || StringUtil.normalize(road.name) === key || `road-of-${key}` === id) return road;
+  }
+  return undefined;
+}
 
 // How a template's morality is configured: which trait it is, its polarity,
 // and how its starting value is derived.
@@ -2828,17 +2807,6 @@ const BASE_CREATION: CreationBudget = {
 
 function creationBudget(over: Partial<CreationBudget> = {}): CreationBudget {
   return { ...BASE_CREATION, ...over };
-}
-
-// Where a trait's own start/ceiling comes from: the template's exception first,
-// then the pool's default for its kind. Either may be an expression; the caller
-// evaluates against the character (state.ts `characterScope`).
-function traitLimitFor(budget: CreationBudget, kind: "attribute" | "ability" | "discipline", trait: string): TraitLimit {
-  const override = budget.limits?.[StringUtil.normalize(trait)];
-  const base = kind === "attribute" ? { start: budget.attributeStart, max: budget.attributeMax }
-    : kind === "discipline" ? { start: 0, max: budget.disciplineMax ?? budget.abilityMax }
-    : { start: budget.abilityStart, max: budget.abilityMax };
-  return { ...base, ...(override ?? {}) };
 }
 
 // =============================================================================
@@ -3352,19 +3320,6 @@ const LIVING_RESOLVE: ResourceDef = {
       label: "Required cost + 1 extra point: the un-cancelable success rides along",
       apply: [{ op: "uncancelable", amount: 1 }],
       cost: { units: 2 },
-    },
-    // @deprecated The plain spend already carries the casting reduction (and
-    // everything else). Kept so older saved rolls carrying spend=…:focus still
-    // resolve; it is simply the default effect by another name.
-    focus: {
-      label: "Living Resolve focuses the casting (an alias of the plain spend - deprecated)",
-      apply: [
-        { op: "uncancelable", amount: 1 },
-        { op: "successes", amount: 1 },
-        { op: "nagain", amount: 8 },
-        { op: "difficulty", amount: -2 },
-        { op: "difficulty", amount: -1, target: "magic" },
-      ],
     },
   },
 };
@@ -3957,7 +3912,6 @@ function advancementCostsFrom(overrides: CostTable): CostTable {
 // name, which bounds how far QUINTESSENCE may talk a spell's difficulty down;
 // this one is the floor the die target itself never drops below.
 // =============================================================================
-const ROLL_KNOB_NAMES = ["min-difficulty"];
 function rollFloorFrom(overrides: Record<string, number>): number | undefined {
   for (const [k, v] of Object.entries(overrides ?? {})) {
     if (knobKey(k) !== "mindifficulty") continue;
@@ -4093,8 +4047,6 @@ interface MeritFlawDef {
   // perKind: {attribute: 1}}. ADVISORY, like everything creation-side: the
   // check reports violations and take-merit refuses (waivable).
   limits?: InstanceLimit[];
-  /** @deprecated Use `limits`: {atRating: N, slots: 1}. Still read. */
-  atMostOneAt?: number;
   // The rating ceiling is a TRAIT, not a constant: "may not be purchased more
   // times than his Resolve". The name is resolved the way every trait name is
   // (a rated trait first, else the resource that fills or replaced that name -
@@ -4125,14 +4077,9 @@ function meritCostFor(def: MeritFlawDef, templates: string[]): {
   return { points: def.points, available: true };
 }
 
-// A def's limits with the deprecated single-slot field folded in, so callers
-// read one shape however the def was written.
+// A def's cross-instance limits.
 function instanceLimitsOf(def: MeritFlawDef): InstanceLimit[] {
-  const out = [...(def.limits ?? [])];
-  if (def.atMostOneAt !== undefined && !out.some(l => l.atRating === def.atMostOneAt)) {
-    out.push({ atRating: def.atMostOneAt, slots: 1 });
-  }
-  return out;
+  return [...(def.limits ?? [])];
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
@@ -4300,8 +4247,6 @@ function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefine
   if (param) def.param = StringUtil.normalize(param);
   const passive = effectOpsFromCard(body["passive"]);
   if (passive.length) def.passive = passive;
-  const atMostOneAt = asNumber(body["atMostOneAt"]);
-  if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
   const limits: InstanceLimit[] = [];
   for (const raw of asList(body["limits"])) {
     const m = asMap(raw);
@@ -6542,12 +6487,17 @@ function scopeFunctions(char: PlayableCharacter, value: (name: string) => number
   };
 }
 
-// The Road this character walks: an explicit choice, else the template's.
+// The Road this character walks: the explicit choice first (a Ventrue on the
+// Road of Kings sums different Virtues), else the template's own.
 function roadOf(char: PlayableCharacter): RoadDefinition {
-  const chosen = StringUtil.normalize(char.choices?.["road"] ?? "");
+  const chosen = char.choices?.["road"];
+  if (chosen) {
+    const road = roadByName(chosen);
+    if (road) return road;
+  }
   for (const key of char.templates) {
     const road = TEMPLATES[StringUtil.normalize(key)]?.Morality?.road;
-    if (road && (!chosen || StringUtil.normalize(road.name) === chosen)) return road;
+    if (road) return road;
   }
   return ROAD_OF_HUMANITY;
 }
@@ -6665,15 +6615,6 @@ function numericOn(char: PlayableCharacter, value: Numeric | undefined, fallback
   return evalNumeric(value, characterScope(char, extend), fallback);
 }
 
-// The trait limits in force, with every expression already resolved.
-function resolvedLimit(char: PlayableCharacter, limit: TraitLimit, fallbackStart: number, fallbackMax: number, extend?: ScopeExtension): { start: number; max: number; note?: string } {
-  const scope = characterScope(char, extend);
-  return {
-    start: evalNumeric(limit.start, scope, fallbackStart),
-    max: evalNumeric(limit.max, scope, fallbackMax),
-    ...(limit.note ? { note: limit.note } : {}),
-  };
-}
 
 // Which KIND of trait a name is, for the rules that ration by kind ("at most
 // one Attribute may reach 3"). The character's own buckets answer first, so a
@@ -8220,6 +8161,18 @@ async function answerActiveWizard(active: ActiveWizard, raw: string): Promise<st
 // ("Erik The Red"). Backtick literals are the verbatim escape hatch for text
 // that must not be normalized at all.
 const disp = (name: string): string => StringUtil.toTitleCase(name);
+// A named argument as an integer, or undefined when absent or unparseable -
+// "not given" and "given as nonsense" both mean "the caller decides".
+function intOrUndef(s: string | undefined): number | undefined {
+  if (s === undefined) return undefined;
+  const v = parseInt(s, 10);
+  return Number.isNaN(v) ? undefined : v;
+}
+
+// The refusal every character-scoped verb gives. It was written out 36 times;
+// one copy is one place to change how the engine asks you to pick someone.
+const NO_CHARACTER = `No active character. Select one with [[play name="..."]]`;
+const noCharacter = (orElse = ""): string => sys(`${NO_CHARACTER}${orElse ? ` ${orElse}` : ""}.`);
 
 async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   const set = (cmd.named["set"] ?? cmd.positional[0] ?? "").toLowerCase();
@@ -8297,11 +8250,6 @@ async function cmdPlay(cmd: ParsedCommand): Promise<string> {
 // [[roll-for "Name" ...]]). Difficulty and its modifier may be positional OR
 // named (named wins); requires, dice-modifier and tags are named-only.
 function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> {
-  const intOf = (s: string | undefined): number | undefined => {
-    if (s === undefined) return undefined;
-    const v = parseInt(s, 10);
-    return Number.isNaN(v) ? undefined : v;
-  };
   const args: Partial<RollSpec> = {};
   const pool = cmd.positional[offset];
   if (pool !== undefined) args.pool = pool;
@@ -8313,13 +8261,13 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
     if (/^-?\d+$/.test(diffRaw)) args.difficulty = parseInt(diffRaw, 10);
     else args.difficultyExpr = diffRaw;
   }
-  const difficultyMod = intOf(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2]);
+  const difficultyMod = intOrUndef(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"] ?? cmd.positional[offset + 2]);
   if (difficultyMod !== undefined) args.difficultyMod = difficultyMod;
-  const requires = intOf(cmd.named["requires"]);
+  const requires = intOrUndef(cmd.named["requires"]);
   if (requires !== undefined) args.requires = requires;
-  const diceMod = intOf(cmd.named["dice-modifier"]);
+  const diceMod = intOrUndef(cmd.named["dice-modifier"]);
   if (diceMod !== undefined) args.diceMod = diceMod;
-  const minDifficulty = intOf(cmd.named["min-difficulty"]);
+  const minDifficulty = intOrUndef(cmd.named["min-difficulty"]);
   if (minDifficulty !== undefined) args.minDifficulty = minDifficulty;
   if (cmd.named["tags"] !== undefined) {
     args.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
@@ -8336,9 +8284,33 @@ function runRoll(spec: RollSpec, resolve: TraitResolver, opts: { rng?: Rng; extr
   return executeRoll(floor === undefined ? spec : { ...spec, minDifficulty: floor }, resolve, opts);
 }
 
-// Ops the roll pipeline executes directly (as the roll's `extra` modifier).
-const ROLL_OPS = new Set(["difficulty", "dice", "successes", "nagain", "uncancelable"]);
-const isRollOp = (o: EffectOp): boolean => ROLL_OPS.has(o.op.toLowerCase());
+// Ops the roll pipeline executes directly, and WHICH RollModifier field each
+// one moves. THE one place that knows: `undefined` means "not a roll op", so
+// the membership test and the translation can never disagree.
+function rollOpPatch(op: string, amount: number): Partial<RollModifier> | undefined {
+  switch (op.toLowerCase()) {
+    case "difficulty": return { difficultyMod: amount };
+    case "dice": return { diceMod: amount };
+    case "successes": return { autoSuccesses: amount };
+    case "uncancelable": return { uncancelableSuccesses: amount };
+    case "nagain": return { nAgain: amount };
+    default: return undefined;
+  }
+}
+const isRollOp = (o: EffectOp): boolean => rollOpPatch(o.op, 0) !== undefined;
+
+// Fold roll-modifier patches into an accumulator. Every field ADDS, except
+// `nAgain`, which TIGHTENS - the lowest explosion threshold offered wins.
+function mergeRollExtra(into: Partial<RollModifier>, ...patches: Array<Partial<RollModifier>>): Partial<RollModifier> {
+  for (const p of patches) {
+    if (p.difficultyMod) into.difficultyMod = (into.difficultyMod ?? 0) + p.difficultyMod;
+    if (p.diceMod) into.diceMod = (into.diceMod ?? 0) + p.diceMod;
+    if (p.autoSuccesses) into.autoSuccesses = (into.autoSuccesses ?? 0) + p.autoSuccesses;
+    if (p.uncancelableSuccesses) into.uncancelableSuccesses = (into.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
+    if (p.nAgain !== undefined) into.nAgain = Math.min(into.nAgain ?? 10, p.nAgain);
+  }
+  return into;
+}
 
 // =============================================================================
 // THE EFFECT INTERPRETER - execute one EffectSpec for a character
@@ -8612,18 +8584,15 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
   for (const inst of ownedMeritInstances(char)) {
     for (const op of passiveOpsOf(inst.def, inst.param, inst.points)) {
       const kind = op.op.toLowerCase();
-      if (!ROLL_OPS.has(kind)) continue;
+      const patch = (n: number): Partial<RollModifier> => rollOpPatch(kind, n) ?? {};
+      if (!rollOpPatch(kind, 0)) continue;
       if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
       if (op.trait && !poolTraits.includes(StringUtil.normalize(op.trait))) continue;
       // A "while I still hold N of this" gate - checked live, so it lapses the
       // moment the pool runs dry.
       if (op.requiresResource && (resourceAt?.(op.requiresResource.resource) ?? 0) < op.requiresResource.atLeast) continue;
       const amount = op.amount ?? 1;
-      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + amount;
-      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + amount;
-      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + amount;
-      else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + amount;
-      else if (kind === "nagain") { extra.nAgain = Math.min(extra.nAgain ?? 10, amount); }
+      mergeRollExtra(extra, patch(amount));
       const who = `${StringUtil.normalize(inst.def.name)}${inst.param ? ` (${inst.param})` : ""}`;
       notes.push(`${who}: ${kind} ${amount > 0 ? "+" : ""}${amount}`);
     }
@@ -8651,18 +8620,15 @@ function afflictionRollExtra(char: PlayableCharacter, active: ActiveAffliction[]
     if (def.scalesWith && rating <= 0) continue;
     for (const op of foldAfflictionTiers(rating, def.tiers).ops) {
       const kind = op.op.toLowerCase();
-      if (!ROLL_OPS.has(kind)) continue;
+      const amount = op.amount ?? 1;
+      const patch = rollOpPatch(kind, amount);
+      if (!patch) continue;
       if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
       if (op.trait) {
         const wanted = StringUtil.normalize(op.trait) === "@foundation" ? foundation : StringUtil.normalize(op.trait);
         if (!poolTraits.includes(wanted)) continue;
       }
-      const amount = op.amount ?? 1;
-      if (kind === "difficulty") extra.difficultyMod = (extra.difficultyMod ?? 0) + amount;
-      else if (kind === "dice") extra.diceMod = (extra.diceMod ?? 0) + amount;
-      else if (kind === "successes") extra.autoSuccesses = (extra.autoSuccesses ?? 0) + amount;
-      else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + amount;
-      else if (kind === "nagain") extra.nAgain = Math.min(extra.nAgain ?? 10, amount);
+      mergeRollExtra(extra, patch);
       notes.push(`${inst.def}${def.scalesWith ? ` ${rating}` : ""}: ${kind} ${amount > 0 ? "+" : ""}${amount}`);
     }
   }
@@ -8724,12 +8690,20 @@ async function resolveTableRef(raw: string): Promise<{ key?: string; error?: str
 // Read a table ref (table=<key|@alias>, or a saved roll's table sidecar)
 // against an outcome. The roll itself never interprets its successes - the
 // table does (or the reading is an unknown-table note).
+// A table REF -> the table, or the note explaining why not. Both readers below
+// need exactly this, and a reading that quietly used the wrong table would be
+// worse than one that says it cannot find it.
+async function lookupTable(raw: string): Promise<{ table?: SuccessTable; note?: string }> {
+  const ref = await resolveTableRef(raw);
+  if (ref.error) return { note: ref.error };
+  const table = SuccessTableRegistry.get(ref.key!);
+  return table ? { table } : { note: `unknown table "${ref.key}" (see [[tables]])` };
+}
+
 async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, successes: number): Promise<string> {
   if (!raw) return "";
-  const ref = await resolveTableRef(raw);
-  if (ref.error) return ref.error;
-  const table = SuccessTableRegistry.get(ref.key!);
-  if (!table) return `unknown table "${ref.key}" (see [[tables]])`;
+  const { table, note } = await lookupTable(raw);
+  if (!table) return note!;
   return `${table.name}: ${describeTableReading(readSuccessTable(table, outcome, successes))}`;
 }
 
@@ -8742,10 +8716,8 @@ async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, succ
 // the value branch falls back to this interval's outcome flavour.
 async function extendedTableNote(raw: string | undefined, outcome: RollOutcomeKind, net: number, accumulated: number): Promise<string> {
   if (!raw) return "";
-  const ref = await resolveTableRef(raw);
-  if (ref.error) return ref.error;
-  const table = SuccessTableRegistry.get(ref.key!);
-  if (!table) return `unknown table "${ref.key}" (see [[tables]])`;
+  const { table, note } = await lookupTable(raw);
+  if (!table) return note!;
   if (table.valuePerSuccess !== undefined && accumulated > 0) {
     return `${table.name}: ${describeTableReading(readSuccessTable(table, "success", accumulated))} so far`;
   }
@@ -8765,14 +8737,7 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
   const env = await characterRollEnv(char);
   const passive = passiveRollExtra(char, poolTraits, tagged.tags, env.resourceAt);
   const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, tagged.tags);
-  const extra: Partial<RollModifier> = { ...(seed ?? {}) };
-  for (const p of [passive.extra, place.extra]) {
-    if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
-    if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
-    if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
-    if (p.uncancelableSuccesses) extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
-    if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
-  }
+  const extra = mergeRollExtra({ ...(seed ?? {}) }, passive.extra, place.extra);
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, tagged.diceMod, extra);
   const exec = runRoll(tagged, env.resolver, { rng: ctx.rng, extra });
@@ -8805,13 +8770,12 @@ async function launchExtended(char: PlayableCharacter, base: RollSpec, opts: { t
 // tags, table, botch/interval defaults); the TARGET and any overrides come at
 // play time. `requires=`/`target=` is the accumulated goal (the full climb).
 async function launchExtendedFromSaved(char: PlayableCharacter, name: string, saved: SavedRoll, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
-  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
-  const target = args.requires ?? intOf(cmd.named["target"]);
+  const target = args.requires ?? intOrUndef(cmd.named["target"]);
   if (target === undefined || target < 1) {
     return sys(`"${name}" is an extended roll - give it a target, e.g. [[roll @${name} requires=4]] (the successes = the whole action; for climbing, wall height / ft-per-success).`);
   }
   const cfg = saved.extended ?? {};
-  const maxRolls = intOf(cmd.named["intervals"]) ?? cfg.intervals;
+  const maxRolls = intOrUndef(cmd.named["intervals"]) ?? cfg.intervals;
   if (maxRolls === undefined || maxRolls < 1) return sys(`"${name}" needs intervals=<max rolls> (its save defines none), e.g. [[roll @${name} requires=${target} intervals=6]].`);
   const onBotch = cmd.named["on-botch"] ? parseBotchPolicy(cmd.named["on-botch"]) : (cfg.onBotch ?? "fail");
   const base = overrideSpec(saved, { ...args, requires: 1 });   // each interval is a plain roll
@@ -8864,14 +8828,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, spec.tags);
   const specialtyRef = cmd.named["specialty"] ?? savedSpecialty;
   const specialty = specialtyRef ? resolveSpecialty(char, specialtyRef, poolTraits) : { note: "" };
-  const extra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
-  for (const p of [passive.extra, place.extra, specialty.extra ?? {}]) {
-    if (p.difficultyMod) extra.difficultyMod = (extra.difficultyMod ?? 0) + p.difficultyMod;
-    if (p.diceMod) extra.diceMod = (extra.diceMod ?? 0) + p.diceMod;
-    if (p.autoSuccesses) extra.autoSuccesses = (extra.autoSuccesses ?? 0) + p.autoSuccesses;
-    if (p.uncancelableSuccesses) extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + p.uncancelableSuccesses;
-    if (p.nAgain !== undefined) extra.nAgain = Math.min(extra.nAgain ?? 10, p.nAgain);
-  }
+  const extra = mergeRollExtra({ ...(spend.extra ?? {}) }, passive.extra, place.extra, specialty.extra ?? {});
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, spec.diceMod, extra);
   const exec = runRoll(spec, env.resolver, { rng: ctx.rng, extra });
@@ -8889,7 +8846,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
 
 async function cmdRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   return rollAndReport(char, cmd, ctx, 0);
 }
 
@@ -8976,8 +8933,7 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   if (description) saved.description = description;
   // A "named procedure": extended=true (or any extended knob) makes invoking it
   // launch an extended action; the target stays play-time input.
-  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
-  const intervals = intOf(cmd.named["intervals"]);
+  const intervals = intOrUndef(cmd.named["intervals"]);
   const interval = cmd.named["interval"]?.trim();
   const onBotchRaw = cmd.named["on-botch"]?.trim();
   const extendedFlag = ["true", "yes", "1"].includes((cmd.named["extended"] ?? "").toLowerCase());
@@ -8995,7 +8951,7 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   if (opposedRaw === "resisted" || opposedRaw === "contested") {
     const opp: OpposedSavedConfig = { mode: opposedRaw };
     const vsPool = cmd.named["vs-pool"]?.trim();
-    const vsDiff = intOf(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+    const vsDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
     if (vsPool) opp.pool = vsPool;
     if (vsDiff !== undefined) opp.vsDifficulty = vsDiff;
     if (saved.extended) { opp.extended = saved.extended; delete saved.extended; }
@@ -9095,22 +9051,17 @@ async function cmdForgetRoll(cmd: ParsedCommand): Promise<string> {
 // the optional id positional is never mistaken for a pool). `requires` is not
 // per-interval overridable - the target is fixed on the action.
 function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
-  const intOf = (s: string | undefined): number | undefined => {
-    if (s === undefined) return undefined;
-    const v = parseInt(s, 10);
-    return Number.isNaN(v) ? undefined : v;
-  };
   const o: Partial<RollSpec> = {};
   const diffRaw = cmd.named["difficulty"]?.trim();
   if (diffRaw) {
     if (/^-?\d+$/.test(diffRaw)) o.difficulty = parseInt(diffRaw, 10);
     else o.difficultyExpr = diffRaw;
   }
-  const difficultyMod = intOf(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"]);
+  const difficultyMod = intOrUndef(cmd.named["difficulty-modifier"] ?? cmd.named["diff-mod"]);
   if (difficultyMod !== undefined) o.difficultyMod = difficultyMod;
-  const diceMod = intOf(cmd.named["dice-modifier"]);
+  const diceMod = intOrUndef(cmd.named["dice-modifier"]);
   if (diceMod !== undefined) o.diceMod = diceMod;
-  const minDifficulty = intOf(cmd.named["min-difficulty"]);
+  const minDifficulty = intOrUndef(cmd.named["min-difficulty"]);
   if (minDifficulty !== undefined) o.minDifficulty = minDifficulty;
   if (cmd.named["tags"] !== undefined) o.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   return o;
@@ -9119,12 +9070,11 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
 // Start an extended action and roll its first interval as the current character.
 async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const args = extractRollArgs(cmd, 0);
   if (!args.pool) return sys(`extended-roll needs a pool, e.g. [[extended-roll strength+stamina requires=8 intervals=4]].`);
   if (args.pool.startsWith("@")) return sys(`extended-roll takes a pool expression (e.g. strength+stamina), not a saved @name - invoke a saved extended roll with [[roll @name requires=<target>]].`);
-  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
-  const maxRolls = intOf(cmd.named["intervals"]) ?? 0;
+  const maxRolls = intOrUndef(cmd.named["intervals"]) ?? 0;
   if (maxRolls < 1) return sys(`extended-roll needs intervals=<max rolls> (at least 1).`);
   const base = makeRollSpec({ ...args, pool: args.pool, requires: 1 });   // each interval is a plain roll
   return launchExtended(char, base, {
@@ -9137,7 +9087,7 @@ async function cmdExtendedRoll(cmd: ParsedCommand, ctx: CommandContext): Promise
 
 async function cmdContinueRoll(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const action = await ExtendedRollStore.resolve(cmd.positional[0]);
   if (!action) return sys(`No open extended action. Start one with [[extended-roll ...]] or name its id.`);
   if (action.status !== "open") return sys(`That extended action is already ${action.status}.`);
@@ -9167,7 +9117,7 @@ async function cmdCancelRoll(cmd: ParsedCommand): Promise<string> {
 
 async function cmdResources(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const views = await CharacterResources.all(char);
   if (!views.length) return sys(`${disp(char.name)} has no resources.`);
   const uses = await EffectUses.counts(char);
@@ -9293,9 +9243,8 @@ function resolveFoundation(arg: string | undefined, resolve: (n: string) => numb
 
 async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const rules = magicRulesFrom(MagicRulesConfig.current());
-  const intOf = (s: string | undefined): number | undefined => { if (s === undefined) return undefined; const v = parseInt(s, 10); return Number.isNaN(v) ? undefined : v; };
 
   const pillarsRaw = (cmd.named["pillars"] ?? cmd.positional[0])?.trim();
   if (!pillarsRaw) {
@@ -9358,7 +9307,7 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   const seed: Partial<RollModifier> = {};
   const castTags = [...CASTING_TAGS];
   const mandatory = primary.required > foundationRating ? 1 : 0;
-  const requested = Math.max(0, intOf(cmd.named["quintessence"] ?? cmd.named["quint"]) ?? 0);
+  const requested = Math.max(0, intOrUndef(cmd.named["quintessence"] ?? cmd.named["quint"]) ?? 0);
   const fuelDef = CharacterResources.resolveDef(char, "magic-fuel");
   if (mandatory > 0 && !fuelDef) {
     return sys(`${disp(char.name)} can't cast: the effect (${disp(primary.name)} ${primary.required}) outstrips ${disp(foundationTrait)} ${foundationRating}, and casting then REQUIRES a point of Quintessence - but they have no magic-fuel resource.`);
@@ -9417,7 +9366,7 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
 
   // The spell's roll: over the cap, difficulty converts to extra required
   // successes (resolveSpec notes it); reductions buy those off first.
-  const requires = Math.max(1, intOf(cmd.named["requires"]) ?? 1);
+  const requires = Math.max(1, intOrUndef(cmd.named["requires"]) ?? 1);
   const ongoing = (cmd.named["ongoing"] ?? "").toLowerCase() === "true";
   const extended = ongoing || (cmd.named["extended"] ?? "").toLowerCase() === "true";
   const spec = makeRollSpec({
@@ -9451,9 +9400,9 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
     // casting (Backlash + every accrued success lost) unless on-botch says
     // otherwise. Ongoing spells need x10 successes and per-success fuel.
     const target = ongoing ? requires * rules.ongoingMultiplier : requires;
-    if (!intOf(cmd.named["requires"])) return sys(`An ${ongoing ? "ongoing" : "extended"} casting needs requires=N (the Storyteller's success total${ongoing ? ` - it is then ×${rules.ongoingMultiplier}` : ""}).`);
+    if (!intOrUndef(cmd.named["requires"])) return sys(`An ${ongoing ? "ongoing" : "extended"} casting needs requires=N (the Storyteller's success total${ongoing ? ` - it is then ×${rules.ongoingMultiplier}` : ""}).`);
     if (ongoing) notes.push(`ongoing spell: ${requires}×${rules.ongoingMultiplier} = ${target} successes; fuel ${rules.ongoingFuelPerSuccess} magic-fuel per success as they land (ST-enforced); seal with [[seal-spell pillar=${primary.required}]] at the end`);
-    const maxRolls = intOf(cmd.named["intervals"]) ?? 20;
+    const maxRolls = intOrUndef(cmd.named["intervals"]) ?? 20;
     return launchExtended(char, spec, {
       target, maxRolls,
       interval: cmd.named["interval"] ?? "",
@@ -9484,7 +9433,7 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
 // price is quoted, payable over time (ST tracks the debt).
 async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const rules = magicRulesFrom(MagicRulesConfig.current());
   const level = parseInt(cmd.named["pillar"] ?? cmd.positional[0] ?? "", 10);
   if (Number.isNaN(level) || level < 1) return sys(`seal-spell needs the highest Pillar level involved, e.g. [[seal-spell pillar=3]].`);
@@ -9634,7 +9583,7 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
 async function cmdBudget(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
   const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const { resolver } = await characterRollEnv(char);
   const budgets = budgetsOf(char);
   const ledger = purseLedger(char, resolver);
@@ -9657,7 +9606,7 @@ async function cmdBudget(cmd: ParsedCommand): Promise<string> {
 // Storyteller granted it. Bare [[paid]] lists the overrides.
 async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const rawKey = cmd.positional[0]?.trim();
   if (!rawKey) {
     const entries = Object.entries(char.paid ?? {});
@@ -9728,13 +9677,14 @@ function limitsFor(char: PlayableCharacter): Record<string, TraitLimit> {
 // choose <what> <value> - the picks a template asks for.
 async function cmdChoose(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const what = StringUtil.normalize(cmd.positional[0] ?? cmd.named["what"] ?? "");
   const value = (cmd.positional[1] ?? cmd.named["value"] ?? "").trim();
   if (!what) {
     const made = Object.entries(char.choices ?? {}).map(([k, v]) => `${k}: ${disp(v)}`);
     return sys(`${disp(char.name)} - ${made.length ? made.join(", ") : "nothing chosen yet"}. `
       + `[[choose clan <name>]] ([[clans]]), [[choose fellowship <name>]] ([[fellowships]]), `
+      + `[[choose road <name>]] (${Object.values(ROADS).map(r => r.name).join(", ")}), `
       + `[[choose attributes physical,social,mental]] (primary, secondary, tertiary).`);
   }
   if (what === "attributes" || what === "abilities") {
@@ -9752,6 +9702,14 @@ async function cmdChoose(cmd: ParsedCommand): Promise<string> {
     return sys(`${disp(char.name)} ${what}: ${order.map((o, i) => `${["primary", "secondary", "tertiary"][i]} ${disp(o)}`).join(", ")}. [[creation]] checks the pools.`);
   }
   if (!value) return sys(`[[choose ${what} <value>]] needs a value.`);
+  if (what === "road") {
+    const road = roadByName(value);
+    if (!road) return sys(`No road "${value}". Known: ${Object.values(ROADS).map(r => r.name).join(", ")}.`);
+    char.choices = { ...(char.choices ?? {}), road: StringUtil.normalize(road.name) };
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)} walks the ${road.name}. Virtues: ${road.virtues.map(v => disp(v)).join(", ")}; `
+      + `the rating is ${road.ratingVirtues.map(v => disp(v)).join(" + ")}. [[derived]] shows what follows.`);
+  }
   if (what === "clan") {
     const clan = clanByName(value);
     if (!clan) return sys(`No clan "${value}". [[clans]] lists them.`);
@@ -9793,7 +9751,7 @@ async function cmdClans(cmd: ParsedCommand): Promise<string> {
 async function cmdCreation(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
   const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const budget = creationOf(char);
   const limits = limitsFor(char);
   const lines: string[] = [];
@@ -9836,11 +9794,10 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
     lines.push(`${kind}: ${bits.join(", ")}${stray.length ? ` ⚠ uncounted: ${stray.join(", ")}` : ""}`);
   }
 
-  const bgSpent = Object.entries(char.backgrounds ?? {}).reduce((sum, [n, v]) => {
-    const held = char.instances?.[n];
-    const each = held?.length ? held : [{ rating: v, paid: char.paid?.[n] }];
-    return sum + each.reduce((s, one) => s + ((one as { paid?: string }).paid !== undefined ? parseInt((one as { paid?: string }).paid!, 10) || 0 : one.rating), 0);
-  }, 0);
+  // ONE ledger, so [[creation]] and [[budget]] can never disagree about what a
+  // Background cost. (They used to: this counted `paid` with parseInt while the
+  // ledger evaluated it as an expression.)
+  const bgSpent = purseLedger(char, (n) => traitValueOf(char, n))["background"]?.spent ?? 0;
   lines.push(`backgrounds: ${bgSpent}/${num(budget.backgrounds, 5)}`);
 
   if (budget.disciplines !== undefined) {
@@ -9894,7 +9851,7 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
 async function cmdDerived(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
   const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const derived = derivedValuesOf(char, purseScope(char));
   if (!derived.length) {
     return sys(`${disp(char.name)} derives nothing - this template states every number outright. `
@@ -9912,7 +9869,7 @@ async function cmdDerived(cmd: ParsedCommand): Promise<string> {
 // out what the engine thinks a name means without guessing from a report.
 async function cmdEval(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const expr = (cmd.named["expression"] ?? cmd.positional.join(" ")).trim();
   if (!expr) {
     return sys(`[[eval <expression>]] reads an expression against ${disp(char.name)}. `
@@ -10026,7 +9983,7 @@ async function cmdForgetBackground(cmd: ParsedCommand): Promise<string> {
 // not have. Reports; enforces nothing.
 async function cmdSupernatural(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const which = cmd.positional[0]?.trim();
   const cats = DEFAULT_SUPERNATURAL_CATEGORIES;
   if (which) {
@@ -10100,7 +10057,7 @@ const LIBRARY_STATES = ["in-sanctum", "in-umbra", "in-library"];
 // an Umbral realm that is also the mage's sanctum, hence all three states.
 async function cmdMeasureDoor(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   if (effectiveTraitOf(char, "library") <= 0) {
     return sys(`${disp(char.name)} has no Library to open a door onto (the Talisman measures the way to YOUR library).`);
   }
@@ -10117,7 +10074,7 @@ async function cmdMeasureDoor(): Promise<string> {
 
 async function cmdLeaveLibrary(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const lifted: string[] = [];
   for (const state of LIBRARY_STATES) {
     const r = await removeAffliction(StringUtil.normalize(char.name), state);
@@ -10136,7 +10093,7 @@ function crayLine(char: PlayableCharacter, state: CrayState): string {
 
 async function cmdCray(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray (it is a Background - rate it on the sheet).`);
   const state = await CrayStore.get(char);
   const regen = state.status === "dead" ? "never regenerates"
@@ -10192,7 +10149,7 @@ async function drawFromCray(char: PlayableCharacter, want: number, ctx: CommandC
 // time-consuming (pass time= to advance the clock with it).
 async function cmdHarvest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray to harvest.`);
   const want = Math.max(1, parseInt(cmd.positional[0] ?? "1", 10) || 1);
   const r = await drawFromCray(char, want, ctx);
@@ -10217,7 +10174,7 @@ async function cmdHarvest(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
 // one point per success - and the mage must absorb everything drawn.
 async function cmdAbsorb(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const rating = CrayStore.rating(char);
   if (rating <= 0) return sys(`${disp(char.name)} has no Cray to draw from.`);
   const found = resolveFoundation(cmd.named["foundation"], (n: string) => resolveTraitFromRecord(char, n));
@@ -10238,7 +10195,7 @@ async function cmdAbsorb(cmd: ParsedCommand, ctx: CommandContext): Promise<strin
 // narrate; the roll says how much of it the mage finds.
 async function cmdResearch(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const topic = cmd.positional.join(" ").trim() || cmd.named["topic"]?.trim();
   if (!topic) return sys(`research needs a topic, e.g. [[research \`the seals of Belial\` difficulty=8]].`);
   const rating = effectiveTraitOf(char, "library");
@@ -10267,7 +10224,7 @@ function healthLine(s: HealthSummary): string {
 // has a group/bucket constraint to pick within.
 async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const raw = cmd.positional[0]?.trim();
   if (!raw) return sys(`spend needs a resource, e.g. [[spend willpower]], [[spend blood:heal 2]] or [[spend blood:boost strength 2]].`);
   const [which, effectName] = raw.split(":").map(s => s.trim());
@@ -10306,14 +10263,14 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
 
 async function cmdResetUses(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   await EffectUses.resetAll(char);
   return sys(`${disp(char.name)}'s effect-use counters reset (new scene/turn).`);
 }
 
 async function cmdDamage(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const severity = (cmd.positional[0] ?? "").trim().toLowerCase();
   if (severity !== "bashing" && severity !== "lethal" && severity !== "aggravated") {
     return sys(`damage needs a severity (bashing, lethal or aggravated), e.g. [[damage lethal 2]].`);
@@ -10325,7 +10282,7 @@ async function cmdDamage(cmd: ParsedCommand): Promise<string> {
 
 async function cmdHealth(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const summary = await CharacterHealth.summary(char);
   const boosts = await CharacterBoosts.all(char);
   const boostBits = Object.entries(boosts).map(([k, v]) => `${StringUtil.toTitleCase(k)} +${v}`).join(", ");
@@ -10334,14 +10291,14 @@ async function cmdHealth(): Promise<string> {
 
 async function cmdClearBoosts(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   await CharacterBoosts.clear(char);
   return sys(`${disp(char.name)}'s attribute boosts fade.`);
 }
 
 async function cmdConfigureResources(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]] first - the wizard configures the resources your templates grant.`);
+  if (!char) return noCharacter(`first - the wizard configures the resources your templates grant`);
   if (await WizardSession.get()) return sys(`A wizard is already running - answer it, or [[cancel-wizard]].`);
   const defs = CharacterResources.defsFor(char);
   const r = await RESOURCES_WIZARD.start({ charName: char.name, defs });
@@ -10358,7 +10315,7 @@ async function cmdCancelWizard(): Promise<string> {
 
 async function cmdGain(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const which = cmd.positional[0]?.trim();
   if (!which) return sys(`gain needs a resource, e.g. [[gain willpower]].`);
   const amount = Math.max(1, parseInt(cmd.positional[1] ?? "1", 10) || 1);
@@ -10377,15 +10334,23 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
 // literal numbers counting). oWoD classic tie rules live in compareRolls; an
 // optional table= reads what the actor's winning margin MEANS.
 // =============================================================================
-function intOrUndef(s: string | undefined): number | undefined {
-  if (s === undefined) return undefined;
-  const v = parseInt(s, 10);
-  return Number.isNaN(v) ? undefined : v;
-}
 
 // Roll one side of a contest. A named character rolls live (traits + boosts +
 // wound penalty); an ad-hoc side rolls its pool with a zero resolver, so only
 // literal numbers count. A char that no longer exists degrades to ad-hoc.
+// Apply one round, persist it, and keep the "current contest" pointer honest:
+// an open contest becomes the current one, a finished one stops being it. The
+// three callers used to hand-roll this, and the two that OPEN a contest forgot
+// to clear the pointer when a contest ended on its first round.
+async function commitContestRound(contest: ExtendedContest, aExec: RollExecution, bExec: RollExecution): Promise<{ after: ExtendedContest; note: string; tail: string }> {
+  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
+  await ExtendedContestStore.save(after);
+  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
+  else if ((await ExtendedContestStore.currentId()) === after.id) await ExtendedContestStore.clearCurrent();
+  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  return { after, note, tail };
+}
+
 async function execContestSide(base: RollSpec, charName: string | undefined, rng: Rng | undefined, extra?: Partial<RollModifier>): Promise<RollExecution> {
   if (charName) {
     const c = await CharacterStore.load(charName);
@@ -10450,7 +10415,7 @@ async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec
 
 async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const me = await CharacterStore.getCurrent();
-  if (!me) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!me) return noCharacter();
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   const verb = mode === "resisted" ? "resist" : "contest";
@@ -10505,10 +10470,7 @@ async function launchOpposedExtended(char: PlayableCharacter, name: string, save
   };
   const aExec = await execContestSide(aSpec, char.name, ctx.rng);
   const bExec = await execContestSide(bSpec, oppRes.oppChar?.name, ctx.rng);
-  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
-  await ExtendedContestStore.save(after);
-  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
-  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  const { after, note, tail } = await commitContestRound(contest, aExec, bExec);
   return sys(`${disp(char.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}${surfaceSteps(saved.steps, undefined)}`);
 }
 
@@ -10520,20 +10482,15 @@ const cmdContest: CommandHandler = (cmd, ctx) => cmdVersus("contested", cmd, ctx
 // =============================================================================
 async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const me = await CharacterStore.getCurrent();
-  if (!me) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!me) return noCharacter();
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   if (!myPool || !theirPool) {
     return sys(`extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].`);
   }
-  let oppArg = cmd.named["vs"]?.trim();
-  if (oppArg?.startsWith("@")) {
-    const ref = await resolveCharacterRef(oppArg);
-    if (ref.error) return sys(`${ref.error}`);
-    oppArg = ref.name!;
-  }
-  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
-  const oppName = oppChar ? oppChar.name : (oppArg || "the-opposition");
+  const opp = await resolveOpponent(cmd, "contested");
+  if (opp.error) return sys(`${opp.error}`);
+  const { oppChar, oppName } = opp;
 
   const target = intOrUndef(cmd.named["target"] ?? cmd.named["requires"]) ?? 0;
   if (target < 1) return sys(`extended-contest needs target=<successes> (the goal both race to).`);
@@ -10554,10 +10511,7 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   };
   const aExec = await execContestSide(aSpec, me.name, ctx.rng);
   const bExec = await execContestSide(bSpec, oppChar?.name, ctx.rng);
-  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
-  await ExtendedContestStore.save(after);
-  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
-  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  const { after, note, tail } = await commitContestRound(contest, aExec, bExec);
   return sys(`${disp(me.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}`);
 }
 
@@ -10573,9 +10527,7 @@ async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   const bSpec = vDiff !== undefined ? overrideSpec(contest.b.base, { difficulty: vDiff }) : contest.b.base;
   const aExec = await execContestSide(aSpec, contest.a.char, ctx.rng);
   const bExec = await execContestSide(bSpec, contest.b.char, ctx.rng);
-  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
-  await ExtendedContestStore.save(after);
-  if (after.status !== "open" && (await ExtendedContestStore.currentId()) === after.id) await ExtendedContestStore.clearCurrent();
+  const { after, note } = await commitContestRound(contest, aExec, bExec);
   return sys(`${describeContest(after)}. This round: ${note}.`);
 }
 
@@ -11307,7 +11259,7 @@ async function cmdForgetConstraint(cmd: ParsedCommand): Promise<string> {
 
 async function cmdCheckConstraints(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const groups = ConstraintRegistry.all();
   const violations = groups.length ? checkConstraints(groups, ownedTraitsOf(char)) : [];
   const meritIssues = meritInstanceFindings(char);
@@ -11453,7 +11405,7 @@ async function writeCustomMeritDefs(defs: MeritFlawDef[]): Promise<void> {
     "with its fields indented under it; the list is merged over the built-ins.",
     "[[define-merit]] writes this for you; hand-editing is equally fine. The fields:",
     "kind (merit|flaw), points (a number, or `1, 2, 3`), param, passive (always-on",
-    "ops), requires, at-most-one-at, description.",
+    "ops), requires, limit-at/limit-slots, description.",
   ];
   const text = configEntryText(header, namedDefsToCard(defs));
   const { id } = await LorebookManager.ensureCategory(MERITS_CATEGORY);
@@ -11488,8 +11440,6 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   const def: MeritFlawDef = { name, kind: kindRaw, points };
   if (cmd.named["description"]?.trim()) def.description = cmd.named["description"].trim();
   if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
-  const atMostOneAt = intOrUndef(cmd.named["at-most-one-at"] ?? "");
-  if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
   const budget = (cmd.named["budget"] ?? "").trim();
   if (budget) def.budget = StringUtil.normalize(budget);
   // per-template="demon:7,thrall:5,mortal:no" - a price each, or `no` for a
@@ -11597,7 +11547,7 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   if (def.maxFromTrait) bits.push(`never more purchases than ${disp(def.maxFromTrait)}`);
   if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
   if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
-  const note = def.passive?.some(o => !ROLL_OPS.has(o.op.toLowerCase()))
+  const note = def.passive?.some(o => !isRollOp(o))
     ? " Ops the engine has no interpreter for are recorded and surfaced for the Storyteller (immunities have no system to enforce them yet)."
     : "";
   return sys(`${bits.join("; ")}.${def.description ? ` ${def.description}` : ""}${note}`);
@@ -11605,7 +11555,7 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
 
 async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const raw = cmd.positional[0]?.trim();
   if (!raw) return sys(`take-merit needs a name, e.g. [[take-merit trait-affinity::melee 2]].`);
   const key = StringUtil.normalize(raw);
@@ -11665,7 +11615,7 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
 
 async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const key = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
   if (!key) return sys(`drop-merit needs a name.`);
   if (!(key in char.meritsFlaws)) return sys(`${disp(char.name)} does not have "${key}". [[merits]] lists them.`);
@@ -11676,7 +11626,7 @@ async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
 
 async function cmdMerits(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const insts = ownedMeritInstances(char);
   if (!insts.length && !Object.keys(char.meritsFlaws).length) {
     return sys(`${disp(char.name)} has no merits or flaws. [[take-merit <name[::param]> [points]]] takes one.`);
@@ -11696,7 +11646,7 @@ async function cmdMerits(): Promise<string> {
 
 async function cmdSpecialty(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
   const label = cmd.positional[1]?.trim();   // backtick literal keeps its case
   if (!trait || !label) return sys(`specialty needs a trait and a label, e.g. [[specialty melee \`Swords\`]].`);
@@ -11712,7 +11662,7 @@ async function cmdSpecialty(cmd: ParsedCommand): Promise<string> {
 
 async function cmdForgetSpecialty(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
   const label = cmd.positional[1]?.trim();
   const list = char.specialties?.[trait];
@@ -11734,7 +11684,7 @@ async function cmdForgetSpecialty(cmd: ParsedCommand): Promise<string> {
 
 async function cmdSpecialties(): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const entries = Object.entries(char.specialties ?? {}).filter(([, l]) => l.length);
   if (!entries.length) return sys(`${disp(char.name)} has no specialties. [[specialty <trait> \`<Label>\`]] adds one.`);
   const items = entries.map(([t, labels]) => `${t}: ${labels.join(", ")}`);
@@ -11946,7 +11896,7 @@ async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
     subject = r.value!;
   } else {
     const cur = await CharacterStore.getCurrent();
-    if (!cur) return sys(`No active character. Select one with [[play name="..."]] or name someone: [[afflictions "Wolf"]].`);
+    if (!cur) return noCharacter(`or name someone: [[afflictions "Wolf"]]`);
     subject = StringUtil.normalize(cur.name);
   }
   const list = await CharacterAfflictions.list(subject);
@@ -12108,7 +12058,7 @@ async function srdGroupOf(trait: string): Promise<string | undefined> {
 
 async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
-  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  if (!char) return noCharacter();
   const rawName = (cmd.named["name"] ?? cmd.positional[0])?.trim();
   if (!rawName) {
     return sys(`set-trait needs a trait and a rating, e.g. [[set-trait sanctum 8]] or `
@@ -12226,7 +12176,7 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
     if (!char) return sys(`No character named "${ref.name}".`);
   } else {
     char = await CharacterStore.getCurrent();
-    if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+    if (!char) return noCharacter();
   }
   const { resolver } = await characterRollEnv(char);
   const fmt = (bucket: Record<string, number>, skipZeros: boolean): string => {
@@ -12493,29 +12443,24 @@ CommandRouter.register("clear-boosts", cmdClearBoosts, { summary: "clear trait b
 CommandRouter.register("reset-uses", cmdResetUses, { summary: "scene/turn change: clears effect-use counters" });
 CommandRouter.register("configure-resources", cmdConfigureResources, { summary: "guided resource setup; plain replies answer it" });
 CommandRouter.register("cancel-wizard", cmdCancelWizard, { summary: "abandon the running wizard" });
+// Both sides, the same shape: [[resist]] and [[contest]] differ only in how the
+// margin is read, so their grammar is one list.
+const TWO_SIDED_PARAMS: ParamSpec[] = [
+  { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
+  { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
+  { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
+  { key: "difficulty", kind: "named", type: "int" },
+  { key: "vs-difficulty", kind: "named", type: "int" },
+  { key: "table", kind: "named", desc: "Success table read with your margin" },
+  { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
+];
 CommandRouter.register("resist", cmdResist, {
   summary: "resisted action: your margin over theirs counts (tie = fail)",
-  params: [
-    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
-    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
-    { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
-    { key: "difficulty", kind: "named", type: "int" },
-    { key: "vs-difficulty", kind: "named", type: "int" },
-    { key: "table", kind: "named", desc: "Success table read with your margin" },
-    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
-  ],
+  params: [...TWO_SIDED_PARAMS],
 });
 CommandRouter.register("contest", cmdContest, {
   summary: "contested action: higher total wins (tie = draw)",
-  params: [
-    { key: "your-pool", kind: "positional", required: true, hint: "<your-pool>" },
-    { key: "their-pool", kind: "positional", required: true, hint: "<their-pool>" },
-    { key: "vs", kind: "named", hint: '"Name"', desc: "Opposing character (stored characters roll live)" },
-    { key: "difficulty", kind: "named", type: "int" },
-    { key: "vs-difficulty", kind: "named", type: "int" },
-    { key: "table", kind: "named", desc: "Success table read with your margin" },
-    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
-  ],
+  params: [...TWO_SIDED_PARAMS],
 });
 CommandRouter.register("extended-contest", cmdExtendedContest, {
   summary: "both sides accumulate; first to the goal wins (dead heat stays open)",
@@ -12896,7 +12841,6 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS' },
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
-    { key: "at-most-one-at", kind: "named", type: "int", desc: "Deprecated - use limit-at/limit-slots" },
     { key: "budget", kind: "named", desc: "Which purse it trades in (default: freebie for merit/flaw, arcana for arcanum/taint)", example: "arcana" },
     { key: "per-template", kind: "named", hint: '"demon:7,thrall:5"', desc: "Price per template; `no` closes it to one", example: "demon:7,thrall:5" },
     { key: "limit-at", kind: "named", type: "int", desc: "The rating that is rationed across instances", example: "3" },
@@ -13268,6 +13212,14 @@ const UI_TEXT = {
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
+// Every window ends the same two ways: a Close beside whatever buttons it owns,
+// and the last reply shown beneath. One definition, so all three agree on what
+// a dismissed window and a shown result look like.
+const closeButton = (part: UiPartHelpers, handle: { close: () => void }): UIPart =>
+  part.button({ text: UI_TEXT.common.close, callback: () => handle.close() });
+const resultBox = (part: UiPartHelpers, result: string | undefined): UIPart[] =>
+  result ? [part.box({ content: [part.text({ text: result })] })] : [];
+
 // A field the spec describes labels itself: `desc` is the label, `example` the
 // placeholder. Falling back to the bare key keeps a spec that says nothing
 // from rendering an empty label.
@@ -13388,9 +13340,9 @@ async function openCommandWindow(verb: string, opts?: {
     }
     content.push(part.row({ content: [
       part.button({ text: opts?.submitLabel ?? UI_TEXT.common.create, callback: () => submitCommand(verb, spec, render) }),
-      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
+      closeButton(part, handle),
     ] }));
-    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    content.push(...resultBox(part, result));
     await handle.update({ content });
   };
 
@@ -13490,9 +13442,9 @@ async function openAfflictWindow(): Promise<void> {
         const reply = await CommandRouter.route(composeCommand("afflict", values, spec));
         await render(reply);
       } }),
-      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
+      closeButton(part, handle),
     ] }));
-    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    content.push(...resultBox(part, result));
     await handle.update({ content });
   };
   await render();
@@ -13628,9 +13580,9 @@ async function openRollWindow(): Promise<void> {
         if (!(await field("pool"))) { await render(UI_TEXT.roll.needsPool); return; }
         await submit("name-roll", { name });
       } }),
-      part.button({ text: UI_TEXT.common.close, callback: () => handle.close() }),
+      closeButton(part, handle),
     ] }));
-    if (result) content.push(part.box({ content: [part.text({ text: result })] }));
+    content.push(...resultBox(part, result));
     await handle.update({ content });
   };
   await render();

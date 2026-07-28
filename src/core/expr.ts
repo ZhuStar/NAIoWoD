@@ -56,10 +56,6 @@ export interface ExprScope {
   call?(name: string, args: number[]): number | undefined;
 }
 
-// A scope that knows nothing: every reference is unknown. Useful for checking
-// that an expression PARSES without deciding what its names mean.
-export const EMPTY_SCOPE: ExprScope = { lookup: () => undefined };
-
 // A scope over a plain map of numbers, for tests and for the simple callers.
 export function mapScope(values: Record<string, number>): ExprScope {
   return {
@@ -254,22 +250,17 @@ export function evaluateExpr(expr: string, scope: ExprScope): ExprResult {
   };
 }
 
-// Just the number, for the many callers that only want one. `fallback` covers
-// an empty or malformed expression, so a bad card falls back to the default
-// rather than to zero.
-export function evalNumber(expr: string, scope: ExprScope, fallback = 0): number {
-  const out = evaluateExpr(expr, scope);
-  return out.error ? fallback : out.value;
-}
-
 // A number, or an expression that yields one. Every rules field that a
 // chronicle might want to write in terms of the character uses this type.
 export type Numeric = number | string;
 
+// Resolve one. A malformed or empty expression falls back to the DEFAULT rather
+// than to zero, so a bad card degrades to the ordinary rule.
 export function evalNumeric(value: Numeric | undefined, scope: ExprScope, fallback: number): number {
   if (value === undefined) return fallback;
   if (typeof value === "number") return value;
-  return evalNumber(value, scope, fallback);
+  const out = evaluateExpr(value, scope);
+  return out.error ? fallback : out.value;
 }
 
 // Every reference an expression makes, without evaluating it - what a cycle

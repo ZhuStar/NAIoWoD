@@ -84,7 +84,6 @@ const FIELD_ALIASES: Record<string, string> = {
   "start-options": "startOptions",
   "per-turn-limit": "perTurnLimit",
   "from-generation": "fromGeneration",
-  "at-most-one-at": "atMostOneAt",
   "at-rating": "atRating",
   "per-kind": "perKind",
   "max-from-trait": "maxFromTrait",
@@ -498,15 +497,6 @@ export function asMap(v: CardValue | undefined): CardMap {
   return isMap(v) ? v : {};
 }
 
-// name -> number, reading a rating written with an annotation block under it.
-export function asNumberMap(v: CardValue | undefined): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [k, raw] of Object.entries(asMap(v))) {
-    const n = asNumber(raw);
-    if (n !== undefined) out[k] = n;
-  }
-  return out;
-}
 
 // A list of blocks that carry their own name: written either as a name-keyed
 // map (the readable form) or as "- name: x" items.

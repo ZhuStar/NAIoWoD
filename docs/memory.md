@@ -2736,6 +2736,53 @@ and `prefill` are mocked/available but not yet written.
     contiguous.) The window needed no change - it is spec-driven, so
     `[[win-roll]]` grew both fields from the `ROLL_KNOBS` list alone.
 
+58. **A template you can extend** (user: "first we need a way to extend a
+    template ... make the Ouroboros template not be hardcoded. Probably by
+    extending Mage, and adding Disciplines and whatever else. That means we'll
+    have to also create the Living Resolve resource with commands").
+    - **`TemplateDef` is how you WRITE one; `TemplateConfig` is what the engine
+      READS.** A def names its `extends` parent and states only the difference;
+      `templateFromDef(def, parent)` folds them. Resources are **appended** to
+      the parent's (a `replaces` list then hides what it stands in for -
+      exactly how Living Resolve covers Blood/Willpower/Resolve/Quintessence);
+      `budgets`/`creation` merge field-by-field; `reactions`/`derived` append.
+      Soak, morality and ruleset are chosen **by NAME** (`SOAK_TABLES`,
+      `MORALITIES`, `RULESETS`, `REACTIONS`), because a card cannot hold an
+      object - and each is an open record, so a chronicle that invents a soak
+      names it too.
+    - **THE OUROBOROS IS NO LONGER CODE.** `TEMPLATE_OUROBOROS` is deleted; it
+      is a `TemplateDef` in `DEFAULT_TEMPLATE_DEFS` - `{extends: "mage", soak:
+      "ghoul", resources: [LIVING_RESOLVE], creation: {notes}}` - and its tests
+      now assert the RESOLVED template, which is the stronger claim.
+    - **Where the fold lives vs. where the card lives.** rules.ts owns
+      `TEMPLATES` + `applyTemplateDefs`; state.ts owns the `wod:config:templates`
+      card via `TemplateRegistry` and drives the fold through `ListConfigStore
+      .onChanged` - a hook that had existed unused since §7.21. Nothing below
+      state.ts learns that a lorebook exists, and the built-ins are rebuilt from
+      scratch on every change, so DELETING a card entry puts the shipped
+      template back.
+    - **A half-written def is reported, not fatal**: a missing parent or a cycle
+      skips that def and returns a problem string (surfaced by `[[templates]]`),
+      while every other def and all the built-ins still build. A cascading
+      failure is reported ONCE - the parent's reason, not the child's echo.
+    - Commands: **`[[templates]]`** (QUIET; `*` marks the data-written ones),
+      `[[templates <name>]]`, **`[[extend-template]]`**, **`[[forget-template]]`**,
+      and **`[[define-resource]]`** - which writes into the SAME
+      `ResourceOverrides` card `[[configure-resources]]` tunes, so there is one
+      place a resource can come from. The proof this pass exists for: a whole
+      fused-pool Awakened creature built from two commands, played (cast, spend)
+      and then forgotten again, entirely without TypeScript.
+    - Bug found while wiring it: `makeTemplateDef` decoded only the CARD's
+      resource shape (a name-keyed block), so a def handed ready-made
+      `ResourceDef`s from code or a command silently lost them. It now accepts
+      both.
+    - **Scope note.** `LIVING_RESOLVE` stays a constant in rules.ts (it is 60
+      lines of data the shipped def references), rather than moving into a
+      seeded card. `[[define-resource]]` makes it REPRODUCIBLE from commands,
+      which is what "creatable with commands" needed; moving the constant itself
+      would buy nothing and would put the Ouroboros behind a store load that
+      ~30 tests do not perform.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:

@@ -31,6 +31,7 @@ import {
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
   EffectOp, resolveMeritInstance, passiveOpsOf,
   Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
+  TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, applyTemplateDefs,
 } from "./rules";
 import { ExprScope, ExprResult, Numeric, evaluateExpr, evalNumeric } from "./core/expr";
 import {
@@ -1797,6 +1798,40 @@ export const RollRulesConfig = new MapConfigStore<number>({
 // Background definitions: the bag Backgrounds never had. Shipped defaults
 // (Fount's ladder, the Awakened places, Mentor, Resources) overlaid by the
 // entry, exactly like afflictions.
+// --- TEMPLATES (the chronicle's own splats, and the ones it EXTENDS) --------
+// The registry lives here because the CARD lives here; the fold lives in
+// rules.ts (applyTemplateDefs), which nothing below state.ts needs to know
+// about. `onChanged` is the seam: every load/save/reset rebuilds TEMPLATES.
+export const TEMPLATES_ENTRY = "wod:config:templates";
+export let lastTemplateProblems: string[] = [];
+export const TemplateRegistry = new ListConfigStore<TemplateDef>({
+  entry: TEMPLATES_ENTRY,
+  header: [
+    "Character templates for this chronicle, overlaid on the built-ins.",
+    "Below the marker each one is its NAME, then indented:",
+    "  extends     - the template it inherits from (mage, vampire, ...). Every",
+    "                field you leave out comes from there.",
+    "  description - the display name",
+    "  soak        - mortal | vampire | ghoul | mage | demon | werewolf",
+    "  morality    - humanity | torment | none",
+    "  awakened    - true for a template that works Awakened magic",
+    "  resources   - ADDED to the parent's; each is a NAME with kind/start/max",
+    "                indented under it (a `replaces` list hides the parent's)",
+    "  budgets, creation, derived - as the template's own",
+    "A def that extends a template nobody defines is skipped and reported.",
+  ],
+  make: makeTemplateDef,
+  defaults: DEFAULT_TEMPLATE_DEFS,
+  // The overlay REPLACES the defaults for a name it repeats, and the built-ins
+  // underneath are rebuilt from scratch every time - so removing a card entry
+  // puts the shipped Ouroboros back.
+  onChanged: (overlay) => {
+    const byName = new Map(DEFAULT_TEMPLATE_DEFS.map(d => [StringUtil.normalize(d.name), d]));
+    for (const d of overlay) byName.set(StringUtil.normalize(d.name), d);
+    lastTemplateProblems = applyTemplateDefs([...byName.values()]);
+  },
+});
+
 export const BACKGROUNDS_ENTRY = "wod:config:backgrounds";
 export const BackgroundRegistry = new ListConfigStore<BackgroundDef>({
   entry: BACKGROUNDS_ENTRY,

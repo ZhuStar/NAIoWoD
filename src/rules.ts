@@ -724,33 +724,143 @@ export const LIVING_RESOLVE: ResourceDef = {
   },
 };
 
-// THE OUROBOROS - a UNIQUE template: the one creature in the world carrying
-// Living Resolve. Revenant + laham (Devil's Due demon-blooded, whence the
-// Resolve) + Awakened mage (Order of Hermes), created by a powerful witch in a
-// ritual involving Belial, the Great Beast. Still alive and human-souled
-// (Road/Humanity + Virtues), ghoul soak, and ONE pool - the fusion itself,
-// which answers to blood/willpower/resolve/quintessence by name and role.
-// His Foundation is Modus (see FELLOWSHIPS); Pillars: Anima/Corona/Primus/Vires.
-export const TEMPLATE_OUROBOROS = new TemplateConfig(
-  "Ouroboros (unique: revenant + laham + Awakened)",
-  RulesetConfig.MAGE,
-  [LIVING_RESOLVE],
-  GHOUL_SOAK,
-  // Like a mage: the ritual burned the Road away. No morality, no Virtues.
-  null, false,
-  STANDARD_HEALTH_LEVELS, [], true,   // Awakened
-  {},
-  creationBudget({
-    notes: [
-      "Starting Willpower 5; note the Aura modifier, if any.",
-      "One pool, not four: Living Resolve starts at Cray + Fount, or 5, whichever is higher.",
-      "The Fellowship sets the Foundation and the four Pillars ([[fellowships]]) - his is the Order of Hermes.",
-      "Arcana and Taints come out of the arcana purse, not out of freebies ([[budget]]).",
-    ],
-  })
-);
+// =============================================================================
+// TEMPLATES AS DATA - extending one, from a card or a command
+// -----------------------------------------------------------------------------
+// A TemplateConfig is the RESOLVED thing the engine reads. A TemplateDef is how
+// a chronicle WRITES one: a name, the template it `extends`, and only the parts
+// it changes. Everything else falls through to the parent, so the Ouroboros is
+// "a mage, with a ghoul's soak and one fused pool" rather than a re-declaration
+// of every field a mage already has.
+//
+// The pieces a def refers to BY NAME (a card cannot hold a TypeScript object):
+// its soak table, its morality, its damage reactions. Each is an open registry,
+// so a chronicle that invents a soak gets to name it too.
+// =============================================================================
+export const SOAK_TABLES: Record<string, SoakSpec> = {
+  mortal: MORTAL_SOAK, vampire: VAMPIRE_SOAK, ghoul: GHOUL_SOAK,
+  mage: MAGE_SOAK, demon: DEMON_SOAK, werewolf: WEREWOLF_SOAK,
+};
+export const MORALITIES: Record<string, MoralityConfig> = {
+  humanity: HUMANITY_MORALITY,
+  torment: { name: "Torment", polarity: "ascending", start: 0 },
+};
+export const RULESETS: Record<string, RulesetConfig> = {
+  vampire: RulesetConfig.VAMPIRE, mage: RulesetConfig.MAGE,
+};
+export const REACTIONS: Record<string, () => DamageReaction> = {
+  "undead-physiology": () => new UndeadPhysiology(),
+  "silver-vulnerability": () => new SilverVulnerability(),
+};
 
-export const TEMPLATES: Record<string, TemplateConfig> = {
+// A template written as data. Only `name` is required; `extends` names the
+// parent that fills in everything this one leaves unsaid.
+export interface TemplateDef {
+  name: string;
+  extends?: string;
+  description?: string;          // the display Name; defaults to the parent's
+  ruleset?: string;              // RULESETS key
+  soak?: string;                 // SOAK_TABLES key
+  morality?: string;             // MORALITIES key, or "none" for a splat without one
+  hasVirtues?: boolean;
+  awakened?: boolean;
+  // ADDED to the parent's resources, not replacing them - and a resource whose
+  // `replaces` names the parent's hides it (Living Resolve over Quintessence).
+  resources?: ResourceDef[];
+  reactions?: string[];          // REACTIONS keys, added to the parent's
+  budgets?: Record<string, string>;
+  creation?: Partial<CreationBudget>;
+  derived?: Derivation[];
+}
+
+// Resolve a def against its parent into the thing the engine reads.
+export function templateFromDef(def: TemplateDef, parent?: TemplateConfig): TemplateConfig {
+  const base = parent ?? TEMPLATE_MORTAL;
+  const morality = def.morality === undefined ? base.Morality
+    : StringUtil.normalize(def.morality) === "none" ? null
+    : MORALITIES[StringUtil.normalize(def.morality)] ?? base.Morality;
+  return new TemplateConfig(
+    def.description ?? (parent ? `${base.Name} (${def.name})` : def.name),
+    def.ruleset ? RULESETS[StringUtil.normalize(def.ruleset)] ?? base.Rules : base.Rules,
+    [...base.Pools, ...(def.resources ?? [])],
+    def.soak ? SOAK_TABLES[StringUtil.normalize(def.soak)] ?? base.Soak : base.Soak,
+    morality,
+    def.hasVirtues ?? base.HasVirtues,
+    base.HealthLevels,
+    [...base.Reactions, ...(def.reactions ?? []).map(r => REACTIONS[StringUtil.normalize(r)]?.()).filter((r): r is DamageReaction => !!r)],
+    def.awakened ?? base.Awakened,
+    { ...base.Budgets, ...(def.budgets ?? {}) },
+    { ...base.Creation, ...(def.creation ?? {}) },
+    [...base.Derived, ...(def.derived ?? [])],
+  );
+}
+
+// THE OUROBOROS, as data rather than as a constructor call: a mage who soaks
+// like a ghoul and carries one fused pool in place of four. This is the worked
+// example of `extends` - and the proof that a unique creature needs no code.
+export const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
+  {
+    name: "ouroboros",
+    extends: "mage",
+    description: "Ouroboros (unique: revenant + laham + Awakened)",
+    soak: "ghoul",
+    resources: [LIVING_RESOLVE],
+    creation: {
+      notes: [
+        "Starting Willpower 5; note the Aura modifier, if any.",
+        "One pool, not four: Living Resolve starts at Cray + Fount, or 5, whichever is higher.",
+        "The Fellowship sets the Foundation and the four Pillars ([[fellowships]]) - his is the Order of Hermes.",
+        "Arcana and Taints come out of the arcana purse, not out of freebies ([[budget]]).",
+      ],
+    },
+  },
+];
+
+// A template def as a CARD writes it: everything is text or a number, and the
+// resources block reuses the same shape ResourceOverrides already accepts.
+export function makeTemplateDef(parts: Partial<TemplateDef> & { name: string }): TemplateDef {
+  const def: TemplateDef = { name: StringUtil.normalize(parts.name) };
+  for (const key of ["extends", "ruleset", "soak", "morality"] as const) {
+    const v = (parts[key] as string | undefined)?.trim();
+    if (v) def[key] = StringUtil.normalize(v);
+  }
+  if (parts.description?.trim()) def.description = parts.description.trim();
+  if (parts.hasVirtues !== undefined) def.hasVirtues = parts.hasVirtues;
+  if (parts.awakened !== undefined) def.awakened = parts.awakened;
+  const reactions = asStringList(parts.reactions as unknown as CardValue).map(r => StringUtil.normalize(r));
+  if (reactions.length) def.reactions = reactions;
+  // Two shapes reach here: a card writes a resource BLOCK (the name is the key,
+  // the fields indented under it), while code and commands hand over ready-made
+  // ResourceDefs. Accept both - the card's shape is the one that needs decoding.
+  const resources: ResourceDef[] = Array.isArray(parts.resources) ? [...parts.resources] : [];
+  for (const [name, raw] of Object.entries(Array.isArray(parts.resources) ? {} : asMap(parts.resources as unknown as CardValue))) {
+    const m = asMap(raw);
+    const kind = StringUtil.normalize(asText(m["kind"]) ?? "pool");
+    resources.push({
+      ...(m as unknown as Partial<ResourceDef>),
+      name: StringUtil.normalize(name),
+      kind: kind === "tracker" ? "tracker" : "pool",
+      start: asNumber(m["start"]) ?? 0,
+      max: asNumber(m["max"]) ?? 10,
+      ...(asStringList(m["roles"]).length ? { roles: asStringList(m["roles"]).map(r => StringUtil.normalize(r)) } : {}),
+      ...(asStringList(m["replaces"]).length ? { replaces: asStringList(m["replaces"]).map(r => StringUtil.normalize(r)) } : {}),
+    });
+  }
+  if (resources.length) def.resources = resources;
+  const budgets: Record<string, string> = {};
+  for (const [purse, expr] of Object.entries(asMap(parts.budgets as unknown as CardValue))) {
+    const v = asText(expr);
+    if (v) budgets[StringUtil.normalize(purse)] = v;
+  }
+  if (Object.keys(budgets).length) def.budgets = budgets;
+  if (parts.creation && Object.keys(parts.creation).length) def.creation = parts.creation;
+  if (parts.derived?.length) def.derived = parts.derived;
+  return def;
+}
+
+// The templates written in code. A def (built-in or from the chronicle's card)
+// is resolved ON TOP of these.
+const BUILTIN_TEMPLATES: Record<string, TemplateConfig> = {
   mortal: TEMPLATE_MORTAL,
   thrall: TEMPLATE_THRALL,
   vampire: TEMPLATE_VAMPIRE,
@@ -759,9 +869,48 @@ export const TEMPLATES: Record<string, TemplateConfig> = {
   werewolf: TEMPLATE_WEREWOLF,
   ghoul: TEMPLATE_GHOUL,
   revenant: TEMPLATE_REVENANT,
-  ouroboros: TEMPLATE_OUROBOROS,
   sorcerer: TEMPLATE_SORCERER,
 };
+
+// What every reader looks at. Rebuilt whenever the chronicle's template card
+// changes (applyTemplateDefs) - state.ts owns the card, rules.ts owns the fold,
+// and nothing below state.ts has to know a lorebook exists.
+export const TEMPLATES: Record<string, TemplateConfig> = {};
+
+// Fold defs over the built-ins, resolving `extends` depth-first. A def naming a
+// parent that does not exist, or a cycle, is SKIPPED and reported rather than
+// crashing the story - a half-written card must never cost you the engine.
+export function applyTemplateDefs(defs: TemplateDef[]): string[] {
+  for (const key of Object.keys(TEMPLATES)) delete TEMPLATES[key];
+  Object.assign(TEMPLATES, BUILTIN_TEMPLATES);
+  const byName = new Map(defs.map(d => [StringUtil.normalize(d.name), d]));
+  const problems: string[] = [];
+  const building = new Set<string>();
+  const failed = new Set<string>();
+  const build = (key: string): TemplateConfig | undefined => {
+    if (TEMPLATES[key] && !byName.has(key)) return TEMPLATES[key];
+    const def = byName.get(key);
+    if (!def) return TEMPLATES[key];
+    if (building.has(key)) { failed.add(key); problems.push(`${key} extends itself in a circle`); return undefined; }
+    building.add(key);
+    const parentKey = def.extends ? StringUtil.normalize(def.extends) : "";
+    const parent = parentKey ? (BUILTIN_TEMPLATES[parentKey] ?? build(parentKey)) : undefined;
+    building.delete(key);
+    // A parent that failed for its OWN reason has already been complained
+    // about; saying it twice tells the player nothing new.
+    if (parentKey && !parent) {
+      if (!failed.has(parentKey)) problems.push(`${key} extends "${parentKey}", which no template defines`);
+      failed.add(key);
+      return undefined;
+    }
+    const built = templateFromDef(def, parent);
+    TEMPLATES[key] = built;
+    return built;
+  };
+  for (const key of byName.keys()) build(key);
+  return problems;
+}
+applyTemplateDefs(DEFAULT_TEMPLATE_DEFS);
 
 // The resources a character has = the union of its templates' resources, deduped
 // by name (first template wins for numbers; roles are merged). Unknown or zero

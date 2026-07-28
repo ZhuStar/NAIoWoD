@@ -35,6 +35,7 @@ import {
   BackgroundDef, makeBackgroundDef, backgroundTierAt, TraitGrant,
   CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, fellowshipByName, ATTRIBUTES,
   roadRatingExpr, roadByName, ROADS,
+  TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, SOAK_TABLES,
   DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, supernaturalTraitOf, categoryOpenTo,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
   meritFlawFromCard, InstanceLimit, instanceLimitsOf,
@@ -79,6 +80,7 @@ import {
   RollRulesConfig, ROLLS_CONFIG_ENTRY,
   ActiveWizard, WizardSession, CreatorMode,
   characterScope, traitValueOf, evalOn, numericOn, derivedValuesOf, DerivedValue, ScopeExtension, roadOf,
+  TemplateRegistry, lastTemplateProblems,
 } from "./state";
 import { Numeric, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS } from "./core/expr";
 
@@ -2039,6 +2041,118 @@ function derivedLine(d: DerivedValue, char?: PlayableCharacter): string {
     // `road-virtues()` is opaque until it says WHICH Virtues; the Road knows.
     : describeTerms(d.terms).replace("road-virtues()", char ? roadRatingExpr(roadOf(char)) : "road-virtues()");
   return `${disp(d.trait)} ${shown} (${why})`;
+}
+
+// =============================================================================
+// TEMPLATES - the chronicle's own splats, written rather than compiled
+// -----------------------------------------------------------------------------
+// A template EXTENDS another and states only what differs. That is what makes a
+// unique creature (the Ouroboros: a mage who soaks like a ghoul and carries one
+// fused pool) a thing a player can write instead of a thing the engine ships.
+// =============================================================================
+async function cmdTemplates(cmd: ParsedCommand): Promise<string> {
+  const which = cmd.positional[0]?.trim();
+  if (which) {
+    const key = StringUtil.normalize(which);
+    const tpl = TEMPLATES[key];
+    if (!tpl) return sys(`No template "${which}". Known: ${Object.keys(TEMPLATES).sort().join(", ")}.`);
+    const def = TemplateRegistry.get(key) ?? DEFAULT_TEMPLATE_DEFS.find(d => StringUtil.normalize(d.name) === key);
+    const bits = [
+      `resources: ${tpl.Pools.map(p => disp(p.name)).join(", ") || "none"}`,
+      `soak: ${Object.entries(SOAK_TABLES).find(([, v]) => v === tpl.Soak)?.[0] ?? "custom"}`,
+      `morality: ${tpl.Morality?.name ?? "none"}${tpl.HasVirtues ? " (with Virtues)" : ""}`,
+      tpl.Awakened ? "Awakened" : "",
+      def?.extends ? `extends ${disp(def.extends)}` : "built in",
+    ].filter(Boolean);
+    return sys(`${tpl.Name} - ${bits.join("; ")}. ${def ? `Written as data; ` : ""}`
+      + `[[create-playable name="..." templates=${key}]] uses it.`);
+  }
+  const written = new Set([...DEFAULT_TEMPLATE_DEFS, ...TemplateRegistry.all()].map(d => StringUtil.normalize(d.name)));
+  const listed = Object.keys(TEMPLATES).sort().map(k => `${k}${written.has(k) ? "*" : ""}`);
+  const problems = lastTemplateProblems.length ? ` ⚠ ${lastTemplateProblems.join("; ")}` : "";
+  return sys(`Templates: ${listed.join(", ")} (* = written as data, editable). `
+    + `[[templates <name>]] details one; [[extend-template]] makes a new one from an old one.${problems}`);
+}
+
+// extend-template <name> extends=<parent> [soak=] [morality=] [awakened=] [description=]
+async function cmdExtendTemplate(cmd: ParsedCommand): Promise<string> {
+  const rawName = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!rawName) {
+    return sys(`extend-template needs a name and a parent, e.g. `
+      + `[[extend-template name=\`Ouroboros\` extends=mage soak=ghoul description=\`...\`]]. `
+      + `Add resources to it with [[define-resource]].`);
+  }
+  const parts: Partial<TemplateDef> & { name: string } = { name: rawName };
+  for (const key of ["extends", "soak", "morality", "ruleset", "description"] as const) {
+    const v = (cmd.named[key] ?? (key === "extends" ? cmd.positional[1] : undefined))?.trim();
+    if (v) parts[key] = v;
+  }
+  for (const key of ["awakened", "has-virtues"] as const) {
+    const v = cmd.named[key]?.trim().toLowerCase();
+    if (v === "true" || v === "false") {
+      if (key === "awakened") parts.awakened = v === "true"; else parts.hasVirtues = v === "true";
+    }
+  }
+  const resources = (cmd.named["resources"] ?? "").split(",").map(r => StringUtil.normalize(r)).filter(Boolean);
+  if (resources.length) {
+    const known = ResourceOverrides.current();
+    const missing = resources.filter(r => !(r in known));
+    if (missing.length) {
+      return sys(`No resource ${missing.map(m => `"${m}"`).join(", ")} - define it first with `
+        + `[[define-resource name=\`...\` kind=pool start=N max=N]].`);
+    }
+    parts.resources = resources.map(r => ({ ...(known[r] as ResourceDef), name: r }));
+  }
+  const def = makeTemplateDef(parts);
+  if (def.extends && !TEMPLATES[StringUtil.normalize(def.extends)]) {
+    return sys(`No template "${def.extends}" to extend. Known: ${Object.keys(TEMPLATES).sort().join(", ")}.`);
+  }
+  await TemplateRegistry.put(def);
+  const problems = lastTemplateProblems.length ? ` ⚠ ${lastTemplateProblems.join("; ")}` : "";
+  const built = TEMPLATES[def.name];
+  return sys(`Template "${disp(def.name)}"${def.extends ? ` extends ${disp(def.extends)}` : ""} - `
+    + `resources: ${built?.Pools.map(p => disp(p.name)).join(", ") || "none"}. `
+    + `[[templates ${def.name}]] shows it.${problems}`);
+}
+
+async function cmdForgetTemplate(cmd: ParsedCommand): Promise<string> {
+  const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  if (!name) return sys(`forget-template needs a name. [[templates]] lists them.`);
+  if (!TemplateRegistry.get(name)) return sys(`No chronicle template "${name}" to forget (the built-ins cannot be removed).`);
+  await TemplateRegistry.remove(name);
+  return sys(`Forgot the chronicle's "${disp(name)}"${TEMPLATES[name] ? ` - the shipped one resurfaces` : ""}.`);
+}
+
+// define-resource - a pool or tracker written from a command. It lands in the
+// resources card (the same overlay [[configure-resources]] edits), so a
+// template can then name it.
+async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
+  const rawName = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!rawName) {
+    return sys(`define-resource needs a name, e.g. [[define-resource name=\`Living Resolve\` kind=pool `
+      + `start=30 max=30 roles=\`blood,willpower,quintessence\` replaces=\`blood,willpower,quintessence\`]].`);
+  }
+  const name = StringUtil.normalize(rawName);
+  const kind = StringUtil.normalize(cmd.named["kind"] ?? "pool") === "tracker" ? "tracker" : "pool";
+  const patch: Partial<ResourceDef> = { kind };
+  const start = intOrUndef(cmd.named["start"] ?? "");
+  const max = intOrUndef(cmd.named["max"] ?? "");
+  patch.start = start ?? 0;
+  patch.max = max ?? Math.max(10, patch.start);
+  for (const key of ["roles", "replaces"] as const) {
+    const list = (cmd.named[key] ?? "").split(",").map(r => StringUtil.normalize(r)).filter(Boolean);
+    if (list.length) patch[key] = list;
+  }
+  const perTurn = intOrUndef(cmd.named["per-turn"] ?? "");
+  if (perTurn !== undefined) patch.perTurnLimit = perTurn;
+  const description = cmd.named["description"]?.trim();
+  if (description) patch.description = description;
+  await ResourceOverrides.save({ ...ResourceOverrides.current(), [name]: { ...(ResourceOverrides.current()[name] ?? {}), ...patch } });
+  return sys(`Resource "${disp(name)}" - ${kind} ${patch.start}/${patch.max}`
+    + `${patch.roles?.length ? `, roles ${patch.roles.join("/")}` : ""}`
+    + `${patch.replaces?.length ? `, replaces ${patch.replaces.join("/")}` : ""}. `
+    + `Give it to a template with [[extend-template ... resources=${name}]]; `
+    + `[[configure-resources]] tunes it.`);
 }
 
 // backgrounds / background <name> - the bag Backgrounds never had.
@@ -4696,6 +4810,40 @@ CommandRouter.register("clan", cmdClans, {
   summary: "one clan: its Disciplines and what it bounds",
   params: [{ key: "name", kind: "positional", hint: "<name>", example: "nosferatu" }],
 });
+CommandRouter.register("templates", cmdTemplates, {
+  summary: "the templates this chronicle knows, and what each one is made of",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "ouroboros" }],
+});
+CommandRouter.register("extend-template", cmdExtendTemplate, {
+  summary: "a new template from an old one: state only what differs",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>", example: "Ouroboros" },
+    { key: "extends", kind: "named", hint: "<template>", example: "mage", desc: "The template it inherits everything else from" },
+    { key: "description", kind: "named", hint: "<text>", desc: "Its display name" },
+    { key: "soak", kind: "named", type: "enum", options: Object.keys(SOAK_TABLES), desc: "Which soak table it uses" },
+    { key: "morality", kind: "named", type: "enum", options: ["humanity", "torment", "none"], desc: "Its Road/Humanity, or none" },
+    { key: "awakened", kind: "named", type: "enum", options: ["true", "false"], desc: "Does it work Awakened magic?" },
+    { key: "has-virtues", kind: "named", type: "enum", options: ["true", "false"] },
+    { key: "resources", kind: "named", hint: '"a,b"', desc: "Resources to ADD (define them first with [[define-resource]])" },
+  ],
+});
+CommandRouter.register("forget-template", cmdForgetTemplate, {
+  summary: "drop a chronicle template (the shipped one, if any, resurfaces)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+CommandRouter.register("define-resource", cmdDefineResource, {
+  summary: "define a pool or tracker a template can then grant",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name>", example: "Living Resolve" },
+    { key: "kind", kind: "named", type: "enum", options: ["pool", "tracker"] },
+    { key: "start", kind: "named", type: "int", desc: "What it starts at" },
+    { key: "max", kind: "named", type: "int", desc: "Its ceiling" },
+    { key: "roles", kind: "named", hint: '"a,b"', desc: "Names it also answers to (blood, willpower, magic-fuel...)" },
+    { key: "replaces", kind: "named", hint: '"a,b"', desc: "Resources it stands in for, hiding them" },
+    { key: "per-turn", kind: "named", type: "int", desc: "Most that may be spent in one turn" },
+    { key: "description", kind: "named", hint: "<text>" },
+  ],
+});
 CommandRouter.register("backgrounds", cmdBackgrounds, {
   summary: "the backgrounds this chronicle defines, what you hold, and what they confer",
 });
@@ -5103,7 +5251,7 @@ const QUIET_VERBS = new Set<string>([
   "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
   // The creation-side listings: all read-only, all for the player's eyes.
   "creation", "clans", "clan", "budget", "paid", "costs", "backgrounds", "background",
-  "arcana", "arcanum", "supernatural", "derived", "eval",
+  "arcana", "arcanum", "supernatural", "derived", "eval", "templates",
 ]);
 
 // =============================================================================

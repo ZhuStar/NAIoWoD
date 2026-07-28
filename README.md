@@ -542,6 +542,43 @@ than being one. They live in their own `choices` map on the sheet:
   you have no right to is refused with `prerequisites not met: clan:brujah`
   (and `waive=true` overrides, as everywhere else).
 
+### Templates — extending one instead of writing one
+
+A **`TemplateConfig`** is what the engine reads; a **`TemplateDef`** is how you
+*write* one. A def names the template it **`extends`** and states only what
+differs — everything else falls through to the parent. That is what makes a
+unique creature something a player can write rather than something the engine
+has to ship.
+
+The **Ouroboros is the worked example**, and it is no longer code: it is a def
+that extends the mage, swaps in a ghoul's soak, and adds one fused pool.
+
+```
+[[define-resource name=`Ash Tally` kind=pool start=20 max=20
+   roles=`blood,willpower,magic-fuel` replaces=`blood,willpower,quintessence`]]
+[[extend-template name=`Cinder` extends=mage soak=ghoul resources=`ash-tally`]]
+[[create-playable name="Ember" templates=cinder]]
+```
+
+> `Cinder — resources: Willpower, Quintessence, Ash Tally; soak: ghoul;
+> morality: none; Awakened; extends Mage`
+
+- **`resources`** are **added** to the parent's, and a resource whose
+  `replaces` names one of them **hides** it — which is how Living Resolve
+  stands in for Blood, Willpower, Resolve *and* Quintessence at once.
+- **`soak`** / **`morality`** / **`ruleset`** are chosen **by name**
+  (`ghoul`, `humanity`, `none` …), because a card cannot hold an object.
+- **`budgets`**, **`creation`** and **`derived`** merge field-by-field over the
+  parent's; `reactions` append.
+- **`[[templates]]`** lists them (a `*` marks the ones written as data),
+  **`[[templates <name>]]`** details one, **`[[forget-template]]`** drops a
+  chronicle's and lets the shipped one resurface.
+
+Defs live in the **`wod:config:templates`** card, so a chronicle can edit or
+add one by hand. A def that extends something nobody defines — or that extends
+itself — is **skipped and reported**, never fatal: a half-written card must
+never cost you the engine.
+
 ### Normalization — one internal form for every string
 
 Every string that enters the engine — command arguments and lorebook data alike

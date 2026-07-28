@@ -37,7 +37,7 @@ import {
   CharacterHealth, CharacterBoosts, healthLevelsForTemplates,
   resolveReply, renderPromptText, WizardSession, ResourceOverrides, RESOURCE_CONFIG_ENTRY, CONFIG_CATEGORY,
   MAGIC_CONFIG_ENTRY, MagicRulesConfig, CastAttempts, magicRulesFrom, DEFAULT_MAGIC_RULES,
-  LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, TEMPLATE_OUROBOROS, FELLOWSHIPS,
+  LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
@@ -56,6 +56,7 @@ import {
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
   ROLLS_CONFIG_ENTRY, RollRulesConfig, rollFloorFrom, SuccessTableRow,
   BACKGROUNDS_ENTRY, BackgroundRegistry, grantedTraitsOf, effectiveTraitOf,
+  TEMPLATES_ENTRY, TemplateRegistry, DEFAULT_TEMPLATE_DEFS, templateFromDef, applyTemplateDefs,
   BASE_CREATION, creationBudgetFor, CLANS, clanByName, clanFamilies, clanFamilyOf,
   fellowshipByName, EXCLUSIVE_MERITS_FLAWS,
   evaluateExpr, mapScope, exprRefs, describeTerms, evalNumeric,
@@ -2855,7 +2856,7 @@ describe("config stores: reload/reset-all", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
       AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY, MAGIC_CONFIG_ENTRY,
       COSTS_CONFIG_ENTRY,
-      ROLLS_CONFIG_ENTRY, BACKGROUNDS_ENTRY,
+      ROLLS_CONFIG_ENTRY, BACKGROUNDS_ENTRY, TEMPLATES_ENTRY,
     ].sort());
   });
 
@@ -4657,9 +4658,13 @@ describe("Living Resolve: the unique template and its fused-substance spends", (
   }
 
   test("the pool belongs to the UNIQUE template - nobody else in the world has it", async () => {
-    expect(TEMPLATE_OUROBOROS.Pools).toEqual([LIVING_RESOLVE]);
-    expect(TEMPLATE_OUROBOROS.Soak).toBe(GHOUL_SOAK);
-    expect(TEMPLATES["ouroboros"]).toBe(TEMPLATE_OUROBOROS);
+    // The Ouroboros is no longer a constructor call - it is a TemplateDef that
+    // EXTENDS the mage, so the resolved template must still be exactly itself.
+    const ouroboros = TEMPLATES["ouroboros"];
+    expect(ouroboros.Soak).toBe(GHOUL_SOAK);                       // its own
+    expect(ouroboros.Rules).toBe(TEMPLATES["mage"].Rules);         // the mage's
+    expect(ouroboros.Pools).toContain(LIVING_RESOLVE);             // added to the mage's
+    // ...and Living Resolve REPLACES what it inherited, so nothing doubles up.
     await marius();
     await CommandRouter.route('create-playable name="Someone Else" templates="revenant, mage"');
     const other = (await CharacterStore.load("Someone Else"))!;   // create doesn't re-select
@@ -5071,9 +5076,9 @@ describe("rating-scaled afflictions: the sanctum knows how big it is", () => {
   });
 
   test("the Ouroboros has no morality and no Virtues (it is Awakened, like a mage)", () => {
-    expect(TEMPLATE_OUROBOROS.Morality).toBeNull();
-    expect(TEMPLATE_OUROBOROS.HasVirtues).toBe(false);
-    expect(TEMPLATE_OUROBOROS.Awakened).toBe(true);
+    expect(TEMPLATES["ouroboros"].Morality).toBeNull();
+    expect(TEMPLATES["ouroboros"].HasVirtues).toBe(false);
+    expect(TEMPLATES["ouroboros"].Awakened).toBe(true);
     expect(TEMPLATE_MAGE.Awakened).toBe(true);
     expect(TEMPLATE_VAMPIRE.Awakened).toBe(false);
     expect(isAwakened(["ouroboros"])).toBe(true);
@@ -6037,5 +6042,107 @@ describe("successes= and uncancelable=: granted successes, by hand", () => {
     const positional = await CommandRouter.route("roll strength 8 1 successes=1", { rng: seqRng([9, 9, 9]) });
     expect(positional).toContain("vs diff 9");
     expect(positional).toContain("+1 auto");
+  });
+});
+
+// =============================================================================
+// TEMPLATES AS DATA - extending one, and the Ouroboros that stopped being code
+// =============================================================================
+describe("templates: extending one, from a def or a command", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the Ouroboros is a DEF that extends the mage - and resolves to what it always was", () => {
+    const def = DEFAULT_TEMPLATE_DEFS.find(d => d.name === "ouroboros")!;
+    expect(def.extends).toBe("mage");
+    expect(def.soak).toBe("ghoul");
+    const o = TEMPLATES["ouroboros"];
+    const mage = TEMPLATES["mage"];
+    // Inherited from the mage: ruleset, no morality, no Virtues, Awakened.
+    expect(o.Rules).toBe(mage.Rules);
+    expect(o.Morality).toBeNull();
+    expect(o.HasVirtues).toBe(false);
+    expect(o.Awakened).toBe(true);
+    // Its own: a ghoul's soak, and Living Resolve ADDED to what it inherited.
+    expect(o.Soak).toBe(GHOUL_SOAK);
+    expect(o.Pools).toContain(LIVING_RESOLVE);
+    expect(o.Pools.map(p => p.name)).toContain("quintessence");   // the mage's, inherited...
+    expect(o.Creation.notes!.some(n => n.includes("One pool, not four"))).toBe(true);
+  });
+
+  test("...and Living Resolve still HIDES the four it replaces, so nothing doubles up", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const char = (await CharacterStore.load("Visvaldas"))!;
+    const names = CharacterResources.defsFor(char).map(d => d.name);
+    expect(names).toEqual(["living-resolve"]);
+    // The phantom-Willpower guard still holds: the inherited pool is replaced,
+    // so the sheet must not carry a willpower entry trait lookups could find.
+    expect(char.poolStarts.willpower).toBeUndefined();
+  });
+
+  test("templateFromDef inherits what a def leaves unsaid and appends what it states", () => {
+    const mage = TEMPLATES["mage"];
+    const bare = templateFromDef({ name: "acolyte", extends: "mage" }, mage);
+    expect(bare.Soak).toBe(mage.Soak);
+    expect(bare.Pools).toEqual(mage.Pools);
+    expect(bare.Awakened).toBe(true);
+    const changed = templateFromDef({
+      name: "burned", extends: "mage", soak: "ghoul", awakened: false,
+      morality: "humanity", budgets: { arcana: "9" },
+    }, mage);
+    expect(changed.Soak).toBe(GHOUL_SOAK);
+    expect(changed.Awakened).toBe(false);
+    expect(changed.Morality!.name).toBe("Road of Humanity");
+    expect(changed.Budgets.arcana).toBe("9");
+    expect(changed.Rules).toBe(mage.Rules);                        // still inherited
+  });
+
+  test("a half-written def is REPORTED, never fatal - and the good ones still build", () => {
+    const problems = applyTemplateDefs([
+      { name: "orphan", extends: "nonesuch" },
+      { name: "loopy", extends: "loopy" },
+      { name: "fine", extends: "mage" },
+    ]);
+    expect(problems).toContain('orphan extends "nonesuch", which no template defines');
+    expect(problems.some(p => p.includes("loopy extends itself in a circle"))).toBe(true);
+    expect(TEMPLATES["orphan"]).toBeUndefined();
+    expect(TEMPLATES["fine"]).toBeDefined();
+    expect(TEMPLATES["mage"]).toBeDefined();                        // built-ins survive
+    applyTemplateDefs(DEFAULT_TEMPLATE_DEFS);
+    expect(TEMPLATES["ouroboros"]).toBeDefined();                   // and the fold is redoable
+  });
+
+  test("a whole fused-pool creature, built from commands and then played", async () => {
+    expect(await CommandRouter.route("templates")).toContain("ouroboros*");   // * = data
+
+    await CommandRouter.route("define-resource name=`Ash Tally` kind=pool start=20 max=20 "
+      + "roles=`blood,willpower,magic-fuel` replaces=`blood,willpower,quintessence` per-turn=4");
+    const made = await CommandRouter.route("extend-template name=`Cinder` extends=mage soak=ghoul resources=`ash-tally`");
+    expect(made).toContain("extends Mage");
+    expect(made).toContain("Ash Tally");
+    expect(TEMPLATES["cinder"].Soak).toBe(GHOUL_SOAK);
+    expect(TEMPLATES["cinder"].Awakened).toBe(true);                // the mage's
+
+    // It PLAYS: the fused pool replaces the four, and casting works off the
+    // Foundation it inherited from being a mage.
+    await CommandRouter.route('create-playable name="Ember" templates=cinder');
+    const char = (await CharacterStore.load("Ember"))!;
+    expect(CharacterResources.defsFor(char).map(d => d.name)).toEqual(["ash-tally"]);
+    await CommandRouter.route("set-trait modus 4");
+    await CommandRouter.route("set-trait primus 2");
+    expect(await CommandRouter.route('cast pillars="primus:2"', { rng: allTens })).toContain("Modus + Primus");
+    expect(await CommandRouter.route("spend ash-tally 2")).toContain("Now 18/20");
+  });
+
+  test("extending nothing that exists is refused, and forgetting restores the shipped one", async () => {
+    expect(await CommandRouter.route("extend-template name=`Ghost` extends=nonesuch"))
+      .toContain('No template "nonesuch" to extend');
+    expect(await CommandRouter.route("extend-template name=`Ghost` extends=mage resources=`no-such-pool`"))
+      .toContain("define it first with");
+    // A chronicle template that shadows a shipped one steps aside when forgotten.
+    await CommandRouter.route("extend-template name=`Ouroboros` extends=vampire");
+    expect(TEMPLATES["ouroboros"].Soak).toBe(TEMPLATES["vampire"].Soak);
+    expect(await CommandRouter.route("forget-template ouroboros")).toContain("shipped one resurfaces");
+    expect(TEMPLATES["ouroboros"].Soak).toBe(GHOUL_SOAK);
+    expect(await CommandRouter.route("forget-template mage")).toContain("built-ins cannot be removed");
   });
 });

@@ -34,6 +34,8 @@ import {
   advancementCostsFrom, CostTable, COST_PURSES,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
   meritFlawFromCard, InstanceLimit, instanceLimitsOf,
+  meritCostFor, budgetOfKind, kindSpends, MERIT_FLAW_KINDS, MeritFlawKind,
+  TemplateVariant,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
@@ -1591,6 +1593,106 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
 }
 
+// =============================================================================
+// BUDGETS - what a character may spend, per purse
+// -----------------------------------------------------------------------------
+// Arcana are NOT merits: they trade in a purse of their own, so counting them
+// as merits would make a legal character look overspent. A budget is an
+// EXPRESSION ("25", and later one written in terms of another), declared on the
+// template and overridable on the sheet. Everything here is ADVISORY - there is
+// no creation engine yet, so [[budget]] reports and the Storyteller decides.
+// =============================================================================
+
+// Every purse this character has a budget for, template first, sheet on top.
+function budgetsOf(char: PlayableCharacter): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const t of char.templates) {
+    const tpl = TEMPLATES[StringUtil.normalize(t)];
+    for (const [purse, expr] of Object.entries(tpl?.Budgets ?? {})) out[StringUtil.normalize(purse)] = expr;
+  }
+  for (const [purse, expr] of Object.entries(char.budgets ?? {})) out[StringUtil.normalize(purse)] = expr;
+  return out;
+}
+
+// An expression -> a number, through the same evaluator pools use, so a budget
+// may one day be written in terms of the character's own traits.
+function evalBudget(expr: string, resolve: TraitResolver): number {
+  return parsePoolExpression(expr, resolve).total;
+}
+
+// What each owned merit / flaw / arcanum / taint draws from its purse. The
+// listed price is the default; `paid` on the sheet overrides it, because price
+// paid is not price listed - a Storyteller may simply GRANT a thing.
+function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<string, { spent: number; items: string[] }> {
+  const out: Record<string, { spent: number; items: string[] }> = {};
+  for (const inst of ownedMeritInstances(char)) {
+    const purse = budgetOfKind(inst.def);
+    const override = char.paid?.[inst.key];
+    const listed = inst.points;
+    const cost = override !== undefined ? evalBudget(override, resolve) : listed;
+    const signed = kindSpends(inst.def.kind) ? cost : -cost;
+    const row = out[purse] ?? { spent: 0, items: [] };
+    row.spent += signed;
+    row.items.push(`${inst.key} ${signed >= 0 ? signed : `+${-signed}`}${override !== undefined ? " (set)" : ""}`);
+    out[purse] = row;
+  }
+  return out;
+}
+
+// budget - each purse: what it allows, what the sheet has spent, what is left.
+async function cmdBudget(cmd: ParsedCommand): Promise<string> {
+  const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
+  const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const { resolver } = await characterRollEnv(char);
+  const budgets = budgetsOf(char);
+  const ledger = purseLedger(char, resolver);
+  const purses = [...new Set([...Object.keys(budgets), ...Object.keys(ledger)])].sort();
+  if (!purses.length) return sys(`${disp(char.name)} has no budgets and has bought nothing that draws on one.`);
+  const lines = purses.map(purse => {
+    const expr = budgets[purse];
+    const spent = ledger[purse]?.spent ?? 0;
+    const items = ledger[purse]?.items ?? [];
+    const detail = items.length ? ` [${items.join(", ")}]` : "";
+    if (expr === undefined) return `${purse}: ${spent} spent, no budget set (Storyteller's call)${detail}`;
+    const total = evalBudget(expr, resolver);
+    return `${purse}: ${spent}/${total}${expr !== String(total) ? ` (${expr})` : ""}, ${total - spent} left${detail}`;
+  });
+  return sys(`${disp(char.name)} budgets - ${lines.join("; ")}. Advisory: nothing is enforced until creation is. `
+    + `Override one on the sheet's "budgets" block; set what a purchase really cost with [[paid <key> <expr>]].`);
+}
+
+// paid <key> [expr] - what a purchase ACTUALLY cost. No expression means 0: the
+// Storyteller granted it. Bare [[paid]] lists the overrides.
+async function cmdPaid(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const rawKey = cmd.positional[0]?.trim();
+  if (!rawKey) {
+    const entries = Object.entries(char.paid ?? {});
+    return entries.length
+      ? sys(`${disp(char.name)} - prices the Storyteller set: ${entries.map(([k, v]) => `${k} = ${v}`).join(", ")}. `
+        + `[[paid <key> <expr>]] sets one; [[paid <key> listed]] puts it back.`)
+      : sys(`${disp(char.name)} paid the listed price for everything. [[paid <key> [expr]]] records otherwise (no expression = granted).`);
+  }
+  const key = StringUtil.normalize(rawKey);
+  const expr = cmd.positional[1]?.trim() ?? cmd.named["expr"]?.trim() ?? "0";
+  char.paid = { ...(char.paid ?? {}) };
+  if (expr.toLowerCase() === "listed") {
+    if (!(key in char.paid)) return sys(`No price was set for "${key}".`);
+    delete char.paid[key];
+    if (!Object.keys(char.paid).length) delete char.paid;
+    await CharacterStore.save(char);
+    return sys(`${key} pays the listed price again.`);
+  }
+  char.paid[key] = expr;
+  await CharacterStore.save(char);
+  const { resolver } = await characterRollEnv(char);
+  const value = evalBudget(expr, resolver);
+  return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
+    + `[[budget]] counts it.`);
+}
+
 // costs [kind] - what a dot costs, from each purse. Prices are CHRONICLE rules
 // (rules.ts DEFAULT_ADVANCEMENT_COSTS + the wod:config:costs card), never
 // character data - which is why they are not on the sheet. Nothing evaluates
@@ -2989,8 +3091,11 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
       + "(or a raw ops array in JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
   }
   const name = rawName.trim();
-  const kindRaw = (cmd.named["kind"] ?? "merit").toLowerCase();
-  if (kindRaw !== "merit" && kindRaw !== "flaw") return sys(`kind must be "merit" or "flaw" (got "${kindRaw}"). Arcana are merits.`);
+  const kindRaw = (cmd.named["kind"] ?? "merit").toLowerCase() as MeritFlawKind;
+  if (!MERIT_FLAW_KINDS.includes(kindRaw)) {
+    return sys(`kind must be one of ${MERIT_FLAW_KINDS.join(", ")} (got "${kindRaw}"). `
+      + `Merits and flaws trade freebie points; arcana and taints trade an arcana budget of their own.`);
+  }
 
   // points: a single number or a "1,2,3" ladder of allowed ratings.
   const pointsRaw = (cmd.named["points"] ?? "0").trim();
@@ -3003,6 +3108,23 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
   const atMostOneAt = intOrUndef(cmd.named["at-most-one-at"] ?? "");
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const budget = (cmd.named["budget"] ?? "").trim();
+  if (budget) def.budget = StringUtil.normalize(budget);
+  // per-template="demon:7,thrall:5,mortal:no" - a price each, or `no` for a
+  // template the definition is closed to.
+  const perTemplateRaw = (cmd.named["per-template"] ?? "").trim();
+  if (perTemplateRaw) {
+    const variants: Record<string, TemplateVariant> = {};
+    for (const pair of perTemplateRaw.split(",").map(x => x.trim()).filter(Boolean)) {
+      const [rawT, rawV] = pair.split(":");
+      if (!rawT) continue;
+      const t = StringUtil.normalize(rawT);
+      const v = (rawV ?? "").trim().toLowerCase();
+      if (v === "no" || v === "none" || v === "false") variants[t] = { available: false };
+      else { const n = intOrUndef(v); if (n !== undefined) variants[t] = { cost: n }; }
+    }
+    if (Object.keys(variants).length) def.perTemplate = variants;
+  }
   const limitAt = intOrUndef(cmd.named["limit-at"] ?? "");
   if (limitAt !== undefined) {
     const limit: InstanceLimit = { atRating: limitAt, slots: intOrUndef(cmd.named["limit-slots"] ?? "") ?? 1 };
@@ -3075,7 +3197,16 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   const key = StringUtil.normalize(raw);
   const def = MeritFlawRegistry.get(key);
   if (!def) return sys(`No merit/flaw "${key}". [[merit]] lists them.`);
-  const bits = [`${def.kind} "${def.name}"`, `${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} point${def.points === 1 ? "" : "s"}`];
+  const bits = [`${def.kind} "${def.name}"`];
+  const perTemplate = Object.entries(def.perTemplate ?? {});
+  if (perTemplate.length) {
+    bits.push(`${budgetOfKind(def)} cost - ${perTemplate.map(([t, v]) =>
+      v.available === false ? `${t}: not available` : `${t}: ${Array.isArray(v.cost) ? `[${v.cost.join(", ")}]` : v.cost ?? def.points}`).join(", ")}`);
+    for (const [t, v] of perTemplate) if (v.note) bits.push(`${t}: ${v.note}`);
+  } else {
+    bits.push(`${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} ${budgetOfKind(def)} point${def.points === 1 ? "" : "s"}`);
+  }
+  if (!kindSpends(def.kind)) bits.push(`GRANTS points rather than costing them`);
   if (def.param) bits.push(`parameterized by ${def.param}`);
   for (const l of instanceLimitsOf(def)) {
     const kinds = Object.entries(l.perKind ?? {}).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`);
@@ -3103,10 +3234,19 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
       ? sys(`"${key}" is parameterized - name its ${bare.param}: [[take-merit ${key}::<${bare.param}>]].`)
       : sys(`Unknown merit/flaw "${key}". Custom definitions go in the srd:merits-flaws lorebook category.`);
   }
-  const allowed = Array.isArray(hit.def.points) ? hit.def.points : [hit.def.points];
+  // The price - and whether it may be taken at all - can differ per template.
+  const priced = meritCostFor(hit.def, char.templates);
+  if (!priced.available && cmd.named["waive"] !== "true") {
+    const who = char.templates.join("+");
+    return sys(`${hit.def.name} is not open to ${who}${priced.note ? ` - ${priced.note}` : ""}. `
+      + `[[merit ${key}]] lists who may take it. Add waive=true to override.`);
+  }
+  const listed = typeof priced.points === "string" ? intOrUndef(priced.points) ?? 0 : priced.points;
+  const allowed = Array.isArray(listed) ? listed : [listed];
   const points = intOrUndef(cmd.positional[1] ?? "") ?? allowed[0];
   if (!allowed.includes(points)) {
-    return sys(`${hit.def.name} must be taken at one of [${allowed.join(", ")}] points (got ${points}).`);
+    return sys(`${hit.def.name} must be taken at one of [${allowed.join(", ")}] points (got ${points})`
+      + `${priced.from ? ` for a ${priced.from}` : ""}.`);
   }
   const missing = unmetRequirements(char, hit.def.requires);
   if (missing.length && cmd.named["waive"] !== "true") {
@@ -3128,10 +3268,17 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
         + `asked for ${points}. Raise ${disp(ceiling.trait)} first, or add waive=true to override.`);
   }
   char.meritsFlaws[key] = points;
+  // The Storyteller may set what it REALLY cost, right here.
+  const paidExpr = cmd.named["paid"]?.trim();
+  if (paidExpr !== undefined) char.paid = { ...(char.paid ?? {}), [key]: paidExpr };
   await CharacterStore.save(char);
   const passiveBits = passiveOpsOf(hit.def, hit.param, points).map(describePassiveOp);
-  return sys(`${disp(char.name)} takes ${hit.def.name}${hit.param ? `::${hit.param}` : ""} (${points} pt${points === 1 ? "" : "s"})`
-    + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}.`);
+  const purse = budgetOfKind(hit.def);
+  const paidBit = paidExpr !== undefined ? `, paid ${paidExpr}` : "";
+  return sys(`${disp(char.name)} takes ${hit.def.name}${hit.param ? `::${hit.param}` : ""} `
+    + `(${points} ${purse} point${points === 1 ? "" : "s"}${priced.from ? ` - a ${priced.from}'s price` : ""}${paidBit})`
+    + `${priced.note ? ` - ${priced.note}` : ""}`
+    + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}. [[budget]] tracks the purse.`);
 }
 
 async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
@@ -3650,8 +3797,10 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const held = Object.entries(char.instances ?? {}).filter(([, list]) => list.length > 1);
   if (held.length) {
     parts.push(`Held more than once: ${held.map(([t, list]) =>
-      `${t} ${list.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(" + ")}`).join("; ")} - the slot rates the highest; which one a roll is about is Storyteller-adjudicated`);
+      `${t} ${list.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}${i.paid !== undefined ? ` [paid ${i.paid}]` : ""}`).join(" + ")}`).join("; ")} - the slot rates the highest; which one a roll is about is Storyteller-adjudicated`);
   }
+  const priced = Object.entries(char.paid ?? {});
+  if (priced.length) parts.push(`Prices the Storyteller set: ${priced.map(([k, v]) => `${k} = ${v}`).join(", ")}`);
   if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
   // A pool start naming a resource this character doesn't have is a leftover -
   // most often a Willpower entry on someone whose Willpower was REPLACED. Trait
@@ -3952,6 +4101,17 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
+CommandRouter.register("budget", cmdBudget, {
+  summary: "what each purse allows, what is spent, what is left (advisory)",
+  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
+});
+CommandRouter.register("paid", cmdPaid, {
+  summary: "record what a purchase really cost (no expression = the Storyteller granted it)",
+  params: [
+    { key: "key", kind: "positional", hint: "<trait|merit-key>", example: "mentor" },
+    { key: "expr", kind: "positional", hint: "[expr|listed]", example: "0" },
+  ],
+});
 CommandRouter.register("costs", cmdCosts, {
   summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)",
   params: [{ key: "kind", kind: "positional", hint: "[kind]", example: "discipline" }],
@@ -4105,6 +4265,7 @@ CommandRouter.register("take-merit", cmdTakeMerit, {
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
     { key: "points", kind: "positional", hint: "[points]" },
+    { key: "paid", kind: "named", desc: "What it REALLY cost (0 = the Storyteller granted it)" },
     { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive unmet prerequisites" },
   ],
 });
@@ -4119,12 +4280,14 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
   summary: "define a merit, flaw or arcanum (writes the srd:merits-flaws overlay)",
   params: [
     { key: "name", kind: "named", required: true, type: "literal", hint: "`<name>`", example: "e.g. `Inviolate Soul`" },
-    { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw"], desc: "Arcana are merits (default merit)" },
+    { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw", "arcanum", "taint"], desc: "Merits/flaws trade freebies; arcana/taints their own budget (default merit)" },
     { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings (default 0)" },
     { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS' },
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
     { key: "at-most-one-at", kind: "named", type: "int", desc: "Deprecated - use limit-at/limit-slots" },
+    { key: "budget", kind: "named", desc: "Which purse it trades in (default: freebie for merit/flaw, arcana for arcanum/taint)", example: "arcana" },
+    { key: "per-template", kind: "named", hint: '"demon:7,thrall:5"', desc: "Price per template; `no` closes it to one", example: "demon:7,thrall:5" },
     { key: "limit-at", kind: "named", type: "int", desc: "The rating that is rationed across instances", example: "3" },
     { key: "limit-slots", kind: "named", type: "int", desc: "How many instances may hold that rating (default 1)", example: "2" },
     { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },

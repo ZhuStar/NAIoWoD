@@ -515,8 +515,17 @@ export interface PlayableCharacter {
   // backgrounds are ST-enforced: nothing yet says WHICH mentor a roll is about
   // (that needs targeting), so the engine stores them and surfaces them.
   instances?: Record<string, TraitInstance[]>;
+  // What this character may SPEND, per purse, overriding the template's
+  // (rules.ts TemplateConfig.Budgets). Expressions, like the template's.
+  budgets?: Record<string, string>;
+  // What a purchase ACTUALLY cost, keyed by trait or merit-instance key, as an
+  // expression - price paid is not price listed. "0" is the Storyteller
+  // granting it outright (a Background you simply have, an arcanum you were
+  // made with). Anything not listed here paid the listed price.
+  paid?: Record<string, string>;
 }
-export interface TraitInstance { rating: number; note?: string }
+// One of several things of the same name (two Mentors), with what THIS one cost.
+export interface TraitInstance { rating: number; note?: string; paid?: string }
 
 export class CharacterStore {
   private static _storage = new ScopedStorage();
@@ -680,17 +689,24 @@ export function characterToCard(char: PlayableCharacter): CardMap {
       const held = char.instances?.[StringUtil.normalize(name)];
       // More than one of the same Background: write the key once per instance -
       // exactly how it was written - each with its own note.
+      const paid = char.paid?.[StringUtil.normalize(name)];
       if (held?.length) {
         block[label] = held.map(inst => {
           const one: CardMap = { [CARD_VALUE_KEY]: inst.rating };
           if (inst.note) one["note"] = inst.note;
+          if (inst.paid !== undefined) one["paid"] = inst.paid;
           return one;
         });
         continue;
       }
-      block[label] = labels.length
-        ? { [CARD_VALUE_KEY]: bucket[name], specialty: labels.length === 1 ? labels[0] : labels }
-        : bucket[name];
+      if (labels.length || paid !== undefined) {
+        const one: CardMap = { [CARD_VALUE_KEY]: bucket[name] };
+        if (labels.length) one["specialty"] = labels.length === 1 ? labels[0] : labels;
+        if (paid !== undefined) one["paid"] = paid;
+        block[label] = one;
+      } else {
+        block[label] = bucket[name];
+      }
     }
     card[key] = block;
   }
@@ -703,6 +719,7 @@ export function characterToCard(char: PlayableCharacter): CardMap {
     orphans[displayTraitName(trait)] = labels.length === 1 ? labels[0] : labels;
   }
   if (Object.keys(orphans).length) card["specialties"] = orphans;
+  if (Object.keys(char.budgets ?? {}).length) card["budgets"] = { ...char.budgets } as CardMap;
   return card;
 }
 
@@ -724,6 +741,7 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
   };
   const specialties: Record<string, string[]> = {};
   const instances: Record<string, TraitInstance[]> = {};
+  const paid: Record<string, string> = {};
   const addSpecialties = (trait: string, value: CardValue | undefined): void => {
     const labels = asStringList(value);
     if (labels.length) specialties[trait] = [...(specialties[trait] ?? []), ...labels];
@@ -742,11 +760,15 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
           const inst: TraitInstance = { rating: asNumber(one) ?? 0 };
           const note = asText(asMap(one)["note"]);
           if (note) inst.note = note;
+          const cost = asText(asMap(one)["paid"]);
+          if (cost !== undefined) inst.paid = cost;
           return inst;
         });
         bucket[trait] = Math.max(...instances[trait].map(i => i.rating));
       } else {
         bucket[trait] = asNumber(value) ?? 0;
+        const cost = asText(asMap(value)["paid"]);
+        if (cost !== undefined) paid[trait] = cost;
       }
       for (const one of written) {
         if (asMap(one)["specialty"] !== undefined) addSpecialties(trait, asMap(one)["specialty"]);
@@ -754,6 +776,13 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
     }
   }
   if (Object.keys(instances).length) char.instances = instances;
+  if (Object.keys(paid).length) char.paid = paid;
+  const budgets: Record<string, string> = {};
+  for (const [purse, raw] of Object.entries(asMap(card["budgets"]))) {
+    const expr = asText(raw);
+    if (expr) budgets[StringUtil.normalize(purse)] = expr;
+  }
+  if (Object.keys(budgets).length) char.budgets = budgets;
   for (const [rawName, value] of Object.entries(asMap(card["specialties"]))) {
     addSpecialties(StringUtil.normalize(rawName), value);
   }

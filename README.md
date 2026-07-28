@@ -1404,6 +1404,62 @@ The shipped Devil's Due arcana:
   raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
   `base → effective` and the advisory ceiling.
 
+### Arcana are not Merits — the purse, and what a purchase really cost
+
+An arcanum does **not** spend bonus points. Counting it as a merit would make a
+legal character look overspent, so `kind` decides both the **purse** and the
+**direction**:
+
+| kind | purse | direction |
+| --- | --- | --- |
+| `merit` | freebie | costs |
+| `flaw` | freebie | grants |
+| `arcanum` | arcana | costs |
+| `taint` | arcana | grants |
+
+(`budget=` on a definition overrides the purse if a chronicle invents another.
+Pacts, whose price is a calculation over Obligation, Consequence and Frequency,
+are left as prose for the Storyteller — the engine stores and shows them.)
+
+**A budget is an expression**, declared on the template and overridable on the
+sheet's `budgets:` block — `"25"` is twenty-five, and the expression form is
+what will let a later chronicle write one budget in terms of another. A purse
+with no budget anywhere is the Storyteller's call, and `[[budget]]` says so
+rather than inventing a number.
+
+**Prices differ per template**, which is what a printed *Celestial Radiance
+(7/5)* means — and the difference can run deeper than money:
+
+```
+[[define-merit name=`Celestial Radiance` kind=arcanum per-template=`demon:7,thrall:5`]]
+
+[[take-merit celestial-radiance]]   (a demon)  → 7 arcana points - a demon's price
+                                    (a thrall) → 5 arcana points - A thrall cannot
+                                                 generate effects greater than three successes.
+                                    (a vampire)→ not open to vampire
+```
+
+Naming templates is **exhaustive**: a definition anyone may take simply names
+none. `cost: 0` is free-to-that-template; `available: false` bars one that would
+otherwise qualify; `waive=true` overrides any of it.
+
+**Price paid is not price listed.** A Storyteller may simply grant a thing — a
+Background you just have, an arcanum you were made with:
+
+```
+[[paid celestial-radiance]]        → granted, not bought   (no expression = 0)
+[[paid mentor 3]]                  → what that one really cost
+[[paid celestial-radiance listed]] → back to the listed price
+[[take-merit <name> paid=0]]       → the same, on the spot
+```
+
+`[[budget]]` counts the override, and a trait held more than once carries a
+price each — *Mentor 5 (his mother) [paid 0] + 3 (Daujotas, his Hermetic
+Master) [paid 3]*.
+
+All of it is **advisory**: there is no creation engine yet, so the engine
+records and reports and the Storyteller decides.
+
 ### Rationed top ratings — "two traits may reach 3, at most one an Attribute"
 
 A parameterized def (`param=trait`) is taken once per trait, and some arcana

@@ -355,7 +355,13 @@ export class TemplateConfig {
     // Has the character Awakened? Mages have; so does the Ouroboros. Sanctum,
     // Library and Cray benefits are all predicated on it (the sleeping world
     // gets nothing from a place of power).
-    public readonly Awakened: boolean = false
+    public readonly Awakened: boolean = false,
+    // What this template may SPEND, per purse, as EXPRESSIONS - "15" is fifteen,
+    // and the expression form is what lets a later chronicle write one budget in
+    // terms of another. A sheet may override any of them (PlayableCharacter
+    // .budgets). A purse with no budget anywhere is the Storyteller's call, and
+    // [[budget]] says so rather than inventing a number.
+    public readonly Budgets: Record<string, string> = {}
   ) {}
 
   // Resources is the modern name for Pools (trackers + pools with roles/effects).
@@ -384,7 +390,9 @@ export const TEMPLATE_THRALL = new TemplateConfig(
     resolveResource({ start: 1, startMin: 1, startMax: 1 }),
   ],
   MORTAL_SOAK,
-  HUMANITY_MORALITY, true
+  HUMANITY_MORALITY, true,
+  STANDARD_HEALTH_LEVELS, [], false,
+  { arcana: "10" }   // placeholder, like the demon's
 );
 
 export const TEMPLATE_VAMPIRE = new TemplateConfig(
@@ -438,7 +446,11 @@ export const TEMPLATE_DEMON = new TemplateConfig(
   ],
   DEMON_SOAK,
   // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
-  { name: "Torment", polarity: "ascending", start: 3 }, false
+  { name: "Torment", polarity: "ascending", start: 3 }, false,
+  STANDARD_HEALTH_LEVELS, [], false,
+  // A PLACEHOLDER arcana budget: the owner's number goes here (or on the sheet,
+  // which overrides). Arcana never touch the freebie purse.
+  { arcana: "25" }
 );
 
 // A modern-WoD illustration (not Dark Ages canon) kept here so the kind/severity
@@ -900,7 +912,37 @@ export function disciplineDef(name: string): DisciplineDef | undefined {
 // tags ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every
 // check can be waived case-by-case.
 // =============================================================================
-export type MeritFlawKind = "merit" | "flaw";
+// What a definition IS, which decides two things at once: which purse it draws
+// on, and which way the money flows. Merits and Flaws trade freebie points;
+// ARCANA and TAINTS trade an arcana budget of their own, which is why an
+// arcanum must never be counted as a merit - it would make a legal character
+// look overspent.
+export type MeritFlawKind = "merit" | "flaw" | "arcanum" | "taint";
+export const MERIT_FLAW_KINDS: MeritFlawKind[] = ["merit", "flaw", "arcanum", "taint"];
+
+// The purse each kind draws on, and the sign of the trade: a merit and an
+// arcanum COST, a flaw and a taint GRANT. `budget` on the def overrides the
+// purse when a chronicle invents another one.
+const KIND_BUDGET: Record<MeritFlawKind, string> = {
+  merit: "freebie", flaw: "freebie", arcanum: "arcana", taint: "arcana",
+};
+const KIND_SPENDS: Record<MeritFlawKind, boolean> = {
+  merit: true, flaw: false, arcanum: true, taint: false,
+};
+export function budgetOfKind(def: { kind: MeritFlawKind; budget?: string }): string {
+  return StringUtil.normalize(def.budget ?? KIND_BUDGET[def.kind] ?? "freebie");
+}
+export function kindSpends(kind: MeritFlawKind): boolean { return KIND_SPENDS[kind] ?? true; }
+
+// How one template differs on a definition. Dark Ages arcana are printed with
+// a price per splat - "Celestial Radiance (7/5)" is 7 to a demon and 5 to a
+// thrall - and the difference can run deeper than money: a template may be
+// barred from it outright, or get a lesser version of the effect.
+export interface TemplateVariant {
+  cost?: number | number[] | string;  // this template's price (an expression is allowed)
+  available?: boolean;                // false = this template may not take it at all
+  note?: string;                      // how the effect differs for them
+}
 export interface MeritFlawRequirements {
   templates?: string[];   // met if the character's template matches ANY listed
   tags?: string[];        // ALL listed tags must be present on the character
@@ -916,7 +958,15 @@ export interface InstanceLimit {
 export interface MeritFlawDef {
   name: string;
   kind: MeritFlawKind;
-  points: number | number[]; // freebie cost (merit) / bonus granted (flaw); array = variable rating
+  points: number | number[]; // cost (merit/arcanum) / bonus granted (flaw/taint); array = variable rating
+  // Which purse this trades in, when the kind's default is not right.
+  budget?: string;
+  // Per-template price / availability / effect. The list is EXHAUSTIVE: naming
+  // any template means only those templates may take it - which is what a
+  // printed "(7/5)" says. Leave it off for something anyone may take; say
+  // `cost: 0` for a template it is free to, and `available: false` to bar one
+  // that would otherwise qualify.
+  perTemplate?: Record<string, TemplateVariant>;
   requires?: MeritFlawRequirements;
   description?: string;
   // --- Parameterized instances + passive effects (the owned-power pattern) ---
@@ -943,6 +993,28 @@ export interface MeritFlawDef {
   // so a character whose Resolve IS Living Resolve is capped by that), and the
   // reading is the PERMANENT rating, never the spent-down current.
   maxFromTrait?: string;
+}
+
+// What this definition costs THIS character, and whether they may take it at
+// all. The first of the character's templates with an entry wins; a def with
+// per-template prices and no entry for any of them is not open to them.
+export function meritCostFor(def: MeritFlawDef, templates: string[]): {
+  points: number | number[] | string; available: boolean; note?: string; from?: string;
+} {
+  const mine = templates.map(t => StringUtil.normalize(t));
+  const variants = def.perTemplate ?? {};
+  for (const t of mine) {
+    const v = variants[t] ?? variants[StringUtil.normalize(t)];
+    if (!v) continue;
+    if (v.available === false) return { points: v.cost ?? def.points, available: false, note: v.note, from: t };
+    return { points: v.cost ?? def.points, available: true, note: v.note, from: t };
+  }
+  // Priced per template, and none of them is ours. The list is EXHAUSTIVE by
+  // design - "(7/5)" names everyone who may have it - so this is not ours to
+  // take. A definition anyone may take simply carries no perTemplate at all,
+  // and one that is free to a template says so with `cost: 0`.
+  if (Object.keys(variants).length) return { points: 0, available: false };
+  return { points: def.points, available: true };
 }
 
 // A def's limits with the deprecated single-slot field folded in, so callers
@@ -1094,8 +1166,8 @@ export function effectOpsFromCard(raw: CardValue | undefined): EffectOp[] {
 // One Merit / Flaw / arcanum. Undefined when the block never says which it is -
 // the card keeps the text, the registry just doesn't take it.
 export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
-  const kind = (asText(body["kind"]) ?? "").toLowerCase();
-  if (kind !== "merit" && kind !== "flaw") return undefined;
+  const kind = (asText(body["kind"]) ?? "").toLowerCase() as MeritFlawKind;
+  if (!MERIT_FLAW_KINDS.includes(kind)) return undefined;
   const rawPoints = body["points"];
   const def: MeritFlawDef = {
     name: name.trim(),
@@ -1139,6 +1211,24 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
   if (limits.length) def.limits = limits;
   const maxFromTrait = asText(body["maxFromTrait"]);
   if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
+  const budget = asText(body["budget"]);
+  if (budget) def.budget = StringUtil.normalize(budget);
+  const perTemplate: Record<string, TemplateVariant> = {};
+  for (const [rawName, raw] of Object.entries(asMap(body["perTemplate"]))) {
+    const m = asMap(raw);
+    const variant: TemplateVariant = {};
+    const cost = Array.isArray(m["cost"]) ? m["cost"].map(c => asNumber(c) ?? 0) : (asNumber(m["cost"]) ?? asText(m["cost"]));
+    if (cost !== undefined) variant.cost = cost;
+    const available = asBool(m["available"]);
+    if (available !== undefined) variant.available = available;
+    const note = asText(m["note"]);
+    if (note) variant.note = note;
+    // A bare `demon: 7` is the price and nothing else.
+    const bare = asNumber(raw);
+    if (bare !== undefined && variant.cost === undefined) variant.cost = bare;
+    perTemplate[StringUtil.normalize(rawName)] = variant;
+  }
+  if (Object.keys(perTemplate).length) def.perTemplate = perTemplate;
   return def;
 }
 
@@ -1162,6 +1252,18 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
     maxFromTrait: "resolve",
     passive: [{ op: "difficulty", amount: -1, trait: "perception" }],
     description: "Devil's Due: attunes preternatural awareness to unravel the hidden details and secrets of the world. Each purchase is a CUMULATIVE -1 to Perception difficulties (the points taken ARE the purchases). May not be purchased more times than the character's Resolve.",
+  },
+  {
+    // The shape a printed "(7/5)" arcanum takes: one price per template, and a
+    // template that gets a LESSER version says so in its own note.
+    name: "Celestial Radiance", kind: "arcanum", points: 0,
+    perTemplate: {
+      demon: { cost: 7 },
+      thrall: { cost: 5, note: "A thrall cannot generate effects greater than three successes." },
+    },
+    description: "Devil's Due: emit and control light by unveiling the burning power of the soul. Roll Resolve "
+      + "(difficulty 8), +1 success per Resolve point spent; the successes buy parlor tricks, illusions and auras, "
+      + "up to a battlefield-blinding flare at five (which needs Resolve 7+). Four successes need Resolve 5+.",
   },
   { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
   { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },

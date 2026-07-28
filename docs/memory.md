@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `3cb162a`** ("Rationed top
-> ratings"). Prior: `ce304b3` ("The words move out
+> **Last synced with the code as of commit `84c5aa0`** ("Arcana are not
+> Merits: their own purse, priced per template"). Prior: `3cb162a` ("Rationed top
+> ratings"); `ce304b3` ("The words move out
 > of the windows"); `38d2007` ("A floor for the
 > die target, and the knob the card format was eating"); `e72acb5`
 > ("One point, one
@@ -955,7 +956,9 @@ verb's CommandSpec at the bottom of game.ts — the grammars below match it):
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
 `play [name="…"]` (no name → default) · `characters` (list; marks
 current/default) · `convert-cards` (§7.43: one-shot, idempotent migration of
-any `wod:`/`srd:` card still holding JSON) · `costs [kind]` (§7.44: what a dot
+any `wod:`/`srd:` card still holding JSON) · `budget [name]` (§7.50: each purse -
+expression, value, spent, left; advisory) · `paid <key> [expr|listed]` (§7.50:
+what a purchase REALLY cost; no expression = granted) · `costs [kind]` (§7.44: what a dot
 costs from each purse — chronicle rules, Storyteller-applied) ·
 `sheet [name|@alias]` (the record as the ENGINE reads it —
 all numeric buckets, merits, specialties; effective value marked when
@@ -2274,6 +2277,53 @@ and `prefill` are mocked/available but not yet written.
     favoured trait may reach 3", the narrower guess) to the owner's statement.
     If his "Trait Aptitude" is a SEPARATE arcanum rather than this one under
     another name, it is one define-merit away - flagged to him.
+
+50. **Arcana are not Merits: their own purse, priced per template** (user:
+    "Arcana are not really merits. They don't spend bonus points... if arcana
+    count as merits, it will flag the character as illegal. Arcana have a budget
+    of their own... write it as an expression... templates may alter their cost,
+    the ability to purchase them or not, and even their effects").
+    A DATA-MODEL pass, deliberately: there is no creation engine yet, so nothing
+    is enforced - the standing rule is store it, surface it, let the Storyteller
+    decide. Getting the shape right now is what stops the legality check from
+    being wrong when it lands.
+    - **`MeritFlawKind` gains `arcanum` and `taint`.** The kind decides two
+      things at once: the PURSE (`KIND_BUDGET`: merit/flaw -> freebie,
+      arcanum/taint -> arcana, overridable per def with `budget`) and the
+      DIRECTION (`KIND_SPENDS`: merit/arcanum cost, flaw/taint grant). That one
+      table is the whole answer to "an arcanum must not be counted as a merit".
+      Pacts are left as prose - their price is a calculation over Obligation,
+      Consequence and Frequency, and inventing a calculator for it would be
+      worse than storing what the book says.
+    - **Budgets are EXPRESSIONS**, on `TemplateConfig.Budgets` and overridable
+      on `PlayableCharacter.budgets`, evaluated through `parsePoolExpression` -
+      the same evaluator pools use, which is what makes "in terms of another
+      budget" reachable later. Demon and thrall carry PLACEHOLDER arcana
+      budgets (25 / 10), labelled as such. A purse with no budget anywhere is
+      reported as the Storyteller's call rather than defaulted to zero.
+    - **`perTemplate: Record<template, TemplateVariant{cost, available, note}>`**
+      + `meritCostFor(def, templates)`. A printed "(7/5)" IS this: demon 7,
+      thrall 5, and the thrall's `note` carries the lesser effect. The list is
+      EXHAUSTIVE - naming any template means only those may take it, which is
+      what the printed notation means - so a def anyone may take names none.
+      First bug caught in the live smoke: Celestial Radiance had `points: 0`,
+      and the fallback treated "declared zero" as "has a plain price", letting a
+      VAMPIRE take it; the exhaustive rule replaced the fallback entirely.
+    - **Price paid is not price listed** (his: "sometimes the character just
+      starts with some Arcana because the Storyteller says so, same as with
+      backgrounds. That should, in fact, be true for all traits"). New
+      `PlayableCharacter.paid: Record<key, expr>` and `TraitInstance.paid`, set
+      by **`[[paid <key> [expr|listed]]]`** (no expression = 0 = granted) or
+      inline with `take-merit paid=`. `[[budget]]` counts the override, `[[sheet]]`
+      shows it, and the card round-trips it.
+      His own example lands exactly here: Mentor 5 is his mother (granted, paid
+      0), Mentor 3 is Daujotas his Hermetic Master (paid 3) - two instances of
+      one Background, each with its own note AND its own price.
+    - **`[[budget]]`** reports each purse: the expression, its value, what the
+      owned merits/arcana draw, and what is left - explicitly advisory.
+    LEFT for the creation engine: pricing ATTRIBUTE and ABILITY dots per
+    priority (the `wod:config:costs` table from §7.44 is the seam), and the
+    legality verdict itself.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

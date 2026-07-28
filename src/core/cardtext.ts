@@ -52,7 +52,7 @@ export const CARD_VALUE_KEY = "value";
 export const TEXT_KEYS = new Set([
   "name", "key", "id", "description", "note", "label", "blurb", "until",
   "interval", "topic", "title", "specialty", "param", "pool", "difficultyexpr",
-  "reason", "summary", "botch", "failure", "overflowlabel",
+  "reason", "summary", "botch", "failure", "overflowlabel", "paid", "budget",
 ]);
 
 // Keys the engine always wants as a list, so one item needs no special syntax

@@ -2948,6 +2948,93 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
 });
 
 // =============================================================================
+// BUDGETS - arcana are not merits, and price paid is not price listed
+// =============================================================================
+describe("arcana budgets: their own purse, priced per template", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a printed (7/5) arcanum: the demon pays 7, the thrall 5 and gets the lesser version", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    const demon = await CommandRouter.route("take-merit celestial-radiance");
+    expect(demon).toContain("7 arcana points");
+    expect(demon).toContain("a demon's price");
+
+    await CommandRouter.route('create-playable name="Bound" templates=thrall');
+    await CommandRouter.route('play name="Bound"');
+    const thrall = await CommandRouter.route("take-merit celestial-radiance");
+    expect(thrall).toContain("5 arcana points");
+    expect(thrall).toContain("cannot generate effects greater than three successes");
+  });
+
+  test("naming templates is exhaustive: nobody else may take it", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const refused = await CommandRouter.route("take-merit celestial-radiance");
+    expect(refused).toContain("not open to vampire");
+    expect((await CharacterStore.load("Kvar"))!.meritsFlaws["celestial-radiance"]).toBeUndefined();
+    // The Storyteller may still say otherwise.
+    expect(await CommandRouter.route("take-merit celestial-radiance waive=true")).toContain("arcana points");
+  });
+
+  test("the two purses never mix: an arcanum can never make a merit budget look overspent", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    await CommandRouter.route("take-merit celestial-radiance");
+    await CommandRouter.route("take-merit iron-will");           // a MERIT, 3 freebie
+    const report = await CommandRouter.route("budget");
+    expect(report).toContain("arcana: 7/25");
+    expect(report).toContain("celestial-radiance 7");
+    expect(report).toContain("freebie: 3 spent");                 // counted apart
+    expect(report).not.toContain("arcana: 10");                   // never summed together
+  });
+
+  test("a flaw GRANTS rather than costs, and the sheet may override the template's budget", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    await CommandRouter.route("take-merit dark-secret");           // a flaw, 1 point
+    expect(await CommandRouter.route("budget")).toContain("freebie: -1 spent");
+    const char = (await CharacterStore.load("Azazel"))!;
+    char.budgets = { arcana: "10" };
+    await CharacterStore.save(char);
+    expect(await CommandRouter.route("budget")).toContain("arcana: 0/10");
+  });
+
+  test("price paid is not price listed: [[paid]] records what the Storyteller granted", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    await CommandRouter.route("take-merit celestial-radiance");
+    expect(await CommandRouter.route("budget")).toContain("arcana: 7/25");
+    // The Storyteller says he was MADE with it.
+    expect(await CommandRouter.route("paid celestial-radiance")).toContain("granted, not bought");
+    const after = await CommandRouter.route("budget");
+    expect(after).toContain("arcana: 0/25");
+    expect(after).toContain("(set)");
+    // And it can be put back.
+    expect(await CommandRouter.route("paid celestial-radiance listed")).toContain("pays the listed price again");
+    expect(await CommandRouter.route("budget")).toContain("arcana: 7/25");
+  });
+
+  test("take-merit can set the price on the spot", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    expect(await CommandRouter.route("take-merit celestial-radiance paid=0")).toContain("paid 0");
+    expect(await CommandRouter.route("budget")).toContain("arcana: 0/25");
+  });
+
+  test("two Mentors, one granted and one bought, survive the card", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const char = (await CharacterStore.load("Visvaldas"))!;
+    char.backgrounds["mentor"] = 5;
+    char.instances = { mentor: [
+      { rating: 5, note: "his mother", paid: "0" },
+      { rating: 3, note: "Daujotas, his Hermetic Master", paid: "3" },
+    ] };
+    await CharacterStore.save(char);
+    const text = formatCardText(characterToCard(char));
+    expect(text).toContain("    paid: 0");
+    expect(text).toContain("Daujotas, his Hermetic Master");
+    const back = characterFromCard(parseCardText(text))!;
+    expect(back.instances!.mentor.map(i => i.paid)).toEqual(["0", "3"]);
+    expect(await CommandRouter.route("sheet")).toContain("[paid 0]");
+  });
+});
+
+// =============================================================================
 // MINIMUM DIFFICULTY - a floor per roll, and one for the whole chronicle
 // =============================================================================
 describe("minimum difficulty: per-roll and chronicle-wide", () => {
@@ -4134,7 +4221,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     const refused = await CommandRouter.route("take-merit sharpened-senses 5");
     expect(refused).toContain("may not be taken more times than Resolve (3)");
     expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
-    expect(await CommandRouter.route("take-merit sharpened-senses 5 waive=true")).toContain("5 pts");
+    expect(await CommandRouter.route("take-merit sharpened-senses 5 waive=true")).toContain("5 freebie points");
     // A ceiling that MOVES strands the purchases above it - reported, never trimmed.
     expect(await CommandRouter.route("check-constraints")).toContain("sharpened-senses is at 5 but resolve is only 3");
   });
@@ -4216,8 +4303,8 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
   test("two Abilities may reach 3; a THIRD trait at 3 is refused (waivable) and flagged", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     // Two Abilities at the top rating is exactly what the arcanum allows.
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 pts");
-    expect(await CommandRouter.route("take-merit trait-affinity::brawl 3")).toContain("3 pts");
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 freebie points");
+    expect(await CommandRouter.route("take-merit trait-affinity::brawl 3")).toContain("3 freebie points");
     await CommandRouter.route('define-constraint name="noop" relation=exclusive domain=background members="status"');
     expect(await CommandRouter.route("check-constraints")).toContain("satisfies all 1 constraint group");
     // A third one is over the ration - refused at the door...
@@ -4234,15 +4321,15 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
 
   test("the SECOND top slot may not be another Attribute", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    expect(await CommandRouter.route("take-merit trait-affinity::strength 3")).toContain("3 pts");
+    expect(await CommandRouter.route("take-merit trait-affinity::strength 3")).toContain("3 freebie points");
     // One Attribute is fine; a second Attribute at 3 breaks the per-kind ration
     // even though the two slots are not full yet.
     const refused = await CommandRouter.route("take-merit trait-affinity::dexterity 3");
     expect(refused).toContain("allows 1 attribute at 3");
     // An Ability takes the other slot happily.
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 pts");
+    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 freebie points");
     // And a trait BELOW the top rating is never rationed.
-    expect(await CommandRouter.route("take-merit trait-affinity::stealth 2")).toContain("2 pts");
+    expect(await CommandRouter.route("take-merit trait-affinity::stealth 2")).toContain("2 freebie points");
   });
 
   test("merit findings surface even with zero constraint groups defined", async () => {

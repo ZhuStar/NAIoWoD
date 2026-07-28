@@ -1343,6 +1343,32 @@ The shipped Devil's Due arcana:
   raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
   `base → effective` and the advisory ceiling.
 
+### Trait-bounded ceilings — when the cap is a rating, not a number
+
+Some arcana cap their own purchases against a trait: *Sharpened Senses* "may
+not be purchased more times than his Resolve". `maxFromTrait` says so, and the
+name resolves the way every trait name does — a rated trait first, else **the
+resource that fills or replaced that name**, so a character whose Resolve *is*
+Living Resolve is capped by that without the definition knowing:
+
+```
+[[take-merit sharpened-senses 5]]
+→ Sharpened Senses may not be taken more times than Resolve (3) — asked for 5.
+  Raise Resolve first, or add waive=true to override.
+```
+
+Always the **permanent** rating, never the spent-down current. A ceiling can
+*move* — a Resolve that drops leaves purchases stranded above it — and that is
+reported by `[[check-constraints]]`, never silently trimmed:
+`sharpened-senses is at 5 but resolve is only 3`.
+
+Author one with `max-from-trait=`:
+
+```
+[[define-merit name=`Sharpened Senses` points=`1,2,3,4,5` max-from-trait=resolve
+  passive=`difficulty -1 if=perception` description=`…`]]
+```
+
 ### Specialties
 
 `[[specialty melee `Swords`]]` (backticks keep the label's case) adds one;

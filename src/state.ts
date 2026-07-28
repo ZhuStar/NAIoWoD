@@ -772,6 +772,20 @@ export function resolveTraitFromRecord(char: PlayableCharacter, name: string): n
   return 0;
 }
 
+// A character's PERMANENT rating in a name that may not be a rated trait at
+// all. Rated buckets first; failing that, the RESOURCE that owns the name (its
+// own name, a role it fills, or a name it replaced) read at the value the
+// player set for it - so "his Resolve" finds Living Resolve for the one
+// character whose Resolve is that. Always the permanent rating, never the
+// spent-down current: this is what a creation-time ceiling is measured against.
+export function permanentRatingOf(char: PlayableCharacter, name: string): number {
+  const direct = resolveTraitFromRecord(char, name);
+  if (direct) return direct;
+  const owner = CharacterResources.resolveDef(char, name);
+  if (!owner) return 0;
+  return resolveTraitFromRecord(char, owner.name) || owner.start;
+}
+
 // --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
 // A character's meritsFlaws bucket maps instance keys ("iron-will",
 // "trait-affinity:melee") to points. Resolution goes through the registry;

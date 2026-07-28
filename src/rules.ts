@@ -875,6 +875,12 @@ export interface MeritFlawDef {
   // points value (trait-affinity: 3 - one favoured trait). ADVISORY - the
   // constraint check reports violations; the creation engine will enforce.
   atMostOneAt?: number;
+  // The rating ceiling is a TRAIT, not a constant: "may not be purchased more
+  // times than his Resolve". The name is resolved the way every trait name is
+  // (a rated trait first, else the resource that fills or replaced that name -
+  // so a character whose Resolve IS Living Resolve is capped by that), and the
+  // reading is the PERMANENT rating, never the spent-down current.
+  maxFromTrait?: string;
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
@@ -1044,6 +1050,8 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
   if (passive.length) def.passive = passive;
   const atMostOneAt = asNumber(body["atMostOneAt"]);
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const maxFromTrait = asText(body["maxFromTrait"]);
+  if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   return def;
 }
 
@@ -1058,6 +1066,12 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
     name: "Trait Enhancement", kind: "merit", points: [1, 2, 3], param: "trait",
     passive: [{ op: "enhance", amount: 1, target: "$trait" }],
     description: "Devil's Due: permanently raises the trait's effective value AND its advancement ceiling by the points taken; XP still prices from the un-enhanced base.",
+  },
+  {
+    name: "Sharpened Senses", kind: "merit", points: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    maxFromTrait: "resolve",
+    passive: [{ op: "difficulty", amount: -1, trait: "perception" }],
+    description: "Devil's Due: attunes preternatural awareness to unravel the hidden details and secrets of the world. Each purchase is a CUMULATIVE -1 to Perception difficulties (the points taken ARE the purchases). May not be purchased more times than the character's Resolve.",
   },
   { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
   { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },

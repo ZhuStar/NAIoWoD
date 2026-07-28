@@ -433,6 +433,7 @@ const FIELD_ALIASES: Record<string, string> = {
   "per-turn-limit": "perTurnLimit",
   "from-generation": "fromGeneration",
   "at-most-one-at": "atMostOneAt",
+  "max-from-trait": "maxFromTrait",
   "fill-to-cap": "fillToCap",
   "requires-resource": "requiresResource",
   "requires-trait": "requiresTrait",
@@ -3167,6 +3168,12 @@ interface MeritFlawDef {
   // points value (trait-affinity: 3 - one favoured trait). ADVISORY - the
   // constraint check reports violations; the creation engine will enforce.
   atMostOneAt?: number;
+  // The rating ceiling is a TRAIT, not a constant: "may not be purchased more
+  // times than his Resolve". The name is resolved the way every trait name is
+  // (a rated trait first, else the resource that fills or replaced that name -
+  // so a character whose Resolve IS Living Resolve is capped by that), and the
+  // reading is the PERMANENT rating, never the spent-down current.
+  maxFromTrait?: string;
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
@@ -3336,6 +3343,8 @@ function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefine
   if (passive.length) def.passive = passive;
   const atMostOneAt = asNumber(body["atMostOneAt"]);
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const maxFromTrait = asText(body["maxFromTrait"]);
+  if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   return def;
 }
 
@@ -3350,6 +3359,12 @@ const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
     name: "Trait Enhancement", kind: "merit", points: [1, 2, 3], param: "trait",
     passive: [{ op: "enhance", amount: 1, target: "$trait" }],
     description: "Devil's Due: permanently raises the trait's effective value AND its advancement ceiling by the points taken; XP still prices from the un-enhanced base.",
+  },
+  {
+    name: "Sharpened Senses", kind: "merit", points: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    maxFromTrait: "resolve",
+    passive: [{ op: "difficulty", amount: -1, trait: "perception" }],
+    description: "Devil's Due: attunes preternatural awareness to unravel the hidden details and secrets of the world. Each purchase is a CUMULATIVE -1 to Perception difficulties (the points taken ARE the purchases). May not be purchased more times than the character's Resolve.",
   },
   { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
   { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },
@@ -5316,6 +5331,20 @@ function resolveTraitFromRecord(char: PlayableCharacter, name: string): number {
   const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
   for (const b of buckets) if (n in b) return b[n];
   return 0;
+}
+
+// A character's PERMANENT rating in a name that may not be a rated trait at
+// all. Rated buckets first; failing that, the RESOURCE that owns the name (its
+// own name, a role it fills, or a name it replaced) read at the value the
+// player set for it - so "his Resolve" finds Living Resolve for the one
+// character whose Resolve is that. Always the permanent rating, never the
+// spent-down current: this is what a creation-time ceiling is measured against.
+function permanentRatingOf(char: PlayableCharacter, name: string): number {
+  const direct = resolveTraitFromRecord(char, name);
+  if (direct) return direct;
+  const owner = CharacterResources.resolveDef(char, name);
+  if (!owner) return 0;
+  return resolveTraitFromRecord(char, owner.name) || owner.start;
 }
 
 // --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
@@ -9300,6 +9329,16 @@ async function cmdCheckConstraints(): Promise<string> {
   return sys(`${disp(char.name)} - ${total} constraint issue${total === 1 ? "" : "s"} (ST-enforced): ${lines}.`);
 }
 
+// A def whose rating ceiling is a TRAIT ("no more purchases than his Resolve"),
+// resolved against this character - undefined when the def has no such cap.
+// The name resolves through resources too, so the Ouroboros is capped by his
+// Living Resolve without the def having to know that.
+function meritTraitCeiling(char: PlayableCharacter, def: MeritFlawDef): { trait: string; cap: number } | undefined {
+  if (!def.maxFromTrait) return undefined;
+  const trait = StringUtil.normalize(def.maxFromTrait);
+  return { trait, cap: permanentRatingOf(char, trait) };
+}
+
 // Advisory merit-instance findings: unknown/malformed keys and atMostOneAt
 // violations ("one favoured trait" caps). Reported, never enforced - the
 // creation engine will enforce.
@@ -9314,6 +9353,12 @@ function meritInstanceFindings(char: PlayableCharacter): string[] {
       const list = atTop.get(inst.def.name) ?? [];
       list.push(inst.param ?? inst.key);
       atTop.set(inst.def.name, list);
+    }
+    // The ceiling is a trait, so it can MOVE: a Resolve that drops leaves the
+    // purchases stranded above it. Reported, never silently trimmed.
+    const ceiling = meritTraitCeiling(char, inst.def);
+    if (ceiling && inst.points > ceiling.cap) {
+      findings.push(`${StringUtil.normalize(inst.def.name)} is at ${inst.points} but ${ceiling.trait} is only ${ceiling.cap}`);
     }
   }
   for (const key of Object.keys(char.meritsFlaws)) {
@@ -9401,6 +9446,8 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
   const atMostOneAt = intOrUndef(cmd.named["at-most-one-at"] ?? "");
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const maxFromTrait = (cmd.named["max-from-trait"] ?? "").trim();
+  if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   if (cmd.named["passive"]?.trim()) {
     const raw = cmd.named["passive"];
     // A quoted (not backticked) value came through the boundary normalizer, so
@@ -9462,6 +9509,7 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   const bits = [`${def.kind} "${def.name}"`, `${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} point${def.points === 1 ? "" : "s"}`];
   if (def.param) bits.push(`parameterized by ${def.param}`);
   if (def.atMostOneAt) bits.push(`at most one instance at ${def.atMostOneAt} (advisory)`);
+  if (def.maxFromTrait) bits.push(`never more purchases than ${disp(def.maxFromTrait)}`);
   if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
   if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
   const note = def.passive?.some(o => !ROLL_OPS.has(o.op.toLowerCase()))
@@ -9491,6 +9539,11 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const missing = unmetRequirements(char, hit.def.requires);
   if (missing.length && cmd.named["waive"] !== "true") {
     return sys(`${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.`);
+  }
+  const ceiling = meritTraitCeiling(char, hit.def);
+  if (ceiling && points > ceiling.cap && cmd.named["waive"] !== "true") {
+    return sys(`${hit.def.name} may not be taken more times than ${disp(ceiling.trait)} (${ceiling.cap}) - `
+      + `asked for ${points}. Raise ${disp(ceiling.trait)} first, or add waive=true to override.`);
   }
   char.meritsFlaws[key] = points;
   await CharacterStore.save(char);
@@ -10480,6 +10533,7 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
     { key: "at-most-one-at", kind: "named", type: "int", desc: "Only one instance may sit at this rating (advisory)" },
+    { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait (\"no more purchases than his Resolve\")", example: "resolve" },
     { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
   ],
 });

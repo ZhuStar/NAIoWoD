@@ -84,6 +84,7 @@ const FIELD_ALIASES: Record<string, string> = {
   "per-turn-limit": "perTurnLimit",
   "from-generation": "fromGeneration",
   "at-most-one-at": "atMostOneAt",
+  "max-from-trait": "maxFromTrait",
   "fill-to-cap": "fillToCap",
   "requires-resource": "requiresResource",
   "requires-trait": "requiresTrait",

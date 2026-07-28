@@ -55,6 +55,7 @@ import {
 } from "./command";
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, characterToCard,
+  permanentRatingOf,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   StoryClock, DateBook, Scene, SceneStore, GenCounter,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
@@ -2810,6 +2811,16 @@ async function cmdCheckConstraints(): Promise<string> {
   return sys(`${disp(char.name)} - ${total} constraint issue${total === 1 ? "" : "s"} (ST-enforced): ${lines}.`);
 }
 
+// A def whose rating ceiling is a TRAIT ("no more purchases than his Resolve"),
+// resolved against this character - undefined when the def has no such cap.
+// The name resolves through resources too, so the Ouroboros is capped by his
+// Living Resolve without the def having to know that.
+function meritTraitCeiling(char: PlayableCharacter, def: MeritFlawDef): { trait: string; cap: number } | undefined {
+  if (!def.maxFromTrait) return undefined;
+  const trait = StringUtil.normalize(def.maxFromTrait);
+  return { trait, cap: permanentRatingOf(char, trait) };
+}
+
 // Advisory merit-instance findings: unknown/malformed keys and atMostOneAt
 // violations ("one favoured trait" caps). Reported, never enforced - the
 // creation engine will enforce.
@@ -2824,6 +2835,12 @@ function meritInstanceFindings(char: PlayableCharacter): string[] {
       const list = atTop.get(inst.def.name) ?? [];
       list.push(inst.param ?? inst.key);
       atTop.set(inst.def.name, list);
+    }
+    // The ceiling is a trait, so it can MOVE: a Resolve that drops leaves the
+    // purchases stranded above it. Reported, never silently trimmed.
+    const ceiling = meritTraitCeiling(char, inst.def);
+    if (ceiling && inst.points > ceiling.cap) {
+      findings.push(`${StringUtil.normalize(inst.def.name)} is at ${inst.points} but ${ceiling.trait} is only ${ceiling.cap}`);
     }
   }
   for (const key of Object.keys(char.meritsFlaws)) {
@@ -2911,6 +2928,8 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
   const atMostOneAt = intOrUndef(cmd.named["at-most-one-at"] ?? "");
   if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  const maxFromTrait = (cmd.named["max-from-trait"] ?? "").trim();
+  if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
   if (cmd.named["passive"]?.trim()) {
     const raw = cmd.named["passive"];
     // A quoted (not backticked) value came through the boundary normalizer, so
@@ -2972,6 +2991,7 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   const bits = [`${def.kind} "${def.name}"`, `${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} point${def.points === 1 ? "" : "s"}`];
   if (def.param) bits.push(`parameterized by ${def.param}`);
   if (def.atMostOneAt) bits.push(`at most one instance at ${def.atMostOneAt} (advisory)`);
+  if (def.maxFromTrait) bits.push(`never more purchases than ${disp(def.maxFromTrait)}`);
   if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
   if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
   const note = def.passive?.some(o => !ROLL_OPS.has(o.op.toLowerCase()))
@@ -3001,6 +3021,11 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const missing = unmetRequirements(char, hit.def.requires);
   if (missing.length && cmd.named["waive"] !== "true") {
     return sys(`${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.`);
+  }
+  const ceiling = meritTraitCeiling(char, hit.def);
+  if (ceiling && points > ceiling.cap && cmd.named["waive"] !== "true") {
+    return sys(`${hit.def.name} may not be taken more times than ${disp(ceiling.trait)} (${ceiling.cap}) - `
+      + `asked for ${points}. Raise ${disp(ceiling.trait)} first, or add waive=true to override.`);
   }
   char.meritsFlaws[key] = points;
   await CharacterStore.save(char);
@@ -3990,6 +4015,7 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
     { key: "at-most-one-at", kind: "named", type: "int", desc: "Only one instance may sit at this rating (advisory)" },
+    { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait (\"no more purchases than his Resolve\")", example: "resolve" },
     { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
   ],
 });

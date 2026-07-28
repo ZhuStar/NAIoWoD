@@ -52,7 +52,7 @@ import {
   processContextBuilt, stripCtxSkip, GenCounter,
   processGenerationEnd, stripAgedCtxSkip,
   parseCardText, formatCardText, characterToCard, characterFromCard,
-  asNumber, asText, asList, asStringList, CardMap,
+  asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
 } from "../src/index";
 
@@ -4023,6 +4023,58 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
 // =============================================================================
 describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("Sharpened Senses: each purchase is another -1, and only on Perception pools", async () => {
+    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    const char = (await CharacterStore.load("Aldous"))!;
+    char.attributes.perception = 4;
+    char.abilities.awareness = 2;
+    char.poolStarts.resolve = 3;
+    await CharacterStore.save(char);
+    expect(await CommandRouter.route("take-merit sharpened-senses 3")).toContain("difficulty -3");
+    // Difficulty 8 - 3 = 5, so a run of 6s all hit.
+    const sharp = await CommandRouter.route("roll perception+awareness 8", { rng: seqRng([6, 6, 6, 6, 6, 6]) });
+    expect(sharp).toContain("vs diff 5");
+    expect(sharp).toContain("sharpened-senses: difficulty -3");
+    // The gate is the POOL: a roll that never uses Perception is untouched.
+    const blunt = await CommandRouter.route("roll strength+brawl 8", { rng: seqRng([6]) });
+    expect(blunt).toContain("vs diff 8");
+    expect(blunt).not.toContain("sharpened-senses");
+  });
+
+  test("the ceiling is a TRAIT: Resolve bounds the purchases, and it can move", async () => {
+    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    const char = (await CharacterStore.load("Aldous"))!;
+    char.poolStarts.resolve = 3;
+    await CharacterStore.save(char);
+    const refused = await CommandRouter.route("take-merit sharpened-senses 5");
+    expect(refused).toContain("may not be taken more times than Resolve (3)");
+    expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
+    expect(await CommandRouter.route("take-merit sharpened-senses 5 waive=true")).toContain("5 pts");
+    // A ceiling that MOVES strands the purchases above it - reported, never trimmed.
+    expect(await CommandRouter.route("check-constraints")).toContain("sharpened-senses is at 5 but resolve is only 3");
+  });
+
+  test("a Resolve that is really Living Resolve caps it just the same", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const char = (await CharacterStore.load("Visvaldas"))!;
+    char.poolStarts["living-resolve"] = 30;      // the resource that REPLACED resolve
+    await CharacterStore.save(char);
+    expect(permanentRatingOf(char, "resolve")).toBe(30);
+    expect(await CommandRouter.route("take-merit sharpened-senses 6")).toContain("difficulty -6");
+  });
+
+  test("max-from-trait is authorable and survives the card round trip", async () => {
+    const reply = await CommandRouter.route('define-merit name=`Keen Nose` points=`1,2,3` '
+      + 'max-from-trait=resolve passive=`difficulty -1 if=perception` description=`A hound\'s nose.`');
+    expect(reply).toContain('merit "Keen Nose"');
+    expect(MeritFlawRegistry.get("keen-nose")!.maxFromTrait).toBe("resolve");
+    const text = (await LorebookManager.entryText("srd:merits-flaws", "srd:merits-flaws:custom"))!;
+    expect(text).toContain("max-from-trait: resolve");
+    MeritFlawRegistry.reset();
+    await MeritFlawRegistry.loadFromLorebook();
+    expect(MeritFlawRegistry.get("keen-nose")!.maxFromTrait).toBe("resolve");
+  });
 
   test("resolveMeritInstance: plain names, parameterized instances, malformed forms", () => {
     const lookup = (n: string) => MeritFlawRegistry.get(n);

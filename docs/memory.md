@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `4fe27aa`** ("Cards are written
-> in a language for people, not for parsers"). Prior: `ca94301` (the cap formula
+> **Last synced with the code as of commit `38f11a8`** ("Sharpened Senses,
+> and a ceiling that is a trait"). Prior: `094c61b` ("Cards are written
+> in a language for people, not for parsers"); `ca94301` (the cap formula
 > + a fused point at the floor); `d9e2829` ("Living Resolve IS
 > the other four: no phantom Willpower, Resolve's bonus"); `62e6534`
 > (define-merit + resource-gated passives); `2d2a45a` ("certainty scales
@@ -821,7 +822,9 @@ gates accept an array (ALL must be active). `cmdResources` lines gained
 perTurn/rollAs/recovery/description. Registrations: `cast`, `seal-spell`,
 `fellowships`. §7.43/§7.44 added `jsonCardBody` + `cmdConvertCards` (the one
 place JSON is still understood) and `cmdCosts`; `cmdSheet` reports
-"Held more than once" for a trait with `instances`.
+"Held more than once" for a trait with `instances`. §7.45 added
+`meritTraitCeiling` (the `maxFromTrait` ceiling, checked in `cmdTakeMerit` and
+reported by `meritInstanceFindings`).
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -2083,6 +2086,35 @@ and `prefill` are mocked/available but not yet written.
     (`{if(@curr eq 0) then 10 else [@curr*6]}`) is deliberately DEFERRED - a
     language nothing can execute is worse than a string that says what it means
     - and the table is the seam the XP engine will read when it lands.
+
+45. **Sharpened Senses, and a ceiling that is a trait** (user, pasting the
+    arcanum: "Each purchase of this Arcana provides a cumulative -1 modifier to
+    all Perception difficulties. A character may not purchase this Arcana more
+    times than his Resolve").
+    The bonus needed nothing new - it is the Trait Affinity shape exactly:
+    `passive: [{op: "difficulty", amount: -1, trait: "perception"}]`, since
+    passive amounts already SCALE by the points an instance is taken at and the
+    `trait` gate already means "the roll's POOL actually used this". So N
+    purchases = -N, and only on pools that really use Perception. Not
+    parameterized: the sense is fixed.
+    The CAP was the gap. `atMostOneAt` says "only one instance at this value",
+    which is a different rule; nothing said "the ceiling is a RATING". Added
+    **`MeritFlawDef.maxFromTrait?: string`** + `meritTraitCeiling(char, def)`
+    (game.ts): `[[take-merit]]` refuses above it (with `waive=true`, matching
+    how unmet prerequisites already behave), `[[merit]]` prints it,
+    `define-merit max-from-trait=` authors it, and the card writes it as
+    `max-from-trait:`.
+    Resolution is the load-bearing decision: **`permanentRatingOf(char, name)`**
+    (state.ts) tries the rated buckets, then `CharacterResources.resolveDef` -
+    the existing name/role/**replaces** lookup - and reads the OWNING resource's
+    value. So "resolve" finds a mage's Resolve tracker at 3 AND the Ouroboros'
+    Living Resolve at 30, with the definition saying only "resolve". It is
+    deliberately the PERMANENT rating, never the live pool: a creation-time
+    ceiling measured against a spent-down pool would rise and fall mid-scene.
+    A ceiling can MOVE (Resolve drops), which strands purchases above it -
+    `meritInstanceFindings` reports that ("sharpened-senses is at 5 but resolve
+    is only 3") and never trims the character, matching the surrounding
+    advisory-not-enforced policy for everything creation-related.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

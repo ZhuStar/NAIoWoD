@@ -34,6 +34,7 @@ import {
   advancementCostsFrom, CostTable, COST_PURSES,
   BackgroundDef, makeBackgroundDef, backgroundTierAt, TraitGrant,
   CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, fellowshipByName, ATTRIBUTES,
+  roadRatingExpr,
   DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, supernaturalTraitOf, categoryOpenTo,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
   meritFlawFromCard, InstanceLimit, instanceLimitsOf,
@@ -77,7 +78,9 @@ import {
   AdvancementCosts, COSTS_CONFIG_ENTRY,
   RollRulesConfig, ROLLS_CONFIG_ENTRY,
   ActiveWizard, WizardSession, CreatorMode,
+  characterScope, traitValueOf, evalOn, numericOn, derivedValuesOf, DerivedValue, ScopeExtension, roadOf,
 } from "./state";
+import { Numeric, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS } from "./core/expr";
 
 // --- The "resources" wizard: a guided editor for ResourceOverrides -----------
 interface RwState {
@@ -633,7 +636,10 @@ async function characterRollEnv(char: PlayableCharacter): Promise<{ resolver: (n
       const key = StringUtil.normalize(n);
       const bound = rollAs.find(b => b.names.includes(key));
       if (bound) return Math.max(0, Math.min(bound.def.rollAs?.cap ?? Infinity, bound.current));
-      return resolveTraitFromRecord(char, key) + (enh[key] ?? 0) + (boosts[key] ?? 0);
+      // traitValueOf, not the raw bucket: a rating a Background CONFERS and a
+      // value the template DERIVES are as real as one the player typed, so
+      // `[[roll willpower+courage]]` works on a sheet that states neither.
+      return traitValueOf(char, key) + (enh[key] ?? 0) + (boosts[key] ?? 0);
     },
     penalty,
     rollAs,
@@ -1634,10 +1640,32 @@ function budgetsOf(char: PlayableCharacter): Record<string, string> {
   return out;
 }
 
-// An expression -> a number, through the same evaluator pools use, so a budget
-// may one day be written in terms of the character's own traits.
-function evalBudget(expr: string, resolve: TraitResolver): number {
-  return parsePoolExpression(expr, resolve).total;
+// An expression -> a number, through the one expression language, so a budget
+// may be written in terms of the character's own traits.
+function evalBudget(char: PlayableCharacter, expr: string): number {
+  return Math.max(0, evalOn(char, expr).value);
+}
+
+// The purse namespaces an expression may reach: `budget:freebie` (what the
+// purse holds), `spent:freebie` (what has left it) and `left:freebie` (the
+// difference). state.ts cannot compute these - the ledger lives up here - so it
+// takes them as a scope EXTENSION, which is the seam a legality proof will use
+// to say "you have four Background dots you never assigned".
+function purseScope(char: PlayableCharacter): ScopeExtension {
+  return (path) => {
+    const [head, ...rest] = path;
+    if (!["budget", "spent", "left"].includes(head)) return undefined;
+    const purse = rest.join(":");
+    // The ledger reads traits, and a trait may itself be derived - but a purse
+    // is never part of a derivation, so the plain trait scope breaks the knot.
+    const resolve = (n: string): number => traitValueOf(char, n);
+    const spent = purseLedger(char, resolve)[purse]?.spent ?? 0;
+    if (head === "spent") return { value: spent };
+    const expr = budgetsOf(char)[purse];
+    if (expr === undefined) return undefined;
+    const budget = Math.max(0, evaluateExpr(expr, characterScope(char)).value);
+    return { value: head === "budget" ? budget : budget - spent };
+  };
 }
 
 // What each owned merit / flaw / arcanum / taint draws from its purse. The
@@ -1656,7 +1684,7 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
     const each = held?.length ? held : [{ rating, paid: char.paid?.[name] }];
     for (const one of each) {
       const override = (one as { paid?: string }).paid;
-      const cost = override !== undefined ? evalBudget(override, resolve) : one.rating;
+      const cost = override !== undefined ? evalBudget(char, override) : one.rating;
       backgrounds.spent += cost;
       backgrounds.items.push(`${name} ${one.rating}${override !== undefined ? ` (paid ${cost})` : ""}`);
     }
@@ -1669,7 +1697,7 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
     const purse = budgetOfKind(inst.def);
     const override = char.paid?.[inst.key];
     const listed = inst.points;
-    const cost = override !== undefined ? evalBudget(override, resolve) : listed;
+    const cost = override !== undefined ? evalBudget(char, override) : listed;
     const signed = kindSpends(inst.def.kind) ? cost : -cost;
     const row = out[purse] ?? { spent: 0, items: [] };
     row.spent += signed;
@@ -1695,7 +1723,7 @@ async function cmdBudget(cmd: ParsedCommand): Promise<string> {
     const items = ledger[purse]?.items ?? [];
     const detail = items.length ? ` [${items.join(", ")}]` : "";
     if (expr === undefined) return `${purse}: ${spent} spent, no budget set (Storyteller's call)${detail}`;
-    const total = evalBudget(expr, resolver);
+    const total = evalBudget(char, expr);
     return `${purse}: ${spent}/${total}${expr !== String(total) ? ` (${expr})` : ""}, ${total - spent} left${detail}`;
   });
   return sys(`${disp(char.name)} budgets - ${lines.join("; ")}. Advisory: nothing is enforced until creation is. `
@@ -1728,7 +1756,7 @@ async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   char.paid[key] = expr;
   await CharacterStore.save(char);
   const { resolver } = await characterRollEnv(char);
-  const value = evalBudget(expr, resolver);
+  const value = evalBudget(char, expr);
   return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
     + `[[budget]] counts it.`);
 }
@@ -1846,14 +1874,19 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
   const budget = creationOf(char);
   const limits = limitsFor(char);
   const lines: string[] = [];
+  // Every number below may be an EXPRESSION over this very character - a
+  // vampire's Attribute ceiling is `trait-max(generation)`, not 5 - so each is
+  // read through the character's own scope (state.ts).
+  const num = (v: Numeric | undefined, fallback: number): number => numericOn(char, v, fallback, purseScope(char));
+  const startOf = (name: string, free: number): number => num(limits[name]?.start, free);
 
   // Attributes and Abilities are per CATEGORY, so the priorities must be set.
   for (const kind of ["attributes", "abilities"] as const) {
     const pools = kind === "attributes" ? budget.attributes : budget.abilities;
-    const free = kind === "attributes" ? budget.attributeStart : budget.abilityStart;
+    const free = num(kind === "attributes" ? budget.attributeStart : budget.abilityStart, kind === "attributes" ? 1 : 0);
     const groups = await categoryTraits(kind);
     const slots = (["primary", "secondary", "tertiary"] as const).map(slot => ({
-      slot, category: char.priorities?.[`${kind}-${slot}`], allowed: pools[slot],
+      slot, category: char.priorities?.[`${kind}-${slot}`], allowed: num(pools[slot], 0),
     }));
     if (slots.some(x => !x.category)) {
       lines.push(`${kind}: ${slots.map(x => `${x.allowed}`).join("/")} to spend - `
@@ -1867,7 +1900,7 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
       if (!names) return `${x.slot} ${disp(x.category!)} ?/${x.allowed} ⚠ no such category`;
       const spent = names.reduce((sum, n) => {
         counted.add(n);
-        return sum + Math.max(0, (bucket[n] ?? free) - (limits[n]?.start ?? free));
+        return sum + Math.max(0, (bucket[n] ?? free) - startOf(n, free));
       }, 0);
       return `${x.slot} ${disp(x.category!)} ${spent}/${x.allowed}`;
     });
@@ -1875,7 +1908,7 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
     // chronicle's lists don't name, or a category the player never made a
     // priority. They are real dots, and silently dropping them would lie.
     const stray = Object.entries(bucket)
-      .filter(([n, v]) => !counted.has(n) && v > (limits[n]?.start ?? free))
+      .filter(([n, v]) => !counted.has(n) && v > startOf(n, free))
       .map(([n]) => disp(n));
     lines.push(`${kind}: ${bits.join(", ")}${stray.length ? ` ⚠ uncounted: ${stray.join(", ")}` : ""}`);
   }
@@ -1885,34 +1918,107 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
     const each = held?.length ? held : [{ rating: v, paid: char.paid?.[n] }];
     return sum + each.reduce((s, one) => s + ((one as { paid?: string }).paid !== undefined ? parseInt((one as { paid?: string }).paid!, 10) || 0 : one.rating), 0);
   }, 0);
-  lines.push(`backgrounds: ${bgSpent}/${budget.backgrounds}`);
+  lines.push(`backgrounds: ${bgSpent}/${num(budget.backgrounds, 5)}`);
 
   if (budget.disciplines !== undefined) {
     const clan = char.choices?.["clan"] ? clanByName(char.choices["clan"]) : undefined;
     const inClan = (clan?.disciplines ?? []).map(d => StringUtil.normalize(d));
     const spent = Object.entries(char.disciplines ?? {}).reduce((sum, [, v]) => sum + v, 0);
     const out = Object.keys(char.disciplines ?? {}).filter(d => inClan.length && !inClan.includes(d));
-    lines.push(`disciplines: ${spent}/${budget.disciplines}${clan ? ` (${clan.name}: ${inClan.map(d => disp(d)).join(", ")})` : " - [[choose clan]] first"}`
+    lines.push(`disciplines: ${spent}/${num(budget.disciplines, 0)}${clan ? ` (${clan.name}: ${inClan.map(d => disp(d)).join(", ")})` : " - [[choose clan]] first"}`
       + `${out.length ? ` ⚠ out of clan: ${out.map(d => disp(d)).join(", ")}` : ""}`);
   }
   if (budget.virtues !== undefined) {
-    const spent = Object.values(char.virtues ?? {}).reduce((a, b) => a + b, 0) - Object.keys(char.virtues ?? {}).length;
-    lines.push(`virtues: ${Math.max(0, spent)}/${budget.virtues} (over one free dot each)`);
+    const free = num(budget.virtueStart, 1);
+    const spent = Object.values(char.virtues ?? {}).reduce((a, b) => a + b, 0) - free * Object.keys(char.virtues ?? {}).length;
+    lines.push(`virtues: ${Math.max(0, spent)}/${num(budget.virtues, 0)} (over ${free} free dot each)`);
   }
-  lines.push(`freebies: ${budget.freebies} to spend ([[costs]] prices them)`);
-  const caps = Object.entries(limits).map(([t, l]) => `${disp(t)} ${l.start ?? 0}-${l.max ?? 5}`);
-  // A rating the limit forbids: a Nosferatu sheet still carrying the free
-  // Appearance dot every other character gets. Said, not corrected.
-  const over = Object.entries(limits).flatMap(([t, l]) => {
-    const rating = char.attributes?.[t] ?? char.abilities?.[t];
-    return rating !== undefined && l.max !== undefined && rating > l.max ? [`${disp(t)} ${rating} > ${l.max}`] : [];
+  lines.push(`freebies: ${num(budget.freebies, 15)} to spend ([[costs]] prices them)`);
+
+  // The ceilings, which for a vampire are a consequence of generation rather
+  // than a number: Attributes 1-6 at the 7th. Per-trait exceptions follow.
+  const ceilings: Array<[string, keyof PlayableCharacter, Numeric | undefined, Numeric | undefined]> = [
+    ["attributes", "attributes", budget.attributeStart, budget.attributeMax],
+    ["abilities", "abilities", budget.abilityStart, budget.abilityMax],
+    ...(budget.disciplines !== undefined ? [["disciplines", "disciplines", 0, budget.disciplineMax ?? budget.abilityMax] as [string, keyof PlayableCharacter, Numeric, Numeric]] : []),
+  ];
+  const over: string[] = [];
+  const caps = ceilings.map(([label, bucketKey, start, max]) => {
+    const lo = num(start, 0), hi = num(max, 5);
+    for (const [t, v] of Object.entries((char[bucketKey] ?? {}) as Record<string, number>)) {
+      const cap = limits[t]?.max !== undefined ? num(limits[t].max, hi) : hi;
+      if (v > cap) over.push(`${disp(t)} ${v} > ${cap}`);
+    }
+    return `${label} ${lo}-${hi}`;
   });
-  if (caps.length) lines.push(`limits: ${caps.join(", ")}${over.length ? ` ⚠ over: ${over.join(", ")}` : ""}`);
+  // A rating a per-trait limit forbids: a Nosferatu sheet still carrying the
+  // free Appearance dot every other character gets. Said, not corrected.
+  const exceptions = Object.entries(limits).map(([t, l]) => `${disp(t)} ${num(l.start, 0)}-${num(l.max, 5)}`);
+  lines.push(`ceilings: ${[...caps, ...exceptions].join(", ")}${over.length ? ` ⚠ over: ${over.join(", ")}` : ""}`);
+
+  // What the sheet IMPLIES rather than states, with its arithmetic shown.
+  const derived = derivedValuesOf(char, purseScope(char));
+  if (derived.length) lines.push(`derived: ${derived.map(d => derivedLine(d, char)).join(", ")}`);
+
   // The notes are whole sentences the splat's own book states; they follow the
   // pools rather than joining them, so the punctuation stays readable.
   const notes = budget.notes?.length ? ` ${budget.notes.join(" ")}` : "";
 
   return sys(`${disp(char.name)} creation - ${lines.join("; ")}.${notes} Advisory: nothing is enforced.`);
+}
+
+// derived - what this sheet implies rather than states, and why.
+async function cmdDerived(cmd: ParsedCommand): Promise<string> {
+  const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
+  const char = raw ? await CharacterStore.load((await resolveCharacterRef(raw)).name ?? raw) : await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const derived = derivedValuesOf(char, purseScope(char));
+  if (!derived.length) {
+    return sys(`${disp(char.name)} derives nothing - this template states every number outright. `
+      + `[[eval <expression>]] still reads the sheet.`);
+  }
+  const lines = derived.map(d => {
+    const kind = d.when === "always" ? "always" : d.overridden !== undefined ? "started here, now the sheet's" : "starts here";
+    return `${derivedLine(d, char)} [${kind}]${d.note ? ` - ${d.note}` : ""}`;
+  });
+  return sys(`${disp(char.name)} derived - ${lines.join("; ")}. `
+    + `An "always" value recomputes whatever the sheet says; a starting one steps aside once you rate it.`);
+}
+
+// eval <expression> - the whole reference system, exposed. This is how you find
+// out what the engine thinks a name means without guessing from a report.
+async function cmdEval(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return sys(`No active character. Select one with [[play name="..."]].`);
+  const expr = (cmd.named["expression"] ?? cmd.positional.join(" ")).trim();
+  if (!expr) {
+    return sys(`[[eval <expression>]] reads an expression against ${disp(char.name)}. `
+      + `Names are traits (\`courage\`, \`self-control\`); a path asks one place (\`background:generation\`, `
+      + `\`derived:willpower\`, \`granted:sanctum\`, \`budget:freebie\`, \`spent:freebie\`, \`left:freebie\`). `
+      + `Arithmetic is + - * / and ( ); functions are ${BUILTIN_FUNCTIONS.join(", ")}, trait-max, blood-max, road-virtues. `
+      + `Mind the hyphen: \`a - b\` needs the spaces, \`self-control\` does not.`);
+  }
+  const out = evalOn(char, expr, purseScope(char));
+  if (out.error) return sys(`Cannot read "${expr}": ${out.error}.`);
+  // Showing the work is only worth it when there IS work: a single reference
+  // restating itself ("road = 2 = road 2") is noise, unless it came from
+  // somewhere worth naming.
+  const one = out.terms.length === 1 ? out.terms[0] : undefined;
+  const work = one && !one.from ? "" : ` = ${describeTerms(out.terms)}`;
+  const missed = out.unknown.length ? ` ⚠ nothing answers to ${out.unknown.join(", ")}` : "";
+  return sys(`${disp(char.name)}: ${expr} = ${out.value}${work}${missed}`);
+}
+
+// One derived value, said the way a Storyteller would check it: the number, the
+// arithmetic behind it, and whether the sheet has overridden a starting value.
+function derivedLine(d: DerivedValue, char?: PlayableCharacter): string {
+  if (d.error) return `${disp(d.trait)} ⚠ ${d.error}`;
+  const shown = d.overridden ?? d.value;
+  const why = d.overridden !== undefined
+    ? `sheet ${d.overridden}, would start at ${d.value}`
+    // `road-virtues()` is opaque until it says WHICH Virtues; the Road knows.
+    : describeTerms(d.terms).replace("road-virtues()", char ? roadRatingExpr(roadOf(char)) : "road-virtues()");
+  return `${disp(d.trait)} ${shown} (${why})`;
 }
 
 // backgrounds / background <name> - the bag Backgrounds never had.
@@ -4557,6 +4663,14 @@ CommandRouter.register("creation", cmdCreation, {
   summary: "the creation budget: every pool against what the sheet holds (advisory)",
   params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
 });
+CommandRouter.register("derived", cmdDerived, {
+  summary: "what the sheet implies rather than states: Road, Willpower, generation, and why",
+  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
+});
+CommandRouter.register("eval", cmdEval, {
+  summary: "read an expression against the current character (the reference system, exposed)",
+  params: [{ key: "expression", kind: "positional", hint: "<expression>", example: "12 - background:generation" }],
+});
 CommandRouter.register("choose", cmdChoose, {
   summary: "pick a clan, a fellowship, or the Attribute/Ability priorities",
   params: [
@@ -4980,7 +5094,7 @@ const QUIET_VERBS = new Set<string>([
   "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
   // The creation-side listings: all read-only, all for the player's eyes.
   "creation", "clans", "clan", "budget", "paid", "costs", "backgrounds", "background",
-  "arcana", "arcanum", "supernatural",
+  "arcana", "arcanum", "supernatural", "derived", "eval",
 ]);
 
 // =============================================================================

@@ -587,6 +587,83 @@ persists in story storage.
 - Position decides what `@` means: in a **pool** slot it's a saved roll
   (`[[roll @dodge]]`); in a **character** slot it's an alias (`[[play @kat]]`).
 
+### Expressions — the one arithmetic, and how to point at the sheet
+
+Every number a chronicle can *write* instead of hard-code goes through the same
+tiny language (`src/core/expr.ts`, pure, ~250 lines): a dice pool, a difficulty,
+an effect cap, a purse budget, a trait ceiling, a derived value.
+
+```
+strength + brawl              a pool
+12 - background:generation    a fact about the blood
+trait-max(generation)         a ceiling that is a consequence
+max(cray + fount, 5)          starting Quintessence
+```
+
+- **Arithmetic** is `+ - * /` with `( )` and the usual precedence.
+- **Functions**: `min`, `max`, `sum`, `abs`, `floor`, `ceil`, `round`, plus the
+  domain ones — `trait-max(gen)`, `blood-max(gen)`, `road-virtues()`.
+- **A reference** is a name, or a colon path that asks *one* place:
+
+  | Reference | Answers with |
+  |---|---|
+  | `courage` | the sheet, then what a Background confers, then what the template derives |
+  | `attribute:` `ability:` `background:` `virtue:` `discipline:` `trait:` `pool:` | that bucket alone |
+  | `derived:willpower` | what it *would* be, ignoring the sheet |
+  | `granted:sanctum` | only what a Background confers |
+  | `budget:freebie` / `spent:freebie` / `left:freebie` | the purse |
+
+  So a Background named *Generation* and the derived `generation` stay different
+  numbers: `background:generation` is 5, `generation` is 7.
+
+> ⚠️ **The hyphen rule.** Trait names contain hyphens (`self-control`,
+> `al-ikhlas`) and arithmetic needs subtraction, so a hyphen belongs to a *name*
+> only when a **letter** follows it. `self-control` is one name; `courage - 1`
+> and `12-generation` are subtraction. Between two names, put the spaces in.
+
+**An unanswered reference is 0 *and is reported*** — a typo used to read as zero
+in silence. A malformed expression is worth 0 and says why; nothing throws,
+because a bad card must never take the story down with it.
+
+**`[[eval <expression>]]`** is this whole system, exposed — the way to ask what
+the engine thinks a name means:
+
+```
+[[eval strength + courage - 1]]
+→ Sasha: strength + courage - 1 = 8 = strength 6 + courage 3 - 1
+[[eval 12 - background:generation]]
+→ Sasha: 12 - background:generation = 7 = 12 - background:generation 5
+```
+
+### Derived values — what a sheet implies rather than states
+
+A vampire's Road is the sum of its two Road Virtues; its Willpower equals its
+Courage; its generation is 12 minus the Generation Background, and *that* sets
+how high its Attributes, Abilities and Disciplines may go. None of these is a
+number the player types, so none is stored: they live on the template as
+expressions (`TemplateConfig.Derived`) and are computed on demand.
+
+`when` is the whole distinction:
+
+- **`start`** — a *seed*. It answers while the sheet's own entry is absent or 0;
+  the moment you rate the trait, the sheet wins. (Willpower starts at Courage,
+  then freebies buy it up.) The report still says where it began.
+- **`always`** — an *identity*. It recomputes whatever the sheet says, because
+  it is not a rating at all. (Generation **is** 12 minus the Background.)
+
+```
+[[derived]]
+→ Sasha derived - Generation 7 (12 - background:generation 5) [always];
+  Road 3 (conscience + self-control 3) [starts here];
+  Willpower 6 (sheet 6, would start at 3) [started here, now the sheet's];
+  Blood Pool Max 20 (blood-max(generation) 20) [always]
+```
+
+Derived values are real everywhere: `[[roll willpower]]` works on a sheet that
+never stated one, and `[[creation]]` reports `ceilings: attributes 1-6` for a
+7th-generation vampire without anyone editing a ceiling. Circular derivations
+are reported, not crashed.
+
 ### The roll command
 
 `[[roll <pool> [difficulty] [difficulty-mod] requires=N dice-modifier=±N tags="a,b"]]`

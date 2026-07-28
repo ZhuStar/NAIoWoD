@@ -30,7 +30,9 @@ import {
   BackgroundDef, makeBackgroundDef, DEFAULT_BACKGROUNDS, grantsFromBackgrounds,
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
   EffectOp, resolveMeritInstance, passiveOpsOf,
+  Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
 } from "./rules";
+import { ExprScope, ExprResult, Numeric, evaluateExpr, evalNumeric } from "./core/expr";
 import {
   ScopedStorage, LorebookManager, MeritFlawRegistry,
   ListConfigStore, MapConfigStore, CONFIG_CATEGORY,
@@ -567,13 +569,23 @@ export class CharacterStore {
       ...await LorebookManager.allKnowledges(),
     ];
     for (const ab of abilityNames) abilities[StringUtil.normalize(ab)] = 0;
+    // A splat with Virtues seeds its Road's three at the free dot, the same way
+    // Attributes seed at 1. Without them a vampire's derived Road and Willpower
+    // would read 0 - the numbers are real from the moment the sheet exists.
+    const virtues: Record<string, number> = {};
+    for (const key of templates) {
+      const tpl = TEMPLATES[StringUtil.normalize(key)];
+      if (!tpl?.HasVirtues) continue;
+      const free = typeof tpl.Creation.virtueStart === "number" ? tpl.Creation.virtueStart : 1;
+      for (const v of (tpl.Morality?.road ?? ROAD_OF_HUMANITY).virtues) virtues[StringUtil.normalize(v)] = free;
+    }
     return {
       id: api.v1.uuid(),
       name,
       templates: templates.map(t => StringUtil.normalize(t)),
       stage: "potential",
       attributes, abilities,
-      backgrounds: {}, virtues: {}, disciplines: {}, traits: {},
+      backgrounds: {}, virtues, disciplines: {}, traits: {},
       // Seed a Willpower start ONLY if these templates actually grant one: a
       // character whose Willpower is replaced (the Ouroboros' Living Resolve)
       // must not carry a phantom willpower entry that trait lookups can find.
@@ -860,6 +872,218 @@ export function resolveTraitFromRecord(char: PlayableCharacter, name: string): n
   const buckets = [char.attributes, char.abilities, char.backgrounds, char.virtues, char.disciplines, char.traits, char.poolStarts];
   for (const b of buckets) if (n in b) return b[n];
   return 0;
+}
+
+// =============================================================================
+// THE CHARACTER SCOPE - what an expression may refer to
+// -----------------------------------------------------------------------------
+// One place answers "what is this name worth on this sheet", so every expression
+// in the engine - a pool, a difficulty, a purse budget, a trait ceiling, a
+// derived value - reads the character the same way.
+//
+// A bare name searches the buckets in the usual order and falls back to what a
+// Background CONFERS and then to what the template DERIVES. A prefixed path
+// asks one place and only that place, which is how a Background named
+// Generation and the derived `generation` stay different numbers:
+//
+//     generation              7   (derived: 12 minus the Background)
+//     background:generation   5   (the dots on the sheet)
+//     derived:willpower       1   (what it WOULD be, ignoring the sheet)
+//
+// The `extend` hook is how a layer above adds namespaces it owns without this
+// module reaching upwards: game.ts hands in `budget:` / `spent:` / `left:` from
+// the purse ledger, which is what a legality proof will be built on.
+// =============================================================================
+const TRAIT_NAMESPACES: Record<string, keyof PlayableCharacter> = {
+  attribute: "attributes", ability: "abilities", background: "backgrounds",
+  virtue: "virtues", discipline: "disciplines", trait: "traits", pool: "poolStarts",
+};
+
+export type ScopeExtension = (path: string[]) => { value: number; from?: string } | undefined;
+
+// The names a namespace RECOGNISES, whether or not this sheet rates them. Only
+// the closed vocabularies answer: Abilities and Virtues are already seeded into
+// their buckets, and `trait:` is deliberately open, so an unrated name there is
+// genuinely unknown.
+function knownTraitNames(namespace: string): string[] {
+  if (namespace === "attribute") return ALL_ATTRIBUTES.map(a => StringUtil.normalize(a));
+  if (namespace === "background") return BackgroundRegistry.all().map(b => StringUtil.normalize(b.name));
+  if (namespace === "discipline") return Object.keys(DISCIPLINES).map(d => StringUtil.normalize(d));
+  return [];
+}
+
+// Every derivation these templates declare, LAST template winning a name.
+export function derivationsOf(char: PlayableCharacter): Derivation[] {
+  const byTrait = new Map<string, Derivation>();
+  for (const key of char.templates) {
+    for (const d of TEMPLATES[StringUtil.normalize(key)]?.Derived ?? []) {
+      byTrait.set(StringUtil.normalize(d.trait), { ...d, trait: StringUtil.normalize(d.trait) });
+    }
+  }
+  return [...byTrait.values()];
+}
+
+// One computed derivation, with everything a report needs to explain it.
+export interface DerivedValue {
+  trait: string;
+  value: number;
+  expr: string;
+  when: "start" | "always";
+  note?: string;
+  terms: ExprResult["terms"];
+  unknown: string[];
+  error?: string;
+  overridden?: number;   // the sheet's own rating, when it wins over a "start"
+}
+
+// The functions an expression may call beyond the arithmetic built-ins. Domain
+// knowledge, so it lives with the rules it comes from.
+function scopeFunctions(char: PlayableCharacter, value: (name: string) => number) {
+  return (name: string, args: number[]): number | undefined => {
+    switch (name) {
+      case "trait-max": return traitMaxForGeneration(args[0] ?? 13);
+      case "blood-max": return bloodForGeneration(args[0] ?? 13).max;
+      case "blood-per-turn": return bloodForGeneration(args[0] ?? 13).perTurn;
+      // The sum of the CURRENT Road's rating Virtues - a chronicle that invents
+      // a Road gets its derivation without touching this code. `roadRatingExpr`
+      // spells the same thing, so a report can say WHICH Virtues.
+      case "road-virtues": return roadOf(char).ratingVirtues.reduce((sum, v) => sum + value(v), 0);
+      default: return undefined;
+    }
+  };
+}
+
+// The Road this character walks: an explicit choice, else the template's.
+export function roadOf(char: PlayableCharacter): RoadDefinition {
+  const chosen = StringUtil.normalize(char.choices?.["road"] ?? "");
+  for (const key of char.templates) {
+    const road = TEMPLATES[StringUtil.normalize(key)]?.Morality?.road;
+    if (road && (!chosen || StringUtil.normalize(road.name) === chosen)) return road;
+  }
+  return ROAD_OF_HUMANITY;
+}
+
+// Everything this character's template derives, computed. Lazy and memoized
+// with a cycle guard, because a derivation may reference another one
+// (`trait-max(generation)` needs `generation` first) and a chronicle may
+// eventually write one that references itself.
+export function derivedValuesOf(char: PlayableCharacter, extend?: ScopeExtension): DerivedValue[] {
+  return buildScope(char, extend).derived;
+}
+
+interface CharacterScope { scope: ExprScope; derived: DerivedValue[]; valueOf: (name: string) => number }
+
+function buildScope(char: PlayableCharacter, extend?: ScopeExtension): CharacterScope {
+  const defs = derivationsOf(char);
+  const byTrait = new Map(defs.map(d => [d.trait, d]));
+  const done = new Map<string, DerivedValue>();
+  const running = new Set<string>();
+  const granted = grantedTraitsOf(char);
+
+  // The value a bare name is worth: the sheet, then a Background's grant, then
+  // the derivation - each only when the one before it had nothing to say.
+  const valueOf = (name: string): number => {
+    const key = StringUtil.normalize(name);
+    const own = resolveTraitFromRecord(char, key);
+    const def = byTrait.get(key);
+    if (def && (def.when ?? "start") === "always") return derive(key).value;
+    if (own) return own;
+    const grant = granted[key]?.rating ?? 0;
+    if (grant) return grant;
+    return def ? derive(key).value : 0;
+  };
+
+  const derive = (key: string): DerivedValue => {
+    const cached = done.get(key);
+    if (cached) return cached;
+    const def = byTrait.get(key)!;
+    const when = def.when ?? "start";
+    const own = resolveTraitFromRecord(char, key);
+    if (running.has(key)) {
+      // A cycle is a chronicle's mistake, not a crash: the name is worth
+      // whatever the sheet says and the report names the loop.
+      const stuck: DerivedValue = { trait: key, value: own, expr: def.expr, when, note: def.note, terms: [], unknown: [], error: `${key} defines itself in a circle` };
+      done.set(key, stuck);
+      return stuck;
+    }
+    running.add(key);
+    const out = evaluateExpr(def.expr, scope);
+    running.delete(key);
+    const computed: DerivedValue = {
+      trait: key, value: out.error ? own : out.value, expr: def.expr, when, note: def.note,
+      terms: out.terms, unknown: out.unknown,
+      ...(out.error ? { error: out.error } : {}),
+      ...(when === "start" && own ? { overridden: own } : {}),
+    };
+    done.set(key, computed);
+    return computed;
+  };
+
+  const scope: ExprScope = {
+    lookup: (path) => {
+      if (path.length === 1) {
+        const key = path[0];
+        if (byTrait.has(key) || resolveTraitFromRecord(char, key) || granted[key]) {
+          return { value: valueOf(key), from: granted[key] && !resolveTraitFromRecord(char, key) ? `from ${granted[key].from}` : undefined };
+        }
+        return undefined;
+      }
+      const [head, ...rest] = path;
+      const name = rest.join(":");
+      const bucket = TRAIT_NAMESPACES[head];
+      if (bucket) {
+        const values = (char[bucket] ?? {}) as Record<string, number>;
+        if (name in values) return { value: values[name] };
+        // UNRATED is not UNKNOWN. A Background this chronicle defines but the
+        // character has no dots in is worth 0 - that is a real answer, and
+        // `12 - background:generation` must not read as a typo on every sheet
+        // without the Background. A name the chronicle does not define at all
+        // still comes back unknown, which is the whole point.
+        return knownTraitNames(head).includes(name) ? { value: 0 } : undefined;
+      }
+      if (head === "derived") return byTrait.has(name) ? { value: derive(name).value } : undefined;
+      if (head === "granted") return granted[name] ? { value: granted[name].rating, from: `from ${granted[name].from}` } : undefined;
+      return extend?.(path);
+    },
+    call: scopeFunctions(char, (n) => valueOf(n)),
+  };
+
+  // Compute every derivation, so a caller that wants the whole picture
+  // ([[derived]], [[sheet]]) gets it without re-walking.
+  for (const d of defs) derive(d.trait);
+  return { scope, derived: defs.map(d => done.get(d.trait)!), valueOf };
+}
+
+// THE seam: an expression scope over this character.
+export function characterScope(char: PlayableCharacter, extend?: ScopeExtension): ExprScope {
+  return buildScope(char, extend).scope;
+}
+
+// A trait as every reader should see it: the sheet, a Background's grant, or
+// the template's derivation - whichever actually has something to say.
+export function traitValueOf(char: PlayableCharacter, name: string, extend?: ScopeExtension): number {
+  return buildScope(char, extend).valueOf(name);
+}
+
+// Evaluate one expression against a character, keeping the whole result so the
+// caller can show its work (and name what it did not recognise).
+export function evalOn(char: PlayableCharacter, expr: string, extend?: ScopeExtension): ExprResult {
+  return evaluateExpr(expr, characterScope(char, extend));
+}
+
+// A rules field that is a number OR an expression, resolved for this character.
+export function numericOn(char: PlayableCharacter, value: Numeric | undefined, fallback: number, extend?: ScopeExtension): number {
+  return evalNumeric(value, characterScope(char, extend), fallback);
+}
+
+// The trait limits in force, with every expression already resolved.
+export function resolvedLimit(char: PlayableCharacter, limit: TraitLimit, fallbackStart: number, fallbackMax: number, extend?: ScopeExtension): { start: number; max: number; note?: string } {
+  const scope = characterScope(char, extend);
+  return {
+    start: evalNumeric(limit.start, scope, fallbackStart),
+    max: evalNumeric(limit.max, scope, fallbackMax),
+    ...(limit.note ? { note: limit.note } : {}),
+  };
 }
 
 // Which KIND of trait a name is, for the rules that ration by kind ("at most

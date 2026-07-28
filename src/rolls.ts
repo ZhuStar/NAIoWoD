@@ -10,6 +10,7 @@
 // =============================================================================
 import { Dice, Rng, RollResult } from "./core/dice";
 import { StringUtil } from "./core/traits";
+import { evaluateExpr, ExprScope } from "./core/expr";
 
 // Resolves a trait name to its dice value (0 when the character lacks it).
 export type TraitResolver = (name: string) => number;
@@ -54,21 +55,27 @@ export function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollS
 
 // --- POOL EXPRESSION ---
 export interface PoolPart { token: string; value: number; isLiteral: boolean; }
-export interface PoolBreakdown { parts: PoolPart[]; total: number; }
+export interface PoolBreakdown { parts: PoolPart[]; total: number; unknown: string[]; error?: string }
 
-// "strength+brawl" / "3+2" / "7" / "willpower" -> summed dice (>= 0). Each
-// '+'-separated part is an integer literal or a trait name resolved via
-// `resolve`. The pool source is a single token (no spaces) so it never collides
-// with the positional difficulty / difficulty-modifier that follow it.
+// A TraitResolver, seen as the expression language's scope: a pool names
+// traits, so a path is just a name (`background:generation` reaches the
+// resolver as the whole string, and the character scope splits it there).
+export function resolverScope(resolve: TraitResolver): ExprScope {
+  return { lookup: (path) => ({ value: resolve(path.join(":")) }) };
+}
+
+// "strength+brawl" / "3+2" / "7" / "willpower" / "strength + brawl - 1" ->
+// summed dice (>= 0), through the one expression language (core/expr.ts). The
+// pool source is USUALLY a single token, because a bare `[[roll ...]]` argument
+// cannot contain spaces without quoting - but a saved roll or a card may write
+// it out in full.
 export function parsePoolExpression(expr: string, resolve: TraitResolver): PoolBreakdown {
-  const parts: PoolPart[] = [];
-  for (const raw of expr.split("+")) {
-    const token = raw.trim();
-    if (token.length === 0) continue;
-    if (/^-?\d+$/.test(token)) parts.push({ token, value: parseInt(token, 10), isLiteral: true });
-    else parts.push({ token, value: resolve(token), isLiteral: false });
-  }
-  return { parts, total: Math.max(0, parts.reduce((s, p) => s + p.value, 0)) };
+  const out = evaluateExpr(expr, resolverScope(resolve));
+  const parts: PoolPart[] = out.terms.map(t => ({ token: t.label, value: t.value, isLiteral: t.kind === "literal" }));
+  return {
+    parts, total: Math.max(0, out.value), unknown: out.unknown,
+    ...(out.error ? { error: out.error } : {}),
+  };
 }
 
 function prettyPool(expr: string): string {

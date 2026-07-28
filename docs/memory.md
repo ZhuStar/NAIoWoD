@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `725fa3a`** ("The budget a
-> character is built against"). Prior: `5778ec5` ("Backgrounds get a bag
+> **Last synced with the code as of commit `e26e005`** ("One arithmetic,
+> and a way to point at the sheet"). Prior: `725fa3a` ("The budget a
+> character is built against"); `5778ec5` ("Backgrounds get a bag
 > of their own"); `cb386af` ("An arcanum is not
 > filed under merits; set-trait; families of power"). Prior: `84c5aa0` ("Arcana are not
 > Merits: their own purse, priced per template"). Prior: `3cb162a` ("Rationed top
@@ -271,6 +272,32 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   block OR `- name:` items). `canonicalCardText` = order-independent digest
   (keys sorted, whitespace collapsed) — what `structuralHash` hashes.
 
+### src/core/expr.ts (~250) — the one expression language (§7.55)
+Pure, zero imports. EVERY number a chronicle can write instead of hard-code
+parses here: pools, difficulties, effect caps, purse budgets, trait ceilings,
+derived values.
+- **THE HYPHEN RULE**: inside a name, `-` continues the name only when a
+  **letter** follows it. `self-control` is one name; `courage - 1` and
+  `12-generation` are subtraction (a number token can never absorb a hyphen).
+  Every expression written before this module existed still parses the same.
+- Grammar: `expr := term (('+'|'-') term)*`, `term := factor (('*'|'/') factor)*`,
+  `factor := '-' factor | primary`, `primary := num | name'(' args ')' | name |
+  '(' expr ')'`. Recursive descent, evaluating as it goes (no tree is kept).
+- `ExprScope {lookup(path: string[]), call?(name, args)}` — `undefined` (not 0)
+  is how a scope says it does not know a name. `EMPTY_SCOPE`, `mapScope(values)`.
+- `evaluateExpr(expr, scope) -> ExprResult {value, terms, unknown, error?}`.
+  **`terms`** are the top-level addends with SIGNED values (a term that recorded
+  exactly one leaf keeps its identity, so a bare ref stays a ref); `ExprTerm
+  .negated` exists because `-0` cannot carry a sign. **`unknown`** is the point:
+  a typo used to read as 0 in silence. **Nothing throws** — a malformed
+  expression is value 0 with `error` set.
+- `evalNumber(expr, scope, fallback)`, **`Numeric = number | string`**,
+  `evalNumeric(value, scope, fallback)` — the type every rules field that might
+  be written in terms of the character now uses.
+- `exprRefs(expr)` (static analysis, for cycle checks and provenance),
+  `describeTerms(terms)` ("Strength 4 + Brawl 3 - 1"), `BUILTIN_FUNCTIONS`
+  (min/max/sum/abs/floor/ceil/round).
+
 ### src/core/dice.ts (~130)
 - `Rng` = () => number in [0,1); `Random(min,max,rng)`.
 - `Dice.roll(input: number | RollTrait[], options)` → `RollResult`: difficulty
@@ -472,6 +499,18 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
   `exclusiveDefs()` + **`EXCLUSIVE_MERITS_FLAWS`** (13+6 pairs, prepended to
   `DEFAULT_MERITS_FLAWS`). `DEFAULT_ADVANCEMENT_COSTS`: foundation freebie 5,
   pillar 3, new `specialty` row.
+- **§7.55 additions — expressions**: every `CreationBudget` /`PriorityPools` /
+  `TraitLimit` field is now **`Numeric`** (a number OR an expression), plus
+  `disciplineMax` and `virtueStart`. `traitLimitFor` takes a `"discipline"`
+  kind. **`Derivation {trait, expr, when?: "start"|"always", note?}`** +
+  `TemplateConfig.Derived: Derivation[]`. `TRAIT_MAX_BY_GENERATION` +
+  **`traitMaxForGeneration`** (8th and thinner: 5; 7th: 6; 3rd: 10);
+  `roadRatingExpr(road)` spells a Road's rating Virtues as an expression. The
+  **Generation Background** joins `DEFAULT_BACKGROUNDS` (max 5, vampire/ghoul/
+  revenant, a tier note per step). TEMPLATE_VAMPIRE's Creation gained
+  `attributeMax`/`abilityMax`/`disciplineMax` = `"trait-max(generation)"` and
+  four derivations (generation, road, willpower, blood-pool-max); the notes it
+  used to carry for those are gone, because they are computed now.
 - `bloodForGeneration(gen)` — classic table gen 3–15 → `{max, perTurn}`.
 - Roads: `RoadDefinition {name, virtues[3], ratingVirtues[2]}` —
   `ROAD_OF_HUMANITY` (conscience/self-control/courage), `ROAD_OF_KINGS`
@@ -694,6 +733,38 @@ and the future "ready character" path):
   virtues were engaged, generation-sized blood, morality (derived from the
   road's two rating virtues when `deriveFromVirtues`), tags→merits ordering.
 
+**§7.55 — THE CHARACTER SCOPE** (right after `resolveTraitFromRecord`, which is
+unchanged and still the RAW bucket read). One place answers "what is this name
+worth on this sheet", so every expression in the engine reads a character the
+same way.
+- `characterScope(char, extend?)` → `ExprScope`. A **bare** name = sheet →
+  Background grant → derivation, first one with something to say. A **prefixed**
+  path asks one place: the seven `TRAIT_NAMESPACES` (attribute/ability/
+  background/virtue/discipline/trait/pool), `derived:` (force the derivation,
+  ignoring the sheet), `granted:` (only what a Background confers). Anything
+  else falls through to `extend`.
+- **UNRATED ≠ UNKNOWN**: a namespaced name the CHRONICLE defines but the sheet
+  does not rate is 0, not a typo — `knownTraitNames()` checks ALL_ATTRIBUTES /
+  `BackgroundRegistry` / `DISCIPLINES` (Abilities and Virtues are already seeded
+  into their buckets; `trait:` is deliberately open, so unrated there IS
+  unknown). Without this, `12 - background:generation` would read as a typo on
+  every sheet without the Background.
+- `ScopeExtension` is the upward seam: game.ts hands in `budget:`/`spent:`/
+  `left:` from the purse ledger (state.ts cannot compute those). THIS is what a
+  legality proof will be built on.
+- `derivationsOf(char)` (last template wins a name), `derivedValuesOf(char)` →
+  `DerivedValue[] {trait, value, expr, when, note?, terms, unknown, error?,
+  overridden?}`, `traitValueOf`, `evalOn`, `numericOn`, `resolvedLimit`,
+  `roadOf(char)` (an explicit `choices.road`, else the template's).
+- Lazy + **memoized with a cycle guard**: a derivation may reference another
+  (`trait-max(generation)` needs `generation`), and a circular one is reported
+  (`X defines itself in a circle`) with the sheet's own value, never a crash.
+- Domain functions live here because the domain does: `trait-max`, `blood-max`,
+  `blood-per-turn`, `road-virtues`.
+- `newPotential` now SEEDS the Road's three Virtues at their free dot (like
+  Attributes at 1) for any template with `HasVirtues` — without them a fresh
+  vampire's derived Road and Willpower would read 0 instead of 2 and 1.
+
 **Playable characters (the current creation path)**:
 - `PlayableCharacter` record: `{id: uuid (the FOREVER identity — recoverable
   from storyStorage even if the lorebook entry is deleted), name, templates[]
@@ -870,6 +941,17 @@ triples; unknown categories refused with the known list), **`cmdClans`**
 (`clans` + `clan <name>`). `resolveFoundation` gained a `chosen` argument that
 WINS over auto-detection; `unmetRequirements` gained the `choices` gate, which
 compares clans by FAMILY. Registrations: `creation`, `choose`, `clans`, `clan`.
+
+**§7.55 additions — expressions in play**: `purseScope(char)` (the
+`budget:`/`spent:`/`left:` ScopeExtension, built on `purseLedger` +
+`budgetsOf`); `evalBudget(char, expr)` now goes through `evalOn` rather than the
+pool parser; `characterRollEnv`'s resolver reads **`traitValueOf`** instead of
+the raw bucket, so a conferred or derived value is rollable
+(`[[roll willpower]]` on a sheet that states no Willpower); `cmdCreation`
+resolves every budget field through `numericOn` and reports a **`ceilings:`**
+line (the generation-driven maxima) plus a **`derived:`** line; `derivedLine`
+(expands `road-virtues()` to the actual Virtues via `roadRatingExpr`+`roadOf`).
+New commands **`[[derived]]`** and **`[[eval <expression>]]`** (both QUIET).
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -2519,6 +2601,66 @@ and `prefill` are mocked/available but not yet written.
     has to sit ABOVE it in rules.ts or the module crashes with "used before
     initialization" at import time.
 
+55. **Expressions, and references into the sheet** (user: "we have to finally
+    come up with a way to evaluate expressions and refer to other parts of the
+    character", with three cases: Generation 5 → 7th generation → every ceiling
+    6; Road = the sum of the two Road Virtues, 2 before assigning; Willpower =
+    Courage, 1 after assigning. Explicitly asked to design for three FUTURE
+    passes: modifying a template, extending one by overriding only some fields
+    including budgets, and a legality proof that says what the budget was and
+    where it went.)
+    - **ONE language, not two.** `parsePoolExpression` was a `+`-splitter and
+      four other things wanted more; a second evaluator would have drifted from
+      it within a pass. `core/expr.ts` is now the only arithmetic, and the pool
+      parser is a thin wrapper that keeps `PoolBreakdown` for the roll display.
+    - **THE HYPHEN RULE** was the whole syntax decision. Trait names contain
+      hyphens (`self-control`, `al-ikhlas`) and arithmetic needs subtraction, so
+      a hyphen continues a NAME only when a **letter** follows it. `12 -
+      generation`, `12-generation` and `courage - 1` all subtract (a number
+      token can never absorb a hyphen); only `a - b` between two NAMES needs the
+      spaces. Chosen over braced refs (`{self-control}`) and mandatory
+      namespaces (`virtue:self-control`) because both would have changed how
+      every pool and difficulty already in the chronicle is typed, to buy
+      nothing the one-sentence rule doesn't.
+    - **An unknown reference is 0 AND reported.** This is the real upgrade: the
+      old resolver returned 0 for a typo in silence. `ExprResult.unknown` names
+      it, and `[[eval]]` prints it. The corollary took a bug to find: a
+      namespaced name the CHRONICLE defines but the sheet does not rate must be
+      **0, not unknown**, or `12 - background:generation` reads as a typo on
+      every vampire without the Background. Hence `knownTraitNames()`.
+    - **Nothing throws.** A malformed expression is 0 with `error` set, because
+      a bad lorebook card must never take the story down.
+    - **Derived ≠ stored.** Road, Willpower, generation and the blood ceiling
+      are consequences of other parts of the sheet, so they are computed on
+      demand and never written. `Derivation.when` carries the only distinction
+      that matters: **`start`** answers while the sheet is absent-or-0 and steps
+      aside the moment you rate the trait (Willpower starts at Courage, then
+      freebies buy it up — and the report still says where it began, via
+      `DerivedValue.overridden`); **`always`** recomputes whatever the sheet
+      says, because it is not a rating (generation IS 12 minus the Background).
+      "Absent or 0" rather than "absent" because `newPotential` seeds
+      `poolStarts.willpower = 0`, and 0 has always meant "unassigned" here.
+    - **Seeding the Virtues** was the missing half of the user's numbers: a
+      fresh vampire had an EMPTY virtues bucket, so Road would have derived 0
+      instead of 2. `newPotential` now seeds the Road's three at their free dot,
+      exactly as Attributes seed at 1. Road 2 before assigning, Willpower 1
+      after — the user's figures, reproduced.
+    - **`ScopeExtension` is the seam the future passes named.** state.ts owns
+      traits and derivations; game.ts hands in `budget:`/`spent:`/`left:` from
+      the purse ledger without state.ts ever reaching upward. A legality proof
+      is `left:background != 0` plus the `terms` trace that already says where
+      each number came from — no new machinery. Likewise `Numeric` on every
+      budget/limit field is where a template-override pass writes its overrides,
+      and `creationBudgetFor` already stacks templates.
+    - Memoized with a **cycle guard**: derivations reference each other
+      (`trait-max(generation)` needs `generation`), and a circular one is
+      reported with the sheet's own value rather than blowing the stack.
+    - Two ambient wins: `characterRollEnv` now resolves through `traitValueOf`,
+      so a CONFERRED or DERIVED rating is rollable (`[[roll willpower]]` on a
+      sheet stating no Willpower); and `-0` cannot carry a sign, which is why
+      `ExprTerm.negated` exists (`12 - background:generation 0` printed as `+`
+      until it did).
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
@@ -2570,16 +2712,35 @@ Ordered roughly by unlock value:
 5. **Allocation + creation budgets** — the BUDGET is **shipped** (§7.54:
    `CreationBudget` per template, `creationBudgetFor` stacking them, the
    priority pools, per-trait `TraitLimit`s, the freebie table, `[[creation]]` /
-   `[[choose]]`). LEFT: **spending** through it — nothing decrements a pool, so
-   `[[creation]]` counts what the sheet holds instead of gating what may be
-   bought; **freebie arithmetic** (the `[[costs]]` values are still text, so
-   nobody multiplies "current x 2"); the **XP/maturation engine** the same table
-   is waiting for; the **creation WIZARD** (the wizard engine exists — this is a
-   script over it); and the derived values that need other subsystems (Road from
-   Virtues, generation, the starting-blood die). **Constraint groups** (§7.17)
-   exist as data + `[[check-constraints]]`; creation is where they would become
-   enforced (block/allow backgrounds & merits/flaws) instead of advisory.
+   `[[choose]]`), and so are the **derived values** and the **expression
+   language** that let a ceiling be a consequence (§7.55: Road, Willpower,
+   generation → trait maxima). LEFT: **spending** through it — nothing
+   decrements a pool, so `[[creation]]` counts what the sheet holds instead of
+   gating what may be bought; **freebie arithmetic** (the `[[costs]]` values are
+   still text, so nobody multiplies "current x 2" — but `Numeric` + the
+   evaluator are now the obvious home for it); the **XP/maturation engine** the
+   same table waits for; the **creation WIZARD** (the wizard engine exists —
+   this is a script over it); and the starting-blood die. **Constraint groups**
+   (§7.17) exist as data + `[[check-constraints]]`; creation is where they would
+   become enforced (block/allow backgrounds & merits/flaws) instead of advisory.
    ALL OPT-IN stays sacred — play-before-allocating is untouched.
+   **The three passes §7.55 was designed for, and the seams that await them:**
+   - **Modifying a template**: every rules field a chronicle might want to
+     change is `Numeric` (a number OR an expression), so an override has a place
+     to be written. What is missing is the STORE — a `wod:config:templates` card
+     and a `TemplateOverrides` layer, applied the way `ResourceOverrides` already
+     patches resources by normalized name.
+   - **Extending a template** (override only some fields, budgets included):
+     `creationBudgetFor` already merges template budgets field-by-field and
+     concatenates notes; an `extends: <template>` link would reuse exactly that
+     fold. `TemplateConfig.Derived` merges the same way (last name wins).
+   - **The legality proof** ("what was the budget, and where did it go" —
+     including unassigned points): the pieces exist. `purseScope` exposes
+     `budget:`/`spent:`/`left:` to any expression, `ExprResult.terms` already
+     carries the provenance trace, and `[[creation]]` already flags `⚠ over` and
+     `⚠ uncounted`. A `[[legality]]` verb is a REPORT over those, not new
+     machinery: unspent = `left:X > 0`, overspent = `left:X < 0`, over-ceiling =
+     the existing check per bucket.
 6. **Template choices** — **shipped for clans and fellowships** (§7.54:
    `CLANS` with their Disciplines and `TraitLimit`s, all six `FELLOWSHIPS`,
    `PlayableCharacter.choices`, `[[choose]]`/`[[clans]]`, and

@@ -6,6 +6,7 @@ import { StringUtil, MoralityPolarity } from "./core/traits";
 import {
   CardValue, CardMap, asMap, asList, asText, asNumber, asBool, asStringList,
 } from "./core/cardtext";
+import { Numeric } from "./core/expr";
 import {
   SoakSpec, DamageReaction, UndeadPhysiology, SilverVulnerability,
   HealthLevelDef, STANDARD_HEALTH_LEVELS,
@@ -170,22 +171,27 @@ export const HUMANITY_MORALITY: MoralityConfig = {
 // actually holds, and the Storyteller decides. The point is that the numbers
 // live in ONE place instead of in a book on someone's desk.
 // =============================================================================
-export interface PriorityPools { primary: number; secondary: number; tertiary: number }
+// Every one of these numbers may instead be an EXPRESSION over the character
+// (core/expr.ts): a 7th-generation vampire's Attribute ceiling is
+// `trait-max(generation)`, not 5. See §"DERIVED VALUES" below.
+export interface PriorityPools { primary: Numeric; secondary: Numeric; tertiary: Numeric }
 // A trait whose start or ceiling differs from everyone else's - a Nosferatu has
 // no Appearance at all, and never will.
-export interface TraitLimit { start?: number; max?: number; note?: string }
+export interface TraitLimit { start?: Numeric; max?: Numeric; note?: string }
 
 export interface CreationBudget {
   attributes: PriorityPools;          // over one free dot in each
-  attributeStart: number;             // the free dot (1)
-  attributeMax: number;               // the usual ceiling (5)
+  attributeStart: Numeric;            // the free dot (1)
+  attributeMax: Numeric;              // the usual ceiling (5)
   abilities: PriorityPools;
-  abilityStart: number;               // nothing free (0)
-  abilityMax: number;
-  backgrounds: number;
-  freebies: number;
-  disciplines?: number;               // vampires: four dots of CLAN Disciplines
-  virtues?: number;                   // vampires: seven, over a free dot each
+  abilityStart: Numeric;              // nothing free (0)
+  abilityMax: Numeric;
+  backgrounds: Numeric;
+  freebies: Numeric;
+  disciplines?: Numeric;              // vampires: four dots of CLAN Disciplines
+  disciplineMax?: Numeric;            // and their ceiling, which generation raises
+  virtues?: Numeric;                  // vampires: seven, over a free dot each
+  virtueStart?: Numeric;              // the free dot in each Virtue (1)
   // Per-trait exceptions, by trait name.
   limits?: Record<string, TraitLimit>;
   notes?: string[];                   // the derived values a splat records
@@ -204,13 +210,53 @@ export function creationBudget(over: Partial<CreationBudget> = {}): CreationBudg
 }
 
 // Where a trait's own start/ceiling comes from: the template's exception first,
-// then the pool's default for its kind.
-export function traitLimitFor(budget: CreationBudget, kind: "attribute" | "ability", trait: string): TraitLimit {
+// then the pool's default for its kind. Either may be an expression; the caller
+// evaluates against the character (state.ts `characterScope`).
+export function traitLimitFor(budget: CreationBudget, kind: "attribute" | "ability" | "discipline", trait: string): TraitLimit {
   const override = budget.limits?.[StringUtil.normalize(trait)];
-  const base = kind === "attribute"
-    ? { start: budget.attributeStart, max: budget.attributeMax }
+  const base = kind === "attribute" ? { start: budget.attributeStart, max: budget.attributeMax }
+    : kind === "discipline" ? { start: 0, max: budget.disciplineMax ?? budget.abilityMax }
     : { start: budget.abilityStart, max: budget.abilityMax };
   return { ...base, ...(override ?? {}) };
+}
+
+// =============================================================================
+// DERIVED VALUES - the parts of a sheet that are consequences of other parts
+// -----------------------------------------------------------------------------
+// A vampire's Road is the sum of its two Road Virtues; its Willpower equals its
+// Courage; its generation is 12 minus the Generation Background, and THAT sets
+// how high its Attributes, Abilities and Disciplines may go. None of this is a
+// number the player types - it is a number the sheet already implies - so it
+// lives here as an EXPRESSION and is computed on demand, never written down.
+//
+// `when` is the whole distinction:
+//   "start"  - a seed. The derivation answers while the sheet's own entry is
+//              absent or 0; the moment the player rates it, the sheet wins.
+//              (Willpower starts AT Courage, then freebies buy it up.)
+//   "always" - an identity. It recomputes whatever the sheet says, because it
+//              is not a rating at all. (Generation IS 12 minus the Background.)
+// =============================================================================
+export interface Derivation {
+  trait: string;                      // the name it answers to
+  expr: string;                       // over the character (core/expr.ts)
+  when?: "start" | "always";          // default "start"
+  note?: string;                      // why, for the reports
+}
+
+// A vampire's trait ceiling by generation: the potent blood of an elder can
+// hold more than five dots. 8th and thinner are the ordinary five.
+const TRAIT_MAX_BY_GENERATION: Record<number, number> = {
+  3: 10, 4: 9, 5: 8, 6: 7, 7: 6,
+};
+export function traitMaxForGeneration(generation: number): number {
+  return TRAIT_MAX_BY_GENERATION[Math.round(generation)] ?? 5;
+}
+
+// The Virtues a Road's rating sums, spelled the way an expression would -
+// "conscience + self-control" for the Road of Humanity. What `road-virtues()`
+// computes, and what a report prints to say WHICH two.
+export function roadRatingExpr(road: RoadDefinition): string {
+  return road.ratingVirtues.map(v => StringUtil.normalize(v)).join(" + ");
 }
 
 // =============================================================================
@@ -420,7 +466,9 @@ export class TemplateConfig {
     public readonly Budgets: Record<string, string> = {},
     // What a fresh character of this template may be (see CreationBudget).
     // Reported by [[creation]], enforced by nobody yet.
-    public readonly Creation: CreationBudget = BASE_CREATION
+    public readonly Creation: CreationBudget = BASE_CREATION,
+    // The values this splat's sheet IMPLIES rather than states (see Derivation).
+    public readonly Derived: Derivation[] = []
   ) {}
 
   // Resources is the modern name for Pools (trackers + pools with roles/effects).
@@ -469,14 +517,33 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
   creationBudget({
     disciplines: 4,   // among CLAN Disciplines
     virtues: 7,       // over a free dot in each Road Virtue and in Courage
+    virtueStart: 1,
+    // The potent blood of an elder holds more than five dots, so these three
+    // ceilings are not numbers - they are a consequence of generation, which is
+    // itself a consequence of the Generation Background.
+    attributeMax: "trait-max(generation)",
+    abilityMax: "trait-max(generation)",
+    disciplineMax: "trait-max(generation)",
     notes: [
       "Four Discipline dots, among the CLAN's three ([[clan]] names them).",
       "Seven Virtue dots, over one free dot in each Road Virtue and in Courage.",
-      "Road rating = the sum of the Road Virtues; Willpower = Courage.",
       "Starting blood = one die + one per dot of Domain and Herd.",
-      "Generation starts at 12th; the Generation Background buys it lower.",
     ],
-  })
+  }),
+  [
+    // 12th by default; each dot of the Generation Background buys one step
+    // closer to Caine, and every ceiling above follows.
+    { trait: "generation", expr: "12 - background:generation", when: "always",
+      note: "12th generation, one step lower per dot of the Generation Background" },
+    { trait: "road", expr: "road-virtues()",
+      note: "the sum of the Road's two rating Virtues" },
+    { trait: "willpower", expr: "courage",
+      note: "Willpower starts at Courage" },
+    // Named for the CEILING, not the pool: `blood` is a live resource with a
+    // current value, and a derived trait must never shadow one.
+    { trait: "blood-pool-max", expr: "blood-max(generation)", when: "always",
+      note: "the blood pool generation allows" },
+  ]
 );
 
 // Dark Ages: Mage works magic through Foundation & Pillars (its answer to the
@@ -1086,6 +1153,17 @@ export const DEFAULT_BACKGROUNDS: BackgroundDef[] = [
     note: "Cosmos Within the Measure is the worked example: at 5 it opens the Library of the Unseen, which IS a Cray 5, a Library 5 and a Sanctum 5. Redefine it for your own chronicle with [[define-background]]." },
   { name: "mentor", max: 5, description: "Someone older and wiser who owes you time. More than one may be held." },
   { name: "resources", max: 5, description: "Money, goods and the credit of a household." },
+  // The one Background that is not a possession but a FACT about the blood:
+  // each dot is a generation closer to Caine, and the sheet's ceilings follow.
+  // Nothing here says so - the vampire template's `generation` derivation does.
+  { name: "generation", max: 5, templates: ["vampire", "ghoul", "revenant"],
+    description: "How close to Caine the blood runs. A vampire starts at the 12th generation; each dot buys one step nearer.",
+    tiers: [
+      { atLeast: 1, note: "11th generation" }, { atLeast: 2, note: "10th generation" },
+      { atLeast: 3, note: "9th generation" }, { atLeast: 4, note: "8th generation" },
+      { atLeast: 5, note: "7th generation - and Attributes, Abilities and Disciplines may reach 6" },
+    ],
+    note: "The engine derives `generation`, the trait ceilings and the blood pool from this dot count; see [[derived]]." },
 ];
 
 // Every trait a character's Backgrounds CONFER, by name -> {rating, from}.

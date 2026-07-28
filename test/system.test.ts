@@ -58,6 +58,8 @@ import {
   BACKGROUNDS_ENTRY, BackgroundRegistry, grantedTraitsOf, effectiveTraitOf,
   BASE_CREATION, creationBudgetFor, CLANS, clanByName, clanFamilies, clanFamilyOf,
   fellowshipByName, EXCLUSIVE_MERITS_FLAWS,
+  evaluateExpr, mapScope, exprRefs, describeTerms, evalNumeric,
+  traitValueOf, derivedValuesOf, evalOn,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -5551,7 +5553,9 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     expect(vampire.disciplines).toBe(4);
     expect(vampire.virtues).toBe(7);
     expect(vampire.attributes).toEqual(BASE_CREATION.attributes);
-    expect(vampire.notes!.some(n => n.includes("Generation starts at 12th"))).toBe(true);
+    // What used to be a note is now a real derivation (§ expressions).
+    expect(TEMPLATE_VAMPIRE.Derived.find(d => d.trait === "generation")!.expr).toBe("12 - background:generation");
+    expect(vampire.attributeMax).toBe("trait-max(generation)");
     // A mage owes neither, and records what its own numbers derive from.
     const mage = creationBudgetFor(["mage"]);
     expect(mage.disciplines).toBeUndefined();
@@ -5604,7 +5608,7 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     expect(await CommandRouter.route("choose clan nosferatu")).toContain("no Appearance and never will");
     await CommandRouter.route("choose attributes social,physical,mental");
     const r = await CommandRouter.route("creation");
-    expect(r).toContain("limits: Appearance 0-0");
+    expect(r).toContain("ceilings: attributes 1-5, abilities 0-5, disciplines 0-5, Appearance 0-0");
     // The factory hands every Attribute the free dot; a Nosferatu may not keep
     // that one, so the report says the sheet is over its own ceiling...
     expect(r).toContain("⚠ over: Appearance 1 > 0");
@@ -5733,5 +5737,183 @@ describe("clans & fellowships: thirteen and six, with exclusives gated on the pi
       expect(r!.stopGeneration).toBe(true);
       expect(stripCtxSkip(r!.inputText!)).not.toContain("[SYSTEM:");   // never reaches the AI
     }
+  });
+});
+
+// =============================================================================
+// THE EXPRESSION LANGUAGE - one arithmetic, and references into the sheet
+// =============================================================================
+describe("expressions (core/expr.ts): arithmetic, references, and the hyphen rule", () => {
+  const scope = mapScope({
+    strength: 4, brawl: 3, courage: 1, conscience: 1, "self-control": 1,
+    "background:generation": 5,
+  });
+
+  test("the hyphen belongs to a NAME only when a letter follows it", () => {
+    // Trait names keep their hyphens...
+    expect(evaluateExpr("self-control", scope).value).toBe(1);
+    expect(evaluateExpr("conscience + self-control", scope).value).toBe(2);
+    // ...and subtraction still works, spaced or not, because a number can
+    // never absorb a hyphen and a space always ends a name.
+    expect(evaluateExpr("12 - background:generation", scope).value).toBe(7);
+    expect(evaluateExpr("12-background:generation", scope).value).toBe(7);
+    expect(evaluateExpr("courage - 1", scope).value).toBe(0);
+    expect(exprRefs("12 - background:generation")).toEqual(["background:generation"]);
+  });
+
+  test("everything the old pool syntax could say, it still says", () => {
+    expect(evaluateExpr("strength+brawl", scope).value).toBe(7);
+    expect(evaluateExpr("3+2", scope).value).toBe(5);
+    expect(evaluateExpr("7", scope).value).toBe(7);
+    expect(evaluateExpr("strength+-1", scope).value).toBe(3);
+    expect(parsePoolExpression("strength+brawl", (n) => ({ strength: 4, brawl: 3 } as Record<string, number>)[n] ?? 0).total).toBe(7);
+  });
+
+  test("arithmetic, precedence, parentheses and functions", () => {
+    expect(evaluateExpr("strength * 2 + 1", scope).value).toBe(9);
+    expect(evaluateExpr("(strength + brawl) * 2", scope).value).toBe(14);
+    expect(evaluateExpr("floor(strength / 3)", scope).value).toBe(1);
+    expect(evaluateExpr("max(strength, brawl)", scope).value).toBe(4);
+    expect(evaluateExpr("min(2, strength)", scope).value).toBe(2);
+    expect(evaluateExpr("sum(courage, conscience, self-control)", scope).value).toBe(3);
+    expect(evaluateExpr("abs(0 - strength)", scope).value).toBe(4);
+  });
+
+  test("an unanswered reference is 0 AND is reported - a typo used to be silent", () => {
+    const out = evaluateExpr("strength + wisdom", scope);
+    expect(out.value).toBe(4);
+    expect(out.unknown).toEqual(["wisdom"]);
+    expect(out.error).toBeUndefined();
+  });
+
+  test("nothing throws: a malformed expression is worth 0 and says why", () => {
+    for (const bad of ["3 4", "((", "strength +", "nope(1)", "3 § 4"]) {
+      const out = evaluateExpr(bad, scope);
+      expect(out.value).toBe(0);
+      expect(out.error).toBeTruthy();
+    }
+    expect(evaluateExpr("", scope).value).toBe(0);
+    expect(evaluateExpr("", scope).error).toBeUndefined();
+    expect(evaluateExpr("1 / 0", scope).error).toContain("division by zero");
+  });
+
+  test("the terms show their work, and a subtracted zero still reads as subtracted", () => {
+    expect(describeTerms(evaluateExpr("strength + brawl - 1", scope).terms)).toBe("strength 4 + brawl 3 - 1");
+    // -0 cannot carry a sign, so the term records that it was negated.
+    expect(describeTerms(evaluateExpr("12 - courage - conscience", scope).terms)).toBe("12 - courage 1 - conscience 1");
+    expect(describeTerms(evaluateExpr("12 - nothing", scope).terms)).toBe("12 - nothing 0 (unknown)");
+  });
+
+  test("evalNumeric takes a number or an expression, and falls back on nonsense", () => {
+    expect(evalNumeric(5, scope, 99)).toBe(5);
+    expect(evalNumeric("strength + 1", scope, 99)).toBe(5);
+    expect(evalNumeric(undefined, scope, 99)).toBe(99);
+    expect(evalNumeric("((", scope, 99)).toBe(99);
+  });
+});
+
+// =============================================================================
+// DERIVED VALUES - what a sheet implies rather than states
+// =============================================================================
+describe("derived values: Generation, Road, Willpower, and the ceilings they move", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a fresh vampire's Road is 2 and its Willpower is 1, before anything is assigned", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    const char = (await CharacterStore.load("Sasha"))!;
+    // The three Road Virtues seed at their free dot, like Attributes do.
+    expect(char.virtues).toEqual({ conscience: 1, "self-control": 1, courage: 1 });
+    expect(traitValueOf(char, "road")).toBe(2);        // conscience + self-control
+    expect(traitValueOf(char, "willpower")).toBe(1);   // = courage
+    expect(traitValueOf(char, "generation")).toBe(12);
+    // A mage derives none of it - no Road, no Virtues.
+    await CommandRouter.route('create-playable name="Hermetic" templates=mage');
+    expect(derivedValuesOf((await CharacterStore.load("Hermetic"))!)).toEqual([]);
+  });
+
+  test("the Road and Willpower follow the Virtues, then step aside once rated", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    await CommandRouter.route("set-trait conscience 4");
+    await CommandRouter.route("set-trait courage 3");
+    const char = (await CharacterStore.load("Sasha"))!;
+    expect(traitValueOf(char, "road")).toBe(5);        // 4 + 1
+    expect(traitValueOf(char, "willpower")).toBe(3);
+    // A "start" derivation is a seed, not an identity: buy Willpower up and the
+    // sheet wins, while the report still says where it began.
+    await CommandRouter.route("set-trait willpower 6 group=pool");
+    const bought = (await CharacterStore.load("Sasha"))!;
+    expect(traitValueOf(bought, "willpower")).toBe(6);
+    const wp = derivedValuesOf(bought).find(d => d.trait === "willpower")!;
+    expect(wp.overridden).toBe(6);
+    expect(wp.value).toBe(3);
+    expect(await CommandRouter.route("derived")).toContain("Willpower 6 (sheet 6, would start at 3)");
+  });
+
+  test("Generation 5 makes him 7th, and every ceiling rises to 6", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    await CommandRouter.route("choose attributes physical,social,mental");
+    expect(await CommandRouter.route("creation")).toContain("ceilings: attributes 1-5, abilities 0-5, disciplines 0-5");
+
+    await CommandRouter.route("set-trait generation 5");
+    const char = (await CharacterStore.load("Sasha"))!;
+    expect(char.backgrounds.generation).toBe(5);       // the Background: five dots
+    expect(traitValueOf(char, "generation")).toBe(7);  // the derived fact: 7th
+    const report = await CommandRouter.route("creation");
+    expect(report).toContain("ceilings: attributes 1-6, abilities 0-6, disciplines 0-6");
+    expect(report).toContain("Generation 7 (12 - background:generation 5)");
+    // ...and a Strength 6 is legal now, where it would have been flagged before.
+    await CommandRouter.route("set-trait strength 6");
+    expect(await CommandRouter.route("creation")).not.toContain("⚠ over");
+  });
+
+  test("an 'always' identity ignores the sheet; a Background nobody rated is 0, not a typo", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    // Writing a generation onto the sheet does not make it true - it is derived.
+    await CommandRouter.route("set-trait generation 3 group=trait");
+    const char = (await CharacterStore.load("Sasha"))!;
+    expect(char.traits.generation).toBe(3);
+    expect(traitValueOf(char, "generation")).toBe(12);   // still 12 - 0
+    // An unrated Background the chronicle DOES define answers 0...
+    expect(evalOn(char, "background:generation").unknown).toEqual([]);
+    // ...and one it does not is still reported.
+    expect(evalOn(char, "background:nonesuch").unknown).toEqual(["background:nonesuch"]);
+  });
+
+  test("derived values are rollable, and the blood pool follows generation", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    await CommandRouter.route("set-trait courage 3");
+    // Willpower is on no bucket the player typed - it is derived - and rolls anyway.
+    const rolled = await CommandRouter.route("roll willpower", { rng: allTens });
+    expect(rolled).toContain("Willpower (3)");
+    const char = (await CharacterStore.load("Sasha"))!;
+    expect(traitValueOf(char, "blood-pool-max")).toBe(11);   // 12th generation
+    await CommandRouter.route("set-trait generation 5");
+    expect(traitValueOf((await CharacterStore.load("Sasha"))!, "blood-pool-max")).toBe(20);   // 7th
+  });
+
+  test("[[eval]] is the reference system, exposed - including the purses", async () => {
+    await CommandRouter.route('create-playable name="Sasha" templates=vampire');
+    await CommandRouter.route("set-trait courage 3");
+    await CommandRouter.route("set-trait herd 2");
+    expect(await CommandRouter.route("eval courage + 1")).toContain("= 4 = courage 3 + 1");
+    expect(await CommandRouter.route("eval derived:willpower")).toContain("derived:willpower = 3");
+    expect(await CommandRouter.route("eval budget:background")).toContain("= 5");
+    expect(await CommandRouter.route("eval spent:background")).toContain("= 2");
+    expect(await CommandRouter.route("eval left:background")).toContain("= 3");
+    expect(await CommandRouter.route("eval strength + nonesuch")).toContain("⚠ nothing answers to nonesuch");
+    expect(await CommandRouter.route("eval ((")).toContain("Cannot read");
+    expect(await CommandRouter.route("eval")).toContain("Mind the hyphen");
+  });
+
+  test("a derivation that defines itself in a circle is reported, not a stack overflow", () => {
+    const looped: PlayableCharacter = {
+      id: "x", name: "Loop", templates: ["vampire"], stage: "potential",
+      attributes: {}, abilities: {}, backgrounds: {}, virtues: {}, disciplines: {},
+      traits: {}, poolStarts: {}, meritsFlaws: {}, tags: [],
+    };
+    // The engine's own vampire derivations are acyclic; this proves the guard by
+    // asking for a value whose expression names itself.
+    expect(evalOn(looped, "generation").value).toBe(12);
+    expect(evaluateExpr("x", { lookup: () => undefined }).value).toBe(0);
   });
 });

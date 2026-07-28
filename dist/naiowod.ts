@@ -401,7 +401,7 @@ const CARD_VALUE_KEY = "value";
 const TEXT_KEYS = new Set([
   "name", "key", "id", "description", "note", "label", "blurb", "until",
   "interval", "topic", "title", "specialty", "param", "pool", "difficultyexpr",
-  "reason", "summary",
+  "reason", "summary", "botch", "failure", "overflowlabel",
 ]);
 
 // Keys the engine always wants as a list, so one item needs no special syntax
@@ -424,6 +424,7 @@ const FIELD_ALIASES: Record<string, string> = {
   "difficulty-expr": "difficultyExpr",
   "difficulty-mod": "difficultyMod",
   "difficulty-cap": "difficultyCap",
+  "min-difficulty": "minDifficulty",
   "dice-mod": "diceMod",
   "merits-flaws": "meritsFlaws",
   "pool-starts": "poolStarts",
@@ -1719,6 +1720,10 @@ interface RollSpec {
   difficultyCap?: number; // ceiling the die target clamps to (default 10); anything
                           // above it becomes +1 required success per point - Mage
                           // spellcasting sets 10 (or the book's 9) here
+  // Floor the die target never drops below, however deep the reductions run.
+  // Unset = no floor of its own; the chronicle's global floor (if it set one)
+  // fills in, and failing that only the engine's hard minimum of 2 applies.
+  minDifficulty?: number;
 }
 
 // Fill defaults and normalize tags. `requires` is at least 1.
@@ -1733,6 +1738,7 @@ function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollSpec {
   };
   if (parts.difficultyExpr && parts.difficultyExpr.trim()) spec.difficultyExpr = parts.difficultyExpr.trim();
   if (parts.difficultyCap !== undefined) spec.difficultyCap = Math.max(2, Math.min(10, parts.difficultyCap));
+  if (parts.minDifficulty !== undefined) spec.minDifficulty = Math.max(2, Math.min(10, parts.minDifficulty));
   return spec;
 }
 
@@ -1876,8 +1882,12 @@ function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficu
   // subtract from the RAW difficulty, they strip that surcharge first and only
   // then lower the die target - the book's ordering, by arithmetic.
   const cap = Math.max(2, Math.min(10, spec.difficultyCap ?? 10));
+  // The floor binds AFTER every reduction: a spell talked down to 1 still rolls
+  // at the chronicle's minimum. 2 is the engine's own hard floor (a d10 target
+  // of 1 would make every die a success).
+  const floor = Math.max(2, Math.min(cap, spec.minDifficulty ?? 2));
   const rawDifficulty = difficulty;
-  const dieDifficulty = Math.max(2, Math.min(cap, rawDifficulty));
+  const dieDifficulty = Math.max(floor, Math.min(cap, rawDifficulty));
   const overflow = Math.max(0, rawDifficulty - cap);
   const policy = opts.overDifficulty ?? "extra-success";
   const impossible = overflow > 0 && policy === "impossible";
@@ -1888,6 +1898,7 @@ function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficu
     if (impossible) notes.push(`difficulty ${rawDifficulty} exceeds ${cap} -> impossible`);
     else { requires += overflow; notes.push(`difficulty ${rawDifficulty} > ${cap} -> +${overflow} required success${overflow === 1 ? "" : "es"}`); }
   }
+  if (floor > 2 && rawDifficulty < floor) notes.push(`difficulty ${rawDifficulty} raised to the minimum ${floor}`);
   if (unknownTags.length) notes.push(`unknown tag${unknownTags.length === 1 ? "" : "s"}: ${unknownTags.join(", ")}`);
 
   return {
@@ -2133,7 +2144,11 @@ function describeTable(t: SuccessTable): string {
 function parseTableRows(raw: string | undefined): SuccessTableRow[] | { error: string } {
   if (!raw || !raw.trim()) return [];
   const rows: SuccessTableRow[] = [];
-  for (const item of raw.split(",")) {
+  // Rows separate on ";" when the text has one, else ",". Labels are prose and
+  // often contain commas ("age, family, and whether the subject resisted"), so
+  // a semicolon is the way to say "that comma is punctuation".
+  const items = raw.includes(";") ? raw.split(";") : raw.split(",");
+  for (const item of items) {
     const m = item.trim().match(/^(\d+)\s*:\s*([^=]+?)\s*(?:=\s*(-?\d+))?$/);
     if (!m || !m[2].trim()) {
       return { error: `Can't read row "${item.trim()}" - rows are "<successes>:<label>[=<value>]", comma-separated (e.g. 1:Cowed, 3:Terrified=2).` };
@@ -3060,12 +3075,21 @@ const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
 };
 const MAGIC_KNOB_NAMES: string[] = Object.keys(MAGIC_KNOBS);
 
+// A knob NAME is data, and a card may spell it either way - the card format
+// rewrites a few hyphenated keys to their camelCase field names on the way in
+// (core/cardtext.ts FIELD_ALIASES), which silently orphaned `difficulty-cap`
+// until this. Knob lookups therefore compare on letters alone, so
+// "difficulty-cap", "difficultyCap" and "difficulty cap" are one knob.
+const knobKey = (s: string): string => s.toLowerCase().replace(/[^a-z]/g, "");
+const MAGIC_KNOBS_BY_KEY: Record<string, keyof MagicRules> =
+  Object.fromEntries(Object.entries(MAGIC_KNOBS).map(([name, field]) => [knobKey(name), field]));
+
 // Defaults overlaid with the story's knob overrides (unknown names and
 // non-numbers are ignored - a typo can't corrupt the rules).
 function magicRulesFrom(overrides: Record<string, number>): MagicRules {
   const rules: MagicRules = { ...DEFAULT_MAGIC_RULES };
   for (const [k, v] of Object.entries(overrides ?? {})) {
-    const field = MAGIC_KNOBS[StringUtil.normalize(k)];
+    const field = MAGIC_KNOBS_BY_KEY[knobKey(k)];
     if (field && typeof v === "number" && Number.isFinite(v)) rules[field] = v;
   }
   return rules;
@@ -3114,6 +3138,24 @@ function advancementCostsFrom(overrides: CostTable): CostTable {
     }
   }
   return out;
+}
+
+// =============================================================================
+// ROLL RULES - chronicle-wide knobs for ordinary rolls
+// -----------------------------------------------------------------------------
+// One knob so far: a global MINIMUM DIFFICULTY. Unset means what it says -
+// no roll has a floor except the ones that name their own (`min-difficulty=` on
+// the roll, saved with a named roll). Distinct from the magic knob of the same
+// name, which bounds how far QUINTESSENCE may talk a spell's difficulty down;
+// this one is the floor the die target itself never drops below.
+// =============================================================================
+const ROLL_KNOB_NAMES = ["min-difficulty"];
+function rollFloorFrom(overrides: Record<string, number>): number | undefined {
+  for (const [k, v] of Object.entries(overrides ?? {})) {
+    if (knobKey(k) !== "mindifficulty") continue;
+    if (typeof v === "number" && Number.isFinite(v)) return Math.max(2, Math.min(10, v));
+  }
+  return undefined;
 }
 
 // =============================================================================
@@ -5491,6 +5533,7 @@ function savedRollToCard(roll: SavedRoll): CardMap {
   if (roll.diceMod) out["diceMod"] = roll.diceMod;
   if (roll.requires > 1) out["requires"] = roll.requires;
   if (roll.difficultyCap !== undefined) out["difficultyCap"] = roll.difficultyCap;
+  if (roll.minDifficulty !== undefined) out["minDifficulty"] = roll.minDifficulty;
   if (roll.tags.length) out["tags"] = [...roll.tags];
   for (const key of ["spend", "specialty", "table", "description"] as const) {
     const v = roll[key];
@@ -5517,6 +5560,8 @@ function savedRollFromCard(body: CardMap): SavedRoll | undefined {
   if (expr) roll.difficultyExpr = expr;
   const cap = asNumber(body["difficultyCap"]);
   if (cap !== undefined) roll.difficultyCap = cap;
+  const floor = asNumber(body["minDifficulty"]);
+  if (floor !== undefined) roll.minDifficulty = floor;
   for (const key of ["spend", "specialty", "table", "description"] as const) {
     const v = asText(body[key]);
     if (v) roll[key] = v;
@@ -6011,6 +6056,23 @@ const MagicRulesConfig = new MapConfigStore<number>({
   ],
 });
 
+// Chronicle-wide roll knobs. Only `min-difficulty` so far: the floor every
+// roll's die target respects. Absent = no floor at all, except on rolls that
+// name their own with `min-difficulty=`.
+const ROLLS_CONFIG_ENTRY = "wod:config:rolls";
+const RollRulesConfig = new MapConfigStore<number>({
+  entry: ROLLS_CONFIG_ENTRY,
+  header: [
+    "Chronicle-wide roll knobs: one `knob: number` per line below the marker.",
+    "  min-difficulty - no roll's die target drops below this, however deep the",
+    "                   reductions run. Leave it out and rolls have NO floor",
+    "                   except the ones that set their own (min-difficulty= on",
+    "                   the roll, or saved with [[name-roll]]).",
+    "Not to be confused with the min-difficulty in wod:config:magic, which is",
+    "how far Quintessence may talk a SPELL's difficulty down.",
+  ],
+});
+
 // Advancement prices: the CHRONICLE's cost table, never the character's. One
 // card, `kind:` with a price per purse indented under it (see
 // DEFAULT_ADVANCEMENT_COSTS). Values are text - nothing evaluates them yet.
@@ -6096,7 +6158,9 @@ class TableLibraryStore {
     await this.loadFromLorebook();
     const key = sub ? `${sub}:${def.name}` : def.name;
     const now = SuccessTableRegistry.get(key);
-    return { shadowed: JSON.stringify(now) !== JSON.stringify({ ...def, name: key }) };
+    // Compare the DATA, not the key order: a round trip through the card
+    // reorders fields, and JSON.stringify would call that a shadowing card.
+    return { shadowed: canonicalCardText(now as unknown as CardValue) !== canonicalCardText({ ...def, name: key } as unknown as CardValue) };
   }
 
   // Remove one table from the addressed category's GENERAL card. Reports what
@@ -6116,7 +6180,7 @@ class TableLibraryStore {
     await this.loadFromLorebook();
     const now = SuccessTableRegistry.get(n);
     const still = now === undefined ? undefined
-      : DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === n) && JSON.stringify(now) === JSON.stringify({ ...DEFAULT_SUCCESS_TABLES.find(d => StringUtil.normalize(d.name) === n), name: n })
+      : DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === n) && canonicalCardText(now as unknown as CardValue) === canonicalCardText({ ...DEFAULT_SUCCESS_TABLES.find(d => StringUtil.normalize(d.name) === n), name: n } as unknown as CardValue)
         ? "built-in" as const : "another-card" as const;
     return { removed, still };
   }
@@ -6919,10 +6983,21 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   if (requires !== undefined) args.requires = requires;
   const diceMod = intOf(cmd.named["dice-modifier"]);
   if (diceMod !== undefined) args.diceMod = diceMod;
+  const minDifficulty = intOf(cmd.named["min-difficulty"]);
+  if (minDifficulty !== undefined) args.minDifficulty = minDifficulty;
   if (cmd.named["tags"] !== undefined) {
     args.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   }
   return args;
+}
+
+// EVERY roll the engine executes goes through here, so the chronicle's floor
+// (wod:config:rolls -> min-difficulty) reaches all of them. A spec that names
+// its own floor keeps it; when neither is set there is no floor at all beyond
+// the engine's hard minimum of 2.
+function runRoll(spec: RollSpec, resolve: TraitResolver, opts: { rng?: Rng; extra?: Partial<RollModifier> } = {}): RollExecution {
+  const floor = spec.minDifficulty ?? rollFloorFrom(RollRulesConfig.current());
+  return executeRoll(floor === undefined ? spec : { ...spec, minDifficulty: floor }, resolve, opts);
 }
 
 // Ops the roll pipeline executes directly (as the roll's `extra` modifier).
@@ -7361,7 +7436,7 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
   }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, tagged.diceMod, extra);
-  const exec = executeRoll(tagged, env.resolver, { rng: ctx.rng, extra });
+  const exec = runRoll(tagged, env.resolver, { rng: ctx.rng, extra });
   const notes = [...passive.notes, ...place.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : "", shieldNote].filter(Boolean);
   return { exec, notes };
 }
@@ -7460,7 +7535,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, spec.diceMod, extra);
-  const exec = executeRoll(spec, env.resolver, { rng: ctx.rng, extra });
+  const exec = runRoll(spec, env.resolver, { rng: ctx.rng, extra });
   const notes = [
     spend.note,
     ...passive.notes,
@@ -7618,7 +7693,9 @@ async function cmdListRolls(): Promise<string> {
 async function cmdRollInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) return sys(`roll-info needs a name, e.g. [[roll-info climbing]]. [[list-rolls]] lists them.`);
-  const key = StringUtil.normalize(name);
+  // "@name" is how a roll is INVOKED, so accept it here too rather than
+  // refusing the spelling the player just used.
+  const key = StringUtil.normalize(name.startsWith("@") ? name.slice(1) : name);
   const saved = await NamedRollStore.get(key);
   if (!saved) return sys(`No saved roll named "${key}". See [[list-rolls]].`);
   const sidecars = describeSidecars(saved);
@@ -7694,6 +7771,8 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
   if (difficultyMod !== undefined) o.difficultyMod = difficultyMod;
   const diceMod = intOf(cmd.named["dice-modifier"]);
   if (diceMod !== undefined) o.diceMod = diceMod;
+  const minDifficulty = intOf(cmd.named["min-difficulty"]);
+  if (minDifficulty !== undefined) o.minDifficulty = minDifficulty;
   if (cmd.named["tags"] !== undefined) o.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   return o;
 }
@@ -8218,7 +8297,7 @@ async function drawFromCray(char: PlayableCharacter, want: number, ctx: CommandC
     const reduced = Math.max(0, rating - 1);
     char.backgrounds = { ...char.backgrounds, cray: reduced };
     await CharacterStore.save(char);
-    const exec = executeRoll(makeRollSpec({ pool: `${reduced}`, difficulty: 8 }), () => 0, { rng: ctx.rng });
+    const exec = runRoll(makeRollSpec({ pool: `${reduced}`, difficulty: 8 }), () => 0, { rng: ctx.rng });
     const status: CrayState["status"] = exec.outcome === "botch" ? "dead" : exec.met ? "active" : "dormant";
     await CrayStore.set(char, { points: 0, status, lastTapDay: day });
     notes.push(`OVERDRAWN by ${overdraw}: the cray drops to ${reduced} dot${reduced === 1 ? "" : "s"} and is drained`);
@@ -8449,10 +8528,10 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
       if (passive.extra.autoSuccesses) merged.autoSuccesses = (merged.autoSuccesses ?? 0) + passive.extra.autoSuccesses;
       if (passive.extra.nAgain !== undefined) merged.nAgain = Math.min(merged.nAgain ?? 10, passive.extra.nAgain);
       if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
-      return executeRoll(spec, env.resolver, { rng, extra: merged });
+      return runRoll(spec, env.resolver, { rng, extra: merged });
     }
   }
-  return executeRoll(base, () => 0, { rng, extra });
+  return runRoll(base, () => 0, { rng, extra });
 }
 
 // From the actor's side, what does a table read? The actor's winning margin (the
@@ -8489,7 +8568,7 @@ async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
   const myEnv = await characterRollEnv(me);
   if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
-  const myExec = executeRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
+  const myExec = runRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
   const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
@@ -10172,15 +10251,25 @@ CommandRouter.beforeRoute(async () => {
 // of its arguments. [[help]] derives from it; windows render forms and compose
 // command strings from it. Handlers stay the validators - a spec describes,
 // it never rejects.
+// `hint` is the GRAMMAR (it goes in the one-line usage [[help]] prints);
+// `example` is what a window shows inside the empty field, so it must be
+// something a player could type. The grammar reads: a resource name, "::effect"
+// to pick one of its NAMED effects (heal, boost, fuel, cast...) instead of the
+// default, and a trailing "!" to make payment REQUIRED - unpayable means the
+// action is refused rather than rolled for free.
 const SPEND_HINT = "res[::effect][!]";
+const SPEND_EXAMPLE = "blood  ·  blood::heal  ·  willpower!";
 const ROLL_KNOBS: ParamSpec[] = [
   { key: "difficulty", kind: "positional", hint: "[difficulty|expr]" },
   { key: "diff-mod", kind: "positional", hint: "[diff-mod]" },
   { key: "requires", kind: "named", type: "int", desc: "Successes required" },
   { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
+  { key: "min-difficulty", kind: "named", type: "int", desc: "Floor the die target never drops below (overrides the chronicle's)" },
   { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
-  { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Resource to spend on the roll" },
-  { key: "specialty", kind: "named", hint: "<trait|label>", desc: "Apply ONE specialty (+1 die; pool must use its trait)" },
+  { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE,
+    desc: 'Resource to spend on the roll — "::effect" picks a named effect, "!" means no payment, no roll' },
+  { key: "specialty", kind: "named", hint: "<trait|label>", example: "Swords  ·  or its trait: melee",
+    desc: "Apply ONE specialty (+1 die; pool must use its trait)" },
 ];
 
 CommandRouter.register("help", cmdHelp, {
@@ -10277,7 +10366,7 @@ CommandRouter.register("extended-roll", cmdExtendedRoll, {
     { key: "difficulty", kind: "named", type: "int" },
     { key: "dice-modifier", kind: "named", type: "int" },
     { key: "tags", kind: "named", hint: '"a,b"' },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("continue-roll", cmdContinueRoll, {
@@ -10288,7 +10377,7 @@ CommandRouter.register("continue-roll", cmdContinueRoll, {
     { key: "diff-mod", kind: "named", type: "int" },
     { key: "dice-modifier", kind: "named", type: "int" },
     { key: "tags", kind: "named", hint: '"a,b"' },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("roll-status", cmdRollStatus, {
@@ -10337,7 +10426,7 @@ CommandRouter.register("resist", cmdResist, {
     { key: "difficulty", kind: "named", type: "int" },
     { key: "vs-difficulty", kind: "named", type: "int" },
     { key: "table", kind: "named", desc: "Success table read with your margin" },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("contest", cmdContest, {
@@ -10349,7 +10438,7 @@ CommandRouter.register("contest", cmdContest, {
     { key: "difficulty", kind: "named", type: "int" },
     { key: "vs-difficulty", kind: "named", type: "int" },
     { key: "table", kind: "named", desc: "Success table read with your margin" },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("extended-contest", cmdExtendedContest, {
@@ -10513,7 +10602,7 @@ CommandRouter.register("define-table", cmdDefineTable, {
   note: "a missing subcategory prompts a modal to create it",
   params: [
     { key: "name", kind: "named", required: true, hint: '"[sub::]name"', desc: "Name (optionally sub::name)", example: "e.g. combat::quick-kill" },
-    { key: "rows", kind: "named", type: "literal", hint: "`1:Cowed, 3:Terrified[=2]`", desc: "Ladder rows: <successes>:<label>[=<value>], comma-separated", example: "e.g. 1:Cowed, 3:Terrified" },
+    { key: "rows", kind: "named", type: "literal", hint: "`1:Cowed, 3:Terrified[=2]`", desc: "Ladder rows: <successes>:<label>[=<value>], separated by ; (or , when no label needs one)", example: "e.g. 1:Cowed, 3:Terrified" },
     { key: "value-per-success", kind: "named", type: "int", desc: "Direct numeric output per success" },
     { key: "cap", kind: "named", type: "int", desc: "Successes beyond this are wasted" },
     { key: "overflow-per", kind: "named", type: "int", desc: "Batch size beyond the last row" },
@@ -10661,7 +10750,7 @@ CommandRouter.register("lift", cmdLift, {
   params: [
     { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>" },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("afflictions", cmdAfflictions, {

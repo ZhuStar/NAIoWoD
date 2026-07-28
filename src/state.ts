@@ -15,7 +15,7 @@ import {
 } from "./core/traits";
 import {
   CardValue, CardMap, parseCardText, formatCardText,
-  asMap, asText, asNumber, asBool, asList, asStringList, asNamedList, CARD_VALUE_KEY,
+  asMap, asText, asNumber, asBool, asList, asStringList, asNamedList, CARD_VALUE_KEY, canonicalCardText,
 } from "./core/cardtext";
 import { Dice, Rng, RollTrait, RollResult } from "./core/dice";
 import {
@@ -907,6 +907,7 @@ export function savedRollToCard(roll: SavedRoll): CardMap {
   if (roll.diceMod) out["diceMod"] = roll.diceMod;
   if (roll.requires > 1) out["requires"] = roll.requires;
   if (roll.difficultyCap !== undefined) out["difficultyCap"] = roll.difficultyCap;
+  if (roll.minDifficulty !== undefined) out["minDifficulty"] = roll.minDifficulty;
   if (roll.tags.length) out["tags"] = [...roll.tags];
   for (const key of ["spend", "specialty", "table", "description"] as const) {
     const v = roll[key];
@@ -933,6 +934,8 @@ export function savedRollFromCard(body: CardMap): SavedRoll | undefined {
   if (expr) roll.difficultyExpr = expr;
   const cap = asNumber(body["difficultyCap"]);
   if (cap !== undefined) roll.difficultyCap = cap;
+  const floor = asNumber(body["minDifficulty"]);
+  if (floor !== undefined) roll.minDifficulty = floor;
   for (const key of ["spend", "specialty", "table", "description"] as const) {
     const v = asText(body[key]);
     if (v) roll[key] = v;
@@ -1427,6 +1430,23 @@ export const MagicRulesConfig = new MapConfigStore<number>({
   ],
 });
 
+// Chronicle-wide roll knobs. Only `min-difficulty` so far: the floor every
+// roll's die target respects. Absent = no floor at all, except on rolls that
+// name their own with `min-difficulty=`.
+export const ROLLS_CONFIG_ENTRY = "wod:config:rolls";
+export const RollRulesConfig = new MapConfigStore<number>({
+  entry: ROLLS_CONFIG_ENTRY,
+  header: [
+    "Chronicle-wide roll knobs: one `knob: number` per line below the marker.",
+    "  min-difficulty - no roll's die target drops below this, however deep the",
+    "                   reductions run. Leave it out and rolls have NO floor",
+    "                   except the ones that set their own (min-difficulty= on",
+    "                   the roll, or saved with [[name-roll]]).",
+    "Not to be confused with the min-difficulty in wod:config:magic, which is",
+    "how far Quintessence may talk a SPELL's difficulty down.",
+  ],
+});
+
 // Advancement prices: the CHRONICLE's cost table, never the character's. One
 // card, `kind:` with a price per purse indented under it (see
 // DEFAULT_ADVANCEMENT_COSTS). Values are text - nothing evaluates them yet.
@@ -1512,7 +1532,9 @@ export class TableLibraryStore {
     await this.loadFromLorebook();
     const key = sub ? `${sub}:${def.name}` : def.name;
     const now = SuccessTableRegistry.get(key);
-    return { shadowed: JSON.stringify(now) !== JSON.stringify({ ...def, name: key }) };
+    // Compare the DATA, not the key order: a round trip through the card
+    // reorders fields, and JSON.stringify would call that a shadowing card.
+    return { shadowed: canonicalCardText(now as unknown as CardValue) !== canonicalCardText({ ...def, name: key } as unknown as CardValue) };
   }
 
   // Remove one table from the addressed category's GENERAL card. Reports what
@@ -1532,7 +1554,7 @@ export class TableLibraryStore {
     await this.loadFromLorebook();
     const now = SuccessTableRegistry.get(n);
     const still = now === undefined ? undefined
-      : DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === n) && JSON.stringify(now) === JSON.stringify({ ...DEFAULT_SUCCESS_TABLES.find(d => StringUtil.normalize(d.name) === n), name: n })
+      : DEFAULT_SUCCESS_TABLES.some(d => StringUtil.normalize(d.name) === n) && canonicalCardText(now as unknown as CardValue) === canonicalCardText({ ...DEFAULT_SUCCESS_TABLES.find(d => StringUtil.normalize(d.name) === n), name: n } as unknown as CardValue)
         ? "built-in" as const : "another-card" as const;
     return { removed, still };
   }

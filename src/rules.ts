@@ -767,12 +767,21 @@ const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
 };
 export const MAGIC_KNOB_NAMES: string[] = Object.keys(MAGIC_KNOBS);
 
+// A knob NAME is data, and a card may spell it either way - the card format
+// rewrites a few hyphenated keys to their camelCase field names on the way in
+// (core/cardtext.ts FIELD_ALIASES), which silently orphaned `difficulty-cap`
+// until this. Knob lookups therefore compare on letters alone, so
+// "difficulty-cap", "difficultyCap" and "difficulty cap" are one knob.
+export const knobKey = (s: string): string => s.toLowerCase().replace(/[^a-z]/g, "");
+const MAGIC_KNOBS_BY_KEY: Record<string, keyof MagicRules> =
+  Object.fromEntries(Object.entries(MAGIC_KNOBS).map(([name, field]) => [knobKey(name), field]));
+
 // Defaults overlaid with the story's knob overrides (unknown names and
 // non-numbers are ignored - a typo can't corrupt the rules).
 export function magicRulesFrom(overrides: Record<string, number>): MagicRules {
   const rules: MagicRules = { ...DEFAULT_MAGIC_RULES };
   for (const [k, v] of Object.entries(overrides ?? {})) {
-    const field = MAGIC_KNOBS[StringUtil.normalize(k)];
+    const field = MAGIC_KNOBS_BY_KEY[knobKey(k)];
     if (field && typeof v === "number" && Number.isFinite(v)) rules[field] = v;
   }
   return rules;
@@ -821,6 +830,24 @@ export function advancementCostsFrom(overrides: CostTable): CostTable {
     }
   }
   return out;
+}
+
+// =============================================================================
+// ROLL RULES - chronicle-wide knobs for ordinary rolls
+// -----------------------------------------------------------------------------
+// One knob so far: a global MINIMUM DIFFICULTY. Unset means what it says -
+// no roll has a floor except the ones that name their own (`min-difficulty=` on
+// the roll, saved with a named roll). Distinct from the magic knob of the same
+// name, which bounds how far QUINTESSENCE may talk a spell's difficulty down;
+// this one is the floor the die target itself never drops below.
+// =============================================================================
+export const ROLL_KNOB_NAMES = ["min-difficulty"];
+export function rollFloorFrom(overrides: Record<string, number>): number | undefined {
+  for (const [k, v] of Object.entries(overrides ?? {})) {
+    if (knobKey(k) !== "mindifficulty") continue;
+    if (typeof v === "number" && Number.isFinite(v)) return Math.max(2, Math.min(10, v));
+  }
+  return undefined;
 }
 
 // =============================================================================

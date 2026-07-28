@@ -54,6 +54,7 @@ import {
   parseCardText, formatCardText, characterToCard, characterFromCard,
   asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
+  ROLLS_CONFIG_ENTRY, RollRulesConfig, rollFloorFrom, SuccessTableRow,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -2837,6 +2838,7 @@ describe("config stores: reload/reset-all", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
       AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY, MAGIC_CONFIG_ENTRY,
       COSTS_CONFIG_ENTRY,
+      ROLLS_CONFIG_ENTRY,
     ].sort());
   });
 
@@ -2942,6 +2944,88 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
     const t = SuccessTableRegistry.get("fear")!;
     expect(t.rows![1]).toEqual({ at: 4, label: "Panicked" });   // literal composition kept the case
     expect(t.cap).toBe(5);
+  });
+});
+
+// =============================================================================
+// MINIMUM DIFFICULTY - a floor per roll, and one for the whole chronicle
+// =============================================================================
+describe("minimum difficulty: per-roll and chronicle-wide", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("unset means unset: nothing has a floor until something asks for one", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    const free = await CommandRouter.route("roll 3 3", { rng: seqRng([2, 2, 2]) });
+    expect(free).toContain("vs diff 3");
+    expect(free).not.toContain("raised to the minimum");
+    // A roll that names its own floor gets it, chronicle setting or not.
+    const floored = await CommandRouter.route("roll 3 3 min-difficulty=6", { rng: seqRng([2, 2, 2]) });
+    expect(floored).toContain("vs diff 6");
+    expect(floored).toContain("difficulty 3 raised to the minimum 6");
+  });
+
+  test("the chronicle's floor reaches every roll; a roll's own floor overrides it", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await RollRulesConfig.save({ "min-difficulty": 5 });
+    expect(await CommandRouter.route("roll 3 3", { rng: seqRng([2, 2, 2]) })).toContain("vs diff 5");
+    // A deep reduction cannot dig under it either.
+    expect(await CommandRouter.route("roll 3 4 diff-mod=-9", { rng: seqRng([2, 2, 2]) })).toContain("vs diff 5");
+    // The roll's own floor wins, in either direction.
+    expect(await CommandRouter.route("roll 3 3 min-difficulty=8", { rng: seqRng([2, 2, 2]) })).toContain("vs diff 8");
+    expect(await CommandRouter.route("roll 3 3 min-difficulty=2", { rng: seqRng([2, 2, 2]) })).toContain("vs diff 3");
+  });
+
+  test("a saved roll carries its floor through the lorebook card", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("name-roll squint perception+alertness 4 min-difficulty=6");
+    const text = (await LorebookManager.entryText(NAMED_ROLLS_CATEGORY, "wod:named-rolls:library"))!;
+    expect(text).toContain("min-difficulty: 6");
+    expect((await NamedRollStore.get("squint"))!.minDifficulty).toBe(6);
+    expect(await CommandRouter.route("roll @squint", { rng: seqRng([2, 2]) })).toContain("vs diff 6");
+  });
+
+  test("the chronicle's roll floor is NOT the magic knob of the same name", async () => {
+    // wod:config:magic min-difficulty bounds how far Quintessence talks a spell
+    // down; wod:config:rolls min-difficulty is the die target's own floor.
+    await MagicRulesConfig.save({ "min-difficulty": 3, "difficulty-cap": 9 });
+    const rules = magicRulesFrom(MagicRulesConfig.current());
+    expect(rules.minDifficulty).toBe(3);
+    expect(rules.difficultyCap).toBe(9);          // the card format must not orphan a knob
+    expect(rollFloorFrom(RollRulesConfig.current())).toBeUndefined();
+  });
+
+  test("a knob is found however the card spells it", () => {
+    expect(magicRulesFrom({ "difficulty-cap": 9 }).difficultyCap).toBe(9);
+    expect(magicRulesFrom({ difficultyCap: 8 }).difficultyCap).toBe(8);
+    expect(rollFloorFrom({ "min-difficulty": 5 })).toBe(5);
+    expect(rollFloorFrom({ minDifficulty: 4 })).toBe(4);
+    expect(rollFloorFrom({})).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// TABLE ROWS - prose labels with commas in them
+// =============================================================================
+describe("success table rows: semicolons for prose labels", () => {
+  test("';' separates rows so a label may contain commas", () => {
+    const rows = parseTableRows("1:whether authorship is present; 4:age, family, and whether he resisted") as SuccessTableRow[];
+    expect(rows.length).toBe(2);
+    expect(rows[1].label).toBe("age, family, and whether he resisted");
+    // No semicolon anywhere: commas still separate, as before.
+    const plain = parseTableRows("1:Cowed, 3:Terrified=2") as SuccessTableRow[];
+    expect(plain.length).toBe(2);
+    expect(plain[1].value).toBe(2);
+  });
+
+  test("[[define-table]] takes them, and the roll reads the ladder", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route('define-table name=`The Alien Hand` '
+      + 'rows=`1:External authorship present; 2:Its principal seat - emotion, thought, memory, or soul`');
+    const t = SuccessTableRegistry.get("the-alien-hand")!;
+    expect(t.rows!.length).toBe(2);
+    expect(t.rows![1].label).toBe("Its principal seat - emotion, thought, memory, or soul");
+    const r = await CommandRouter.route("roll 3 4 table=the-alien-hand", { rng: seqRng([8, 8, 2]) });   // 2 successes
+    expect(r).toContain("Its principal seat");
   });
 });
 

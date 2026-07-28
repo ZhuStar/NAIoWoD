@@ -532,6 +532,27 @@ persists in story storage.
   `RollModifierRegistry` (e.g. `acute-senses` → −2 difficulty, `willpower` → +1
   automatic success) — the hook for rules-driven modifiers like Merits & Flaws.
 
+### Minimum difficulty — a floor per roll, and one for the chronicle
+
+Reductions stack, and a well-fuelled character can talk a difficulty down to
+nothing. Two floors stop that, and **neither exists until you ask for one**:
+
+- **Per roll** — `min-difficulty=N` on `[[roll]]`, `[[roll-for]]`,
+  `[[extended-roll]]` or `[[name-roll]]` (saved with the roll, so `@name`
+  carries it).
+- **Chronicle-wide** — `min-difficulty` in the **`wod:config:rolls`** card.
+  Leave it out and rolls have no floor at all; set it and *every* roll respects
+  it. A roll that names its own floor overrides the chronicle's, in either
+  direction.
+
+The floor binds **after** every modifier, and the reply says so:
+`difficulty 3 raised to the minimum 6`. (The engine's own hard minimum of 2
+always applies — a target of 1 would make every die a success.)
+
+> Not the same as `min-difficulty` in `wod:config:magic`, which is how far
+> **Quintessence** may talk a *spell's* difficulty down. That one bounds a
+> spend; this one is the die target's floor.
+
 ### Named rolls
 
 Save a roll once, then fire it by name — tweaking pieces on the spot. Saved
@@ -718,6 +739,9 @@ output is a **number**, one level per success).
   - **`[[define-table]]`** — rows use a mini-grammar, backtick-quoted so labels
     keep their case:
     ``[[define-table name="combat::quick-kill" rows=`1:Wounded, 3:Dead` cap=6]]``
+    Rows separate on **`;`** when the text contains one, on `,` when it doesn't
+    — so a prose label may hold commas:
+    ``rows=`1:Authorship present; 4:age, family, and whether he resisted` ``
     (also `value-per-success=`, `overflow-per=`/`overflow-value=`/`overflow-label=`,
     `botch=`, `failure=`, `description=`). A missing subcategory pops a
     **modal** asking to create it; `[[define-table-category name="combat"]]`

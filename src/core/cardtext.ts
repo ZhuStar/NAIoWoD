@@ -52,7 +52,7 @@ export const CARD_VALUE_KEY = "value";
 export const TEXT_KEYS = new Set([
   "name", "key", "id", "description", "note", "label", "blurb", "until",
   "interval", "topic", "title", "specialty", "param", "pool", "difficultyexpr",
-  "reason", "summary",
+  "reason", "summary", "botch", "failure", "overflowlabel",
 ]);
 
 // Keys the engine always wants as a list, so one item needs no special syntax
@@ -75,6 +75,7 @@ const FIELD_ALIASES: Record<string, string> = {
   "difficulty-expr": "difficultyExpr",
   "difficulty-mod": "difficultyMod",
   "difficulty-cap": "difficultyCap",
+  "min-difficulty": "minDifficulty",
   "dice-mod": "diceMod",
   "merits-flaws": "meritsFlaws",
   "pool-starts": "poolStarts",

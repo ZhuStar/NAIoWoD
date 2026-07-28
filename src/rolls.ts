@@ -30,6 +30,10 @@ export interface RollSpec {
   difficultyCap?: number; // ceiling the die target clamps to (default 10); anything
                           // above it becomes +1 required success per point - Mage
                           // spellcasting sets 10 (or the book's 9) here
+  // Floor the die target never drops below, however deep the reductions run.
+  // Unset = no floor of its own; the chronicle's global floor (if it set one)
+  // fills in, and failing that only the engine's hard minimum of 2 applies.
+  minDifficulty?: number;
 }
 
 // Fill defaults and normalize tags. `requires` is at least 1.
@@ -44,6 +48,7 @@ export function makeRollSpec(parts: Partial<RollSpec> & { pool: string }): RollS
   };
   if (parts.difficultyExpr && parts.difficultyExpr.trim()) spec.difficultyExpr = parts.difficultyExpr.trim();
   if (parts.difficultyCap !== undefined) spec.difficultyCap = Math.max(2, Math.min(10, parts.difficultyCap));
+  if (parts.minDifficulty !== undefined) spec.minDifficulty = Math.max(2, Math.min(10, parts.minDifficulty));
   return spec;
 }
 
@@ -187,8 +192,12 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
   // subtract from the RAW difficulty, they strip that surcharge first and only
   // then lower the die target - the book's ordering, by arithmetic.
   const cap = Math.max(2, Math.min(10, spec.difficultyCap ?? 10));
+  // The floor binds AFTER every reduction: a spell talked down to 1 still rolls
+  // at the chronicle's minimum. 2 is the engine's own hard floor (a d10 target
+  // of 1 would make every die a success).
+  const floor = Math.max(2, Math.min(cap, spec.minDifficulty ?? 2));
   const rawDifficulty = difficulty;
-  const dieDifficulty = Math.max(2, Math.min(cap, rawDifficulty));
+  const dieDifficulty = Math.max(floor, Math.min(cap, rawDifficulty));
   const overflow = Math.max(0, rawDifficulty - cap);
   const policy = opts.overDifficulty ?? "extra-success";
   const impossible = overflow > 0 && policy === "impossible";
@@ -199,6 +208,7 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
     if (impossible) notes.push(`difficulty ${rawDifficulty} exceeds ${cap} -> impossible`);
     else { requires += overflow; notes.push(`difficulty ${rawDifficulty} > ${cap} -> +${overflow} required success${overflow === 1 ? "" : "es"}`); }
   }
+  if (floor > 2 && rawDifficulty < floor) notes.push(`difficulty ${rawDifficulty} raised to the minimum ${floor}`);
   if (unknownTags.length) notes.push(`unknown tag${unknownTags.length === 1 ? "" : "s"}: ${unknownTags.join(", ")}`);
 
   return {
@@ -444,7 +454,11 @@ export function describeTable(t: SuccessTable): string {
 export function parseTableRows(raw: string | undefined): SuccessTableRow[] | { error: string } {
   if (!raw || !raw.trim()) return [];
   const rows: SuccessTableRow[] = [];
-  for (const item of raw.split(",")) {
+  // Rows separate on ";" when the text has one, else ",". Labels are prose and
+  // often contain commas ("age, family, and whether the subject resisted"), so
+  // a semicolon is the way to say "that comma is punctuation".
+  const items = raw.includes(";") ? raw.split(";") : raw.split(",");
+  for (const item of items) {
     const m = item.trim().match(/^(\d+)\s*:\s*([^=]+?)\s*(?:=\s*(-?\d+))?$/);
     if (!m || !m[2].trim()) {
       return { error: `Can't read row "${item.trim()}" - rows are "<successes>:<label>[=<value>]", comma-separated (e.g. 1:Cowed, 3:Terrified=2).` };

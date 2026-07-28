@@ -30,6 +30,7 @@ import {
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
   magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers, uncancelableCap,
   uncancelableAllowance, isCastingRoll, CASTING_TAGS,
+  rollFloorFrom,
   advancementCostsFrom, CostTable, COST_PURSES,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
   meritFlawFromCard,
@@ -41,7 +42,7 @@ import {
   configEntryText, namedDefsToCard,
 } from "./services";
 import {
-  RollSpec, RollModifier, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
+  RollSpec, RollModifier, TraitResolver, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
   ExtendedRoll, applyInterval, describeExtended, parseBotchPolicy, parsePoolExpression,
   SuccessTable, SuccessTableRegistry, readSuccessTable, describeTableReading, describeTable,
   parseTableRows, DEFAULT_SUCCESS_TABLES, RollOutcomeKind,
@@ -68,6 +69,7 @@ import {
   CharacterResources, CharacterHealth, CharacterBoosts, EffectUses,
   MagicRulesConfig, CastAttempts, CrayStore, CrayState,
   AdvancementCosts, COSTS_CONFIG_ENTRY,
+  RollRulesConfig, ROLLS_CONFIG_ENTRY,
   ActiveWizard, WizardSession, CreatorMode,
 } from "./state";
 
@@ -379,10 +381,21 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
   if (requires !== undefined) args.requires = requires;
   const diceMod = intOf(cmd.named["dice-modifier"]);
   if (diceMod !== undefined) args.diceMod = diceMod;
+  const minDifficulty = intOf(cmd.named["min-difficulty"]);
+  if (minDifficulty !== undefined) args.minDifficulty = minDifficulty;
   if (cmd.named["tags"] !== undefined) {
     args.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   }
   return args;
+}
+
+// EVERY roll the engine executes goes through here, so the chronicle's floor
+// (wod:config:rolls -> min-difficulty) reaches all of them. A spec that names
+// its own floor keeps it; when neither is set there is no floor at all beyond
+// the engine's hard minimum of 2.
+function runRoll(spec: RollSpec, resolve: TraitResolver, opts: { rng?: Rng; extra?: Partial<RollModifier> } = {}): RollExecution {
+  const floor = spec.minDifficulty ?? rollFloorFrom(RollRulesConfig.current());
+  return executeRoll(floor === undefined ? spec : { ...spec, minDifficulty: floor }, resolve, opts);
 }
 
 // Ops the roll pipeline executes directly (as the roll's `extra` modifier).
@@ -821,7 +834,7 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
   }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, tagged.diceMod, extra);
-  const exec = executeRoll(tagged, env.resolver, { rng: ctx.rng, extra });
+  const exec = runRoll(tagged, env.resolver, { rng: ctx.rng, extra });
   const notes = [...passive.notes, ...place.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : "", shieldNote].filter(Boolean);
   return { exec, notes };
 }
@@ -920,7 +933,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   }
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, spec.diceMod, extra);
-  const exec = executeRoll(spec, env.resolver, { rng: ctx.rng, extra });
+  const exec = runRoll(spec, env.resolver, { rng: ctx.rng, extra });
   const notes = [
     spend.note,
     ...passive.notes,
@@ -1078,7 +1091,9 @@ async function cmdListRolls(): Promise<string> {
 async function cmdRollInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) return sys(`roll-info needs a name, e.g. [[roll-info climbing]]. [[list-rolls]] lists them.`);
-  const key = StringUtil.normalize(name);
+  // "@name" is how a roll is INVOKED, so accept it here too rather than
+  // refusing the spelling the player just used.
+  const key = StringUtil.normalize(name.startsWith("@") ? name.slice(1) : name);
   const saved = await NamedRollStore.get(key);
   if (!saved) return sys(`No saved roll named "${key}". See [[list-rolls]].`);
   const sidecars = describeSidecars(saved);
@@ -1154,6 +1169,8 @@ function rollOverridesFromNamed(cmd: ParsedCommand): Partial<RollSpec> {
   if (difficultyMod !== undefined) o.difficultyMod = difficultyMod;
   const diceMod = intOf(cmd.named["dice-modifier"]);
   if (diceMod !== undefined) o.diceMod = diceMod;
+  const minDifficulty = intOf(cmd.named["min-difficulty"]);
+  if (minDifficulty !== undefined) o.minDifficulty = minDifficulty;
   if (cmd.named["tags"] !== undefined) o.tags = cmd.named["tags"].split(",").map(t => t.trim()).filter(t => t.length > 0);
   return o;
 }
@@ -1678,7 +1695,7 @@ async function drawFromCray(char: PlayableCharacter, want: number, ctx: CommandC
     const reduced = Math.max(0, rating - 1);
     char.backgrounds = { ...char.backgrounds, cray: reduced };
     await CharacterStore.save(char);
-    const exec = executeRoll(makeRollSpec({ pool: `${reduced}`, difficulty: 8 }), () => 0, { rng: ctx.rng });
+    const exec = runRoll(makeRollSpec({ pool: `${reduced}`, difficulty: 8 }), () => 0, { rng: ctx.rng });
     const status: CrayState["status"] = exec.outcome === "botch" ? "dead" : exec.met ? "active" : "dormant";
     await CrayStore.set(char, { points: 0, status, lastTapDay: day });
     notes.push(`OVERDRAWN by ${overdraw}: the cray drops to ${reduced} dot${reduced === 1 ? "" : "s"} and is drained`);
@@ -1909,10 +1926,10 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
       if (passive.extra.autoSuccesses) merged.autoSuccesses = (merged.autoSuccesses ?? 0) + passive.extra.autoSuccesses;
       if (passive.extra.nAgain !== undefined) merged.nAgain = Math.min(merged.nAgain ?? 10, passive.extra.nAgain);
       if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
-      return executeRoll(spec, env.resolver, { rng, extra: merged });
+      return runRoll(spec, env.resolver, { rng, extra: merged });
     }
   }
-  return executeRoll(base, () => 0, { rng, extra });
+  return runRoll(base, () => 0, { rng, extra });
 }
 
 // From the actor's side, what does a table read? The actor's winning margin (the
@@ -1949,7 +1966,7 @@ async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
   const myEnv = await characterRollEnv(me);
   if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
-  const myExec = executeRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
+  const myExec = runRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
   const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
   const outcome = compareRolls(mode, myExec, theirExec);
   const t = contestTableInput(outcome);
@@ -3632,15 +3649,25 @@ CommandRouter.beforeRoute(async () => {
 // of its arguments. [[help]] derives from it; windows render forms and compose
 // command strings from it. Handlers stay the validators - a spec describes,
 // it never rejects.
+// `hint` is the GRAMMAR (it goes in the one-line usage [[help]] prints);
+// `example` is what a window shows inside the empty field, so it must be
+// something a player could type. The grammar reads: a resource name, "::effect"
+// to pick one of its NAMED effects (heal, boost, fuel, cast...) instead of the
+// default, and a trailing "!" to make payment REQUIRED - unpayable means the
+// action is refused rather than rolled for free.
 const SPEND_HINT = "res[::effect][!]";
+const SPEND_EXAMPLE = "blood  ·  blood::heal  ·  willpower!";
 const ROLL_KNOBS: ParamSpec[] = [
   { key: "difficulty", kind: "positional", hint: "[difficulty|expr]" },
   { key: "diff-mod", kind: "positional", hint: "[diff-mod]" },
   { key: "requires", kind: "named", type: "int", desc: "Successes required" },
   { key: "dice-modifier", kind: "named", type: "int", desc: "Dice added or removed" },
+  { key: "min-difficulty", kind: "named", type: "int", desc: "Floor the die target never drops below (overrides the chronicle's)" },
   { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
-  { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Resource to spend on the roll" },
-  { key: "specialty", kind: "named", hint: "<trait|label>", desc: "Apply ONE specialty (+1 die; pool must use its trait)" },
+  { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE,
+    desc: 'Resource to spend on the roll — "::effect" picks a named effect, "!" means no payment, no roll' },
+  { key: "specialty", kind: "named", hint: "<trait|label>", example: "Swords  ·  or its trait: melee",
+    desc: "Apply ONE specialty (+1 die; pool must use its trait)" },
 ];
 
 CommandRouter.register("help", cmdHelp, {
@@ -3737,7 +3764,7 @@ CommandRouter.register("extended-roll", cmdExtendedRoll, {
     { key: "difficulty", kind: "named", type: "int" },
     { key: "dice-modifier", kind: "named", type: "int" },
     { key: "tags", kind: "named", hint: '"a,b"' },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("continue-roll", cmdContinueRoll, {
@@ -3748,7 +3775,7 @@ CommandRouter.register("continue-roll", cmdContinueRoll, {
     { key: "diff-mod", kind: "named", type: "int" },
     { key: "dice-modifier", kind: "named", type: "int" },
     { key: "tags", kind: "named", hint: '"a,b"' },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("roll-status", cmdRollStatus, {
@@ -3797,7 +3824,7 @@ CommandRouter.register("resist", cmdResist, {
     { key: "difficulty", kind: "named", type: "int" },
     { key: "vs-difficulty", kind: "named", type: "int" },
     { key: "table", kind: "named", desc: "Success table read with your margin" },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("contest", cmdContest, {
@@ -3809,7 +3836,7 @@ CommandRouter.register("contest", cmdContest, {
     { key: "difficulty", kind: "named", type: "int" },
     { key: "vs-difficulty", kind: "named", type: "int" },
     { key: "table", kind: "named", desc: "Success table read with your margin" },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("extended-contest", cmdExtendedContest, {
@@ -3973,7 +4000,7 @@ CommandRouter.register("define-table", cmdDefineTable, {
   note: "a missing subcategory prompts a modal to create it",
   params: [
     { key: "name", kind: "named", required: true, hint: '"[sub::]name"', desc: "Name (optionally sub::name)", example: "e.g. combat::quick-kill" },
-    { key: "rows", kind: "named", type: "literal", hint: "`1:Cowed, 3:Terrified[=2]`", desc: "Ladder rows: <successes>:<label>[=<value>], comma-separated", example: "e.g. 1:Cowed, 3:Terrified" },
+    { key: "rows", kind: "named", type: "literal", hint: "`1:Cowed, 3:Terrified[=2]`", desc: "Ladder rows: <successes>:<label>[=<value>], separated by ; (or , when no label needs one)", example: "e.g. 1:Cowed, 3:Terrified" },
     { key: "value-per-success", kind: "named", type: "int", desc: "Direct numeric output per success" },
     { key: "cap", kind: "named", type: "int", desc: "Successes beyond this are wasted" },
     { key: "overflow-per", kind: "named", type: "int", desc: "Batch size beyond the last row" },
@@ -4121,7 +4148,7 @@ CommandRouter.register("lift", cmdLift, {
   params: [
     { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>" },
-    { key: "spend", kind: "named", hint: SPEND_HINT },
+    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
   ],
 });
 CommandRouter.register("afflictions", cmdAfflictions, {

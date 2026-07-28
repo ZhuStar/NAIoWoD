@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `e72acb5`** ("One point, one
-> difficulty break; stacking Willpower is a spellcasting rule"). Prior:
+> **Last synced with the code as of commit `38d2007`** ("A floor for the
+> die target, and the knob the card format was eating"). Prior: `e72acb5`
+> ("One point, one
+> difficulty break; stacking Willpower is a spellcasting rule");
 > `46e362c` ("A mage has no
 > Resolve: correct the tests that invented one"); `38f11a8` ("Sharpened
 > Senses, and a ceiling that is a trait"); `094c61b` ("Cards are written
@@ -2172,6 +2174,46 @@ and `prefill` are mocked/available but not yet written.
     `defsFor` filters out everything `replaces` names, so `[[resources]]` prints
     one line and `spend=willpower` reports "spent 1 living-resolve". The four
     names are not pools he also has; they resolve to the one he has.
+
+47. **A floor for the die target, and the knob the card format was eating**
+    (user: "it should be possible to set minimum difficulties for rolls... a
+    global minimum difficulty, and a per-roll minimum difficulty. If global is
+    not set, no rolls have minimum difficulties, except the ones that state
+    it").
+    `RollSpec.minDifficulty` (rolls.ts) is honoured in `resolveSpec` AFTER every
+    modifier - `dieDifficulty = max(floor, min(cap, raw))`, with a note when it
+    actually bit - so a deep reduction cannot dig under it. `min-difficulty=` on
+    every roll verb, saved with a named roll (card key `min-difficulty`). The
+    chronicle-wide one is `RollRulesConfig` (`wod:config:rolls`, knob
+    `min-difficulty`, read by `rollFloorFrom`) folded in by a new game.ts
+    **`runRoll`** - the single wrapper EVERY `executeRoll` call now goes
+    through, which is what makes "global" actually global. Unset means unset:
+    only the engine's hard minimum of 2 remains. Deliberately distinct from the
+    `min-difficulty` MAGIC knob, which bounds how far Quintessence talks a
+    SPELL down; both cards say so in their headers.
+    **The regression it uncovered**: §7.43's `FIELD_ALIASES` rewrites
+    `difficulty-cap` -> `difficultyCap` on read, and `MAGIC_KNOBS` is keyed on
+    the hyphenated name, so `difficulty-cap: 9` in the magic card had been
+    SILENTLY IGNORED since that commit. Knob names are DATA, and the alias table
+    was warned against exactly this - but the collision was with a key I did not
+    think of as data. Fixed generally: `knobKey()` compares on letters alone, so
+    `difficulty-cap`, `difficultyCap` and `difficulty cap` are one knob, in both
+    `magicRulesFrom` and `rollFloorFrom`. A test pins it.
+    **Three warts fixed alongside**, all found by building the owner's own
+    table end to end: `parseTableRows` now splits on `;` when the text has one
+    (a prose label holds commas - "age, family, and whether he resisted" - which
+    the comma-only grammar could not express); `botch`/`failure`/`overflow-label`
+    joined TEXT_KEYS so a hand-written table card doesn't split them either;
+    `TableLibraryStore.put`'s "another card shadows this name" check compared
+    `JSON.stringify` of two objects whose KEY ORDER differs after a card round
+    trip, so every fresh table claimed to be shadowed - it now compares
+    `canonicalCardText`. And `[[roll-info @name]]` accepts the `@` the player
+    just used to invoke the roll.
+    **UI**: the window's placeholders came from `hint`, which is the help
+    GRAMMAR (`res[::effect][!]`) and unreadable in a form field. `ParamSpec`
+    already had `example`, which window.ts prefers - so the grammar stays in
+    `hint` for `[[help]]` and the friendly text goes in `example`, with the
+    `desc` (the field's label) now explaining what `::effect` and `!` mean.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

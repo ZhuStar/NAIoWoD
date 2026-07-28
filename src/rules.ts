@@ -4,6 +4,9 @@
 // =============================================================================
 import { StringUtil, MoralityPolarity } from "./core/traits";
 import {
+  CardValue, CardMap, asMap, asList, asText, asNumber, asBool, asStringList,
+} from "./core/cardtext";
+import {
   SoakSpec, DamageReaction, UndeadPhysiology, SilverVulnerability,
   HealthLevelDef, STANDARD_HEALTH_LEVELS,
 } from "./core/damage";
@@ -753,6 +756,51 @@ export function magicRulesFrom(overrides: Record<string, number>): MagicRules {
 }
 
 // =============================================================================
+// ADVANCEMENT COSTS - what a dot costs, from each purse
+// -----------------------------------------------------------------------------
+// Prices are CHRONICLE RULES, not character data: they are the same for every
+// sheet, so they live here and in one config card - never on the sheet itself.
+// Each entry is one trait kind priced from the three purses a Dark Ages game
+// draws on: `experience` (play), `freebie` (creation), `maturation` (downtime).
+// Values are TEXT, deliberately: nothing evaluates them yet (there is no
+// advancement engine), so they are stored, surfaced by [[costs]], and applied
+// by the Storyteller - the standing rule for a subsystem that doesn't exist.
+// "current" means the rating you are raising FROM.
+// =============================================================================
+export type CostPurse = "experience" | "freebie" | "maturation";
+export const COST_PURSES: CostPurse[] = ["experience", "freebie", "maturation"];
+export type CostTable = Record<string, Record<string, string>>;
+
+export const DEFAULT_ADVANCEMENT_COSTS: CostTable = {
+  attribute: { experience: "current x 4", freebie: "5", maturation: "current x 3" },
+  ability: { experience: "current x 2 (a new one: 3)", freebie: "2", maturation: "current x 2" },
+  background: { experience: "current x 2", freebie: "1", maturation: "current x 2" },
+  discipline: { experience: "current x 5 (out of clan: current x 7)", freebie: "7", maturation: "current x 5" },
+  pillar: { experience: "current x 7", freebie: "7", maturation: "current x 7" },
+  foundation: { experience: "current x 8", freebie: "10", maturation: "current x 8" },
+  virtue: { experience: "current x 2", freebie: "2", maturation: "current x 2" },
+  willpower: { experience: "current", freebie: "1", maturation: "current" },
+  road: { experience: "current x 2", freebie: "1", maturation: "current x 2" },
+  "merit-flaw": { experience: "-", freebie: "the merit's own points", maturation: "-" },
+};
+
+// The shipped table with the story's overrides laid over it, kind by kind (an
+// override may replace one purse's price without restating the others).
+export function advancementCostsFrom(overrides: CostTable): CostTable {
+  const out: CostTable = {};
+  for (const [kind, purses] of Object.entries(DEFAULT_ADVANCEMENT_COSTS)) out[kind] = { ...purses };
+  for (const [rawKind, purses] of Object.entries(overrides ?? {})) {
+    const kind = StringUtil.normalize(rawKind);
+    out[kind] = { ...(out[kind] ?? {}) };
+    for (const [rawPurse, price] of Object.entries(purses ?? {})) {
+      if (price === undefined || price === null) continue;
+      out[kind][StringUtil.normalize(rawPurse)] = String(price);
+    }
+  }
+  return out;
+}
+
+// =============================================================================
 // DISCIPLINES - vampiric (and ghoul/revenant) supernatural powers
 // -----------------------------------------------------------------------------
 // Rated traits (0-5). The registry is metadata: an "arena" and which Dark Ages
@@ -796,7 +844,7 @@ export function disciplineDef(name: string): DisciplineDef | undefined {
 // MERITS & FLAWS - optional quirks with (waivable) prerequisites
 // -----------------------------------------------------------------------------
 // Defaults live in an in-code list; the lorebook is the editable database on
-// top: any entry in the "srd:merits-flaws" category whose text is a JSON array
+// top: any entry in the "srd:merits-flaws" category whose text names definitions
 // of definitions is merged over the defaults by MeritFlawRegistry
 // .loadFromLorebook(). Prerequisites may name templates, free-form character
 // tags ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every
@@ -931,6 +979,74 @@ export function describePassiveOp(op: EffectOp): string {
   return `${op.op}${amount}${on}${gates.length ? ` - ${gates.join(", ")}` : ""}`;
 }
 
+// --- READING DEFINITIONS OUT OF A CARD --------------------------------------
+// Card text is untyped on purpose (core/cardtext.ts): the reader reports what
+// was written, and the consumer says what it wants. These are the two shapes
+// the rules layer owns - every other store reads its own.
+
+// One always-on / spend op. `op` is required; everything else is optional, and
+// an op the engine doesn't know is kept anyway (the open-vocabulary rule: it is
+// recorded, surfaced, and the Storyteller adjudicates).
+export function effectOpFromCard(raw: CardValue): EffectOp | undefined {
+  const body = asMap(raw);
+  const name = asText(body["op"]);
+  if (!name) return undefined;
+  const op: EffectOp = { op: StringUtil.normalize(name) };
+  const target = asText(body["target"], ",");
+  if (target) op.target = target;
+  const amount = asNumber(body["amount"]);
+  if (amount !== undefined) op.amount = amount;
+  if (asBool(body["fillToCap"])) op.fillToCap = true;
+  const cap = asNumber(body["cap"]) ?? asText(body["cap"]);
+  if (cap !== undefined) op.cap = cap;
+  const trait = asText(body["trait"]);
+  if (trait) op.trait = trait;
+  if (asBool(body["once"])) op.once = true;
+  const gate = asMap(body["requiresResource"]);
+  const resource = asText(gate["resource"]);
+  if (resource) {
+    op.requiresResource = { resource: StringUtil.normalize(resource), atLeast: asNumber(gate["atLeast"]) ?? 1 };
+  }
+  return op;
+}
+export function effectOpsFromCard(raw: CardValue | undefined): EffectOp[] {
+  return asList(raw).map(effectOpFromCard).filter((op): op is EffectOp => op !== undefined);
+}
+
+// One Merit / Flaw / arcanum. Undefined when the block never says which it is -
+// the card keeps the text, the registry just doesn't take it.
+export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
+  const kind = (asText(body["kind"]) ?? "").toLowerCase();
+  if (kind !== "merit" && kind !== "flaw") return undefined;
+  const rawPoints = body["points"];
+  const def: MeritFlawDef = {
+    name: name.trim(),
+    kind,
+    points: Array.isArray(rawPoints)
+      ? rawPoints.map(p => asNumber(p) ?? 0)
+      : asNumber(rawPoints) ?? 0,
+  };
+  const requires = asMap(body["requires"]);
+  const templates = asStringList(requires["templates"]).map(t => StringUtil.normalize(t));
+  const tags = asStringList(requires["tags"]).map(t => StringUtil.normalize(t));
+  const meritsFlaws = asStringList(requires["meritsFlaws"]).map(t => StringUtil.normalize(t));
+  if (templates.length || tags.length || meritsFlaws.length) {
+    def.requires = {};
+    if (templates.length) def.requires.templates = templates;
+    if (tags.length) def.requires.tags = tags;
+    if (meritsFlaws.length) def.requires.meritsFlaws = meritsFlaws;
+  }
+  const description = asText(body["description"]);
+  if (description) def.description = description;
+  const param = asText(body["param"]);
+  if (param) def.param = StringUtil.normalize(param);
+  const passive = effectOpsFromCard(body["passive"]);
+  if (passive.length) def.passive = passive;
+  const atMostOneAt = asNumber(body["atMostOneAt"]);
+  if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  return def;
+}
+
 export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
   {
@@ -1002,8 +1118,8 @@ export function makeConstraintGroup(parts: Partial<ConstraintGroup> & { name: st
     name: StringUtil.normalize(parts.name),
     relation,
     domain,
-    members: (parts.members ?? []).map(m => StringUtil.normalize(m)).filter(m => m.length > 0),
-    scope: (parts.scope ?? []).map(s => StringUtil.normalize(s)).filter(s => s.length > 0),
+    members: asStringList(parts.members as CardValue).map(m => StringUtil.normalize(m)).filter(m => m.length > 0),
+    scope: asStringList(parts.scope as CardValue).map(s => StringUtil.normalize(s)).filter(s => s.length > 0),
   };
   if (relation === "exclusive") g.max = Math.max(1, parts.max ?? 1);
   else if (parts.max !== undefined) g.max = parts.max;
@@ -1134,12 +1250,12 @@ export function foldAfflictionTiers(rating: number, tiers: AfflictionTier[] | un
 export function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): AfflictionDef {
   const def: AfflictionDef = { name: StringUtil.normalize(parts.name) };
   if (parts.description && parts.description.trim()) def.description = parts.description.trim();
-  const bindings = (parts.bindings ?? []).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
+  const bindings = asStringList(parts.bindings as CardValue).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
   if (bindings.length) def.bindings = bindings;
   if (parts.duration) def.duration = parts.duration;
   if (parts.then && parts.then.trim()) def.then = StringUtil.normalize(parts.then);
   if (parts.mirror && parts.mirror.trim()) def.mirror = StringUtil.normalize(parts.mirror);
-  const tags = (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  const tags = asStringList(parts.tags as CardValue).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
   if (tags.length) def.tags = tags;
   if (parts.note && parts.note.trim()) def.note = parts.note.trim();
   if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
@@ -1318,22 +1434,35 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
   },
   {
     name: "srd:merits-flaws",
-    blurb: "custom Merits & Flaws (JSON), layered over the built-in list",
+    blurb: "custom Merits & Flaws, layered over the built-in list",
     entries: [
       { displayName: "srd:merits-flaws:custom", text: srdEntryText(
         [
-          `Custom Merits & Flaws. Put a JSON array below the ${SRD_HEADER_MARKER} line; it is merged over the built-in list. Each definition:`,
-          '  name        - display name',
-          '  kind        - "merit" or "flaw"',
-          '  points      - freebie cost (merit) / bonus (flaw); a number, or [1,2,3] for variable ratings',
-          '  requires    - optional { "templates": [any-of], "tags": [all-of], "meritsFlaws": [all-of] }',
-          '  description - optional text',
+          `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
+          "NAME followed by a colon, with its fields indented underneath. They are merged",
+          "over the built-in list. The fields:",
+          '  kind        - "merit" or "flaw" (required - a block without it is skipped)',
+          "  points      - freebie cost (merit) / bonus (flaw); one number, or `1, 2, 3`",
+          "                for a variable rating",
+          "  requires    - optional, with any of: templates (any-of), tags (all-of),",
+          "                merits-flaws (all-of)",
+          "  description - optional text (commas in it are just punctuation)",
+          "  passive     - optional always-on effects; see [[define-merit]]",
           "The two below are examples - edit or replace them.",
         ],
-        [JSON.stringify([
-          { name: "Sturdy Stock", kind: "merit", points: 2, requires: { tags: ["revenant"] }, description: "Hardy revenant lineage." },
-          { name: "Illiterate", kind: "flaw", points: 1, description: "You cannot read or write." },
-        ], null, 2)]) },
+        [
+          "Sturdy Stock:",
+          "  kind: merit",
+          "  points: 2",
+          "  requires:",
+          "    tags: revenant",
+          "  description: Hardy revenant lineage.",
+          "",
+          "Illiterate:",
+          "  kind: flaw",
+          "  points: 1",
+          "  description: You cannot read or write.",
+        ]) },
     ],
   },
 ];

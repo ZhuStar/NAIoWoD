@@ -346,6 +346,548 @@ class MoralityTrait {
 }
 //#endregion src/core/traits.ts
 
+//#region src/core/cardtext.ts
+// =============================================================================
+// CORE / CARD TEXT - the readable data language of lorebook cards
+// -----------------------------------------------------------------------------
+// Every card the engine reads or writes (character sheets, config registries,
+// merits, saved rolls, success tables) is written in THIS, not JSON. It is a
+// small hand-rolled dialect - the artifact ships with zero dependencies, so a
+// partial implementation of real YAML would be worse than a complete
+// implementation of something smaller.
+//
+// The whole grammar:
+//
+//   # a comment                     '#' at line start or after a space
+//   key: value                      the key ends at the first ": " (or a
+//                                   trailing ":"), so "he said: hi" is fine
+//   key:                            a block: whatever is indented below
+//     inner: 1
+//   key: value                      a value PLUS an annotation block; the
+//     note: why                     value itself lands under `value`
+//   key: a, b, c                    an inline list (commas)
+//   key:                            a block list
+//     - a
+//     - b
+//   mentor: Velia                   a REPEATED key is a list - the one thing
+//   mentor: Belial                  JSON could not say at all
+//   - op: immune                    a list of blocks: "- " starts an item and
+//     target: fear                  the lines under it belong to that item
+//
+// Scalars type themselves: 3 is a number, yes/no are booleans, `none` is null,
+// anything else is text with its case preserved. Quote ("...") to force text -
+// the writer quotes for you whenever it would otherwise be misread.
+//
+// Two small tables (TEXT_KEYS, LIST_KEYS) let a human write the obvious thing:
+// a comma inside a `description` is punctuation, and one `role:` is still a
+// list of one. FIELD_ALIASES lets cards spell the engine's camelCase fields
+// with hyphens ("difficulty-expr"). Everything else is typed by its shape.
+//
+// Pure: no imports from the host layer.
+// =============================================================================
+
+interface CardMap { [key: string]: CardValue }
+type CardValue = string | number | boolean | null | CardValue[] | CardMap;
+
+// A node's own value when it also carries an annotation block:
+//   sanctum: 8
+//     note: the Library of the Unseen
+// reads as { value: 8, note: "..." }. The key IS the key, so nothing needs a
+// separate `name:` field - that was the question this answers.
+const CARD_VALUE_KEY = "value";
+
+// Keys whose value is prose or a single name: a comma in them is punctuation,
+// and a numeric-looking value stays text. Compared case-insensitively.
+const TEXT_KEYS = new Set([
+  "name", "key", "id", "description", "note", "label", "blurb", "until",
+  "interval", "topic", "title", "specialty", "param", "pool", "difficultyexpr",
+  "reason", "summary",
+]);
+
+// Keys the engine always wants as a list, so one item needs no special syntax
+// ("roles: quintessence" is a list of one). Compared case-insensitively.
+const LIST_KEYS = new Set([
+  "roles", "replaces", "tags", "templates", "meritsflaws", "targetmustbe",
+  "apply", "passive", "rows", "steps", "startoptions", "members", "scope",
+  "tiers", "bindings",
+]);
+
+// A comma-joined TOKEN string the engine splits itself (EffectOp.target):
+// kept as text, but the spacing around the commas is squeezed out.
+const TOKEN_TEXT_KEYS = new Set(["target"]);
+
+// Wire spelling <-> engine field, for the handful of fields whose names are
+// camelCase. Cards write them hyphenated; anything NOT listed passes through
+// untouched, because trait names, merit keys and table names are DATA and must
+// never be renamed. The camelCase spelling is also accepted on input.
+const FIELD_ALIASES: Record<string, string> = {
+  "difficulty-expr": "difficultyExpr",
+  "difficulty-mod": "difficultyMod",
+  "difficulty-cap": "difficultyCap",
+  "dice-mod": "diceMod",
+  "merits-flaws": "meritsFlaws",
+  "pool-starts": "poolStarts",
+  "start-min": "startMin",
+  "start-max": "startMax",
+  "start-options": "startOptions",
+  "per-turn-limit": "perTurnLimit",
+  "from-generation": "fromGeneration",
+  "at-most-one-at": "atMostOneAt",
+  "fill-to-cap": "fillToCap",
+  "requires-resource": "requiresResource",
+  "requires-trait": "requiresTrait",
+  "requires-awakened": "requiresAwakened",
+  "scales-with": "scalesWith",
+  "at-least": "atLeast",
+  "target-must-be": "targetMustBe",
+  "max-per-use": "maxPerUse",
+  "reduced-by": "reducedBy",
+  "per-success": "perSuccess",
+  "vs-difficulty": "vsDifficulty",
+  "on-botch": "onBotch",
+  "display-name": "displayName",
+  "n-again": "nAgain",
+};
+const WIRE_ALIASES: Record<string, string> =
+  Object.fromEntries(Object.entries(FIELD_ALIASES).map(([wire, field]) => [field, wire]));
+
+// The key as the engine knows it (hyphenated wire spelling -> camelCase field).
+function canonicalKey(key: string): string {
+  const k = key.trim();
+  return FIELD_ALIASES[k.toLowerCase()] ?? k;
+}
+// The key as a card spells it (the inverse; unlisted keys are unchanged).
+function wireKey(key: string): string {
+  return WIRE_ALIASES[key] ?? key;
+}
+
+const lookupKey = (key: string | undefined): string => (key ?? "").toLowerCase();
+const isTextKey = (key?: string): boolean => TEXT_KEYS.has(lookupKey(key)) || TOKEN_TEXT_KEYS.has(lookupKey(key));
+const isListKey = (key?: string): boolean => LIST_KEYS.has(lookupKey(key));
+
+// =============================================================================
+// READING
+// =============================================================================
+
+// Everything from an unquoted '#' (line start, or after whitespace) onward.
+function stripComment(line: string): string {
+  let out = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === "\\" && i + 1 < line.length) { out += ch + line[i + 1]; i++; continue; }
+      if (ch === '"') quoted = false;
+      out += ch;
+      continue;
+    }
+    if (ch === '"') { quoted = true; out += ch; continue; }
+    if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) return out;
+    out += ch;
+  }
+  return out;
+}
+
+// Leading whitespace width; a tab counts as two spaces.
+function indentOf(line: string): number {
+  let n = 0;
+  for (const ch of line) {
+    if (ch === " ") n++;
+    else if (ch === "\t") n += 2;
+    else break;
+  }
+  return n;
+}
+
+// "key: rest" -> the pair. The key ends at the FIRST colon followed by a space
+// or end of line, so "trait-affinity:melee: 3" keys on the whole instance name
+// and "he said: hi" is a value with a colon in it.
+function splitKey(text: string): { key: string; inline: string } | undefined {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== ":") continue;
+    const next = text[i + 1];
+    if (next === undefined || next === " " || next === "\t") {
+      const key = text.slice(0, i).trim();
+      return key.length ? { key, inline: text.slice(i + 1).trim() } : undefined;
+    }
+  }
+  return undefined;
+}
+
+// Split on a separator at the top level - inside "..." doesn't count.
+function splitTopLevel(text: string, sep: string): string[] {
+  const parts: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === "\\" && i + 1 < text.length) { cur += ch + text[i + 1]; i++; continue; }
+      if (ch === '"') quoted = false;
+      cur += ch;
+      continue;
+    }
+    if (ch === '"') { quoted = true; cur += ch; continue; }
+    if (ch === sep) { parts.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+// A "..." literal: backslash escapes, closing quote ends it, trailing junk ignored.
+function unquote(text: string): string {
+  let out = "";
+  for (let i = 1; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      const n = text[i + 1];
+      out += n === "n" ? "\n" : n === "t" ? "\t" : n ?? "";
+      i++;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+  }
+  return out;
+}
+
+const NUMBER_RE = /^[+-]?\d+$/;
+const DECIMAL_RE = /^[+-]?(?:\d+\.\d*|\.\d+)$/;
+
+// One written value -> a typed scalar (or an inline list). The key matters:
+// TEXT_KEYS never split and never auto-type.
+function readScalar(raw: string, key?: string): CardValue {
+  const t = raw.trim();
+  if (!t.length) return "";
+  if (t.startsWith('"')) return unquote(t);
+  if (TOKEN_TEXT_KEYS.has(lookupKey(key))) return t.replace(/\s*,\s*/g, ",");
+  if (isTextKey(key)) return t;
+  if (NUMBER_RE.test(t)) return parseInt(t, 10);
+  if (DECIMAL_RE.test(t)) return parseFloat(t);
+  const low = t.toLowerCase();
+  if (low === "true" || low === "yes" || low === "on") return true;
+  if (low === "false" || low === "no" || low === "off") return false;
+  if (low === "none" || low === "null") return null;
+  if (t.includes(",")) {
+    const parts = splitTopLevel(t, ",").map(p => readScalar(p)).filter(p => p !== "");
+    return parts.length === 1 ? parts[0] : parts;
+  }
+  return t;
+}
+
+interface CardNode { key?: string; inline: string; children: CardNode[] }
+
+// Text -> the indentation tree. Never throws: unreadable lines become items.
+function readNodes(text: string): CardNode {
+  const root: CardNode = { inline: "", children: [] };
+  const stack: { indent: number; node: CardNode }[] = [{ indent: -1, node: root }];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = stripComment(rawLine);
+    const body = line.trim();
+    if (!body.length) continue;
+    const indent = indentOf(line);
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+    const parent = stack[stack.length - 1].node;
+    let node: CardNode;
+    if (body === "-" || body.startsWith("- ")) {
+      // A list item. "- key: value" opens a block whose first pair is inline.
+      const rest = body === "-" ? "" : body.slice(2).trim();
+      node = { inline: "", children: [] };
+      const pair = rest.startsWith('"') ? undefined : splitKey(rest);
+      if (pair) node.children.push({ key: pair.key, inline: pair.inline, children: [] });
+      else node.inline = rest;
+    } else {
+      const pair = body.startsWith('"') ? undefined : splitKey(body);
+      node = pair ? { key: pair.key, inline: pair.inline, children: [] } : { inline: body, children: [] };
+    }
+    parent.children.push(node);
+    stack.push({ indent, node });
+  }
+  return root;
+}
+
+// Add a key, turning a REPEATED key into a list (the format's whole reason for
+// existing: two Mentors, three passives).
+function addKey(map: CardMap, key: string, value: CardValue): void {
+  if (!Object.prototype.hasOwnProperty.call(map, key)) { map[key] = value; return; }
+  const cur = map[key];
+  if (Array.isArray(cur)) cur.push(value);
+  else map[key] = [cur, value];
+}
+
+function nodeValue(node: CardNode): CardValue {
+  if (!node.children.length) return readScalar(node.inline, node.key);
+  const keyed = node.children.filter(c => c.key !== undefined);
+  const items = node.children.filter(c => c.key === undefined);
+  // No keys below: a plain list block. A stray inline value is the first item.
+  if (!keyed.length) {
+    const list = items.map(nodeValue);
+    return node.inline ? [readScalar(node.inline, node.key), ...list] : list;
+  }
+  // Keys below: a block. The node's OWN value (inline, else the loose items)
+  // lands under `value`; the keys are its annotations.
+  const map: CardMap = {};
+  if (node.inline) map[CARD_VALUE_KEY] = readScalar(node.inline, node.key);
+  else if (items.length) map[CARD_VALUE_KEY] = items.map(nodeValue);
+  for (const child of keyed) {
+    const key = canonicalKey(child.key as string);
+    let value = nodeValue({ ...child, key });
+    if (isListKey(key) && !Array.isArray(value)) value = value === "" ? [] : [value];
+    addKey(map, key, value);
+  }
+  return map;
+}
+
+// Read a card body. Undefined when there is nothing there; a map when the body
+// has keys, a list when it is all "- " items. Never throws - a malformed card
+// yields whatever could be read, and the player's text is never destroyed.
+function parseCardText(text: string | undefined): CardValue | undefined {
+  if (!text || !text.trim().length) return undefined;
+  const root = readNodes(text);
+  if (!root.children.length) return undefined;
+  return nodeValue(root);
+}
+
+// =============================================================================
+// WRITING
+// =============================================================================
+
+const BOOLEAN_WORDS = new Set(["true", "yes", "on", "false", "no", "off", "none", "null"]);
+
+function looksTyped(s: string): boolean {
+  return NUMBER_RE.test(s) || DECIMAL_RE.test(s) || BOOLEAN_WORDS.has(s.toLowerCase());
+}
+
+function needsQuote(s: string, key?: string): boolean {
+  if (!s.length) return true;
+  if (s !== s.trim()) return true;
+  if (/["\n\r\t]/.test(s)) return true;
+  if (/(^|\s)#/.test(s)) return true;
+  if (s === "-" || s.startsWith("- ")) return true;
+  if (isTextKey(key)) return false;      // text keys neither split nor auto-type
+  return s.includes(",") || looksTyped(s);
+}
+
+function quote(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t")}"`;
+}
+
+function writeScalar(value: CardValue, key?: string): string {
+  if (value === null) return "none";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "none";
+  const s = TOKEN_TEXT_KEYS.has(lookupKey(key)) ? String(value).split(",").join(", ") : String(value);
+  return needsQuote(s, key) ? quote(s) : s;
+}
+
+const isScalar = (v: CardValue | undefined): boolean => v !== undefined && (v === null || typeof v !== "object");
+const isMap = (v: CardValue | undefined): v is CardMap => !!v && typeof v === "object" && !Array.isArray(v);
+
+const INLINE_LIST_WIDTH = 88;
+
+function writeBlock(value: CardValue, indent: number, out: string[]): void {
+  const pad = " ".repeat(indent);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (isScalar(item)) { out.push(`${pad}- ${writeScalar(item)}`); continue; }
+      if (isMap(item)) {
+        const entries = Object.entries(item);
+        const first = entries.find(([, v]) => isScalar(v));
+        if (first) {
+          out.push(`${pad}- ${wireKey(first[0])}: ${writeScalar(first[1], first[0])}`);
+          for (const [k, v] of entries) if (k !== first[0]) writeEntry(k, v, indent + 2, out);
+        } else {
+          out.push(`${pad}-`);
+          writeBlock(item, indent + 2, out);
+        }
+        continue;
+      }
+      out.push(`${pad}-`);
+      writeBlock(item, indent + 2, out);
+    }
+    return;
+  }
+  if (isMap(value)) {
+    for (const [k, v] of Object.entries(value)) writeEntry(k, v, indent, out);
+    return;
+  }
+  out.push(`${pad}${writeScalar(value)}`);
+}
+
+function writeEntry(rawKey: string, value: CardValue, indent: number, out: string[]): void {
+  const pad = " ".repeat(indent);
+  const key = wireKey(rawKey);
+  if (value === undefined) return;
+  if (isScalar(value)) {
+    const written = writeScalar(value, rawKey);
+    out.push(value === "" ? `${pad}${key}:` : `${pad}${key}: ${written}`);
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) { out.push(`${pad}${key}:`); return; }
+    if (value.every(isScalar)) {
+      const inline = value.map(v => writeScalar(v)).join(", ");
+      if (pad.length + key.length + 2 + inline.length <= INLINE_LIST_WIDTH) {
+        out.push(`${pad}${key}: ${inline}`);
+        return;
+      }
+    }
+    // Every element an annotated value -> write it the way a human would: the
+    // key REPEATED, once per value ("mentor: 4" twice, each with its own note).
+    if (value.every(v => isMap(v) && CARD_VALUE_KEY in v && isScalar(v[CARD_VALUE_KEY]))) {
+      for (const item of value) writeEntry(rawKey, item, indent, out);
+      return;
+    }
+    out.push(`${pad}${key}:`);
+    writeBlock(value, indent + 2, out);
+    return;
+  }
+  // A block. When it carries the reserved `value` key, that scalar goes back on
+  // the key's own line and the rest becomes the annotation block.
+  const entries = Object.entries(value as CardMap);
+  const own = entries.find(([k]) => k === CARD_VALUE_KEY);
+  const rest = entries.filter(([k]) => k !== CARD_VALUE_KEY);
+  if (own && isScalar(own[1])) {
+    out.push(`${pad}${key}: ${writeScalar(own[1], rawKey)}`);
+    for (const [k, v] of rest) writeEntry(k, v, indent + 2, out);
+    return;
+  }
+  if (!entries.length) { out.push(`${pad}${key}:`); return; }
+  out.push(`${pad}${key}:`);
+  writeBlock(value, indent + 2, out);
+}
+
+// A value -> card text. Top-level blocks are separated by a blank line so a
+// long sheet reads as sections rather than one wall.
+function formatCardText(value: CardValue | undefined): string {
+  if (value === undefined) return "";
+  const out: string[] = [];
+  if (isMap(value)) {
+    for (const [k, v] of Object.entries(value)) {
+      const before = out.length;
+      writeEntry(k, v, 0, out);
+      const multiline = out.length - before > 1;
+      if (multiline && before > 0 && out[before - 1] !== "") out.splice(before, 0, "");
+    }
+  } else {
+    writeBlock(value, 0, out);
+  }
+  return out.join("\n");
+}
+
+// One-line rendering, for replies and confirmations that can't spare a block.
+function inlineCardText(value: CardValue | undefined): string {
+  return formatCardText(value).split("\n").map(l => l.trim()).filter(l => l.length > 0).join("; ");
+}
+
+// =============================================================================
+// COERCIONS - the schema-directed half
+// -----------------------------------------------------------------------------
+// The reader is deliberately untyped: it reports what was written, and the
+// consumer says what it wants. That is what lets a human write `templates: mage`
+// for a list, or a comma inside a sentence, without a syntax for either.
+// =============================================================================
+
+// The scalar under a node, digging through an annotation block's `value`.
+function ownValue(v: CardValue | undefined): CardValue | undefined {
+  return isMap(v) && CARD_VALUE_KEY in v ? v[CARD_VALUE_KEY] : v;
+}
+
+function asNumber(v: CardValue | undefined): number | undefined {
+  const own = ownValue(v);
+  if (typeof own === "number") return own;
+  if (typeof own === "boolean") return own ? 1 : 0;
+  if (typeof own === "string" && own.trim().length && !isNaN(Number(own))) return Number(own);
+  return undefined;
+}
+
+function asBool(v: CardValue | undefined): boolean | undefined {
+  const own = ownValue(v);
+  if (typeof own === "boolean") return own;
+  if (typeof own === "number") return own !== 0;
+  if (typeof own === "string") {
+    const low = own.trim().toLowerCase();
+    if (low === "true" || low === "yes" || low === "on") return true;
+    if (low === "false" || low === "no" || low === "off") return false;
+  }
+  return undefined;
+}
+
+// Text, re-joining a value a comma made into a list ("immune to fear, and to
+// mind control" reads back as the sentence it was written as).
+function asText(v: CardValue | undefined, sep = ", "): string | undefined {
+  const own = ownValue(v);
+  if (own === undefined || own === null) return undefined;
+  if (Array.isArray(own)) {
+    const parts = own.map(p => asText(p, sep)).filter((p): p is string => p !== undefined);
+    return parts.length ? parts.join(sep) : undefined;
+  }
+  if (isMap(own)) return undefined;
+  const s = String(own);
+  return s.length ? s : undefined;
+}
+
+// A list, wrapping a lone value ("one item" needs no syntax).
+function asList(v: CardValue | undefined): CardValue[] {
+  if (v === undefined || v === null || v === "") return [];
+  if (Array.isArray(v)) return v;
+  return [v];
+}
+
+function asStringList(v: CardValue | undefined): string[] {
+  return asList(v).map(x => asText(x)).filter((x): x is string => x !== undefined && x.length > 0);
+}
+
+function asMap(v: CardValue | undefined): CardMap {
+  return isMap(v) ? v : {};
+}
+
+// name -> number, reading a rating written with an annotation block under it.
+function asNumberMap(v: CardValue | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, raw] of Object.entries(asMap(v))) {
+    const n = asNumber(raw);
+    if (n !== undefined) out[k] = n;
+  }
+  return out;
+}
+
+// A list of blocks that carry their own name: written either as a name-keyed
+// map (the readable form) or as "- name: x" items.
+function asNamedList(v: CardValue | undefined): Array<{ name: string; body: CardMap }> {
+  const out: Array<{ name: string; body: CardMap }> = [];
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      const body = asMap(item);
+      const name = asText(body["name"]);
+      if (name) out.push({ name, body });
+    }
+    return out;
+  }
+  for (const [name, raw] of Object.entries(asMap(v))) {
+    if (!name.trim().length) continue;
+    out.push({ name, body: isMap(raw) ? raw : { [CARD_VALUE_KEY]: raw } });
+  }
+  return out;
+}
+
+// A stable, order-independent digest of a card's DATA (used to tell a card that
+// was merely re-created from one that was edited): keys sorted, lists kept in
+// order, formatting and comments gone.
+function canonicalCardText(value: CardValue | undefined): string {
+  const canon = (v: CardValue | undefined): string => {
+    if (v === undefined) return "~";
+    if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
+    if (isMap(v)) {
+      return `{${Object.keys(v).sort().map(k => `${k}=${canon(v[k])}`).join(",")}}`;
+    }
+    return v === null ? "none" : String(v).replace(/\s+/g, " ");
+  };
+  return canon(value);
+}
+//#endregion src/core/cardtext.ts
+
 //#region src/core/dice.ts
 // =============================================================================
 // DICE - auditable Storyteller (World of Darkness) dice roller
@@ -2506,6 +3048,51 @@ function magicRulesFrom(overrides: Record<string, number>): MagicRules {
 }
 
 // =============================================================================
+// ADVANCEMENT COSTS - what a dot costs, from each purse
+// -----------------------------------------------------------------------------
+// Prices are CHRONICLE RULES, not character data: they are the same for every
+// sheet, so they live here and in one config card - never on the sheet itself.
+// Each entry is one trait kind priced from the three purses a Dark Ages game
+// draws on: `experience` (play), `freebie` (creation), `maturation` (downtime).
+// Values are TEXT, deliberately: nothing evaluates them yet (there is no
+// advancement engine), so they are stored, surfaced by [[costs]], and applied
+// by the Storyteller - the standing rule for a subsystem that doesn't exist.
+// "current" means the rating you are raising FROM.
+// =============================================================================
+type CostPurse = "experience" | "freebie" | "maturation";
+const COST_PURSES: CostPurse[] = ["experience", "freebie", "maturation"];
+type CostTable = Record<string, Record<string, string>>;
+
+const DEFAULT_ADVANCEMENT_COSTS: CostTable = {
+  attribute: { experience: "current x 4", freebie: "5", maturation: "current x 3" },
+  ability: { experience: "current x 2 (a new one: 3)", freebie: "2", maturation: "current x 2" },
+  background: { experience: "current x 2", freebie: "1", maturation: "current x 2" },
+  discipline: { experience: "current x 5 (out of clan: current x 7)", freebie: "7", maturation: "current x 5" },
+  pillar: { experience: "current x 7", freebie: "7", maturation: "current x 7" },
+  foundation: { experience: "current x 8", freebie: "10", maturation: "current x 8" },
+  virtue: { experience: "current x 2", freebie: "2", maturation: "current x 2" },
+  willpower: { experience: "current", freebie: "1", maturation: "current" },
+  road: { experience: "current x 2", freebie: "1", maturation: "current x 2" },
+  "merit-flaw": { experience: "-", freebie: "the merit's own points", maturation: "-" },
+};
+
+// The shipped table with the story's overrides laid over it, kind by kind (an
+// override may replace one purse's price without restating the others).
+function advancementCostsFrom(overrides: CostTable): CostTable {
+  const out: CostTable = {};
+  for (const [kind, purses] of Object.entries(DEFAULT_ADVANCEMENT_COSTS)) out[kind] = { ...purses };
+  for (const [rawKind, purses] of Object.entries(overrides ?? {})) {
+    const kind = StringUtil.normalize(rawKind);
+    out[kind] = { ...(out[kind] ?? {}) };
+    for (const [rawPurse, price] of Object.entries(purses ?? {})) {
+      if (price === undefined || price === null) continue;
+      out[kind][StringUtil.normalize(rawPurse)] = String(price);
+    }
+  }
+  return out;
+}
+
+// =============================================================================
 // DISCIPLINES - vampiric (and ghoul/revenant) supernatural powers
 // -----------------------------------------------------------------------------
 // Rated traits (0-5). The registry is metadata: an "arena" and which Dark Ages
@@ -2549,7 +3136,7 @@ function disciplineDef(name: string): DisciplineDef | undefined {
 // MERITS & FLAWS - optional quirks with (waivable) prerequisites
 // -----------------------------------------------------------------------------
 // Defaults live in an in-code list; the lorebook is the editable database on
-// top: any entry in the "srd:merits-flaws" category whose text is a JSON array
+// top: any entry in the "srd:merits-flaws" category whose text names definitions
 // of definitions is merged over the defaults by MeritFlawRegistry
 // .loadFromLorebook(). Prerequisites may name templates, free-form character
 // tags ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every
@@ -2684,6 +3271,74 @@ function describePassiveOp(op: EffectOp): string {
   return `${op.op}${amount}${on}${gates.length ? ` - ${gates.join(", ")}` : ""}`;
 }
 
+// --- READING DEFINITIONS OUT OF A CARD --------------------------------------
+// Card text is untyped on purpose (core/cardtext.ts): the reader reports what
+// was written, and the consumer says what it wants. These are the two shapes
+// the rules layer owns - every other store reads its own.
+
+// One always-on / spend op. `op` is required; everything else is optional, and
+// an op the engine doesn't know is kept anyway (the open-vocabulary rule: it is
+// recorded, surfaced, and the Storyteller adjudicates).
+function effectOpFromCard(raw: CardValue): EffectOp | undefined {
+  const body = asMap(raw);
+  const name = asText(body["op"]);
+  if (!name) return undefined;
+  const op: EffectOp = { op: StringUtil.normalize(name) };
+  const target = asText(body["target"], ",");
+  if (target) op.target = target;
+  const amount = asNumber(body["amount"]);
+  if (amount !== undefined) op.amount = amount;
+  if (asBool(body["fillToCap"])) op.fillToCap = true;
+  const cap = asNumber(body["cap"]) ?? asText(body["cap"]);
+  if (cap !== undefined) op.cap = cap;
+  const trait = asText(body["trait"]);
+  if (trait) op.trait = trait;
+  if (asBool(body["once"])) op.once = true;
+  const gate = asMap(body["requiresResource"]);
+  const resource = asText(gate["resource"]);
+  if (resource) {
+    op.requiresResource = { resource: StringUtil.normalize(resource), atLeast: asNumber(gate["atLeast"]) ?? 1 };
+  }
+  return op;
+}
+function effectOpsFromCard(raw: CardValue | undefined): EffectOp[] {
+  return asList(raw).map(effectOpFromCard).filter((op): op is EffectOp => op !== undefined);
+}
+
+// One Merit / Flaw / arcanum. Undefined when the block never says which it is -
+// the card keeps the text, the registry just doesn't take it.
+function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
+  const kind = (asText(body["kind"]) ?? "").toLowerCase();
+  if (kind !== "merit" && kind !== "flaw") return undefined;
+  const rawPoints = body["points"];
+  const def: MeritFlawDef = {
+    name: name.trim(),
+    kind,
+    points: Array.isArray(rawPoints)
+      ? rawPoints.map(p => asNumber(p) ?? 0)
+      : asNumber(rawPoints) ?? 0,
+  };
+  const requires = asMap(body["requires"]);
+  const templates = asStringList(requires["templates"]).map(t => StringUtil.normalize(t));
+  const tags = asStringList(requires["tags"]).map(t => StringUtil.normalize(t));
+  const meritsFlaws = asStringList(requires["meritsFlaws"]).map(t => StringUtil.normalize(t));
+  if (templates.length || tags.length || meritsFlaws.length) {
+    def.requires = {};
+    if (templates.length) def.requires.templates = templates;
+    if (tags.length) def.requires.tags = tags;
+    if (meritsFlaws.length) def.requires.meritsFlaws = meritsFlaws;
+  }
+  const description = asText(body["description"]);
+  if (description) def.description = description;
+  const param = asText(body["param"]);
+  if (param) def.param = StringUtil.normalize(param);
+  const passive = effectOpsFromCard(body["passive"]);
+  if (passive.length) def.passive = passive;
+  const atMostOneAt = asNumber(body["atMostOneAt"]);
+  if (atMostOneAt !== undefined) def.atMostOneAt = atMostOneAt;
+  return def;
+}
+
 const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
   {
@@ -2755,8 +3410,8 @@ function makeConstraintGroup(parts: Partial<ConstraintGroup> & { name: string })
     name: StringUtil.normalize(parts.name),
     relation,
     domain,
-    members: (parts.members ?? []).map(m => StringUtil.normalize(m)).filter(m => m.length > 0),
-    scope: (parts.scope ?? []).map(s => StringUtil.normalize(s)).filter(s => s.length > 0),
+    members: asStringList(parts.members as CardValue).map(m => StringUtil.normalize(m)).filter(m => m.length > 0),
+    scope: asStringList(parts.scope as CardValue).map(s => StringUtil.normalize(s)).filter(s => s.length > 0),
   };
   if (relation === "exclusive") g.max = Math.max(1, parts.max ?? 1);
   else if (parts.max !== undefined) g.max = parts.max;
@@ -2887,12 +3542,12 @@ function foldAfflictionTiers(rating: number, tiers: AfflictionTier[] | undefined
 function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): AfflictionDef {
   const def: AfflictionDef = { name: StringUtil.normalize(parts.name) };
   if (parts.description && parts.description.trim()) def.description = parts.description.trim();
-  const bindings = (parts.bindings ?? []).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
+  const bindings = asStringList(parts.bindings as CardValue).map(b => StringUtil.normalize(b)).filter(b => b.length > 0);
   if (bindings.length) def.bindings = bindings;
   if (parts.duration) def.duration = parts.duration;
   if (parts.then && parts.then.trim()) def.then = StringUtil.normalize(parts.then);
   if (parts.mirror && parts.mirror.trim()) def.mirror = StringUtil.normalize(parts.mirror);
-  const tags = (parts.tags ?? []).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
+  const tags = asStringList(parts.tags as CardValue).map(t => StringUtil.normalize(t)).filter(t => t.length > 0);
   if (tags.length) def.tags = tags;
   if (parts.note && parts.note.trim()) def.note = parts.note.trim();
   if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
@@ -3071,22 +3726,35 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
   },
   {
     name: "srd:merits-flaws",
-    blurb: "custom Merits & Flaws (JSON), layered over the built-in list",
+    blurb: "custom Merits & Flaws, layered over the built-in list",
     entries: [
       { displayName: "srd:merits-flaws:custom", text: srdEntryText(
         [
-          `Custom Merits & Flaws. Put a JSON array below the ${SRD_HEADER_MARKER} line; it is merged over the built-in list. Each definition:`,
-          '  name        - display name',
-          '  kind        - "merit" or "flaw"',
-          '  points      - freebie cost (merit) / bonus (flaw); a number, or [1,2,3] for variable ratings',
-          '  requires    - optional { "templates": [any-of], "tags": [all-of], "meritsFlaws": [all-of] }',
-          '  description - optional text',
+          `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
+          "NAME followed by a colon, with its fields indented underneath. They are merged",
+          "over the built-in list. The fields:",
+          '  kind        - "merit" or "flaw" (required - a block without it is skipped)',
+          "  points      - freebie cost (merit) / bonus (flaw); one number, or `1, 2, 3`",
+          "                for a variable rating",
+          "  requires    - optional, with any of: templates (any-of), tags (all-of),",
+          "                merits-flaws (all-of)",
+          "  description - optional text (commas in it are just punctuation)",
+          "  passive     - optional always-on effects; see [[define-merit]]",
           "The two below are examples - edit or replace them.",
         ],
-        [JSON.stringify([
-          { name: "Sturdy Stock", kind: "merit", points: 2, requires: { tags: ["revenant"] }, description: "Hardy revenant lineage." },
-          { name: "Illiterate", kind: "flaw", points: 1, description: "You cannot read or write." },
-        ], null, 2)]) },
+        [
+          "Sturdy Stock:",
+          "  kind: merit",
+          "  points: 2",
+          "  requires:",
+          "    tags: revenant",
+          "  description: Hardy revenant lineage.",
+          "",
+          "Illiterate:",
+          "  kind: flaw",
+          "  points: 1",
+          "  description: You cannot read or write.",
+        ]) },
     ],
   },
 ];
@@ -3286,8 +3954,9 @@ class CommandRouter {
 // default) and pairs every persistent method with a temp* variant on
 // api.v1.tempStorage - volatile scratch state the host clears when the script
 // unloads. LorebookManager reads lorebook entries as data: rule lists live in
-// entries whose text is a newline list (or JSON) beneath a human-readable
-// header, so the user edits game data like a database table in the lorebook UI.
+// entries whose text is a newline list (or CARD TEXT - see core/cardtext.ts)
+// beneath a human-readable header, so the user edits game data like a database
+// table in the lorebook UI.
 // =============================================================================
 class ScopedStorage {
   constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
@@ -3492,29 +4161,27 @@ const GENERAL_ENTRY = "general";
 
 // Default tutorial headers for engine-seeded `general` cards.
 const CONFIG_GENERAL_HEADER = [
-  "Global configuration for this chronicle. The JSON below the marker holds",
-  "story-wide settings (none are read yet - this card is the documented home",
-  "for future global options). Edit in creator mode.",
+  "Global configuration for this chronicle. Below the marker holds story-wide",
+  "settings (none are read yet - this card is the documented home for future",
+  "global options). Edit in creator mode; the format is `key: value`, one per",
+  "line, indenting to nest.",
 ];
 const TABLE_GENERAL_HEADER = [
-  "Success tables for this category. The JSON below the marker is an array of",
-  "tables (or a map name -> table). [[define-table]] writes here; you may add",
-  "MORE cards to this category to split a large set - every card is read, and",
-  "a later card's table shadows an earlier one with the same name.",
+  "Success tables for this category, written `name:` with the table's rows",
+  "indented below it. [[define-table]] writes here; you may add MORE cards to",
+  "this category to split a large set - every card is read, and a later card's",
+  "table shadows an earlier one with the same name.",
 ];
 
 // Content-only structural hash: the tutorial header above the marker never
-// participates, so editing instructions can't trip a conflict. JSON bodies are
-// canonicalized (recursively sorted keys); anything unparseable falls back to
-// whitespace-collapsed text. djb2, hex.
+// participates, so editing instructions can't trip a conflict. Card bodies are
+// canonicalized (keys sorted, comments and layout gone); anything unreadable
+// falls back to whitespace-collapsed text. djb2, hex.
 function structuralHash(text: string): string {
   const body = LorebookManager.contentBelowHeader(text).trim();
-  const canon = (v: unknown): unknown => Array.isArray(v) ? v.map(canon)
-    : (v && typeof v === "object")
-      ? Object.fromEntries(Object.keys(v as Record<string, unknown>).sort().map(k => [k, canon((v as Record<string, unknown>)[k])]))
-      : v;
-  let s: string;
-  try { s = JSON.stringify(canon(JSON.parse(body))); } catch { s = body.replace(/\s+/g, " "); }
+  // An empty (or comment-only) body has no data, so every such card hashes the
+  // same - a re-created empty card is a re-creation, not an edit.
+  const s = canonicalCardText(parseCardText(body));
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(16);
@@ -3609,28 +4276,26 @@ class TrackedLorebook {
   }
 }
 
-// Union of two config card texts (both must parse). Shapes are preserved from
-// the FOUND (player's newer) card: map -> spread union; array-of-named-defs ->
+// Union of two config card texts (both must read). Shapes are preserved from
+// the FOUND (player's newer) card: block -> key union; list-of-named-defs ->
 // name-keyed union. The player's defs win collisions; backup-only defs are
 // kept. The found card's header text stays. Undefined = not combinable.
 function combineConfigTexts(backupText: string, foundText: string): string | undefined {
-  const parse = (t: string): unknown => {
-    try { return JSON.parse(LorebookManager.contentBelowHeader(t).trim()); } catch { return undefined; }
-  };
+  const parse = (t: string): CardValue | undefined => parseCardText(LorebookManager.contentBelowHeader(t).trim());
   const backup = parse(backupText);
   const found = parse(foundText);
   if (backup === undefined || found === undefined) return undefined;
-  // Everything up to (and including) the found card's marker line; the JSON
+  // Everything up to (and including) the found card's marker line; the data
   // goes back on its own line below it.
   const header = foundText.slice(0, foundText.length - LorebookManager.contentBelowHeader(foundText).length);
-  let combined: unknown;
+  let combined: CardValue;
   if (Array.isArray(backup) && Array.isArray(found)) {
-    const byName = new Map<string, unknown>();
-    const keyOf = (d: unknown): string | undefined => {
-      const n = (d as { name?: unknown })?.name;
-      return typeof n === "string" ? StringUtil.normalize(n) : undefined;
+    const byName = new Map<string, CardValue>();
+    const keyOf = (d: CardValue): string | undefined => {
+      const n = asText(asMap(d)["name"]);
+      return n === undefined ? undefined : StringUtil.normalize(n);
     };
-    const extras: unknown[] = [];
+    const extras: CardValue[] = [];
     for (const list of [backup, found]) {
       for (const d of list) {
         const k = keyOf(d);
@@ -3638,20 +4303,21 @@ function combineConfigTexts(backupText: string, foundText: string): string | und
       }
     }
     combined = [...byName.values(), ...extras];
-  } else if (backup && found && typeof backup === "object" && typeof found === "object" && !Array.isArray(backup) && !Array.isArray(found)) {
-    combined = { ...(backup as Record<string, unknown>), ...(found as Record<string, unknown>) };
+  } else if (!Array.isArray(backup) && !Array.isArray(found)
+    && backup !== null && found !== null && typeof backup === "object" && typeof found === "object") {
+    combined = { ...backup, ...found };
   } else {
     return undefined;
   }
-  return `${header}\n${JSON.stringify(combined, null, 2)}`;
+  return `${header}\n${formatCardText(combined)}`;
 }
 
 // =============================================================================
 // CONFIG STORES - the generic shape of "wod:config" registries
 // -----------------------------------------------------------------------------
 // Every story-config registry works the same way: ONE lorebook entry under the
-// wod:config category (tutorial header above the marker, JSON below), parsed as
-// an array OR a name -> def map, cached module-level for synchronous reads,
+// wod:config category (tutorial header above the marker, card text below), read
+// as a name -> def block (or a list of named defs), cached module-level for synchronous reads,
 // reloaded at init and on the creator-mode sync points. These two classes ARE
 // that pattern; a concrete registry is an instance, not a re-implementation.
 // Instances self-register into ALL_CONFIG_STORES so reload/reset sweep every
@@ -3683,29 +4349,33 @@ function resetAllConfigStores(): void {
 }
 
 // The tutorial-above-the-marker entry text every store writes.
-function configEntryText(header: string[], data: unknown): string {
-  return [...header, SRD_HEADER_MARKER, JSON.stringify(data, null, 2)].join("\n");
+function configEntryText(header: string[], data: CardValue): string {
+  return [...header, SRD_HEADER_MARKER, formatCardText(data)].join("\n");
 }
 
-// Parse an entry body as JSON; undefined when missing/unparseable (the entry
+// A named-def registry, as a card writes it: `name:` with the def's fields
+// indented below. (A def whose whole body is one scalar keeps that scalar.)
+function namedDefsToCard<T extends { name: string }>(defs: T[]): CardMap {
+  const out: CardMap = {};
+  for (const def of defs) {
+    const { name, ...rest } = def as T & Record<string, unknown>;
+    out[StringUtil.toTitleCase(String(name))] = rest as CardMap;
+  }
+  return out;
+}
+
+// Read an entry body as card text; undefined when missing/empty (the entry
 // stays for the player to fix - never destroyed by a bad edit).
-function parseConfigBody(text: string | undefined): unknown {
+function parseConfigBody(text: string | undefined): CardValue | undefined {
   if (!text) return undefined;
-  const body = LorebookManager.contentBelowHeader(text).trim();
-  if (!body) return undefined;
-  try { return JSON.parse(body); } catch { return undefined; }
+  return parseCardText(LorebookManager.contentBelowHeader(text).trim());
 }
 
-// Normalize a parsed config body (array of named defs OR name -> def map) to
-// a list of partials that carry their name. Shared by ListConfigStore and the
-// TableLibrary's multi-card loader.
-function parseNamedConfigList<T extends { name: string }>(parsed: unknown): Array<Partial<T> & { name: string }> {
-  const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
-    ? parsed as Array<Partial<T> & { name: string }>
-    : (parsed && typeof parsed === "object")
-      ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
-      : [];
-  return list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0);
+// Normalize a read config body (name -> def block, OR a list of defs that carry
+// their own `name:`) to a list of partials that carry their name. Shared by
+// ListConfigStore and the TableLibrary's multi-card loader.
+function parseNamedConfigList<T extends { name: string }>(parsed: CardValue | undefined): Array<Partial<T> & { name: string }> {
+  return asNamedList(parsed).map(({ name, body }) => ({ ...body, name } as unknown as Partial<T> & { name: string }));
 }
 
 // Write-through for a TRACKED card in any category: create the category/entry
@@ -3731,11 +4401,11 @@ async function writeConfigEntry(entry: string, text: string): Promise<void> {
 // tracked `general` card (seeded with the given tutorial header + empty JSON
 // when created; an existing card's text is never touched). The subcategory
 // policy's one constructor.
-async function ensurePath(virtualPath: string, generalHeader: string[] = ["Data for this category. JSON below the marker."]): Promise<{ category: string; createdEntry: boolean }> {
+async function ensurePath(virtualPath: string, generalHeader: string[] = ["Data for this category, below the marker."]): Promise<{ category: string; createdEntry: boolean }> {
   const category = `wod:${StringUtil.normalize(virtualPath)}`;
   const { id: categoryId } = await LorebookManager.ensureCategory(category);
   await TrackedLorebook.remember(category, undefined, categoryId);
-  const seeded = [...generalHeader, SRD_HEADER_MARKER, "[]"].join("\n");
+  const seeded = [...generalHeader, SRD_HEADER_MARKER, "# (nothing here yet)"].join("\n");
   const createdEntry = await LorebookManager.ensureEntry(categoryId, GENERAL_ENTRY, seeded);
   const want = GENERAL_ENTRY;
   const entry = (await api.v1.lorebook.entries(categoryId)).find(e => (e.displayName ?? "").trim().toLowerCase() === want);
@@ -3796,7 +4466,7 @@ class ListConfigStore<T extends { name: string }> {
   }
 
   async save(defs: T[]): Promise<void> {
-    await writeConfigEntry(this.entry, configEntryText(this._header, defs));
+    await writeConfigEntry(this.entry, configEntryText(this._header, namedDefsToCard(defs)));
     this._apply(defs);
   }
 
@@ -3833,14 +4503,12 @@ class MapConfigStore<V> {
 
   async loadFromLorebook(): Promise<number> {
     const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
-    this._cache = (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-      ? parsed as Record<string, V>
-      : {};
+    this._cache = asMap(parsed) as unknown as Record<string, V>;
     return Object.keys(this._cache).length;
   }
 
   async save(map: Record<string, V>): Promise<void> {
-    await writeConfigEntry(this.entry, configEntryText(this._header, map));
+    await writeConfigEntry(this.entry, configEntryText(this._header, map as unknown as CardMap));
     this._cache = map;
   }
 }
@@ -3861,26 +4529,19 @@ class MeritFlawRegistry {
   }
 
   // Merge lorebook definitions over the defaults: every entry in the
-  // srd:merits-flaws category whose text parses as a JSON array of defs.
+  // srd:merits-flaws category, read as `name:` blocks below the marker.
   // Returns how many definitions were registered.
   static async loadFromLorebook(): Promise<number> {
     let count = 0;
     for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
-      // Data is the JSON array below the header marker; anything else is skipped.
-      const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
-      if (!body.startsWith("[")) continue;
-      try {
-        const parsed = JSON.parse(body);
-        if (!Array.isArray(parsed)) continue;
-        for (const def of parsed) {
-          if (def && typeof def.name === "string" && (def.kind === "merit" || def.kind === "flaw")) {
-            MeritFlawRegistry.register(def as MeritFlawDef);
-            count++;
-          }
-        }
-      } catch {
-        log(`[MERITS] Skipping unparseable lorebook entry: ${entry.displayName}`);
+      const parsed = parseCardText(LorebookManager.contentBelowHeader(entry.text ?? "").trim());
+      if (parsed === undefined) continue;
+      let skipped = 0;
+      for (const { name, body } of asNamedList(parsed)) {
+        const def = meritFlawFromCard(name, body);
+        if (def) { MeritFlawRegistry.register(def); count++; } else skipped++;
       }
+      if (skipped) log(`[MERITS] ${entry.displayName}: skipped ${skipped} definition(s) with no kind (merit|flaw)`);
     }
     return count;
   }
@@ -4394,7 +5055,14 @@ interface PlayableCharacter {
   // trait -> specialty labels (VERBATIM case - display text). At most one
   // specialty applies per roll, chosen by the specialty= argument.
   specialties?: Record<string, string[]>;
+  // A trait the character holds MORE THAN ONE of - two Mentors, three Allies.
+  // The bucket above rates it at the HIGHEST (one slot, one number), and every
+  // instance is kept here with the note that tells them apart. Multi-instance
+  // backgrounds are ST-enforced: nothing yet says WHICH mentor a roll is about
+  // (that needs targeting), so the engine stores them and surfaces them.
+  instances?: Record<string, TraitInstance[]>;
 }
+interface TraitInstance { rating: number; note?: string }
 
 class CharacterStore {
   private static _storage = new ScopedStorage();
@@ -4468,11 +5136,13 @@ class CharacterStore {
 
   private static _entryText(char: PlayableCharacter): string {
     return [
-      `Player character sheet for ${StringUtil.toTitleCase(char.name)}. The JSON below the ${SRD_HEADER_MARKER} line is the`,
-      "character's data. Edit it only while creator mode is on ([[creator-mode set=true]]);",
+      `Player character sheet for ${StringUtil.toTitleCase(char.name)}. Below the ${SRD_HEADER_MARKER} line is the`,
+      "character's data: one `trait: rating` per line, indented under its group. Write",
+      "names the way you say them (\"Animal Ken\"); indent `specialty: ...` under a trait",
+      "to give it one. Edit only while creator mode is on ([[creator-mode set=true]]);",
       "your edits are synced into the game when you issue any command or turn creator mode off.",
       SRD_HEADER_MARKER,
-      JSON.stringify(char, null, 2),
+      formatCardText(characterToCard(char)),
     ].join("\n");
   }
 
@@ -4497,7 +5167,7 @@ class CharacterStore {
     return await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
   }
 
-  // Lorebook -> storage. The player's lorebook edits win; unparseable entries
+  // Lorebook -> storage. The player's lorebook edits win; unreadable entries
   // are reported, not synced. Returns what happened for the OOC reply.
   static async syncFromLorebook(): Promise<{ synced: string[]; failed: string[] }> {
     const synced: string[] = [];
@@ -4505,18 +5175,136 @@ class CharacterStore {
     for (const entry of await LorebookManager.entriesInCategory(PLAYER_CHARACTERS_CATEGORY)) {
       const label = (entry.displayName ?? "").trim();
       const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
-      if (!body.startsWith("{")) { if (label) failed.push(label); continue; }
-      try {
-        const char = JSON.parse(body) as PlayableCharacter;
-        if (!char || typeof char.name !== "string" || !Array.isArray(char.templates)) { failed.push(label); continue; }
-        await CharacterStore._storage.set(CharacterStore._key(char.name), char);
-        synced.push(char.name);
-      } catch {
-        failed.push(label);
-      }
+      const char = characterFromCard(parseCardText(body));
+      if (!char) { if (label) failed.push(label); continue; }
+      await CharacterStore._storage.set(CharacterStore._key(char.name), char);
+      synced.push(char.name);
     }
     return { synced, failed };
   }
+}
+
+// --- THE SHEET AS A CARD -----------------------------------------------------
+// A character is written the way a player says it: groups of `Trait: rating`,
+// names in their display spelling, specialties indented under the trait they
+// belong to (the annotation block - core/cardtext.ts). The engine normalizes on
+// the way in, so nothing on the card has to be typed in engine spelling.
+const CHARACTER_BUCKETS: Array<[keyof PlayableCharacter, string]> = [
+  ["attributes", "attributes"],
+  ["abilities", "abilities"],
+  ["backgrounds", "backgrounds"],
+  ["virtues", "virtues"],
+  ["disciplines", "disciplines"],
+  ["traits", "traits"],
+  ["poolStarts", "poolStarts"],
+  ["meritsFlaws", "meritsFlaws"],
+];
+// `pools` / `merits` read as the longer engine names, so a player may write
+// either spelling on the card.
+const BUCKET_SYNONYMS: Record<string, string> = { pools: "poolStarts", merits: "meritsFlaws" };
+
+// A merit instance key ("trait-affinity:melee") keeps its parameter; only the
+// def's own name is title-cased for display.
+function displayTraitName(key: string): string {
+  const i = key.indexOf(":");
+  return i < 0 ? StringUtil.toTitleCase(key) : `${StringUtil.toTitleCase(key.slice(0, i))}:${key.slice(i + 1)}`;
+}
+
+function characterToCard(char: PlayableCharacter): CardMap {
+  const card: CardMap = { name: StringUtil.toTitleCase(char.name), id: char.id, stage: char.stage };
+  card["templates"] = char.templates.map(t => StringUtil.normalize(t));
+  if (char.tags.length) card["tags"] = char.tags.map(t => StringUtil.normalize(t));
+  const specialties = char.specialties ?? {};
+  for (const [field, key] of CHARACTER_BUCKETS) {
+    const bucket = (char[field] ?? {}) as Record<string, number>;
+    const names = Object.keys(bucket);
+    if (!names.length) continue;
+    const block: CardMap = {};
+    for (const name of names) {
+      const label = displayTraitName(name);
+      const labels = specialties[StringUtil.normalize(name)] ?? [];
+      const held = char.instances?.[StringUtil.normalize(name)];
+      // More than one of the same Background: write the key once per instance -
+      // exactly how it was written - each with its own note.
+      if (held?.length) {
+        block[label] = held.map(inst => {
+          const one: CardMap = { [CARD_VALUE_KEY]: inst.rating };
+          if (inst.note) one["note"] = inst.note;
+          return one;
+        });
+        continue;
+      }
+      block[label] = labels.length
+        ? { [CARD_VALUE_KEY]: bucket[name], specialty: labels.length === 1 ? labels[0] : labels }
+        : bucket[name];
+    }
+    card[key] = block;
+  }
+  // A specialty on a trait the sheet doesn't rate would be lost; keep it in its
+  // own block rather than dropping the player's text.
+  const orphans: CardMap = {};
+  const rated = new Set(CHARACTER_BUCKETS.flatMap(([field]) => Object.keys((char[field] ?? {}) as Record<string, number>)));
+  for (const [trait, labels] of Object.entries(specialties)) {
+    if (rated.has(trait) || !labels.length) continue;
+    orphans[displayTraitName(trait)] = labels.length === 1 ? labels[0] : labels;
+  }
+  if (Object.keys(orphans).length) card["specialties"] = orphans;
+  return card;
+}
+
+function characterFromCard(raw: CardValue | undefined): PlayableCharacter | undefined {
+  const card = asMap(raw);
+  const name = asText(card["name"]);
+  const templates = asStringList(card["templates"]).map(t => StringUtil.normalize(t));
+  if (!name || !templates.length) return undefined;
+  const stage = asText(card["stage"]) === "ready" ? "ready" : "potential";
+  const char: PlayableCharacter = {
+    id: asText(card["id"]) ?? api.v1.uuid(),
+    name,
+    templates,
+    stage,
+    attributes: {}, abilities: {}, backgrounds: {}, virtues: {}, disciplines: {},
+    traits: {}, poolStarts: {}, meritsFlaws: {},
+    tags: asStringList(card["tags"]).map(t => StringUtil.normalize(t)),
+    specialties: {},
+  };
+  const specialties: Record<string, string[]> = {};
+  const instances: Record<string, TraitInstance[]> = {};
+  const addSpecialties = (trait: string, value: CardValue | undefined): void => {
+    const labels = asStringList(value);
+    if (labels.length) specialties[trait] = [...(specialties[trait] ?? []), ...labels];
+  };
+  for (const [rawKey, block] of Object.entries(card)) {
+    const field = (BUCKET_SYNONYMS[rawKey.toLowerCase()] ?? rawKey) as keyof PlayableCharacter;
+    if (!CHARACTER_BUCKETS.some(([f]) => f === field)) continue;
+    const bucket = char[field] as Record<string, number>;
+    for (const [rawName, value] of Object.entries(asMap(block))) {
+      const trait = StringUtil.normalize(rawName);
+      // The key written more than once = more than one of that Background. The
+      // slot takes the highest; every instance is kept with its note.
+      const written = Array.isArray(value) ? value : [value];
+      if (written.length > 1) {
+        instances[trait] = written.map(one => {
+          const inst: TraitInstance = { rating: asNumber(one) ?? 0 };
+          const note = asText(asMap(one)["note"]);
+          if (note) inst.note = note;
+          return inst;
+        });
+        bucket[trait] = Math.max(...instances[trait].map(i => i.rating));
+      } else {
+        bucket[trait] = asNumber(value) ?? 0;
+      }
+      for (const one of written) {
+        if (asMap(one)["specialty"] !== undefined) addSpecialties(trait, asMap(one)["specialty"]);
+      }
+    }
+  }
+  if (Object.keys(instances).length) char.instances = instances;
+  for (const [rawName, value] of Object.entries(asMap(card["specialties"]))) {
+    addSpecialties(StringUtil.normalize(rawName), value);
+  }
+  char.specialties = specialties;
+  return char;
 }
 
 // Resolve a trait name to its value from a character record's numeric buckets.
@@ -4574,7 +5362,7 @@ function enhancementsFor(char: PlayableCharacter): Record<string, number> {
 // =============================================================================
 // NAMED ROLLS - a global, player-editable library of saved RollSpecs
 // -----------------------------------------------------------------------------
-// One lorebook entry IS the library: a JSON map { name: RollSpec } below the
+// One lorebook entry IS the library: each roll's name with its spec below the
 // header marker in wod:named-rolls. Read fresh on every call (no storage mirror)
 // so a player's hand edits are always live. Names normalize to single tokens.
 // =============================================================================
@@ -4641,29 +5429,116 @@ const DEFAULT_NAMED_ROLLS: Record<string, SavedRoll> = {
   },
 };
 
+// A saved roll, as a card writes it: the roll's NAME, its spec and sidecars
+// indented below. Defaults are omitted so a hand-written spec stays short.
+function savedRollToCard(roll: SavedRoll): CardMap {
+  const out: CardMap = { pool: roll.pool };
+  if (roll.difficultyExpr) out["difficultyExpr"] = roll.difficultyExpr;
+  else if (roll.difficulty !== DEFAULT_DIFFICULTY) out["difficulty"] = roll.difficulty;
+  if (roll.difficultyMod) out["difficultyMod"] = roll.difficultyMod;
+  if (roll.diceMod) out["diceMod"] = roll.diceMod;
+  if (roll.requires > 1) out["requires"] = roll.requires;
+  if (roll.difficultyCap !== undefined) out["difficultyCap"] = roll.difficultyCap;
+  if (roll.tags.length) out["tags"] = [...roll.tags];
+  for (const key of ["spend", "specialty", "table", "description"] as const) {
+    const v = roll[key];
+    if (v) out[key] = v;
+  }
+  if (roll.extended) out["extended"] = { ...roll.extended } as CardMap;
+  if (roll.opposed) out["opposed"] = { ...roll.opposed, extended: roll.opposed.extended ? { ...roll.opposed.extended } : undefined } as CardMap;
+  if (roll.steps?.length) out["steps"] = roll.steps.map(s => ({ ...s }) as CardMap);
+  return out;
+}
+
+function savedRollFromCard(body: CardMap): SavedRoll | undefined {
+  const pool = asText(body["pool"]);
+  if (!pool) return undefined;
+  const roll: SavedRoll = {
+    pool,
+    difficulty: asNumber(body["difficulty"]) ?? DEFAULT_DIFFICULTY,
+    difficultyMod: asNumber(body["difficultyMod"]) ?? 0,
+    requires: Math.max(1, asNumber(body["requires"]) ?? 1),
+    diceMod: asNumber(body["diceMod"]) ?? 0,
+    tags: asStringList(body["tags"]).map(t => StringUtil.normalize(t)),
+  };
+  const expr = asText(body["difficultyExpr"]);
+  if (expr) roll.difficultyExpr = expr;
+  const cap = asNumber(body["difficultyCap"]);
+  if (cap !== undefined) roll.difficultyCap = cap;
+  for (const key of ["spend", "specialty", "table", "description"] as const) {
+    const v = asText(body[key]);
+    if (v) roll[key] = v;
+  }
+  const extendedOf = (v: CardValue | undefined): ExtendedSavedConfig | undefined => {
+    const m = asMap(v);
+    if (!Object.keys(m).length) return undefined;
+    const cfg: ExtendedSavedConfig = {};
+    const intervals = asNumber(m["intervals"]);
+    if (intervals !== undefined) cfg.intervals = intervals;
+    const interval = asText(m["interval"]);
+    if (interval) cfg.interval = interval;
+    const onBotch = asText(m["onBotch"]);
+    if (onBotch === "fail" || onBotch === "lose-successes" || onBotch === "ignore") cfg.onBotch = onBotch;
+    return cfg;
+  };
+  const extended = extendedOf(body["extended"]);
+  if (extended) roll.extended = extended;
+  const opposed = asMap(body["opposed"]);
+  const mode = asText(opposed["mode"]);
+  if (mode === "resisted" || mode === "contested") {
+    roll.opposed = { mode };
+    const oppPool = asText(opposed["pool"]);
+    if (oppPool) roll.opposed.pool = oppPool;
+    const vs = asNumber(opposed["vsDifficulty"]);
+    if (vs !== undefined) roll.opposed.vsDifficulty = vs;
+    const oppExtended = extendedOf(opposed["extended"]);
+    if (oppExtended) roll.opposed.extended = oppExtended;
+  }
+  const steps: ProcedureStep[] = [];
+  for (const raw of asList(body["steps"])) {
+    const m = asMap(raw);
+    const target = asText(m["roll"]);
+    if (!target) continue;
+    const when = asText(m["when"]) ?? "always";
+    const step: ProcedureStep = {
+      when: (["always", "on-success", "on-fail", "on-botch"] as string[]).includes(when) ? when as ProcedureCondition : "always",
+      roll: target,
+    };
+    const note = asText(m["note"]);
+    if (note) step.note = note;
+    steps.push(step);
+  }
+  if (steps.length) roll.steps = steps;
+  return roll;
+}
+
 class NamedRollStore {
   private static _text(map: Record<string, SavedRoll>): string {
+    const card: CardMap = {};
+    for (const [name, roll] of Object.entries(map)) card[StringUtil.toTitleCase(name)] = savedRollToCard(roll);
     return [
-      "Saved rolls for this chronicle: a JSON object { name: rollspec } below the",
-      "marker. Invoke one with [[roll @name]]; edit this map freely by hand.",
-      "Each spec: pool, difficulty (or difficultyExpr), difficultyMod, requires,",
-      "diceMod, tags[], and optional sidecars applied on [[roll @name]]: spend",
+      "Saved rolls for this chronicle: each roll's NAME, with its spec indented",
+      "below it. Invoke one with [[roll @name]]; edit freely by hand.",
+      "Each spec: pool, difficulty (or difficulty-expr), difficulty-mod, requires,",
+      "dice-mod, tags, and optional sidecars applied on [[roll @name]]: spend",
       "(paid automatically), specialty (its die), table (reads the outcome).",
+      "Anything left out keeps its default (difficulty 6, one success needed).",
       SRD_HEADER_MARKER,
-      JSON.stringify(map, null, 2),
+      formatCardText(card),
     ].join("\n");
   }
 
-  // The whole library ({} when the entry is missing or unparseable).
+  // The whole library ({} when the entry is missing or unreadable).
   static async all(): Promise<Record<string, SavedRoll>> {
     const text = await LorebookManager.entryText(NAMED_ROLLS_CATEGORY, NAMED_ROLLS_ENTRY);
     if (!text) return {};
-    const body = LorebookManager.contentBelowHeader(text).trim();
-    if (!body.startsWith("{")) return {};
-    try {
-      const o = JSON.parse(body);
-      return (o && typeof o === "object" && !Array.isArray(o)) ? o as Record<string, SavedRoll> : {};
-    } catch { return {}; }
+    const parsed = parseCardText(LorebookManager.contentBelowHeader(text).trim());
+    const out: Record<string, SavedRoll> = {};
+    for (const { name, body } of asNamedList(parsed)) {
+      const roll = savedRollFromCard(body);
+      if (roll) out[StringUtil.normalize(name)] = roll;
+    }
+    return out;
   }
 
   static async get(name: string): Promise<SavedRoll | undefined> {
@@ -5042,7 +5917,7 @@ class AliasRegistry {
 // =============================================================================
 // CONFIG REGISTRIES - the story's wod:config entries, as generic store instances
 // -----------------------------------------------------------------------------
-// Each is ONE lorebook entry (tutorial header above the marker, JSON below),
+// Each is ONE lorebook entry (tutorial header above the marker, card text below),
 // cached for synchronous reads and reloaded at init + the creator-mode sync
 // points via reloadAllConfigStores() - instances self-register, so a new
 // registry here never touches a sync point. Wizards and [[define-*]] commands
@@ -5061,8 +5936,8 @@ const TABLES_CATEGORY = "wod:config:success-tables";
 const ResourceOverrides = new MapConfigStore<Partial<ResourceDef>>({
   entry: RESOURCE_CONFIG_ENTRY,
   header: [
-    "Story overrides for resources (the house-rule layer). The JSON below the",
-    "marker maps a resource name to the fields you want to change (start, max,",
+    "Story overrides for resources (the house-rule layer). Below the marker,",
+    "write a resource NAME and indent the fields you want to change (start, max,",
     "roles, effect, effects, ...). A name that matches no template resource and",
     "carries kind/start/max adds a custom resource. [[configure-resources]]",
     "edits this for you; you may also edit it by hand in creator mode.",
@@ -5075,12 +5950,31 @@ const MAGIC_CONFIG_ENTRY = "wod:config:magic";
 const MagicRulesConfig = new MapConfigStore<number>({
   entry: MAGIC_CONFIG_ENTRY,
   header: [
-    "Spellcasting knob overrides (Dark Ages: Mage). The JSON below the marker",
-    "maps a knob name to a number; unset knobs keep their defaults. Knobs:",
+    "Spellcasting knob overrides (Dark Ages: Mage). Below the marker, one",
+    "`knob: number` per line; unset knobs keep their defaults. Knobs:",
     "simple-base (4), complex-base (5), difficulty-cap (10; the book plays 9),",
     "min-difficulty (4), quintessence-per-turn (3), quintessence-free-limit (2),",
     "retry-penalty (1), botch-retry-penalty (2), ongoing-multiplier (10),",
     "ongoing-fuel-per-success (1), seal-per-pillar-dot (5), seal-willpower-per (10).",
+  ],
+});
+
+// Advancement prices: the CHRONICLE's cost table, never the character's. One
+// card, `kind:` with a price per purse indented under it (see
+// DEFAULT_ADVANCEMENT_COSTS). Values are text - nothing evaluates them yet.
+const COSTS_CONFIG_ENTRY = "wod:config:costs";
+const AdvancementCosts = new MapConfigStore<Record<string, string>>({
+  entry: COSTS_CONFIG_ENTRY,
+  header: [
+    "What a dot COSTS, from each purse - chronicle rules, so they live here and",
+    "not on any sheet. Below the marker, write the trait kind, then indent the",
+    "price for `experience` (play), `freebie` (creation) and `maturation`",
+    "(downtime); \"current\" means the rating you are raising FROM. Only the",
+    "prices you write are overridden - the rest keep the shipped values, which",
+    "[[costs]] lists. Nothing evaluates these yet: they are recorded and shown,",
+    "and the Storyteller applies them.",
+    "  attribute:",
+    "    experience: current x 4",
   ],
 });
 
@@ -5146,7 +6040,7 @@ class TableLibraryStore {
     const existing = parseNamedConfigList<SuccessTable>(
       parseConfigBody(await LorebookManager.entryText(category, GENERAL_ENTRY)));
     const list = [...existing.filter(d => StringUtil.normalize(d.name) !== def.name), def];
-    await writeTrackedEntry(category, GENERAL_ENTRY, [...TABLE_GENERAL_HEADER, SRD_HEADER_MARKER, JSON.stringify(list, null, 2)].join("\n"));
+    await writeTrackedEntry(category, GENERAL_ENTRY, configEntryText(TABLE_GENERAL_HEADER, namedDefsToCard(list as SuccessTable[])));
     await this.loadFromLorebook();
     const key = sub ? `${sub}:${def.name}` : def.name;
     const now = SuccessTableRegistry.get(key);
@@ -5165,7 +6059,7 @@ class TableLibraryStore {
     const rest = existing.filter(d => StringUtil.normalize(d.name) !== base);
     const removed = rest.length !== existing.length;
     if (removed) {
-      await writeTrackedEntry(category, GENERAL_ENTRY, [...TABLE_GENERAL_HEADER, SRD_HEADER_MARKER, JSON.stringify(rest, null, 2)].join("\n"));
+      await writeTrackedEntry(category, GENERAL_ENTRY, configEntryText(TABLE_GENERAL_HEADER, namedDefsToCard(rest as SuccessTable[])));
     }
     await this.loadFromLorebook();
     const now = SuccessTableRegistry.get(n);
@@ -5218,7 +6112,7 @@ const ConstraintRegistry = new ListConfigStore<ConstraintGroup>({
   entry: CONSTRAINTS_ENTRY,
   header: [
     "Constraint groups: the story's allow/deny rules over Backgrounds and",
-    "Merits/Flaws. The JSON array below the marker lists groups; each has a name,",
+    "Merits/Flaws. Below the marker each group is its NAME, then indented:",
     "relation (exclusive|restricted|forbidden), domain",
     "(background|merit|flaw|meritflaw|any), members, optional max (exclusive),",
     "scope (templates/choices it applies to), and note. [[define-constraint]]",
@@ -5234,8 +6128,8 @@ const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
   entry: AFFLICTIONS_ENTRY,
   header: [
     "Affliction definitions for this chronicle (overlaid on the built-ins).",
-    "The JSON array below the marker lists definitions; each has a name and",
-    "optional bindings (required slots like \"target\"), duration, then",
+    "Below the marker each definition is its NAME, then indented: optional",
+    "bindings (required slots like \"target\"), duration, then",
     "(successor), mirror (affliction the target gains, bound back), tags",
     "(join the afflicted character's rolls) and note. [[define-affliction]]",
     "edits this for you; you may also edit it by hand in creator mode.",
@@ -5750,7 +6644,7 @@ const rw = {
   confirmPrompt(state: RwState): WizardPrompt {
     const changes = Object.entries(state.overrides)
       .filter(([, p]) => Object.keys(p).length > 0)
-      .map(([k, p]) => `${k} ${JSON.stringify(p)}`).join("; ");
+      .map(([k, p]) => `${k} (${inlineCardText(p as CardValue)})`).join("; ");
     return {
       step: "confirm", title: "Save changes?",
       body: changes ? `Changes: ${changes}.` : "No changes were made.",
@@ -5895,7 +6789,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   await CreatorMode.set(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
-  if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
+  if (failed.length) parts.push(`Could not read: ${failed.join(", ")} - a sheet needs at least a name and a template. Fix the card and sync again; the convert-cards command rewrites any card still holding the old JSON.`);
   return sys(`${parts.join(" ")}`);
 }
 
@@ -7148,6 +8042,27 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   if (!entries.length) return sys(`No fellowships defined.`);
   const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
   return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
+}
+
+// costs [kind] - what a dot costs, from each purse. Prices are CHRONICLE rules
+// (rules.ts DEFAULT_ADVANCEMENT_COSTS + the wod:config:costs card), never
+// character data - which is why they are not on the sheet. Nothing evaluates
+// them yet; this surfaces them for the Storyteller, and the advancement engine
+// will read the same table when it lands.
+async function cmdCosts(cmd: ParsedCommand): Promise<string> {
+  const table = advancementCostsFrom(AdvancementCosts.current() as CostTable);
+  const which = cmd.positional[0]?.trim();
+  const priced = (purses: Record<string, string>): string =>
+    COST_PURSES.filter(p => purses[p]).map(p => `${p} ${purses[p]}`).join(", ");
+  if (which) {
+    const key = StringUtil.normalize(which);
+    const purses = table[key];
+    if (!purses) return sys(`No cost kind "${which}". Known: ${Object.keys(table).join(", ")}.`);
+    return sys(`${disp(key)} - ${priced(purses)}. "current" is the rating you raise FROM. `
+      + `Storyteller-applied: the engine records prices, it does not spend for you.`);
+  }
+  const items = Object.entries(table).map(([kind, purses]) => `${disp(kind)}: ${priced(purses)}`).join("; ");
+  return sys(`Advancement costs - ${items}. [[costs <kind>]] for one; edit them in the "${COSTS_CONFIG_ENTRY}" card.`);
 }
 
 // =============================================================================
@@ -8433,29 +9348,28 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
 
 // --- DEFINING merits, flaws and arcana -----------------------------------
 // The custom-definition overlay lives in the srd:merits-flaws lorebook
-// category (a JSON array merged over the built-ins). These commands write it
-// for you; hand-editing the card stays equally valid.
+// category (name-keyed blocks merged over the built-ins). These commands write
+// it for you; hand-editing the card stays equally valid.
 const MERITS_CATEGORY = "srd:merits-flaws";
 const MERITS_CUSTOM_ENTRY = "srd:merits-flaws:custom";
 
 async function customMeritDefs(): Promise<MeritFlawDef[]> {
   const text = await LorebookManager.entryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY);
-  const body = LorebookManager.contentBelowHeader(text ?? "").trim();
-  if (!body.startsWith("[")) return [];
-  try {
-    const parsed = JSON.parse(body);
-    return Array.isArray(parsed) ? parsed as MeritFlawDef[] : [];
-  } catch { return []; }
+  const parsed = parseCardText(LorebookManager.contentBelowHeader(text ?? "").trim());
+  return asNamedList(parsed)
+    .map(({ name, body }) => meritFlawFromCard(name, body))
+    .filter((d): d is MeritFlawDef => d !== undefined);
 }
 
 async function writeCustomMeritDefs(defs: MeritFlawDef[]): Promise<void> {
   const header = [
-    `Custom Merits, Flaws & arcana. The JSON array below the ${SRD_HEADER_MARKER} line is merged`,
-    "over the built-in list. [[define-merit]] writes this for you; hand-editing is equally fine.",
-    "Each definition: name, kind (merit|flaw), points (a number or [1,2,3]), optional param,",
-    "passive (always-on ops), requires, atMostOneAt, description.",
+    `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line each one is its NAME,`,
+    "with its fields indented under it; the list is merged over the built-ins.",
+    "[[define-merit]] writes this for you; hand-editing is equally fine. The fields:",
+    "kind (merit|flaw), points (a number, or `1, 2, 3`), param, passive (always-on",
+    "ops), requires, at-most-one-at, description.",
   ];
-  const text = [...header, SRD_HEADER_MARKER, JSON.stringify(defs, null, 2)].join("\n");
+  const text = configEntryText(header, namedDefsToCard(defs));
   const { id } = await LorebookManager.ensureCategory(MERITS_CATEGORY);
   const created = await LorebookManager.ensureEntry(id, MERITS_CUSTOM_ENTRY, text);
   if (!created) await LorebookManager.updateEntryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY, text);
@@ -8470,7 +9384,7 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
     return sys("define-merit needs a name, e.g. [[define-merit name=`Inviolate Soul` points=0 "
       + "passive=`immune:possession; immune:fear while=living-resolve` description=`…`]]. "
       + 'Passives read "<op>[:<target>] [+N|-N] [if=<trait>] [while=<resource>[>=N]] [once]", ";"-separated '
-      + "(or raw JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
+      + "(or a raw ops array in JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
   }
   const name = rawName.trim();
   const kindRaw = (cmd.named["kind"] ?? "merit").toLowerCase();
@@ -9000,10 +9914,62 @@ async function cmdCharacters(): Promise<string> {
   return sys(`Characters: ${items.join("; ")}. [[play name="..."]] to switch.`);
 }
 
+// --- MIGRATION: the one place that still understands the old JSON cards ------
+// Cards written before the readable format hold JSON. Nothing READS that any
+// more (core/cardtext.ts is the only card language), so this rewrites them in
+// place: same header, same data, new language. Idempotent - a card already in
+// the new format is not JSON and is left alone - and safe on a card the engine
+// doesn't own, because only wod:/srd: categories are visited.
+function jsonCardBody(text: string): CardValue | undefined {
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  if (!body.startsWith("{") && !body.startsWith("[")) return undefined;
+  try { return JSON.parse(body) as CardValue; } catch { return undefined; }
+}
+
+async function cmdConvertCards(): Promise<string> {
+  const converted: string[] = [];
+  const failed: string[] = [];
+  for (const cat of await api.v1.lorebook.categories()) {
+    const category = (cat.name ?? "").trim().toLowerCase();
+    if (!category.startsWith("wod:") && !category.startsWith("srd:")) continue;
+    for (const entry of await api.v1.lorebook.entries(cat.id)) {
+      const text = entry.text ?? "";
+      const parsed = jsonCardBody(text);
+      if (parsed === undefined) continue;
+      const label = (entry.displayName ?? "(unnamed)").trim();
+      const header = text.slice(0, text.length - LorebookManager.contentBelowHeader(text).length);
+      let value: CardValue | undefined;
+      if (category === PLAYER_CHARACTERS_CATEGORY) {
+        const char = parsed as unknown as PlayableCharacter;
+        if (char && typeof char.name === "string" && Array.isArray(char.templates)) value = characterToCard(char);
+      } else if (Array.isArray(parsed)) {
+        // A list of named defs reads far better keyed by its names.
+        value = parsed.every(d => typeof (d as Record<string, unknown>)?.["name"] === "string")
+          ? namedDefsToCard(parsed as unknown as Array<{ name: string }>)
+          : parsed;
+      } else {
+        value = parsed;
+      }
+      if (value === undefined) { failed.push(label); continue; }
+      await api.v1.lorebook.updateEntry(entry.id, { text: `${header}\n${formatCardText(value)}` });
+      await TrackedLorebook.refreshBackup(category, label, `${header}\n${formatCardText(value)}`);
+      converted.push(label);
+    }
+  }
+  if (!converted.length && !failed.length) return sys("Nothing to convert - every card is already in the readable format.");
+  const sync = await CharacterStore.syncFromLorebook();
+  await MeritFlawRegistry.loadFromLorebook();
+  await reloadAllConfigStores();
+  const bits = [`Converted ${converted.length} card${converted.length === 1 ? "" : "s"} from JSON: ${converted.join(", ")}.`];
+  if (failed.length) bits.push(`Left alone (unreadable): ${failed.join(", ")}.`);
+  if (sync.synced.length) bits.push(`Re-synced ${sync.synced.map(n => StringUtil.toTitleCase(n)).join(", ")}.`);
+  return sys(`${bits.join(" ")} Open a card to see the new format; [[sheet]] confirms what the engine reads.`);
+}
+
 // The record as the ENGINE reads it: every numeric bucket, with the effective
 // value marked wherever enhancements/boosts change what a roll will actually
 // use. This is the verification half of the creator-mode loop: hand-edit the
-// lorebook JSON, run [[sheet]], see exactly what synced.
+// lorebook card, run [[sheet]], see exactly what synced.
 async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
   let char: PlayableCharacter | undefined;
@@ -9044,6 +10010,13 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   }
   const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
+  // More than one of the same Background: the slot shows the highest, so say
+  // what else is held (which one a roll means is the Storyteller's call).
+  const held = Object.entries(char.instances ?? {}).filter(([, list]) => list.length > 1);
+  if (held.length) {
+    parts.push(`Held more than once: ${held.map(([t, list]) =>
+      `${t} ${list.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(" + ")}`).join("; ")} - the slot rates the highest; which one a roll is about is Storyteller-adjudicated`);
+  }
   if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
   // A pool start naming a resource this character doesn't have is a leftover -
   // most often a Willpower entry on someone whose Willpower was REPLACED. Trait
@@ -9125,6 +10098,9 @@ CommandRouter.register("characters", cmdCharacters, {
 CommandRouter.register("sheet", cmdSheet, {
   summary: "show a character's record as the engine reads it (effective values marked)",
   params: [{ key: "character", kind: "positional", hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("convert-cards", cmdConvertCards, {
+  summary: "rewrite any lorebook card still holding JSON in the readable format (one-shot)",
 });
 CommandRouter.register("set-default", cmdSetDefault, {
   summary: "change the default character",
@@ -9331,6 +10307,10 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
+CommandRouter.register("costs", cmdCosts, {
+  summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)",
+  params: [{ key: "kind", kind: "positional", hint: "[kind]", example: "discipline" }],
+});
 CommandRouter.register("fellowships", cmdFellowships, {
   summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
@@ -9496,7 +10476,7 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "name", kind: "named", required: true, type: "literal", hint: "`<name>`", example: "e.g. `Inviolate Soul`" },
     { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw"], desc: "Arcana are merits (default merit)" },
     { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings (default 0)" },
-    { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or raw JSON) - BACKTICKS' },
+    { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS' },
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
     { key: "at-most-one-at", kind: "named", type: "int", desc: "Only one instance may sit at this rating (advisory)" },

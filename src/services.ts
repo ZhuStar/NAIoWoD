@@ -1,7 +1,11 @@
 import { log } from "./host";
 import { sys } from "./command";
 import { StringUtil, Stat, Category } from "./core/traits";
-import { SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER, DEFAULT_MERITS_FLAWS, MeritFlawDef } from "./rules";
+import {
+  CardValue, CardMap, parseCardText, formatCardText, canonicalCardText,
+  asMap, asNamedList, asText,
+} from "./core/cardtext";
+import { SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER, DEFAULT_MERITS_FLAWS, MeritFlawDef, meritFlawFromCard } from "./rules";
 
 // =============================================================================
 // STORAGE & LOREBOOK MANAGERS - the script's editable database layer
@@ -10,8 +14,9 @@ import { SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER, DEFAULT_MERITS_FLAW
 // default) and pairs every persistent method with a temp* variant on
 // api.v1.tempStorage - volatile scratch state the host clears when the script
 // unloads. LorebookManager reads lorebook entries as data: rule lists live in
-// entries whose text is a newline list (or JSON) beneath a human-readable
-// header, so the user edits game data like a database table in the lorebook UI.
+// entries whose text is a newline list (or CARD TEXT - see core/cardtext.ts)
+// beneath a human-readable header, so the user edits game data like a database
+// table in the lorebook UI.
 // =============================================================================
 export class ScopedStorage {
   constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
@@ -216,29 +221,27 @@ export const GENERAL_ENTRY = "general";
 
 // Default tutorial headers for engine-seeded `general` cards.
 export const CONFIG_GENERAL_HEADER = [
-  "Global configuration for this chronicle. The JSON below the marker holds",
-  "story-wide settings (none are read yet - this card is the documented home",
-  "for future global options). Edit in creator mode.",
+  "Global configuration for this chronicle. Below the marker holds story-wide",
+  "settings (none are read yet - this card is the documented home for future",
+  "global options). Edit in creator mode; the format is `key: value`, one per",
+  "line, indenting to nest.",
 ];
 export const TABLE_GENERAL_HEADER = [
-  "Success tables for this category. The JSON below the marker is an array of",
-  "tables (or a map name -> table). [[define-table]] writes here; you may add",
-  "MORE cards to this category to split a large set - every card is read, and",
-  "a later card's table shadows an earlier one with the same name.",
+  "Success tables for this category, written `name:` with the table's rows",
+  "indented below it. [[define-table]] writes here; you may add MORE cards to",
+  "this category to split a large set - every card is read, and a later card's",
+  "table shadows an earlier one with the same name.",
 ];
 
 // Content-only structural hash: the tutorial header above the marker never
-// participates, so editing instructions can't trip a conflict. JSON bodies are
-// canonicalized (recursively sorted keys); anything unparseable falls back to
-// whitespace-collapsed text. djb2, hex.
+// participates, so editing instructions can't trip a conflict. Card bodies are
+// canonicalized (keys sorted, comments and layout gone); anything unreadable
+// falls back to whitespace-collapsed text. djb2, hex.
 export function structuralHash(text: string): string {
   const body = LorebookManager.contentBelowHeader(text).trim();
-  const canon = (v: unknown): unknown => Array.isArray(v) ? v.map(canon)
-    : (v && typeof v === "object")
-      ? Object.fromEntries(Object.keys(v as Record<string, unknown>).sort().map(k => [k, canon((v as Record<string, unknown>)[k])]))
-      : v;
-  let s: string;
-  try { s = JSON.stringify(canon(JSON.parse(body))); } catch { s = body.replace(/\s+/g, " "); }
+  // An empty (or comment-only) body has no data, so every such card hashes the
+  // same - a re-created empty card is a re-creation, not an edit.
+  const s = canonicalCardText(parseCardText(body));
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(16);
@@ -333,28 +336,26 @@ export class TrackedLorebook {
   }
 }
 
-// Union of two config card texts (both must parse). Shapes are preserved from
-// the FOUND (player's newer) card: map -> spread union; array-of-named-defs ->
+// Union of two config card texts (both must read). Shapes are preserved from
+// the FOUND (player's newer) card: block -> key union; list-of-named-defs ->
 // name-keyed union. The player's defs win collisions; backup-only defs are
 // kept. The found card's header text stays. Undefined = not combinable.
 export function combineConfigTexts(backupText: string, foundText: string): string | undefined {
-  const parse = (t: string): unknown => {
-    try { return JSON.parse(LorebookManager.contentBelowHeader(t).trim()); } catch { return undefined; }
-  };
+  const parse = (t: string): CardValue | undefined => parseCardText(LorebookManager.contentBelowHeader(t).trim());
   const backup = parse(backupText);
   const found = parse(foundText);
   if (backup === undefined || found === undefined) return undefined;
-  // Everything up to (and including) the found card's marker line; the JSON
+  // Everything up to (and including) the found card's marker line; the data
   // goes back on its own line below it.
   const header = foundText.slice(0, foundText.length - LorebookManager.contentBelowHeader(foundText).length);
-  let combined: unknown;
+  let combined: CardValue;
   if (Array.isArray(backup) && Array.isArray(found)) {
-    const byName = new Map<string, unknown>();
-    const keyOf = (d: unknown): string | undefined => {
-      const n = (d as { name?: unknown })?.name;
-      return typeof n === "string" ? StringUtil.normalize(n) : undefined;
+    const byName = new Map<string, CardValue>();
+    const keyOf = (d: CardValue): string | undefined => {
+      const n = asText(asMap(d)["name"]);
+      return n === undefined ? undefined : StringUtil.normalize(n);
     };
-    const extras: unknown[] = [];
+    const extras: CardValue[] = [];
     for (const list of [backup, found]) {
       for (const d of list) {
         const k = keyOf(d);
@@ -362,20 +363,21 @@ export function combineConfigTexts(backupText: string, foundText: string): strin
       }
     }
     combined = [...byName.values(), ...extras];
-  } else if (backup && found && typeof backup === "object" && typeof found === "object" && !Array.isArray(backup) && !Array.isArray(found)) {
-    combined = { ...(backup as Record<string, unknown>), ...(found as Record<string, unknown>) };
+  } else if (!Array.isArray(backup) && !Array.isArray(found)
+    && backup !== null && found !== null && typeof backup === "object" && typeof found === "object") {
+    combined = { ...backup, ...found };
   } else {
     return undefined;
   }
-  return `${header}\n${JSON.stringify(combined, null, 2)}`;
+  return `${header}\n${formatCardText(combined)}`;
 }
 
 // =============================================================================
 // CONFIG STORES - the generic shape of "wod:config" registries
 // -----------------------------------------------------------------------------
 // Every story-config registry works the same way: ONE lorebook entry under the
-// wod:config category (tutorial header above the marker, JSON below), parsed as
-// an array OR a name -> def map, cached module-level for synchronous reads,
+// wod:config category (tutorial header above the marker, card text below), read
+// as a name -> def block (or a list of named defs), cached module-level for synchronous reads,
 // reloaded at init and on the creator-mode sync points. These two classes ARE
 // that pattern; a concrete registry is an instance, not a re-implementation.
 // Instances self-register into ALL_CONFIG_STORES so reload/reset sweep every
@@ -407,29 +409,33 @@ export function resetAllConfigStores(): void {
 }
 
 // The tutorial-above-the-marker entry text every store writes.
-function configEntryText(header: string[], data: unknown): string {
-  return [...header, SRD_HEADER_MARKER, JSON.stringify(data, null, 2)].join("\n");
+export function configEntryText(header: string[], data: CardValue): string {
+  return [...header, SRD_HEADER_MARKER, formatCardText(data)].join("\n");
 }
 
-// Parse an entry body as JSON; undefined when missing/unparseable (the entry
+// A named-def registry, as a card writes it: `name:` with the def's fields
+// indented below. (A def whose whole body is one scalar keeps that scalar.)
+export function namedDefsToCard<T extends { name: string }>(defs: T[]): CardMap {
+  const out: CardMap = {};
+  for (const def of defs) {
+    const { name, ...rest } = def as T & Record<string, unknown>;
+    out[StringUtil.toTitleCase(String(name))] = rest as CardMap;
+  }
+  return out;
+}
+
+// Read an entry body as card text; undefined when missing/empty (the entry
 // stays for the player to fix - never destroyed by a bad edit).
-export function parseConfigBody(text: string | undefined): unknown {
+export function parseConfigBody(text: string | undefined): CardValue | undefined {
   if (!text) return undefined;
-  const body = LorebookManager.contentBelowHeader(text).trim();
-  if (!body) return undefined;
-  try { return JSON.parse(body); } catch { return undefined; }
+  return parseCardText(LorebookManager.contentBelowHeader(text).trim());
 }
 
-// Normalize a parsed config body (array of named defs OR name -> def map) to
-// a list of partials that carry their name. Shared by ListConfigStore and the
-// TableLibrary's multi-card loader.
-export function parseNamedConfigList<T extends { name: string }>(parsed: unknown): Array<Partial<T> & { name: string }> {
-  const list: Array<Partial<T> & { name: string }> = Array.isArray(parsed)
-    ? parsed as Array<Partial<T> & { name: string }>
-    : (parsed && typeof parsed === "object")
-      ? Object.entries(parsed as Record<string, Partial<T>>).map(([name, d]) => ({ ...d, name } as Partial<T> & { name: string }))
-      : [];
-  return list.filter(d => d && typeof d.name === "string" && d.name.trim().length > 0);
+// Normalize a read config body (name -> def block, OR a list of defs that carry
+// their own `name:`) to a list of partials that carry their name. Shared by
+// ListConfigStore and the TableLibrary's multi-card loader.
+export function parseNamedConfigList<T extends { name: string }>(parsed: CardValue | undefined): Array<Partial<T> & { name: string }> {
+  return asNamedList(parsed).map(({ name, body }) => ({ ...body, name } as unknown as Partial<T> & { name: string }));
 }
 
 // Write-through for a TRACKED card in any category: create the category/entry
@@ -455,11 +461,11 @@ async function writeConfigEntry(entry: string, text: string): Promise<void> {
 // tracked `general` card (seeded with the given tutorial header + empty JSON
 // when created; an existing card's text is never touched). The subcategory
 // policy's one constructor.
-export async function ensurePath(virtualPath: string, generalHeader: string[] = ["Data for this category. JSON below the marker."]): Promise<{ category: string; createdEntry: boolean }> {
+export async function ensurePath(virtualPath: string, generalHeader: string[] = ["Data for this category, below the marker."]): Promise<{ category: string; createdEntry: boolean }> {
   const category = `wod:${StringUtil.normalize(virtualPath)}`;
   const { id: categoryId } = await LorebookManager.ensureCategory(category);
   await TrackedLorebook.remember(category, undefined, categoryId);
-  const seeded = [...generalHeader, SRD_HEADER_MARKER, "[]"].join("\n");
+  const seeded = [...generalHeader, SRD_HEADER_MARKER, "# (nothing here yet)"].join("\n");
   const createdEntry = await LorebookManager.ensureEntry(categoryId, GENERAL_ENTRY, seeded);
   const want = GENERAL_ENTRY;
   const entry = (await api.v1.lorebook.entries(categoryId)).find(e => (e.displayName ?? "").trim().toLowerCase() === want);
@@ -520,7 +526,7 @@ export class ListConfigStore<T extends { name: string }> {
   }
 
   async save(defs: T[]): Promise<void> {
-    await writeConfigEntry(this.entry, configEntryText(this._header, defs));
+    await writeConfigEntry(this.entry, configEntryText(this._header, namedDefsToCard(defs)));
     this._apply(defs);
   }
 
@@ -557,14 +563,12 @@ export class MapConfigStore<V> {
 
   async loadFromLorebook(): Promise<number> {
     const parsed = parseConfigBody(await LorebookManager.entryText(CONFIG_CATEGORY, this.entry));
-    this._cache = (parsed && typeof parsed === "object" && !Array.isArray(parsed))
-      ? parsed as Record<string, V>
-      : {};
+    this._cache = asMap(parsed) as unknown as Record<string, V>;
     return Object.keys(this._cache).length;
   }
 
   async save(map: Record<string, V>): Promise<void> {
-    await writeConfigEntry(this.entry, configEntryText(this._header, map));
+    await writeConfigEntry(this.entry, configEntryText(this._header, map as unknown as CardMap));
     this._cache = map;
   }
 }
@@ -585,26 +589,19 @@ export class MeritFlawRegistry {
   }
 
   // Merge lorebook definitions over the defaults: every entry in the
-  // srd:merits-flaws category whose text parses as a JSON array of defs.
+  // srd:merits-flaws category, read as `name:` blocks below the marker.
   // Returns how many definitions were registered.
   static async loadFromLorebook(): Promise<number> {
     let count = 0;
     for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
-      // Data is the JSON array below the header marker; anything else is skipped.
-      const body = LorebookManager.contentBelowHeader(entry.text ?? "").trim();
-      if (!body.startsWith("[")) continue;
-      try {
-        const parsed = JSON.parse(body);
-        if (!Array.isArray(parsed)) continue;
-        for (const def of parsed) {
-          if (def && typeof def.name === "string" && (def.kind === "merit" || def.kind === "flaw")) {
-            MeritFlawRegistry.register(def as MeritFlawDef);
-            count++;
-          }
-        }
-      } catch {
-        log(`[MERITS] Skipping unparseable lorebook entry: ${entry.displayName}`);
+      const parsed = parseCardText(LorebookManager.contentBelowHeader(entry.text ?? "").trim());
+      if (parsed === undefined) continue;
+      let skipped = 0;
+      for (const { name, body } of asNamedList(parsed)) {
+        const def = meritFlawFromCard(name, body);
+        if (def) { MeritFlawRegistry.register(def); count++; } else skipped++;
       }
+      if (skipped) log(`[MERITS] ${entry.displayName}: skipped ${skipped} definition(s) with no kind (merit|flaw)`);
     }
     return count;
   }

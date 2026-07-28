@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `d9e2829`** ("Living Resolve IS
-> the other four: no phantom Willpower, Resolve's bonus"). Prior: `62e6534`
+> **Last synced with the code as of commit `4fe27aa`** ("Cards are written
+> in a language for people, not for parsers"). Prior: `ca94301` (the cap formula
+> + a fused point at the floor); `d9e2829` ("Living Resolve IS
+> the other four: no phantom Willpower, Resolve's bonus"); `62e6534`
 > (define-merit + resource-gated passives); `2d2a45a` ("certainty scales
 > with Foundation; the wizard's roles step reads the sheet"); `6719345`
 > ("the Sanctum pass:
@@ -88,6 +90,7 @@ types/novelai/script-types.d.ts  VENDORED NovelAI declarations - ambient truth (
 src/host.ts          release-safe glue: log() + UiPartHelpers/UIHandle aliases (NO NovelAI types)
 src/host-mock.ts     off-host mock + __reset*/__ui* hooks; installs globalThis.api. TEST-ONLY (NOT in the build)
 src/core/traits.ts   pure: names, Stat/Tracker/Pool, morality
+src/core/cardtext.ts pure: THE card language - parse/format/coerce (§7.43)
 src/core/dice.ts     pure: the d10 roller
 src/core/damage.ts   pure: Severity/Kind, packets, reactions, HealthTrack, soak
 src/wizard.ts        pure: medium-agnostic wizard engine
@@ -229,6 +232,31 @@ Our code redefines none of these. (It also reveals unused-yet capabilities:
 - `MoralityPolarity` = "ascending"|"descending"; `MoralityTrait` (value 0–10,
   `Degenerate/Improve` move WITH the polarity, `IsUnplayable` at 10-ascending /
   0-descending).
+
+### src/core/cardtext.ts (~440) — the readable card language (§7.43)
+- `CardValue` = string|number|boolean|null|CardValue[]|`CardMap`;
+  `CARD_VALUE_KEY = "value"` (a node's own value when it also has an
+  annotation block).
+- **`parseCardText(text)`** → `CardValue | undefined` (undefined = empty or
+  comment-only; NEVER throws — a malformed card yields what could be read and
+  the player's text is never destroyed). Pipeline: `stripComment` (quote-aware,
+  `#` at line start or after whitespace) → `indentOf` (tab = 2) → `splitKey`
+  (key ends at the FIRST `":"` followed by space/EOL) → indentation tree
+  (`readNodes`, `- ` items carry an inline `key: value` as their first child) →
+  `nodeValue` (keyed children → block, all-item children → list, `addKey`
+  turns a REPEATED key into a list) → `readScalar` (quoted / number / decimal /
+  yes-no-on-off / none-null / top-level commas → inline list / text).
+- **`formatCardText(value)`** — blank line between multi-line top-level blocks;
+  scalar lists inline up to `INLINE_LIST_WIDTH` (88) else `- ` items; a list of
+  annotated values is written as the key REPEATED; `needsQuote`/`quote` for
+  anything that would be misread. `inlineCardText` is the one-line form.
+- Tables: `TEXT_KEYS` (comma = punctuation, never auto-typed), `LIST_KEYS`
+  (always a list), `TOKEN_TEXT_KEYS` = {target} (text, comma spacing squeezed),
+  `FIELD_ALIASES`/`canonicalKey`/`wireKey` (hyphenated wire ↔ camelCase field).
+- Coercions: `asText` (re-joins a comma-split value), `asNumber`, `asBool`,
+  `asList`, `asStringList`, `asMap`, `asNumberMap`, `asNamedList` (name-keyed
+  block OR `- name:` items). `canonicalCardText` = order-independent digest
+  (keys sorted, whitespace collapsed) — what `structuralHash` hashes.
 
 ### src/core/dice.ts (~130)
 - `Rng` = () => number in [0,1); `Random(min,max,rng)`.
@@ -791,7 +819,9 @@ affliction tiers with the `@foundation` sentinel), `applyPenaltyShield`,
 Foundation the caster actually has), `cmdFellowships` (QUIET). `applyRecovery`
 gates accept an array (ALL must be active). `cmdResources` lines gained
 perTurn/rollAs/recovery/description. Registrations: `cast`, `seal-spell`,
-`fellowships`.
+`fellowships`. §7.43/§7.44 added `jsonCardBody` + `cmdConvertCards` (the one
+place JSON is still understood) and `cmdCosts`; `cmdSheet` reports
+"Held more than once" for a trait with `instances`.
 
 **Table seam + modals**: `resolveTableRef(raw)` — the ONE place a table
 argument (`key`, `sub::name`, or `@table-alias`) becomes a registry key;
@@ -913,7 +943,10 @@ verb's CommandSpec at the bottom of game.ts — the grammars below match it):
 `help [verb]` (list commands, or one's usage) ·
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
 `play [name="…"]` (no name → default) · `characters` (list; marks
-current/default) · `sheet [name|@alias]` (the record as the ENGINE reads it —
+current/default) · `convert-cards` (§7.43: one-shot, idempotent migration of
+any `wod:`/`srd:` card still holding JSON) · `costs [kind]` (§7.44: what a dot
+costs from each purse — chronicle rules, Storyteller-applied) ·
+`sheet [name|@alias]` (the record as the ENGINE reads it —
 all numeric buckets, merits, specialties; effective value marked when
 enhancements/boosts differ: `strength 1 (3 eff)`; the verification half of
 the creator-mode manual-fill loop) · `set-default name="…"` · `roll <pool|@name>
@@ -1119,14 +1152,17 @@ once-per-session reconciliation-modal guard).
 
 **Lorebook** (all data entries = instructions above `=====`, data below):
 `srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
-`srd:merits-flaws` (JSON defs merged over defaults) · `wod:player-characters`
+`srd:merits-flaws` (name-keyed defs merged over defaults) · `wod:player-characters`
 (`pc:<name>` entries — SOURCE OF TRUTH for characters) · `wod:named-rolls`
-(`wod:named-rolls:library` JSON map) · `wod:config` (entries: `general`
+(`wod:named-rolls:library`, name → spec) · `wod:config` (entries: `general`
 seeded global-config card, unread for now; `wod:config:resources` overrides
 map; **`wod:config:magic`** spellcasting knob map, kebab-case name → number overlaid
-on `DEFAULT_MAGIC_RULES`; `wod:config:constraints` constraint groups;
-`wod:config:afflictions` affliction-def overlay — each array or `name → def`
-map) ·
+on `DEFAULT_MAGIC_RULES`; **`wod:config:costs`** advancement prices, kind →
+purse → text, overlaid on `DEFAULT_ADVANCEMENT_COSTS` (§7.44);
+`wod:config:constraints` constraint groups;
+`wod:config:afflictions` affliction-def overlay) ·
+ALL of these are **card text** (§7.43), never JSON — `[[convert-cards]]`
+migrates a story written before the change. ·
 **`wod:config:success-tables`** — a CATEGORY (the virtual-subcategory tree,
 §7.21): its `general` card + any extra cards hold bare-named tables; each
 subcategory is the real category `wod:config:success-tables:<sub>` (own
@@ -1972,6 +2008,81 @@ and `prefill` are mocked/available but not yet written.
     whichever limiter actually bound.
     Result on the owner's exact command: +2 auto, +2 sure, -4 difficulty from
     the pair instead of one point's worth.
+
+43. **Cards are written in a language for people** (user: "I'm wondering if we
+    could make the language of the lorebook entries less actual JSON, and more
+    human-readable/writable. Maybe XML-like? or merely YAML. Or a mixture of
+    both?... Help me make it least astonishing"; confirmed forks: scope =
+    **"Sheets + the config entries"**, migration = **"New format only"**).
+    The binding constraint decided the shape: `dist/naiowod.ts` ships with ZERO
+    dependencies, so a real YAML/XML parser is not available and a *partial*
+    implementation of a real standard would be worse than a *complete*
+    implementation of a small one. So: **`src/core/cardtext.ts`**, a hand-rolled
+    indentation format, ~430 lines, pure (no host imports).
+    - **One node shape**: `key: value`, plus an optional indented block. A block
+      under a key that already HAS a value annotates it (the value lands under
+      the reserved key `value`). This dissolves the user's own question ("maybe
+      name should be changed to `key`?") - **the key IS the key**, so no def
+      needs a `name:` field and no sheet needs a `trait:` field.
+    - **A repeated key is a list.** This is the actual reason the format exists:
+      his example sheet had two Mentors, which JSON cannot say at all.
+    - **The reader is untyped; the consumers coerce** (`asText`/`asNumber`/
+      `asList`/`asStringList`/`asMap`/`asNamedList`). That is what lets a human
+      write `templates: mage` for a list field and a comma inside a sentence,
+      with no syntax for either. Two small tables carry the knowledge:
+      `TEXT_KEYS` (a comma is punctuation there: description, note, label,
+      name, ...) and `LIST_KEYS` (always a list: tags, roles, passive, ...).
+      `FIELD_ALIASES` maps the engine's camelCase fields to hyphenated wire
+      spellings BOTH ways (`difficulty-expr` <-> `difficultyExpr`); it is a
+      fixed table, never a general camel/kebab rule, because trait names, merit
+      keys and table names are DATA and must never be renamed.
+    - **The key ends at the first `": "`** (or a trailing `:`), so
+      `trait-affinity:melee: 3` keys on the whole instance name and
+      `he said: hi` is a value with a colon in it.
+    - Writer quotes on demand (empty, padded, `,` `#` `"` newline, or anything
+      that would auto-type); reader unquotes. `formatCardText(parseCardText(x))`
+      is stable, which the tests assert.
+    JSON reading is **gone** from every card path: `parseConfigBody`,
+    `ListConfigStore`/`MapConfigStore`, `MeritFlawRegistry.loadFromLorebook`,
+    `NamedRollStore`, `TableLibrary`, `CharacterStore` read/write, `combineConfigTexts`
+    and `structuralHash` (now `canonicalCardText`, whitespace-collapsed, empty
+    bodies canonical). New decoders own their shapes: `meritFlawFromCard` /
+    `effectOpsFromCard` (rules.ts), `characterToCard` / `characterFromCard` and
+    `savedRollToCard` / `savedRollFromCard` (state.ts). `makeConstraintGroup` /
+    `makeAfflictionDef` now take their list fields through `asStringList`, so a
+    single-value `scope:` can never reach `.map` as a string.
+    **`[[convert-cards]]`** is the one place JSON is still understood: a
+    one-shot, idempotent migration that rewrites every `wod:`/`srd:` card whose
+    body starts with `{`/`[`, keeps the player's header, re-keys arrays of named
+    defs by name, and re-syncs. Chosen over silent fallback because the user
+    asked for "new format only", but a live story with a fully built character
+    must not be destroyed to honour that.
+    **Two Mentors made the model grow**: the format could now express something
+    `PlayableCharacter` could not hold, and a repeated rating read as 0. Added
+    `instances?: Record<string, TraitInstance[]>` - the bucket rates the trait at
+    the HIGHEST (one slot, one number), every instance is kept with its note,
+    `[[sheet]]` reports "Held more than once", and the card writes the key once
+    per instance. Which mentor a given roll is about is ST-adjudicated (that
+    needs targeting) - the standing "store it, surface it, never block" rule.
+    Known and documented limit: `#` comments are the player's, and a card the
+    engine REWRITES keeps only the data - so anything worth keeping goes in a
+    `note:`.
+
+44. **Advancement costs are chronicle rules, not character data** (user, on his
+    example sheet: costs for exp/freebies/maturation "maybe these shouldn't be
+    in the user-fronting character, but they should still be somewhere").
+    They are identical for every sheet, so putting them on one is duplication
+    waiting to drift. `DEFAULT_ADVANCEMENT_COSTS` + `advancementCostsFrom`
+    (rules.ts) + the `wod:config:costs` card (`AdvancementCosts`, a
+    `MapConfigStore`) + `[[costs]]` / `[[costs <kind>]]`. Ten kinds
+    (attribute/ability/background/discipline/pillar/foundation/virtue/
+    willpower/road/merit-flaw) x three purses (experience/freebie/maturation);
+    an override replaces ONE purse's price without restating the others.
+    Values are **text on purpose**: there is no advancement engine, so nothing
+    evaluates them. The user's own cost-expression sketch
+    (`{if(@curr eq 0) then 10 else [@curr*6]}`) is deliberately DEFERRED - a
+    language nothing can execute is worse than a string that says what it means
+    - and the table is the seam the XP engine will read when it lands.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

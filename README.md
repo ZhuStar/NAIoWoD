@@ -310,10 +310,96 @@ Conventions (defined in `SRD_CATEGORIES`, installed by `bootstrap()`):
 | --- | --- | --- |
 | `srd:abilities` | `srd:abilities:talents` / `:skills` / `:knowledges` | one ability per line |
 | `srd:backgrounds` | `srd:backgrounds:all` | one background per line |
-| `srd:merits-flaws` | `srd:merits-flaws:custom` | JSON array of merit/flaw definitions |
+| `srd:merits-flaws` | `srd:merits-flaws:custom` | merit/flaw definitions in card text |
 
 `LorebookManager.allTalents()` etc. return those lists;
 `LorebookParser.ParseFromApi()` (async) builds zero-dot `Stat` maps from them.
+
+### Card text — the language every card is written in
+
+Structured cards (sheets, config registries, merits, saved rolls, success
+tables) are **not JSON**. They are written in a small format meant to be typed
+and read by a person — `src/core/cardtext.ts`, hand-rolled because the artifact
+ships with zero dependencies:
+
+```
+# who he is
+name: Visvaldas
+templates: ouroboros
+tags: revenant, awakened
+
+attributes:
+  Strength: 3
+  Wits: 5
+
+abilities:
+  Occult: 5
+    specialty: Hermetic Theory      # indented under the skill it is on
+
+backgrounds:
+  Sanctum: 8
+  Mentor: 4
+    note: Velia, the Rafastio Matriarch
+  Mentor: 2                          # the SAME key again = two Mentors
+    note: Belial
+```
+
+The whole grammar:
+
+- **`key: value`** — the key ends at the first `": "` (or a trailing `:`), so
+  `he said: hello` is a value with a colon in it, and `trait-affinity:melee: 3`
+  keys on the whole instance name.
+- **Indentation nests.** A key with nothing after the colon takes whatever is
+  indented below it. A key *with* a value that also has an indented block keeps
+  its value and gains annotations (internally the value sits under `value`) —
+  which is why nothing needs a separate `name:` field: **the key is the key**.
+- **A repeated key is a list.** Two `Mentor:` lines are two Mentors. This is
+  the thing JSON could not express at all.
+- **Commas make a list** (`tags: revenant, awakened`), **except** in a handful
+  of text keys (`description`, `note`, `label`, `name`, …) where a comma is
+  just punctuation. Conversely a handful of list keys (`tags`, `roles`,
+  `templates`, `passive`, …) are always a list, so one item needs no syntax.
+- **`- ` starts a list item**, and lines indented under it belong to it:
+  ```
+  passive:
+    - op: immune
+      target: possession, soul-control
+    - op: difficulty
+      amount: -2
+  ```
+- **Scalars type themselves**: `3` is a number, `yes`/`no` are booleans, `none`
+  is null, everything else is text **with its case preserved**. Quote (`"…"`)
+  to force text; the writer quotes for you whenever it would be misread.
+- **`#` starts a comment** at the start of a line or after a space.
+- The engine's camelCase fields are written with hyphens — `difficulty-expr`,
+  `at-most-one-at`, `requires-resource` — and either spelling is accepted.
+
+Names are yours: write `Animal Ken`, not `animal-ken`. The engine normalizes on
+the way in and title-cases on the way out. One caveat worth knowing: when the
+engine rewrites a card (any command that changes the character), it writes the
+**data** — your `#` comments are not preserved, so put anything you want kept
+in a `note:` instead.
+
+**Coming from an older story?** Cards written before this format hold JSON, and
+nothing reads that any more. Run **`[[convert-cards]]`** once: it rewrites every
+`wod:`/`srd:` card that still holds JSON, keeps your header text, and re-syncs.
+It is idempotent and leaves anything already converted alone.
+
+### What a dot costs — `[[costs]]`
+
+Prices are **chronicle rules, not character data** — the same for every sheet —
+so they are not on the sheet. `[[costs]]` lists them per purse (`experience`,
+`freebie`, `maturation`), `[[costs <kind>]]` shows one, and the
+`wod:config:costs` card overrides one price at a time:
+
+```
+attribute:
+  experience: current x 5
+```
+
+Values are **text**: there is no advancement engine yet, so the engine records
+and surfaces them and the Storyteller applies them — the standing rule for a
+subsystem that doesn't exist.
 
 ## Player commands & character creation
 

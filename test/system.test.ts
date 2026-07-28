@@ -51,6 +51,9 @@ import {
   extractHideBlocks, processGeneratedText, init,
   processContextBuilt, stripCtxSkip, GenCounter,
   processGenerationEnd, stripAgedCtxSkip,
+  parseCardText, formatCardText, characterToCard, characterFromCard,
+  asNumber, asText, asList, asStringList, CardMap,
+  COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
 } from "../src/index";
 
 // A fresh story has no SRD lorebook categories; the script seeds them on load.
@@ -866,8 +869,12 @@ describe("[[create-playable]] and creator mode", () => {
     // lorebook entry is the source of truth
     const text = await LorebookManager.entryText(PLAYER_CHARACTERS_CATEGORY, "pc:absurd-al");
     expect(text).toContain("=====");
-    const parsed = JSON.parse(LorebookManager.contentBelowHeader(text!));
-    expect(parsed.name).toBe("absurd-al");
+    const body = LorebookManager.contentBelowHeader(text!);
+    expect(body).toContain("name: Absurd Al");                 // display spelling, not the key
+    expect(body).toContain("templates: vampire, werewolf, mage");
+    expect(body).toContain("  Strength: 1");                   // a group, one trait per line
+    const parsed = characterFromCard(parseCardText(body))!;
+    expect(parsed.name).toBe("Absurd Al");
     expect(parsed.templates).toEqual(["vampire", "werewolf", "mage"]);
   });
 
@@ -892,7 +899,7 @@ describe("[[create-playable]] and creator mode", () => {
     // The player edits the sheet directly in the lorebook: becomes a ghoul.
     const char = (await CharacterStore.load("Editable"))!;
     const edited = { ...char, templates: ["ghoul"], tags: ["tzimisce-thrall"] };
-    const newText = `edited by hand\n=====\n${JSON.stringify(edited, null, 2)}`;
+    const newText = `edited by hand\n=====\n${formatCardText(characterToCard(edited))}`;
     expect(await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:editable", newText)).toBe(true);
 
     // Turning creator mode off picks the edit up (sync is lorebook -> storage).
@@ -906,9 +913,9 @@ describe("[[create-playable]] and creator mode", () => {
   test("unparseable player edits are reported, not synced", async () => {
     await CommandRouter.route('create-playable name="Broken" templates=mortal');
     await CommandRouter.route("creator-mode set=true");
-    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:broken", "junk\n=====\n{not json");
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:broken", "junk\n=====\nthis is not a sheet at all");
     const reply = await CommandRouter.route("creator-mode set=false");
-    expect(reply).toContain("Could not parse");
+    expect(reply).toContain("Could not read");
     expect(reply).toContain("pc:broken");
     expect((await CharacterStore.load("Broken"))!.templates).toEqual(["mortal"]); // old copy intact
   });
@@ -1342,8 +1349,12 @@ describe("named rolls (@name library)", () => {
 
   test("a hand-edited library entry is read live", async () => {
     await NamedRollStore.save("dodge", makeRollSpec({ pool: "dexterity+dodge" }));
-    const map = { "power-attack": makeRollSpec({ pool: "strength+brawl", difficulty: 7 }) };
-    const text = `edited by hand\n=====\n${JSON.stringify(map, null, 2)}`;
+    const text = [
+      "edited by hand", "=====",
+      "Power Attack:",
+      "  pool: strength+brawl",
+      "  difficulty: 7",
+    ].join("\n");
     await LorebookManager.updateEntryText(NAMED_ROLLS_CATEGORY, "wod:named-rolls:library", text);
     expect((await NamedRollStore.get("power-attack"))!.difficulty).toBe(7);
     expect(await NamedRollStore.get("dodge")).toBeUndefined(); // replaced by the edit
@@ -1807,7 +1818,7 @@ describe("resource overrides (the house-rule layer)", () => {
     expect(ResourceOverrides.current().willpower.max).toBe(8);
 
     // The player hand-edits the entry (what creator mode allows).
-    const edited = `notes\n=====\n${JSON.stringify({ willpower: { max: 6 } })}`;
+    const edited = "notes\n=====\nwillpower:\n  max: 6";
     await LorebookManager.updateEntryText(CONFIG_CATEGORY, RESOURCE_CONFIG_ENTRY, edited);
     await ResourceOverrides.loadFromLorebook();
     expect(ResourceOverrides.current().willpower.max).toBe(6);
@@ -2235,8 +2246,15 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
   });
 
   test("a lorebook entry overlays new tables (array form), usable via table=", async () => {
-    const tables = [{ name: "intimidate", rows: [{ at: 1, label: "Cowed" }, { at: 3, label: "Terrified" }] }];
-    const text = `Success tables (JSON below the marker).\n=====\n${JSON.stringify(tables)}`;
+    const text = [
+      "Success tables below the marker.", "=====",
+      "- name: intimidate",
+      "  rows:",
+      "    - at: 1",
+      "      label: Cowed",
+      "    - at: 3",
+      "      label: Terrified",
+    ].join("\n");
     const { id } = await LorebookManager.ensureCategory(TABLES_CATEGORY);
     await LorebookManager.ensureEntry(id, GENERAL_ENTRY, text);
     expect(await TableLibrary.loadFromLorebook()).toBe(1);
@@ -2249,8 +2267,7 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
   });
 
   test("the map form (name -> table) also registers, defaults are re-seeded", async () => {
-    const map = { luck: { valuePerSuccess: 2, failure: "no luck" } };
-    const text = `notes\n=====\n${JSON.stringify(map)}`;
+    const text = "notes\n=====\nluck:\n  valuePerSuccess: 2\n  failure: no luck";
     const { id } = await LorebookManager.ensureCategory(TABLES_CATEGORY);
     await LorebookManager.ensureEntry(id, GENERAL_ENTRY, text);
     await TableLibrary.loadFromLorebook();
@@ -2819,6 +2836,7 @@ describe("config stores: reload/reset-all", () => {
   test("every store self-registered into ALL_CONFIG_STORES", () => {
     expect(ALL_CONFIG_STORES.map(s => s.entry).sort()).toEqual([
       AFFLICTIONS_ENTRY, CONSTRAINTS_ENTRY, RESOURCE_CONFIG_ENTRY, TABLES_CATEGORY, MAGIC_CONFIG_ENTRY,
+      COSTS_CONFIG_ENTRY,
     ].sort());
   });
 
@@ -2853,7 +2871,7 @@ describe("command router: beforeRoute hooks (creator-mode live sync)", () => {
     await CommandRouter.route('define-affliction name="dazed" description=`Old words`');
     await CommandRouter.route("creator-mode set=true");
     const entry = ["hand edit", "=====",
-      JSON.stringify([{ name: "dazed", description: "New words", tags: ["off-hand"] }])].join("\n");
+      "dazed:", "  description: New words", "  tags: off-hand"].join("\n");
     await LorebookManager.updateEntryText(CONFIG_CATEGORY, AFFLICTIONS_ENTRY, entry);
     expect(await CommandRouter.route("affliction dazed")).toContain("New words");   // the hook re-loaded it
     await CommandRouter.route("creator-mode set=false");
@@ -2928,17 +2946,226 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
 });
 
 // =============================================================================
+// CARD TEXT - the readable language every lorebook card is written in
+// =============================================================================
+describe("card text: the readable card format", () => {
+  test("nesting, typing and comments", () => {
+    const v = parseCardText([
+      "# who he is",
+      "name: Visvaldas",
+      "stage: ready        # trailing comments too",
+      "awake: yes",
+      "road: none",
+      "attributes:",
+      "  Strength: 3",
+      "  Wits: 5",
+    ].join("\n")) as Record<string, unknown>;
+    expect(v.name).toBe("Visvaldas");          // case preserved for display
+    expect(v.stage).toBe("ready");
+    expect(v.awake).toBe(true);
+    expect(v.road).toBeNull();
+    expect(v.attributes).toEqual({ Strength: 3, Wits: 5 });
+  });
+
+  test("a repeated key is a list - the thing JSON could not say", () => {
+    const v = parseCardText("mentor: Velia\nmentor: Belial\nmentor: Inauhaten") as Record<string, unknown>;
+    expect(v.mentor).toEqual(["Velia", "Belial", "Inauhaten"]);
+  });
+
+  test("a value plus an indented block: the value lands under `value`", () => {
+    const v = parseCardText("sanctum: 8\n  note: the Library of the Unseen") as CardMap;
+    expect(v.sanctum).toEqual({ value: 8, note: "the Library of the Unseen" } as never);
+    expect(asNumber(v.sanctum)).toBe(8);        // and reads back as its rating
+    expect(asText(v.sanctum)).toBe("8");
+  });
+
+  test("commas make a list - except in a TEXT key, where they are punctuation", () => {
+    const v = parseCardText([
+      "tags: revenant, awakened",
+      "description: He is immune to fear, and to mind control.",
+      "roles: quintessence",                    // a LIST key: one item is still a list
+    ].join("\n")) as Record<string, unknown>;
+    expect(v.tags).toEqual(["revenant", "awakened"]);
+    expect(v.description).toBe("He is immune to fear, and to mind control.");
+    expect(v.roles).toEqual(["quintessence"]);
+  });
+
+  test('"- " items build a list of blocks; the engine\'s camelCase fields are written with hyphens', () => {
+    const v = parseCardText([
+      "passive:",
+      "  - op: immune",
+      "    target: possession, soul-control",
+      "  - op: difficulty",
+      "    amount: -2",
+      "    requires-resource:",
+      "      resource: living-resolve",
+      "      at-least: 1",
+    ].join("\n")) as Record<string, Record<string, unknown>[]>;
+    expect(v.passive.length).toBe(2);
+    expect(v.passive[0]).toEqual({ op: "immune", target: "possession,soul-control" });
+    expect(v.passive[1].amount).toBe(-2);
+    expect(v.passive[1].requiresResource).toEqual({ resource: "living-resolve", atLeast: 1 });
+  });
+
+  test("a key may contain a colon; a value may too", () => {
+    const v = parseCardText("trait-affinity:melee: 3\nnote: he said: hello") as Record<string, unknown>;
+    expect(v["trait-affinity:melee"]).toBe(3);
+    expect(v.note).toBe("he said: hello");
+  });
+
+  test("tabs indent, quotes force text, and everything round-trips", () => {
+    const src = ["a:", "\tb: 1", 'c: "7"', 'd: "  padded, with a # and a \\"quote\\"  "'].join("\n");
+    const v = parseCardText(src) as Record<string, unknown>;
+    expect(v.a).toEqual({ b: 1 });
+    expect(v.c).toBe("7");                                    // quoted: text, not a number
+    expect(v.d).toBe('  padded, with a # and a "quote"  ');
+    const again = parseCardText(formatCardText(v as never));   // writer re-quotes what it must
+    expect(again).toEqual(v as never);
+  });
+
+  test("a whole sheet survives a round trip unchanged", () => {
+    const src = [
+      "name: Visvaldas", "templates: ouroboros", "tags: revenant, awakened",
+      "backgrounds:", "  Sanctum: 8", "  Mentor: 4", "    note: Velia", "  Mentor: 2", "    note: Belial",
+      "traits:", "  Modus: 5",
+    ].join("\n");
+    const once = parseCardText(src)!;
+    const text = formatCardText(once);
+    expect(text).toContain("Mentor: 4");           // written back the way it was written
+    expect(text).toContain("Mentor: 2");
+    expect(parseCardText(text)).toEqual(once as never);
+  });
+
+  test("an empty or comment-only body is nothing at all", () => {
+    expect(parseCardText("")).toBeUndefined();
+    expect(parseCardText("# just a note\n\n   ")).toBeUndefined();
+    expect(asList(undefined)).toEqual([]);
+    expect(asStringList("a, b")).toEqual(["a, b"]);   // already-joined text stays one item
+  });
+});
+
+// =============================================================================
+// THE SHEET AS A CARD - what a player actually hand-writes
+// =============================================================================
+describe("the character sheet card", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("names are written for reading and normalized on the way in", async () => {
+    await CommandRouter.route('create-playable name="Al" templates=mortal');
+    const char = (await CharacterStore.load("Al"))!;
+    char.abilities["animal-ken"] = 2;
+    char.specialties = { "animal-ken": ["Hounds"] };
+    const text = formatCardText(characterToCard(char));
+    expect(text).toContain("  Animal Ken: 2");
+    expect(text).toContain("    specialty: Hounds");
+    const back = characterFromCard(parseCardText(text))!;
+    expect(back.abilities["animal-ken"]).toBe(2);
+    expect(back.specialties!["animal-ken"]).toEqual(["Hounds"]);
+  });
+
+  test("`pools` and `merits` are accepted for the engine's longer bucket names", () => {
+    const back = characterFromCard(parseCardText([
+      "name: Kvar", "templates: vampire",
+      "pools:", "  Willpower: 5",
+      "merits:", "  Iron Will: 3",
+    ].join("\n")))!;
+    expect(back.poolStarts.willpower).toBe(5);
+    expect(back.meritsFlaws["iron-will"]).toBe(3);
+    expect(back.stage).toBe("potential");        // unstated stage is the safe one
+  });
+
+  test("two Mentors: the slot takes the highest, and both survive the round trip", () => {
+    const written = [
+      "name: Visvaldas", "templates: ouroboros",
+      "backgrounds:",
+      "  Mentor: 4",
+      "    note: Velia, the Rafastio Matriarch",
+      "  Mentor: 2",
+      "    note: Belial",
+    ].join("\n");
+    const char = characterFromCard(parseCardText(written))!;
+    expect(char.backgrounds.mentor).toBe(4);                       // one slot, the strongest
+    expect(char.instances!.mentor.map(i => i.rating)).toEqual([4, 2]);
+    expect(char.instances!.mentor[1].note).toBe("Belial");
+    const again = formatCardText(characterToCard(char));
+    expect(again).toContain("  Mentor: 4");
+    expect(again).toContain("  Mentor: 2");
+    expect(characterFromCard(parseCardText(again))!.instances).toEqual(char.instances!);
+  });
+
+  test("a sheet without a name or a template is not a sheet", () => {
+    expect(characterFromCard(parseCardText("templates: mortal"))).toBeUndefined();
+    expect(characterFromCard(parseCardText("name: Nobody"))).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// CONVERT-CARDS - the one-shot migration off the old JSON cards
+// =============================================================================
+describe("[[convert-cards]]: migrating a story written before the readable format", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("a JSON sheet and a JSON merit card are rewritten, and the engine reads them again", async () => {
+    await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
+    const old = { ...(await CharacterStore.load("Visvaldas"))!, traits: { modus: 5, primus: 1 } };
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
+      `old header\n=====\n${JSON.stringify(old, null, 2)}`);
+    const { id } = await LorebookManager.ensureCategory("srd:merits-flaws");
+    await LorebookManager.ensureEntry(id, "srd:merits-flaws:legacy",
+      'h\n=====\n[{"name":"Sturdy Stock","kind":"merit","points":2}]');
+
+    const reply = await CommandRouter.route("convert-cards");
+    expect(reply).toContain("pc:visvaldas");
+    expect(reply).toContain("srd:merits-flaws:legacy");
+
+    const text = (await LorebookManager.entryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas"))!;
+    expect(text).toContain("old header");                 // the player's header is kept
+    expect(text).toContain("  Modus: 5");
+    expect(text).not.toContain('"traits"');
+    expect(resolveTraitFromRecord((await CharacterStore.load("Visvaldas"))!, "primus")).toBe(1);
+    expect(MeritFlawRegistry.get("sturdy-stock")!.points).toBe(2);
+
+    // Idempotent: a second run has nothing left to do.
+    expect(await CommandRouter.route("convert-cards")).toContain("already in the readable format");
+  });
+});
+
+// =============================================================================
+// ADVANCEMENT COSTS - chronicle rules, not character data
+// =============================================================================
+describe("[[costs]]: what a dot costs, and where that lives", () => {
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+
+  test("the shipped table lists every purse; the card overrides one price at a time", async () => {
+    expect(await CommandRouter.route("costs")).toContain("experience current x 4");
+    expect(await CommandRouter.route("costs discipline")).toContain("out of clan");
+    await AdvancementCosts.save({ attribute: { experience: "current x 5" } });
+    const table = advancementCostsFrom(AdvancementCosts.current());
+    expect(table.attribute.experience).toBe("current x 5");
+    expect(table.attribute.freebie).toBe("5");            // untouched prices survive
+    expect((await CommandRouter.route("costs")).includes("current x 5")).toBe(true);
+  });
+
+  test("the costs card is card text a player can read", async () => {
+    await AdvancementCosts.save({ pillar: { experience: "current x 6" } });
+    const text = (await LorebookManager.entryText(CONFIG_CATEGORY, COSTS_CONFIG_ENTRY))!;
+    expect(LorebookManager.contentBelowHeader(text)).toContain("pillar:");
+    expect(LorebookManager.contentBelowHeader(text)).toContain("experience: current x 6");
+  });
+});
+
+// =============================================================================
 // TRACKED LOREBOOK - id map, backups, structural hash, reconciliation
 // =============================================================================
 describe("tracked lorebook: hash, ensurePath, reconcile findings", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); __resetUiMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("structuralHash: key order and header text are irrelevant; text fallback collapses whitespace", () => {
-    const a = "instructions A\n=====\n" + JSON.stringify([{ name: "x", cap: 3 }]);
-    const b = "TOTALLY different header\n=====\n" + JSON.stringify([{ cap: 3, name: "x" }]);
+    const a = "instructions A\n=====\n- name: x\n  cap: 3";
+    const b = "TOTALLY different header\n=====\n- cap: 3\n  name: x   # order is irrelevant";
     expect(structuralHash(a)).toBe(structuralHash(b));
     expect(structuralHash("h\n=====\nplain   text")).toBe(structuralHash("h2\n=====\nplain text"));
-    expect(structuralHash(a)).not.toBe(structuralHash("h\n=====\n" + JSON.stringify([{ name: "x", cap: 4 }])));
+    expect(structuralHash(a)).not.toBe(structuralHash("h\n=====\n- name: x\n  cap: 4"));
   });
 
   test("ensurePath creates the real category + tracked general card; idempotent", async () => {
@@ -2958,7 +3185,7 @@ describe("tracked lorebook: hash, ensurePath, reconcile findings", () => {
     const oldId = (await TrackedLorebook.idFor(category, GENERAL_ENTRY))!;
     await api.v1.lorebook.removeEntry(oldId);
     const catId = (await LorebookManager.ensureCategory(category)).id;
-    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId, text: "my own header words\n=====\n[]" });
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId, text: "my own header words\n=====\n# still empty" });
     const findings = await TrackedLorebook.reconcile();
     expect(findings.length).toBe(1);
     expect(findings[0].kind).toBe("adopted");
@@ -2972,7 +3199,7 @@ describe("tracked lorebook: hash, ensurePath, reconcile findings", () => {
     const oldId = (await TrackedLorebook.idFor(category, GENERAL_ENTRY))!;
     await api.v1.lorebook.removeEntry(oldId);
     const catId = (await LorebookManager.ensureCategory(category)).id;
-    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId, text: "h\n=====\n" + JSON.stringify([{ name: "dread", valuePerSuccess: 1 }]) });
+    await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId, text: "h\n=====\ndread:\n  valuePerSuccess: 1" });
     const conflict = (await TrackedLorebook.reconcile())[0];
     expect(conflict.kind).toBe("conflict");
     expect(conflict.foundText).toContain("dread");
@@ -2984,13 +3211,15 @@ describe("tracked lorebook: hash, ensurePath, reconcile findings", () => {
   });
 
   test("combineConfigTexts: array union (found wins), header from found; unparseable is not combinable", () => {
-    const backup = "old header\n=====\n" + JSON.stringify([{ name: "a", cap: 1 }, { name: "b", cap: 2 }]);
-    const found = "new header\n=====\n" + JSON.stringify([{ name: "b", cap: 9 }, { name: "c", cap: 3 }]);
+    const backup = "old header\n=====\n- name: a\n  cap: 1\n- name: b\n  cap: 2";
+    const found = "new header\n=====\n- name: b\n  cap: 9\n- name: c\n  cap: 3";
     const combined = combineConfigTexts(backup, found)!;
-    const list = JSON.parse(LorebookManager.contentBelowHeader(combined)) as { name: string; cap: number }[];
+    const list = parseCardText(LorebookManager.contentBelowHeader(combined)) as { name: string; cap: number }[];
     expect(list.map(d => `${d.name}:${d.cap}`).sort()).toEqual(["a:1", "b:9", "c:3"]);
     expect(combined.startsWith("new header")).toBe(true);
-    expect(combineConfigTexts("h\n=====\nnot json", found)).toBeUndefined();
+    // A block and a bare list are different shapes - nothing to union.
+    expect(combineConfigTexts("h\n=====\nsomething: else", found)).toBeUndefined();
+    expect(combineConfigTexts("h\n=====\n# empty", found)).toBeUndefined();
   });
 });
 
@@ -3026,7 +3255,9 @@ describe("table subcategories: paths, cards, aliases, modals", () => {
     const catId = (await LorebookManager.ensureCategory(TABLES_CATEGORY)).id;
     await api.v1.lorebook.createEntry({
       id: api.v1.uuid(), displayName: "more-tables", category: catId,
-      text: "extra card\n=====\n" + JSON.stringify([{ name: "fear", rows: [{ at: 1, label: "Shaken" }] }, { name: "joy", valuePerSuccess: 1 }]),
+      text: ["extra card", "=====",
+        "fear:", "  rows:", "    - at: 1", "      label: Shaken",
+        "joy:", "  valuePerSuccess: 1"].join("\n"),
     });
     await TableLibrary.loadFromLorebook();
     expect(SuccessTableRegistry.get("fear")!.rows![0].label).toBe("Shaken");
@@ -3082,7 +3313,7 @@ describe("table subcategories: paths, cards, aliases, modals", () => {
     const catId = (await LorebookManager.ensureCategory(TABLES_CATEGORY)).id;
     await api.v1.lorebook.createEntry({
       id: api.v1.uuid(), displayName: GENERAL_ENTRY, category: catId,
-      text: "mine\n=====\n" + JSON.stringify([{ name: "dread", valuePerSuccess: 1 }]),
+      text: "mine\n=====\ndread:\n  valuePerSuccess: 1",
     });
     __resetUiMock();
     await reconcileLorebook();
@@ -3368,7 +3599,16 @@ describe("named procedures: extended saved rolls, table + description, defaults"
   test("the climb tag rides the launched base, so a tag-gated passive reaches the extended interval", async () => {
     await NamedRollStore.seedDefaults();
     // A merit whose passive drops difficulty by 2 ONLY on climb-tagged rolls.
-    const entryText = 'x\n=====\n[{"name":"Sure Grip","kind":"merit","points":[1],"passive":[{"op":"difficulty","amount":-2,"target":"climb"}]}]';
+    const entryText = [
+      "x", "=====",
+      "Sure Grip:",
+      "  kind: merit",
+      "  points: 1",
+      "  passive:",
+      "    - op: difficulty",
+      "      amount: -2",
+      "      target: climb",
+    ].join("\n");
     const cat = await LorebookManager.ensureCategory("srd:merits-flaws");
     await api.v1.lorebook.createEntry({ id: api.v1.uuid(), displayName: "srd:merits-flaws:custom2", category: cat.id, text: entryText });
     await MeritFlawRegistry.loadFromLorebook();
@@ -3732,25 +3972,33 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
     expect(await CommandRouter.route("sheet")).toContain("strength 1 (3 eff)");
   });
 
-  test("the manual-fill loop: hand-edit the lorebook JSON in creator mode, sheet shows the sync, the roll uses it", async () => {
+  test("the manual-fill loop: hand-write the lorebook card in creator mode, sheet shows the sync, the roll uses it", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route("creator-mode set=true");
     const entry = (await LorebookManager.entriesInCategory(PLAYER_CHARACTERS_CATEGORY)).find(e => (e.displayName ?? "") === "pc:kvar")!;
     const text = entry.text ?? "";
-    const body = JSON.parse(LorebookManager.contentBelowHeader(text)) as {
-      attributes: Record<string, number>; abilities: Record<string, number>;
-      poolStarts: Record<string, number>; specialties: Record<string, string[]>;
-    };
-    body.attributes["dexterity"] = 4;
-    body.abilities["melee"] = 3;
-    body.poolStarts["willpower"] = 5;
-    body.specialties["melee"] = ["Swords"];
+    // A player retyping the sheet by hand: display spellings, `pools` for the
+    // longer engine name, and the specialty indented under the skill it is on.
+    const written = [
+      "name: Kvar",
+      "templates: vampire",
+      "",
+      "attributes:",
+      "  Dexterity: 4",
+      "",
+      "abilities:",
+      "  Melee: 3",
+      "    specialty: Swords",
+      "",
+      "pools:",
+      "  Willpower: 5",
+    ];
     // Edit like a player would: keep everything through the MARKER LINE (the
     // header itself mentions "=====" inline, so index-of would cut too early),
-    // replace only the JSON below it.
+    // replace only the data below it.
     const lines = text.split("\n");
     const mi = lines.findIndex(l => l.trim() === SRD_HEADER_MARKER);
-    await api.v1.lorebook.updateEntry(entry.id, { text: [...lines.slice(0, mi + 1), JSON.stringify(body, null, 2)].join("\n") });
+    await api.v1.lorebook.updateEntry(entry.id, { text: [...lines.slice(0, mi + 1), ...written].join("\n") });
     const s = await CommandRouter.route("sheet");            // beforeRoute synced the edit in
     expect(s).toContain("dexterity 4");
     expect(s).toContain("melee 3");
@@ -4756,7 +5004,7 @@ describe("stale sheets: a lorebook edit that never synced", () => {
     const base = (await CharacterStore.load("Visvaldas"))!;
     const edited = { ...base, traits: { modus: 5, primus: 1 } };
     await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
-      `edited by hand\n=====\n${JSON.stringify(edited, null, 2)}`);
+      `edited by hand\n=====\n${formatCardText(characterToCard(edited))}`);
 
     // Creator mode off: the edit is invisible, and the refusal points at why.
     const cold = await CommandRouter.route('cast pillars="primus:1"');
@@ -4771,14 +5019,15 @@ describe("stale sheets: a lorebook edit that never synced", () => {
     expect(warm).not.toContain("has NOT synced yet");
   });
 
-  test("malformed JSON is reported, not silently ignored", async () => {
+  test("an edit that loses the sheet's identity is reported, not silently ignored", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
-    const base = (await CharacterStore.load("Visvaldas"))!;
-    const trailingComma = JSON.stringify({ ...base, traits: { modus: 5 } }, null, 2).replace('"modus": 5\n', '"modus": 5,\n');
-    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas", `oops\n=====\n${trailingComma}`);
+    // The card format is forgiving, so the way to break a sheet is to lose what
+    // makes it one: here the player deleted the templates line.
+    await LorebookManager.updateEntryText(PLAYER_CHARACTERS_CATEGORY, "pc:visvaldas",
+      "oops\n=====\nname: Visvaldas\n\ntraits:\n  Modus: 5");
     await CommandRouter.route("creator-mode set=true");
     const off = await CommandRouter.route("creator-mode set=false");
-    expect(off).toContain("Could not parse");
+    expect(off).toContain("Could not read");
     expect(off).toContain("pc:visvaldas");
     expect(resolveTraitFromRecord((await CharacterStore.load("Visvaldas"))!, "modus")).toBe(0);   // old copy intact
   });

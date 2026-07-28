@@ -7,6 +7,7 @@
 // =============================================================================
 export * from "./host";
 export * from "./core/traits";
+export * from "./core/cardtext";
 export * from "./core/dice";
 export * from "./core/damage";
 export * from "./core/time";

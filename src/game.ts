@@ -11,6 +11,9 @@
 // `api`, `UIPart`, `OnTextAdventureInputReturnValue` are ambient host globals
 // (types vendored in types/novelai/script-types.d.ts).
 import { StringUtil } from "./core/traits";
+import {
+  CardValue, parseCardText, formatCardText, inlineCardText, asNamedList,
+} from "./core/cardtext";
 import { Rng } from "./core/dice";
 import { SeverityName, HealthSummary } from "./core/damage";
 import {
@@ -26,12 +29,15 @@ import {
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
   magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers, uncancelableCap,
+  advancementCostsFrom, CostTable, COST_PURSES,
   MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
+  meritFlawFromCard,
 } from "./rules";
 import {
   MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
   TrackedLorebook, ReconcileFinding, combineConfigTexts, structuralHash,
   writeTrackedEntry, ensurePath, TABLE_GENERAL_HEADER,
+  configEntryText, namedDefsToCard,
 } from "./services";
 import {
   RollSpec, RollModifier, makeRollSpec, executeRoll, formatExecution, overrideSpec, describeSpec,
@@ -48,7 +54,7 @@ import {
   ParsedCommand, CommandParser, CommandContext, CommandHandler, CommandRouter, ParamSpec, sys,
 } from "./command";
 import {
-  PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY,
+  PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, characterToCard,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   StoryClock, DateBook, Scene, SceneStore, GenCounter,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
@@ -59,6 +65,7 @@ import {
   ActiveAffliction, CharacterAfflictions,
   CharacterResources, CharacterHealth, CharacterBoosts, EffectUses,
   MagicRulesConfig, CastAttempts, CrayStore, CrayState,
+  AdvancementCosts, COSTS_CONFIG_ENTRY,
   ActiveWizard, WizardSession, CreatorMode,
 } from "./state";
 
@@ -147,7 +154,7 @@ const rw = {
   confirmPrompt(state: RwState): WizardPrompt {
     const changes = Object.entries(state.overrides)
       .filter(([, p]) => Object.keys(p).length > 0)
-      .map(([k, p]) => `${k} ${JSON.stringify(p)}`).join("; ");
+      .map(([k, p]) => `${k} (${inlineCardText(p as CardValue)})`).join("; ");
     return {
       step: "confirm", title: "Save changes?",
       body: changes ? `Changes: ${changes}.` : "No changes were made.",
@@ -292,7 +299,7 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   await CreatorMode.set(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
-  if (failed.length) parts.push(`Could not parse: ${failed.join(", ")} - fix the JSON and sync again.`);
+  if (failed.length) parts.push(`Could not read: ${failed.join(", ")} - a sheet needs at least a name and a template. Fix the card and sync again; the convert-cards command rewrites any card still holding the old JSON.`);
   return sys(`${parts.join(" ")}`);
 }
 
@@ -1545,6 +1552,27 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   if (!entries.length) return sys(`No fellowships defined.`);
   const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
   return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
+}
+
+// costs [kind] - what a dot costs, from each purse. Prices are CHRONICLE rules
+// (rules.ts DEFAULT_ADVANCEMENT_COSTS + the wod:config:costs card), never
+// character data - which is why they are not on the sheet. Nothing evaluates
+// them yet; this surfaces them for the Storyteller, and the advancement engine
+// will read the same table when it lands.
+async function cmdCosts(cmd: ParsedCommand): Promise<string> {
+  const table = advancementCostsFrom(AdvancementCosts.current() as CostTable);
+  const which = cmd.positional[0]?.trim();
+  const priced = (purses: Record<string, string>): string =>
+    COST_PURSES.filter(p => purses[p]).map(p => `${p} ${purses[p]}`).join(", ");
+  if (which) {
+    const key = StringUtil.normalize(which);
+    const purses = table[key];
+    if (!purses) return sys(`No cost kind "${which}". Known: ${Object.keys(table).join(", ")}.`);
+    return sys(`${disp(key)} - ${priced(purses)}. "current" is the rating you raise FROM. `
+      + `Storyteller-applied: the engine records prices, it does not spend for you.`);
+  }
+  const items = Object.entries(table).map(([kind, purses]) => `${disp(kind)}: ${priced(purses)}`).join("; ");
+  return sys(`Advancement costs - ${items}. [[costs <kind>]] for one; edit them in the "${COSTS_CONFIG_ENTRY}" card.`);
 }
 
 // =============================================================================
@@ -2830,29 +2858,28 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
 
 // --- DEFINING merits, flaws and arcana -----------------------------------
 // The custom-definition overlay lives in the srd:merits-flaws lorebook
-// category (a JSON array merged over the built-ins). These commands write it
-// for you; hand-editing the card stays equally valid.
+// category (name-keyed blocks merged over the built-ins). These commands write
+// it for you; hand-editing the card stays equally valid.
 const MERITS_CATEGORY = "srd:merits-flaws";
 const MERITS_CUSTOM_ENTRY = "srd:merits-flaws:custom";
 
 async function customMeritDefs(): Promise<MeritFlawDef[]> {
   const text = await LorebookManager.entryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY);
-  const body = LorebookManager.contentBelowHeader(text ?? "").trim();
-  if (!body.startsWith("[")) return [];
-  try {
-    const parsed = JSON.parse(body);
-    return Array.isArray(parsed) ? parsed as MeritFlawDef[] : [];
-  } catch { return []; }
+  const parsed = parseCardText(LorebookManager.contentBelowHeader(text ?? "").trim());
+  return asNamedList(parsed)
+    .map(({ name, body }) => meritFlawFromCard(name, body))
+    .filter((d): d is MeritFlawDef => d !== undefined);
 }
 
 async function writeCustomMeritDefs(defs: MeritFlawDef[]): Promise<void> {
   const header = [
-    `Custom Merits, Flaws & arcana. The JSON array below the ${SRD_HEADER_MARKER} line is merged`,
-    "over the built-in list. [[define-merit]] writes this for you; hand-editing is equally fine.",
-    "Each definition: name, kind (merit|flaw), points (a number or [1,2,3]), optional param,",
-    "passive (always-on ops), requires, atMostOneAt, description.",
+    `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line each one is its NAME,`,
+    "with its fields indented under it; the list is merged over the built-ins.",
+    "[[define-merit]] writes this for you; hand-editing is equally fine. The fields:",
+    "kind (merit|flaw), points (a number, or `1, 2, 3`), param, passive (always-on",
+    "ops), requires, at-most-one-at, description.",
   ];
-  const text = [...header, SRD_HEADER_MARKER, JSON.stringify(defs, null, 2)].join("\n");
+  const text = configEntryText(header, namedDefsToCard(defs));
   const { id } = await LorebookManager.ensureCategory(MERITS_CATEGORY);
   const created = await LorebookManager.ensureEntry(id, MERITS_CUSTOM_ENTRY, text);
   if (!created) await LorebookManager.updateEntryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY, text);
@@ -2867,7 +2894,7 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
     return sys("define-merit needs a name, e.g. [[define-merit name=`Inviolate Soul` points=0 "
       + "passive=`immune:possession; immune:fear while=living-resolve` description=`…`]]. "
       + 'Passives read "<op>[:<target>] [+N|-N] [if=<trait>] [while=<resource>[>=N]] [once]", ";"-separated '
-      + "(or raw JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
+      + "(or a raw ops array in JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
   }
   const name = rawName.trim();
   const kindRaw = (cmd.named["kind"] ?? "merit").toLowerCase();
@@ -3397,10 +3424,62 @@ async function cmdCharacters(): Promise<string> {
   return sys(`Characters: ${items.join("; ")}. [[play name="..."]] to switch.`);
 }
 
+// --- MIGRATION: the one place that still understands the old JSON cards ------
+// Cards written before the readable format hold JSON. Nothing READS that any
+// more (core/cardtext.ts is the only card language), so this rewrites them in
+// place: same header, same data, new language. Idempotent - a card already in
+// the new format is not JSON and is left alone - and safe on a card the engine
+// doesn't own, because only wod:/srd: categories are visited.
+function jsonCardBody(text: string): CardValue | undefined {
+  const body = LorebookManager.contentBelowHeader(text).trim();
+  if (!body.startsWith("{") && !body.startsWith("[")) return undefined;
+  try { return JSON.parse(body) as CardValue; } catch { return undefined; }
+}
+
+async function cmdConvertCards(): Promise<string> {
+  const converted: string[] = [];
+  const failed: string[] = [];
+  for (const cat of await api.v1.lorebook.categories()) {
+    const category = (cat.name ?? "").trim().toLowerCase();
+    if (!category.startsWith("wod:") && !category.startsWith("srd:")) continue;
+    for (const entry of await api.v1.lorebook.entries(cat.id)) {
+      const text = entry.text ?? "";
+      const parsed = jsonCardBody(text);
+      if (parsed === undefined) continue;
+      const label = (entry.displayName ?? "(unnamed)").trim();
+      const header = text.slice(0, text.length - LorebookManager.contentBelowHeader(text).length);
+      let value: CardValue | undefined;
+      if (category === PLAYER_CHARACTERS_CATEGORY) {
+        const char = parsed as unknown as PlayableCharacter;
+        if (char && typeof char.name === "string" && Array.isArray(char.templates)) value = characterToCard(char);
+      } else if (Array.isArray(parsed)) {
+        // A list of named defs reads far better keyed by its names.
+        value = parsed.every(d => typeof (d as Record<string, unknown>)?.["name"] === "string")
+          ? namedDefsToCard(parsed as unknown as Array<{ name: string }>)
+          : parsed;
+      } else {
+        value = parsed;
+      }
+      if (value === undefined) { failed.push(label); continue; }
+      await api.v1.lorebook.updateEntry(entry.id, { text: `${header}\n${formatCardText(value)}` });
+      await TrackedLorebook.refreshBackup(category, label, `${header}\n${formatCardText(value)}`);
+      converted.push(label);
+    }
+  }
+  if (!converted.length && !failed.length) return sys("Nothing to convert - every card is already in the readable format.");
+  const sync = await CharacterStore.syncFromLorebook();
+  await MeritFlawRegistry.loadFromLorebook();
+  await reloadAllConfigStores();
+  const bits = [`Converted ${converted.length} card${converted.length === 1 ? "" : "s"} from JSON: ${converted.join(", ")}.`];
+  if (failed.length) bits.push(`Left alone (unreadable): ${failed.join(", ")}.`);
+  if (sync.synced.length) bits.push(`Re-synced ${sync.synced.map(n => StringUtil.toTitleCase(n)).join(", ")}.`);
+  return sys(`${bits.join(" ")} Open a card to see the new format; [[sheet]] confirms what the engine reads.`);
+}
+
 // The record as the ENGINE reads it: every numeric bucket, with the effective
 // value marked wherever enhancements/boosts change what a roll will actually
 // use. This is the verification half of the creator-mode loop: hand-edit the
-// lorebook JSON, run [[sheet]], see exactly what synced.
+// lorebook card, run [[sheet]], see exactly what synced.
 async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
   let char: PlayableCharacter | undefined;
@@ -3441,6 +3520,13 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   }
   const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
+  // More than one of the same Background: the slot shows the highest, so say
+  // what else is held (which one a roll means is the Storyteller's call).
+  const held = Object.entries(char.instances ?? {}).filter(([, list]) => list.length > 1);
+  if (held.length) {
+    parts.push(`Held more than once: ${held.map(([t, list]) =>
+      `${t} ${list.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(" + ")}`).join("; ")} - the slot rates the highest; which one a roll is about is Storyteller-adjudicated`);
+  }
   if (char.tags.length) parts.push(`Tags: ${char.tags.join(", ")}`);
   // A pool start naming a resource this character doesn't have is a leftover -
   // most often a Willpower entry on someone whose Willpower was REPLACED. Trait
@@ -3522,6 +3608,9 @@ CommandRouter.register("characters", cmdCharacters, {
 CommandRouter.register("sheet", cmdSheet, {
   summary: "show a character's record as the engine reads it (effective values marked)",
   params: [{ key: "character", kind: "positional", hint: '"<name|@alias>"' }],
+});
+CommandRouter.register("convert-cards", cmdConvertCards, {
+  summary: "rewrite any lorebook card still holding JSON in the readable format (one-shot)",
 });
 CommandRouter.register("set-default", cmdSetDefault, {
   summary: "change the default character",
@@ -3728,6 +3817,10 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
+CommandRouter.register("costs", cmdCosts, {
+  summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)",
+  params: [{ key: "kind", kind: "positional", hint: "[kind]", example: "discipline" }],
+});
 CommandRouter.register("fellowships", cmdFellowships, {
   summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
@@ -3893,7 +3986,7 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "name", kind: "named", required: true, type: "literal", hint: "`<name>`", example: "e.g. `Inviolate Soul`" },
     { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw"], desc: "Arcana are merits (default merit)" },
     { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings (default 0)" },
-    { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or raw JSON) - BACKTICKS' },
+    { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS' },
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
     { key: "at-most-one-at", kind: "named", type: "int", desc: "Only one instance may sit at this rating (advisory)" },

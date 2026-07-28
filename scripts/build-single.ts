@@ -18,6 +18,7 @@
 const MODULES = [
   "src/host.ts",
   "src/core/traits.ts",
+  "src/core/cardtext.ts",
   "src/core/dice.ts",
   "src/core/damage.ts",
   "src/core/time.ts",

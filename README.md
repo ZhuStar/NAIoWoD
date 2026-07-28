@@ -1348,19 +1348,33 @@ The shipped Devil's Due arcana:
 Some arcana cap their own purchases against a trait: *Sharpened Senses* "may
 not be purchased more times than his Resolve". `maxFromTrait` says so, and the
 name resolves the way every trait name does — a rated trait first, else **the
-resource that fills or replaced that name**, so a character whose Resolve *is*
-Living Resolve is capped by that without the definition knowing:
+resource that fills or replaced that name**.
+
+Which fuel a character has is per-splat, and that is the whole gate: a **mage**
+has Quintessence + Willpower, an **infernal being** (demon, thrall) has Resolve
++ Willpower, a **vampire/ghoul/revenant** has a Blood pool + Willpower, and the
+**Ouroboros** has Living Resolve, one point of which *is* one Quintessence and
+one Resolve and one blood point and one Willpower. So an arcanum measured
+against Resolve is open to a demon up to his rating, capped for the Ouroboros
+by Living Resolve, and **not open to a mage at all** — no template gate needed,
+because his Resolve is 0:
 
 ```
-[[take-merit sharpened-senses 5]]
+[[take-merit sharpened-senses 5]]        # a demon, Resolve 3
 → Sharpened Senses may not be taken more times than Resolve (3) — asked for 5.
   Raise Resolve first, or add waive=true to override.
+
+[[take-merit sharpened-senses 1]]        # a mage
+→ Aldous has no Resolve, and Sharpened Senses is measured against it — none of
+  Aldous's templates (mage) grant one. Add waive=true if the chronicle says otherwise.
 ```
 
 Always the **permanent** rating, never the spent-down current. A ceiling can
 *move* — a Resolve that drops leaves purchases stranded above it — and that is
 reported by `[[check-constraints]]`, never silently trimmed:
-`sharpened-senses is at 5 but resolve is only 3`.
+`sharpened-senses is at 5 but resolve is only 3`. The same check flags a pool
+your templates don't grant (`pool "resolve" is not granted by mage`), so a
+hand-edited card can't quietly give a character a fuel his kind never has.
 
 Author one with `max-from-trait=`:
 

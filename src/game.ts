@@ -2846,6 +2846,16 @@ function meritInstanceFindings(char: PlayableCharacter): string[] {
   for (const key of Object.keys(char.meritsFlaws)) {
     if (!known.has(StringUtil.normalize(key))) findings.push(`unknown merit/flaw "${StringUtil.normalize(key)}"`);
   }
+  // A pool start naming a resource the templates don't grant: a hand-edited
+  // card can give a mage a "Resolve" he cannot have, and every trait lookup
+  // would then find it. The same phantom the Willpower seeding guards against,
+  // caught on the way in from the lorebook.
+  for (const name of Object.keys(char.poolStarts ?? {})) {
+    if (!CharacterResources.resolveDef(char, name)) {
+      findings.push(`pool "${StringUtil.normalize(name)}" is not granted by ${char.templates.join("+")} - `
+        + `trait lookups will still find it`);
+    }
+  }
   for (const [defName, traits] of atTop) {
     if (traits.length > 1) findings.push(`${StringUtil.normalize(defName)} allows only ONE instance at the top value (have: ${traits.join(", ")})`);
   }
@@ -3024,8 +3034,14 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   }
   const ceiling = meritTraitCeiling(char, hit.def);
   if (ceiling && points > ceiling.cap && cmd.named["waive"] !== "true") {
-    return sys(`${hit.def.name} may not be taken more times than ${disp(ceiling.trait)} (${ceiling.cap}) - `
-      + `asked for ${points}. Raise ${disp(ceiling.trait)} first, or add waive=true to override.`);
+    // A ceiling of 0 is not a low cap, it is the WRONG KIND OF BEING: a mage
+    // has Quintessence and Willpower, never Resolve, so an arcanum measured
+    // against Resolve is not open to him at all. Say that, not "0".
+    return ceiling.cap === 0
+      ? sys(`${disp(char.name)} has no ${disp(ceiling.trait)}, and ${hit.def.name} is measured against it - `
+        + `none of ${disp(char.name)}'s templates (${char.templates.join("+")}) grant one. Add waive=true if the chronicle says otherwise.`)
+      : sys(`${hit.def.name} may not be taken more times than ${disp(ceiling.trait)} (${ceiling.cap}) - `
+        + `asked for ${points}. Raise ${disp(ceiling.trait)} first, or add waive=true to override.`);
   }
   char.meritsFlaws[key] = points;
   await CharacterStore.save(char);

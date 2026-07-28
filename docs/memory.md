@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `38f11a8`** ("Sharpened Senses,
-> and a ceiling that is a trait"). Prior: `094c61b` ("Cards are written
+> **Last synced with the code as of commit `fb319ee`** ("A mage has no
+> Resolve: correct the tests that invented one"). Prior: `38f11a8` ("Sharpened
+> Senses, and a ceiling that is a trait"); `094c61b` ("Cards are written
 > in a language for people, not for parsers"); `ca94301` (the cap formula
 > + a fused point at the floor); `d9e2829` ("Living Resolve IS
 > the other four: no phantom Willpower, Resolve's bonus"); `62e6534`
@@ -2107,14 +2108,27 @@ and `prefill` are mocked/available but not yet written.
     Resolution is the load-bearing decision: **`permanentRatingOf(char, name)`**
     (state.ts) tries the rated buckets, then `CharacterResources.resolveDef` -
     the existing name/role/**replaces** lookup - and reads the OWNING resource's
-    value. So "resolve" finds a mage's Resolve tracker at 3 AND the Ouroboros'
-    Living Resolve at 30, with the definition saying only "resolve". It is
+    value. So "resolve" finds a DEMON's Resolve at 3 AND the Ouroboros' Living
+    Resolve at 30, with the definition saying only "resolve". It is
     deliberately the PERMANENT rating, never the live pool: a creation-time
     ceiling measured against a spent-down pool would rise and fall mid-scene.
     A ceiling can MOVE (Resolve drops), which strands purchases above it -
     `meritInstanceFindings` reports that ("sharpened-senses is at 5 but resolve
     is only 3") and never trims the character, matching the surrounding
     advisory-not-enforced policy for everything creation-related.
+    **Correction the owner had to make** (worth keeping, because the mistake was
+    invisible): the first tests gave a MAGE a Resolve. Who holds what is
+    per-splat and the templates already had it right - mage = Quintessence +
+    Willpower, demon/thrall (infernal) = Resolve + Willpower, vampire/ghoul/
+    revenant = Blood + Willpower, Ouroboros = Living Resolve which IS all four
+    at once. The test passed anyway because it hand-wrote `poolStarts.resolve`
+    and `resolveTraitFromRecord` searches that bucket BLINDLY - the same phantom
+    class as the Willpower one in §7.38. Two consequences: `maxFromTrait` needs
+    no template gate (a mage's Resolve is 0, so the arcanum simply is not open
+    to him, and the refusal says THAT rather than "0"), and
+    `meritInstanceFindings` now reports a `poolStarts` key no template grants,
+    so a hand-edited card giving a mage a Resolve is visible instead of silently
+    authoritative.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

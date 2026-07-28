@@ -4025,11 +4025,12 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("Sharpened Senses: each purchase is another -1, and only on Perception pools", async () => {
-    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    // A DEMON: Willpower + Resolve. (Resolve is the infernal resource - mages
+    // have Quintessence and Willpower, vampires Blood and Willpower.)
+    await CommandRouter.route('create-playable name="Aldous" templates=demon');
     const char = (await CharacterStore.load("Aldous"))!;
     char.attributes.perception = 4;
     char.abilities.awareness = 2;
-    char.poolStarts.resolve = 3;
     await CharacterStore.save(char);
     expect(await CommandRouter.route("take-merit sharpened-senses 3")).toContain("difficulty -3");
     // Difficulty 8 - 3 = 5, so a run of 6s all hit.
@@ -4043,10 +4044,9 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
   });
 
   test("the ceiling is a TRAIT: Resolve bounds the purchases, and it can move", async () => {
-    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    await CommandRouter.route('create-playable name="Aldous" templates=demon');
     const char = (await CharacterStore.load("Aldous"))!;
-    char.poolStarts.resolve = 3;
-    await CharacterStore.save(char);
+    expect(permanentRatingOf(char, "resolve")).toBe(3);   // the demon's own starting band
     const refused = await CommandRouter.route("take-merit sharpened-senses 5");
     expect(refused).toContain("may not be taken more times than Resolve (3)");
     expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
@@ -4055,12 +4055,24 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(await CommandRouter.route("check-constraints")).toContain("sharpened-senses is at 5 but resolve is only 3");
   });
 
+  test("a mage has no Resolve at all, so the arcanum is not open to him", async () => {
+    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    const char = (await CharacterStore.load("Aldous"))!;
+    expect(permanentRatingOf(char, "resolve")).toBe(0);        // Quintessence + Willpower, no Resolve
+    const refused = await CommandRouter.route("take-merit sharpened-senses 1");
+    expect(refused).toContain("has no Resolve");
+    expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
+  });
+
   test("a Resolve that is really Living Resolve caps it just the same", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
     const char = (await CharacterStore.load("Visvaldas"))!;
-    char.poolStarts["living-resolve"] = 30;      // the resource that REPLACED resolve
-    await CharacterStore.save(char);
+    // One point of Living Resolve IS one Quintessence AND one Resolve AND one
+    // blood point AND one Willpower, so every one of those names finds it.
     expect(permanentRatingOf(char, "resolve")).toBe(30);
+    expect(permanentRatingOf(char, "quintessence")).toBe(30);
+    expect(permanentRatingOf(char, "blood")).toBe(30);
+    expect(permanentRatingOf(char, "willpower")).toBe(30);
     expect(await CommandRouter.route("take-merit sharpened-senses 6")).toContain("difficulty -6");
   });
 

@@ -4569,10 +4569,13 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     c.traits = { vis: 2, incantation: 3 };
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
-    expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 for -1 difficulty");
-    expect(r).toContain("all 2 points also spend as Willpower and Resolve: "
+    expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 more");
+    // The mandatory point pays too - it is the same substance, not a fee taken
+    // off the top - so BOTH points break the difficulty, once each.
+    expect(r).toContain("all 2 points spend as Quintessence AND Willpower AND Resolve at once: "
       + "1 un-cancelable success (capped at 1), +2 automatic successes, 8-again, -4 difficulty");
     expect(r).toContain("+1 sure");
+    expect(r).toContain("vs diff 3");                        // 7 - 4, not 7 - 1 - 4
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "living-resolve")!)).toBe(28);
     // Sealing with the fused substance: one payment covers both components.
     const seal = await CommandRouter.route("seal-spell pillar=3 pay=true");
@@ -4901,23 +4904,28 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
     expect(uncancelableCap(5, magicRulesFrom({ "uncancelable-per-foundation": 3 }))).toBe(1);  // knob
   });
 
-  test("spending 2 points at Foundation 5 buys 2 sure successes; at Foundation 3 the cap bites", async () => {
+  test("stacking certainty is a SPELLCASTING rule: on a spell 2 points buy 2, elsewhere 1", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     const c = (await CharacterStore.getCurrent())!;
-    c.traits = { modus: 5, corona: 3 };
+    c.traits = { modus: 5, corona: 3, primus: 1 };
     await CharacterStore.save(c);
+    // NOT a spell: two points are still two Resolve points (2 automatic
+    // successes) but only ONE Willpower - one per action is the old law.
     const two = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=2", { rng: seqRng([1, 1, 1]) });
-    expect(two).toContain("+2 sure");
-    expect(two).toContain("2 successes");           // three 1s cannot touch them
+    expect(two).toContain("+2 auto +1 sure");
+    expect(two).toContain("stacking Willpower into a single action is a spellcasting rule");
     expect(two).not.toContain("BOTCH");
+    // A SPELL: the mage may pour it in, up to what Modus 5 holds.
+    const spell = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    expect(spell).toContain("+2 auto +2 sure");
     // Three points still only buy two - Modus 5 is the ceiling.
-    const three = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=3", { rng: seqRng([2, 2, 2]) });
-    expect(three).toContain("+2 sure");
-    expect(three).toContain("capped at 2 (Foundation)");
+    const three = await CommandRouter.route('cast pillars="primus:1" quintessence=3 label=other', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    expect(three).toContain("+3 auto +2 sure");
+    expect(three).toContain("capped at 2");
     // A lesser Foundation caps at one.
-    c.traits = { modus: 3, corona: 3 };
+    c.traits = { modus: 3, corona: 3, primus: 1 };
     await CharacterStore.save(c);
-    expect(await CommandRouter.route("roll 3 spend=living-resolve spend-amount=2", { rng: seqRng([2, 2, 2]) })).toContain("+1 sure");
+    expect(await CommandRouter.route('cast pillars="primus:1" quintessence=2 label=third', { rng: seqRng([2, 2, 2, 2]) })).toContain("+1 sure");
   });
 
   test("an ordinary character spends Willpower explicitly for the same certainty", async () => {
@@ -4927,8 +4935,8 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
     await CharacterStore.save(c);
     await CharacterResources.gain(c, "willpower", 5);
     const r = await CommandRouter.route("roll strength spend=willpower spend-amount=2", { rng: seqRng([1, 1, 1]) });
-    expect(r).toContain("+1 sure");                 // no Foundation: one is the cap
-    expect(r).toContain("capped at 1 (Foundation)");
+    expect(r).toContain("+1 sure");                 // one Willpower per action, outside a spell
+    expect(r).toContain("stacking Willpower into a single action is a spellcasting rule");
     expect(r).not.toContain("BOTCH");
   });
 
@@ -5046,13 +5054,14 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
     expect(one).toContain("vs diff 4");                          // 6 - 2, the Resolve component
     expect(one).toContain("+1 sure");                            // and the Willpower component
     expect(one).toContain("5 successes");                        // three 4s now hit, plus the sure AND automatic ones
-    // Two points: the Resolve scales per point, the certainty by the Foundation cap.
+    // Two points: the Resolve scales per point; the certainty does not, off a spell.
     const two = await CommandRouter.route("roll wits spend=living-resolve spend-amount=2", { rng: seqRng([2, 2, 2]) });
     expect(two).toContain("vs diff 2");
-    expect(two).toContain("+2 sure");
-    // A spell gets the Quintessence component too: -2 (Resolve) -1 (Quintessence).
-    const spell = await CommandRouter.route('roll wits tags="magic" spend=living-resolve', { rng: seqRng([3, 3, 3]) });
-    expect(spell).toContain("vs diff 3");                        // 6 - 2 - 1
+    expect(two).toContain("+2 auto +1 sure");
+    // A spell breaks the difficulty by the SAME -2: the Quintessence -1 is that
+    // break seen from another side, not another one to add.
+    const spell = await CommandRouter.route('roll wits tags="magic" spend=living-resolve', { rng: seqRng([4, 4, 4]) });
+    expect(spell).toContain("vs diff 4");                        // 6 - 2, once
     // focus survives as a deprecated alias of the same thing.
     const legacy = await CommandRouter.route("roll wits spend=living-resolve:focus", { rng: seqRng([4, 4, 4]) });
     expect(legacy).toContain("vs diff 4");
@@ -5112,22 +5121,26 @@ describe("the Resolve component pays in FULL, not just its difficulty break", ()
     expect(r).toContain("+1 sure");                  // the Willpower's un-cancelable one
     expect(r).toContain("💥9");                       // 8-again: 9s explode
     expect(r).toContain("vs diff 4");                // and its -2
+    // ONE difficulty op: a point lowers a roll's difficulty once, by the deepest
+    // break any of its natures gives.
     const def = LIVING_RESOLVE.effect!.apply.map(o => o.op).sort();
-    expect(def).toEqual(["difficulty", "difficulty", "nagain", "successes", "uncancelable"]);
+    expect(def).toEqual(["difficulty", "nagain", "successes", "uncancelable"]);
   });
 
-  test("a casting gets the same bundle on top of the Quintessence reduction", async () => {
+  test("a casting point breaks the difficulty ONCE - Resolve's -2 IS the Quintessence break", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="primus:1" quintessence=1', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
     expect(r).toContain("simple spell: diff 4+1 = 5");
-    expect(r).toContain("1 for -1 difficulty");                          // the Quintessence, counted once
+    expect(r).toContain("spend as Quintessence AND Willpower AND Resolve at once");
     expect(r).toContain("+1 automatic success");                         // the Resolve, in full
+    expect(r).toContain("1 un-cancelable success");                      // the Willpower, beside it
     expect(r).toContain("8-again");
-    expect(r).toContain("-2 difficulty");                                // and its break, not double-counted
-    expect(r).toContain("vs diff 2");                                    // 5 - 1 (quint) - 2 (resolve)
+    expect(r).toContain("-2 difficulty");
+    expect(r).toContain("vs diff 3");                                    // 5 - 2, NOT 5 - 2 - 1
+    expect(r).not.toContain("for -1 difficulty");
   });
 });
 
@@ -5140,14 +5153,13 @@ describe("a fused point is never wasted at the difficulty floor", () => {
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
     const r = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
-    // Only one point may lower the difficulty (5 - 4 = 1 of headroom)...
-    expect(r).toContain("1 for -1 difficulty");
-    // ...but the second is spent anyway, because it is also Willpower and Resolve.
-    expect(r).toContain("1 past the difficulty floor (still spent");
-    expect(r).toContain("all 2 points also spend as Willpower and Resolve");
+    // Both points are spent: the Quintessence floor cannot waste a point that
+    // is also a Willpower and a Resolve.
+    expect(r).toContain("living-resolve: 2 more");
+    expect(r).toContain("all 2 points spend as Quintessence AND Willpower AND Resolve at once");
     expect(r).toContain("2 un-cancelable successes");            // Modus 5 -> cap 2
     expect(r).toContain("+2 automatic successes");
-    expect(r).toContain("-4 difficulty");
+    expect(r).toContain("-4 difficulty");                        // 2 x Resolve's -2, counted once each
     expect(r).toContain("+2 auto +2 sure");
     const lr = CharacterResources.resolveDef(c, "living-resolve")!;
     expect(await CharacterResources.current(c, lr)).toBe(28);     // both points left the pool

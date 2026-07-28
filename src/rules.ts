@@ -295,7 +295,7 @@ export function willpowerResource(start: number): ResourceDef {
     // Spent Willpower buys CERTAINTY: successes rolled 1s can never cancel, one
     // per point - but a mind can only hold so much of it at once, so the total
     // is capped by Foundation (uncancelableCap; 1 for the unawakened).
-    effect: { label: "Willpower: +1 un-cancelable success per point (capped by Foundation)", apply: [{ op: "uncancelable", amount: 1 }] },
+    effect: { label: "Willpower: +1 un-cancelable success (one per action; a SPELL may stack them up to the Foundation)", apply: [{ op: "uncancelable", amount: 1 }] },
     // Willpower is also static spell fuel (Sorcerers, some Thaumaturgy): a
     // mandatory pure cost with no dice bonus - `spend=willpower:fuel!`.
     effects: { fuel: { label: "Willpower spent as static spell fuel", apply: [], cost: { units: 1 } } },
@@ -534,18 +534,25 @@ export const LIVING_RESOLVE: ResourceDef = {
   // ONE point is one of each, ALL AT ONCE - it is never spent "as" one
   // component (the owner's ruling; this resource is meant to be overwhelming).
   // So the ordinary spend pays every roll-side component together: the
-  // Willpower's certainty, the Resolve's -2, and the Quintessence's -1 on top
-  // when the roll is a casting. The vitae is the same point aimed at flesh
-  // (`heal`/`boost`) - not a different way of spending, just a different target.
+  // Willpower's certainty and the Resolve's whole payout. The vitae is the same
+  // point aimed at flesh (`heal`/`boost`) - not a different way of spending,
+  // just a different target.
+  //
+  // INVARIANT for a fused resource: ONE `difficulty` op, holding the DEEPEST
+  // break any of its natures gives. A point lowers a spell's difficulty once,
+  // and Resolve's -2 IS that break - the Quintessence -1 is the same break seen
+  // from another side, not a second one to add on top (the owner's ruling). If
+  // a chronicle retunes Resolve to give no break, put the Quintessence -1 here
+  // instead and casting reduces like it does for any mage.
   effect: {
-    label: "Living Resolve: per point, +1 un-cancelable success (capped by Foundation) + Resolve's whole payout "
-      + "(+1 automatic success, 8-again, -2 difficulty) + -1 more when casting (Quintessence)",
+    label: "Living Resolve: per point, +1 un-cancelable success (spellcasting may stack these up to the "
+      + "Foundation; one per action otherwise) + Resolve's whole payout (+1 automatic success, 8-again, "
+      + "-2 difficulty, which IS the Quintessence break rather than an extra one)",
     apply: [
       { op: "uncancelable", amount: 1 },   // the Willpower
       { op: "successes", amount: 1 },      // the Resolve, in full - not just its difficulty break
       { op: "nagain", amount: 8 },
-      { op: "difficulty", amount: -2 },
-      { op: "difficulty", amount: -1, target: "magic" },   // the Quintessence, on spell rolls
+      { op: "difficulty", amount: -2 },    // Resolve's break; the Quintessence -1 is this same break
     ],
   },
   effects: {
@@ -729,6 +736,22 @@ export const DEFAULT_MAGIC_RULES: MagicRules = {
 // first dot is the price of entry, then each `uncancelablePerFoundation` dots
 // buys another - floor((Foundation - 1) / 2) by default, so Foundation 5 grants
 // 2. A character with no Foundation (the unawakened) can still buy exactly one.
+// Tags that mark a roll as a CASTING (both are set by [[cast]]).
+export const CASTING_TAGS = ["magic", "cast"];
+export function isCastingRoll(tags: readonly string[] | undefined): boolean {
+  return (tags ?? []).some(t => CASTING_TAGS.includes(StringUtil.normalize(t)));
+}
+
+// How much certainty a single spend may buy. The multi-Willpower rule is a
+// SPELLCASTING rule - a mage may pour extra Willpower into a spell, up to what
+// his Foundation can hold. Everywhere else the old law stands: one Willpower
+// per action. So two points of a fused substance spent on a Discipline are two
+// points of that Discipline's fuel and exactly ONE un-cancelable success; the
+// same two spent on a spell buy two (at Foundation 5).
+export function uncancelableAllowance(casting: boolean, foundationRating: number, rules: MagicRules): number {
+  return casting ? uncancelableCap(foundationRating, rules) : 1;
+}
+
 export function uncancelableCap(foundationRating: number, rules: MagicRules): number {
   return Math.max(1, Math.floor((Math.max(0, foundationRating) - 1) / Math.max(1, rules.uncancelablePerFoundation)));
 }

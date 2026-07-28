@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `fb319ee`** ("A mage has no
-> Resolve: correct the tests that invented one"). Prior: `38f11a8` ("Sharpened
+> **Last synced with the code as of commit `e72acb5`** ("One point, one
+> difficulty break; stacking Willpower is a spellcasting rule"). Prior:
+> `46e362c` ("A mage has no
+> Resolve: correct the tests that invented one"); `38f11a8` ("Sharpened
 > Senses, and a ceiling that is a trait"); `094c61b` ("Cards are written
 > in a language for people, not for parsers"); `ca94301` (the cap formula
 > + a fused point at the floor); `d9e2829` ("Living Resolve IS
@@ -2129,6 +2131,47 @@ and `prefill` are mocked/available but not yet written.
     `meritInstanceFindings` now reports a `poolStarts` key no template grants,
     so a hand-edited card giving a mage a Resolve is visible instead of silently
     authoritative.
+
+46. **One point, one difficulty break; and stacking Willpower is a spellcasting
+    rule** (user, auditing the fusion: "if I spend 2 Quintessence to lower a
+    spell's difficulty, the difficulty is lowered by Resolve, but not *again* by
+    Quintessence"; and separately "this expenditure of more than 1 Willpower to
+    get un-cancelable successes is only allowed for spellcasting").
+    Two genuine bugs in §7.39-§7.42's collapse, both found by the owner reading
+    output rather than code.
+    **(a) The difficulty was paid twice.** `cmdCast` subtracted the Quintessence
+    -1 per reducing point (`difficulty -= applied`) AND `fusedComponentExtra`
+    added Resolve's -2 for every point, so one point broke the difficulty by 3.
+    The ruling: a point lowers the difficulty ONCE, by the DEEPEST break any of
+    its natures gives - Resolve's -2 IS the Quintessence break seen from another
+    side. Fixed in two places so it cannot come back: LIVING_RESOLVE now carries
+    ONE `difficulty` op (the redundant `-1 target:magic` is gone, with the
+    invariant written into the def), and `fusedComponentExtra` folds `difficulty`
+    ops by DEPTH rather than summing them (and now honours targeted ops whose
+    tag the roll carries, instead of skipping every targeted op). `cmdCast` no
+    longer subtracts anything itself for a fused payer: the rider owns the whole
+    break, including for the MANDATORY stabilizing point, which is the same
+    substance and not a fee off the top. The `reducing`/`spare` split collapsed
+    into one `optional` (the Quintessence floor only bounds an ORDINARY payer),
+    which also killed the confusing "past the difficulty floor (still spent)"
+    note. Successes are explicitly NOT folded this way: Resolve's automatic
+    success and the Willpower's un-cancelable one are different currencies and
+    both land.
+    **(b) Certainty stacked everywhere.** The interpreter capped un-cancelable
+    successes at `uncancelableCap(Foundation)` on EVERY roll, so 2 Living
+    Resolve on a Discipline bought 2. But the multi-Willpower rule is Mage's:
+    the old law is one Willpower per action. New `isCastingRoll(tags)` +
+    `uncancelableAllowance(casting, foundation, rules)` (rules.ts, beside
+    `uncancelableCap`) - the Foundation ceiling applies only on a roll tagged
+    `magic`/`cast`; everywhere else the allowance is 1, whatever rode the spend.
+    The Resolve half still scales off a spell (2 points = +2 automatic
+    successes, -4 difficulty); only the Willpower half is once per action. For
+    unawakened characters nothing changed numerically (their cap was already 1)
+    - only the reason given in the reply.
+    Also answered, since the owner asked: he has exactly ONE pool.
+    `defsFor` filters out everything `replaces` names, so `[[resources]]` prints
+    one line and `spend=willpower` reports "spent 1 living-resolve". The four
+    names are not pools he also has; they resolve to the one he has.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

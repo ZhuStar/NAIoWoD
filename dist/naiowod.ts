@@ -2588,7 +2588,7 @@ function willpowerResource(start: number): ResourceDef {
     // Spent Willpower buys CERTAINTY: successes rolled 1s can never cancel, one
     // per point - but a mind can only hold so much of it at once, so the total
     // is capped by Foundation (uncancelableCap; 1 for the unawakened).
-    effect: { label: "Willpower: +1 un-cancelable success per point (capped by Foundation)", apply: [{ op: "uncancelable", amount: 1 }] },
+    effect: { label: "Willpower: +1 un-cancelable success (one per action; a SPELL may stack them up to the Foundation)", apply: [{ op: "uncancelable", amount: 1 }] },
     // Willpower is also static spell fuel (Sorcerers, some Thaumaturgy): a
     // mandatory pure cost with no dice bonus - `spend=willpower:fuel!`.
     effects: { fuel: { label: "Willpower spent as static spell fuel", apply: [], cost: { units: 1 } } },
@@ -2827,18 +2827,25 @@ const LIVING_RESOLVE: ResourceDef = {
   // ONE point is one of each, ALL AT ONCE - it is never spent "as" one
   // component (the owner's ruling; this resource is meant to be overwhelming).
   // So the ordinary spend pays every roll-side component together: the
-  // Willpower's certainty, the Resolve's -2, and the Quintessence's -1 on top
-  // when the roll is a casting. The vitae is the same point aimed at flesh
-  // (`heal`/`boost`) - not a different way of spending, just a different target.
+  // Willpower's certainty and the Resolve's whole payout. The vitae is the same
+  // point aimed at flesh (`heal`/`boost`) - not a different way of spending,
+  // just a different target.
+  //
+  // INVARIANT for a fused resource: ONE `difficulty` op, holding the DEEPEST
+  // break any of its natures gives. A point lowers a spell's difficulty once,
+  // and Resolve's -2 IS that break - the Quintessence -1 is the same break seen
+  // from another side, not a second one to add on top (the owner's ruling). If
+  // a chronicle retunes Resolve to give no break, put the Quintessence -1 here
+  // instead and casting reduces like it does for any mage.
   effect: {
-    label: "Living Resolve: per point, +1 un-cancelable success (capped by Foundation) + Resolve's whole payout "
-      + "(+1 automatic success, 8-again, -2 difficulty) + -1 more when casting (Quintessence)",
+    label: "Living Resolve: per point, +1 un-cancelable success (spellcasting may stack these up to the "
+      + "Foundation; one per action otherwise) + Resolve's whole payout (+1 automatic success, 8-again, "
+      + "-2 difficulty, which IS the Quintessence break rather than an extra one)",
     apply: [
       { op: "uncancelable", amount: 1 },   // the Willpower
       { op: "successes", amount: 1 },      // the Resolve, in full - not just its difficulty break
       { op: "nagain", amount: 8 },
-      { op: "difficulty", amount: -2 },
-      { op: "difficulty", amount: -1, target: "magic" },   // the Quintessence, on spell rolls
+      { op: "difficulty", amount: -2 },    // Resolve's break; the Quintessence -1 is this same break
     ],
   },
   effects: {
@@ -3022,6 +3029,22 @@ const DEFAULT_MAGIC_RULES: MagicRules = {
 // first dot is the price of entry, then each `uncancelablePerFoundation` dots
 // buys another - floor((Foundation - 1) / 2) by default, so Foundation 5 grants
 // 2. A character with no Foundation (the unawakened) can still buy exactly one.
+// Tags that mark a roll as a CASTING (both are set by [[cast]]).
+const CASTING_TAGS = ["magic", "cast"];
+function isCastingRoll(tags: readonly string[] | undefined): boolean {
+  return (tags ?? []).some(t => CASTING_TAGS.includes(StringUtil.normalize(t)));
+}
+
+// How much certainty a single spend may buy. The multi-Willpower rule is a
+// SPELLCASTING rule - a mage may pour extra Willpower into a spell, up to what
+// his Foundation can hold. Everywhere else the old law stands: one Willpower
+// per action. So two points of a fused substance spent on a Discipline are two
+// points of that Discipline's fuel and exactly ONE un-cancelable success; the
+// same two spent on a spell buy two (at Foundation 5).
+function uncancelableAllowance(casting: boolean, foundationRating: number, rules: MagicRules): number {
+  return casting ? uncancelableCap(foundationRating, rules) : 1;
+}
+
 function uncancelableCap(foundationRating: number, rules: MagicRules): number {
   return Math.max(1, Math.floor((Math.max(0, foundationRating) - 1) / Math.max(1, rules.uncancelablePerFoundation)));
 }
@@ -7000,12 +7023,17 @@ async function applyEffectSpec(
       else if (kind === "uncancelable") extra.uncancelableSuccesses = (extra.uncancelableSuccesses ?? 0) + (op.amount ?? 1) * mult;
       else if (kind === "nagain") extra.nAgain = Math.min(extra.nAgain ?? 10, op.amount ?? 10);
       if (kind === "uncancelable") {
-        // However many points bought it, certainty caps out at the caster's
-        // Foundation (one for the unawakened).
-        const cap = uncancelableCap(resolveFoundation(undefined, resolver).rating, magicRulesFrom(MagicRulesConfig.current()));
+        // Pouring EXTRA Willpower into one action for extra certainty is a
+        // spellcasting rule; everywhere else the old law holds - one Willpower
+        // per action, so however many points rode the spend, one of them counts
+        // as the Willpower. On a spell it stacks up to what the Foundation holds.
+        const casting = isCastingRoll(opts.rollTags);
+        const cap = uncancelableAllowance(casting, resolveFoundation(undefined, resolver).rating, magicRulesFrom(MagicRulesConfig.current()));
         if ((extra.uncancelableSuccesses ?? 0) > cap) {
           extra.uncancelableSuccesses = cap;
-          notes.push(`un-cancelable successes capped at ${cap} (Foundation)`);
+          notes.push(casting
+            ? `un-cancelable successes capped at ${cap} (Foundation)`
+            : `one un-cancelable success only - stacking Willpower into a single action is a spellcasting rule`);
         }
       }
     } else if (kind === "increase") {
@@ -7789,19 +7817,24 @@ function grantsUncancelableOnSpend(def: ResourceDef): boolean {
   return specs.some(e => e.apply.some(o => o.op.toLowerCase() === "uncancelable"));
 }
 
-// What `points` of the fused substance pay ON TOP of the job they were spent
-// for, read straight off the resource's default effect - so re-tuning the def
-// moves the casting maths with it. TARGETED ops are skipped: [[cast]] has
-// already counted the Quintessence reduction in its own difficulty maths, and
-// double-dipping it here would pay for the same point twice.
-function fusedComponentExtra(def: ResourceDef, points: number, uncancelableLimit: number): { extra: Partial<RollModifier>; bits: string[] } {
+// What `points` of the fused substance pay, read straight off the resource's
+// default effect - so re-tuning the def moves the casting maths with it.
+// The one rule that isn't a plain sum: a point lowers the difficulty ONCE, by
+// the DEEPEST break any of its natures gives. Resolve's -2 and the
+// Quintessence's -1 are the same break seen from two sides, not two breaks to
+// add (the owner's ruling), so they are folded by depth, never summed.
+// Successes are NOT the same: the Resolve's automatic success and the
+// Willpower's un-cancelable one are different things and both land.
+function fusedComponentExtra(def: ResourceDef, points: number, uncancelableLimit: number, tags: string[]): { extra: Partial<RollModifier>; bits: string[] } {
   const extra: Partial<RollModifier> = {};
   const bits: string[] = [];
+  let deepest = 0;
   for (const op of def.effect?.apply ?? []) {
-    if (op.target) continue;
+    // An op aimed at an action tag counts only when this roll carries it.
+    if (op.target && !op.target.split(",").map(t => StringUtil.normalize(t)).some(t => tags.includes(t))) continue;
     const kind = op.op.toLowerCase();
     const total = (op.amount ?? 1) * points;
-    if (kind === "difficulty") { extra.difficultyMod = (extra.difficultyMod ?? 0) + total; bits.push(`${total} difficulty`); }
+    if (kind === "difficulty") { deepest = Math.min(deepest, op.amount ?? 0); }
     else if (kind === "successes") { extra.autoSuccesses = (extra.autoSuccesses ?? 0) + total; bits.push(`+${total} automatic success${total === 1 ? "" : "es"}`); }
     else if (kind === "uncancelable") {
       const capped = Math.min(total, uncancelableLimit);
@@ -7811,6 +7844,10 @@ function fusedComponentExtra(def: ResourceDef, points: number, uncancelableLimit
       extra.nAgain = Math.min(extra.nAgain ?? 10, op.amount ?? 10);
       bits.push(`${op.amount ?? 10}-again`);
     }
+  }
+  if (deepest < 0) {
+    extra.difficultyMod = (extra.difficultyMod ?? 0) + deepest * points;
+    bits.push(`${deepest * points} difficulty`);
   }
   return { extra, bits };
 }
@@ -7894,56 +7931,60 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   // (stabilization - no difficulty break), plus optional extra points at -1
   // difficulty each, all within the per-turn cap and the difficulty floor.
   const seed: Partial<RollModifier> = {};
+  const castTags = [...CASTING_TAGS];
   const mandatory = primary.required > foundationRating ? 1 : 0;
   const requested = Math.max(0, intOf(cmd.named["quintessence"] ?? cmd.named["quint"]) ?? 0);
   const fuelDef = CharacterResources.resolveDef(char, "magic-fuel");
   if (mandatory > 0 && !fuelDef) {
     return sys(`${disp(char.name)} can't cast: the effect (${disp(primary.name)} ${primary.required}) outstrips ${disp(foundationTrait)} ${foundationRating}, and casting then REQUIRES a point of Quintessence - but they have no magic-fuel resource.`);
   }
-  // The FUSED substance is never wasted: a point whose Quintessence reduction
-  // the difficulty floor blocks still pays its Willpower and Resolve, so those
-  // points are spent anyway. Ordinary Quintessence has nothing else to give, so
-  // only the ones that actually lower the difficulty leave the pool.
+  // A FUSED point is never wasted at the Quintessence floor: its Willpower and
+  // Resolve still have work to do, so only the per-turn cap and the pool bind,
+  // and its whole break comes from the rider below. ORDINARY Quintessence has
+  // nothing else to give, so only points that actually lower the difficulty
+  // leave the pool - and they are the ones that lower it.
   const fused = !!fuelDef && grantsUncancelableOnSpend(fuelDef);
-  const reducing = Math.max(0, Math.min(requested, rules.quintPerTurn - mandatory, difficulty - rules.minDifficulty));
-  let applied = reducing;
-  let spare = fused ? Math.max(0, Math.min(requested, rules.quintPerTurn - mandatory) - reducing) : 0;
-  if (fuelDef && (mandatory > 0 || applied > 0 || spare > 0)) {
+  let optional = Math.max(0, Math.min(requested, rules.quintPerTurn - mandatory));
+  if (!fused) optional = Math.min(optional, Math.max(0, difficulty - rules.minDifficulty));
+  if (fuelDef && (mandatory > 0 || optional > 0)) {
     const have = await CharacterResources.current(char, fuelDef);
     if (have < mandatory) {
       return sys(`${disp(char.name)} can't cast: ${disp(primary.name)} ${primary.required} outstrips ${disp(foundationTrait)} ${foundationRating}, so casting REQUIRES 1 ${fuelDef.name} - they have ${have}.`);
     }
-    applied = Math.min(applied, have - mandatory);
-    spare = Math.min(spare, have - mandatory - applied);
-    const total = mandatory + applied + spare;
+    optional = Math.min(optional, have - mandatory);
+    const total = mandatory + optional;
     if (total > 0) {
       await CharacterResources.spend(char, fuelDef.name, total);
       const bits: string[] = [];
       if (mandatory) bits.push(`1 to stabilize (${disp(primary.name)} ${primary.required} > ${disp(foundationTrait)} ${foundationRating})`);
-      if (applied) bits.push(`${applied} for -${applied} difficulty`);
-      if (spare) bits.push(`${spare} past the difficulty floor (still spent - see below)`);
+      if (optional) bits.push(fused ? `${optional} more` : `${optional} for -${optional} difficulty`);
       notes.push(`${fuelDef.name}: ${bits.join(" + ")}`);
-      if (applied + spare < requested) {
+      if (optional < requested) {
         // Name the limiter that actually bound. The difficulty floor only stops
         // an ORDINARY Quintessence point - a fused one still has three other
         // components to pay, so it is spent regardless.
         const why = [`cap ${rules.quintPerTurn}/turn`, `pool ${have}`];
         if (!fused && difficulty - rules.minDifficulty < requested) why.unshift(`min diff ${rules.minDifficulty}`);
-        notes.push(`only ${applied + spare} of ${requested} points could be spent (${why.join(", ")})`);
+        notes.push(`only ${optional} of ${requested} points could be spent (${why.join(", ")})`);
       }
       if (total > rules.quintFreeLimit) notes.push(`spending >${rules.quintFreeLimit}/turn needs the Fount Background (ST)`);
       if (fused) {
-        // The fused substance: every point spent here is ALSO a Willpower and a
-        // Resolve point, so their whole payout rides along on top of the
-        // Quintessence reduction already counted above.
-        const rider = fusedComponentExtra(fuelDef, total, uncancelableCap(foundationRating, rules));
+        // Every point spent here IS a Quintessence and a Willpower and a Resolve
+        // at once, so its whole payout comes from one place - including the
+        // difficulty break, which is Resolve's rather than Resolve's plus the
+        // Quintessence's. The mandatory point pays it too: it is the same
+        // substance, not a fee taken off the top.
+        const rider = fusedComponentExtra(fuelDef, total, uncancelableCap(foundationRating, rules), castTags);
         for (const [k, v] of Object.entries(rider.extra) as Array<[keyof RollModifier, number]>) {
           if (k === "nAgain") seed.nAgain = Math.min(seed.nAgain ?? 10, v);
           else (seed as Record<string, number>)[k] = ((seed as Record<string, number>)[k] ?? 0) + v;
         }
-        if (rider.bits.length) notes.push(`all ${total} point${total === 1 ? "" : "s"} also spend as Willpower and Resolve: ${rider.bits.join(", ")}`);
+        if (rider.bits.length) {
+          notes.push(`all ${total} point${total === 1 ? "" : "s"} spend as Quintessence AND Willpower AND Resolve at once: ${rider.bits.join(", ")}`);
+        }
+      } else {
+        difficulty -= optional;
       }
-      difficulty -= applied;
     }
   } else if (requested > 0 && !fuelDef) {
     notes.push(`no magic-fuel resource - the requested Quintessence reduction is skipped`);
@@ -7956,7 +7997,7 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   const extended = ongoing || (cmd.named["extended"] ?? "").toLowerCase() === "true";
   const spec = makeRollSpec({
     pool, difficulty, requires: extended ? 1 : requires,
-    tags: ["magic", "cast"], difficultyCap: rules.difficultyCap,
+    tags: castTags, difficultyCap: rules.difficultyCap,
   });
 
   // spend= rides along (Living Resolve's focus/fuel-surge, a plain Willpower...).

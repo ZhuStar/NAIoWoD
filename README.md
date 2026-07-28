@@ -986,17 +986,30 @@ component:
 - It **replaces** blood/willpower/resolve/quintessence and answers to their
   names and roles — every vitae trick (heal, `boost` a Physical), every power
   that burns Resolve or Willpower, all spell fuel.
+- **He has exactly one pool.** `[[resources]]` shows a single line —
+  `living-resolve 30/30 (replaces: blood/willpower/resolve/quintessence)`. The
+  other four names are not pools he also has; they *resolve to* this one, so
+  `spend=willpower` spends Living Resolve and `[[spend willpower 1]]` reports
+  "spent 1 living-resolve".
 - **One point pays out as all four, at once** — it is never spent *as* one
-  component. A plain `spend=living-resolve` gives, per point: **+1 un-cancelable
-  success** (Willpower, capped by Foundation); Resolve's **whole** payout —
-  **+1 automatic success, 8-again and −2 difficulty**; and **−1 more on a
-  casting** (Quintessence). The same holds inside `[[cast]]`: Quintessence points
-  spent there also pay their Willpower and their Resolve in full — and a point
-  the difficulty floor won't let *reduce* is still spent, because its other
-  three components have work to do (ordinary Quintessence stops at the floor,
-  having nothing else to give). The vitae is
-  that same point aimed at flesh — `heal`, `boost` — not a different way of
-  spending it. **It is meant to be overwhelming.**
+  component. Per point: **+1 un-cancelable success** (the Willpower) and
+  Resolve's **whole** payout — **+1 automatic success, 8-again, −2 difficulty**.
+  Two rules keep that from double-paying:
+  - **A point lowers the difficulty once**, by the **deepest** break any of its
+    natures gives. Resolve's −2 *is* the Quintessence break seen from another
+    side, not another −1 to add on top. (A fused resource therefore carries
+    exactly **one** `difficulty` op; retune Resolve to give none and the
+    Quintessence −1 goes there instead, reducing like it does for any mage.)
+  - **Successes are not the same thing**: Resolve's automatic success and the
+    Willpower's un-cancelable one are different currencies and **both** land.
+    Two points on a spell = **+2 auto and +2 sure**.
+  Inside `[[cast]]` the same point pays everything, including the **mandatory**
+  stabilizing point — it is the same substance, not a fee taken off the top —
+  and a point the Quintessence floor won't let *reduce* is still spent, because
+  its other three components have work to do (ordinary Quintessence stops at
+  the floor, having nothing else to give). The vitae is that same point aimed at
+  flesh — `heal`, `boost` — not a different way of spending it. **It is meant to
+  be overwhelming.**
 - When a power *consumes* the Willpower as its activation cost, use `fuel` (no
   free success) — or `fuel-surge` (an extra point buys it anyway).
 - He has **no Willpower entry at all**: it is replaced, so a character created
@@ -1013,15 +1026,21 @@ component:
 An ordinary mage's **Quintessence** recovers on those same two gates (Umbra,
 and rested-in-sanctum) — it just has no daily brew of its own.
 
-**Certainty is capped by Foundation.** Spent Willpower buys successes that
-rolled 1s can *never* cancel — one per point — but no mind holds unlimited
-certainty: the total per roll is **`max(1, (Foundation − 1) ÷ 2)`** — the first
-dot is the price of entry, then every two more buy another (the divisor is the
+**Certainty: one Willpower per action — unless you are casting.** Spent
+Willpower buys successes that rolled 1s can *never* cancel, one per point. The
+old law allows **one Willpower per action**, and pouring in *more* for more
+certainty is a **spellcasting** rule: on a spell the total is capped by the
+Foundation instead, at **`max(1, (Foundation − 1) ÷ 2)`** — the first dot is
+the price of entry, then every two more buy another (the divisor is the
 `uncancelable-per-foundation` knob). At Modus 5 that's **2**, at 7 it's **3**;
-a character with no Foundation at all still gets 1. This applies to everyone:
-the Ouroboros gets them from *any* Living Resolve spend (the Willpower is in
-every point), while an ordinary character spends that many Willpower explicitly —
-`[[roll strength spend=willpower spend-amount=2]]`.
+a caster with no Foundation still gets 1.
+
+So two points of Living Resolve spent on a **spell** buy 2 sure successes,
+while the same two spent on a **Discipline** buy 2 of that Discipline's fuel
+and exactly **1** — the Resolve half still scales (2 automatic successes,
+−4 difficulty), only the Willpower half is once per action. An ordinary
+character hits the same wall with `[[roll strength spend=willpower
+spend-amount=2]]`: one sure success, and the reply says why.
 
 ### Casting magic — Dark Ages: Mage
 
@@ -1061,7 +1080,10 @@ actually has.
   automatically** on any casting it fuels).
 - **`quintessence=N`** spends *extra* points at **−1 difficulty each** — max 3
   per turn including the stabilizer (>2 flags the **Fount Background**), never
-  below **difficulty 4**.
+  below **difficulty 4**. A **fused** payer instead takes its own (deeper)
+  break once per point, and the floor doesn't bind: a point that is also a
+  Willpower and a Resolve is never wasted, so only the per-turn cap and the
+  pool limit how many may be spent.
 - **Over the cap** (default **10** — this chronicle's ruling; set
   `difficulty-cap` to 9 for the book's rule), difficulty converts to **+1
   required success per excess point**, and reductions **buy those off first**

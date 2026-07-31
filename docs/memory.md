@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `9101ce3`** ("A post office,
-> and the one thing a message cannot do").
+> **Last synced with the code as of commit `4881040`** ("A command that
+> can travel, and the chain that may make it unnecessary").
+> Prior: `9101ce3` ("A post office, and the one thing a message cannot do").
 > Prior: `25de8bf` ("Say what the spend did, and say that you can spend two").
 > Prior: `12a9fae` ("A purse with prices, a pool you cannot use, and
 > Disciplines that are his own").
@@ -3079,6 +3080,56 @@ and `prefill` are mocked/available but not yet written.
     - **Nothing in the engine publishes to the bus yet.** This pass is additive
       on purpose: the bus exists, is proven, and adopting it is a later
       deliberate pass rather than a rewrite smuggled in beside it.
+
+63. **A command on the wire, and the reason the huge file can go** (owner:
+    *"this is all about not needing the huge file anymore. We can distribute the
+    script ... The script that handles commands in the text adventure input
+    thing publishes the commands in the bus in a formalized manner, which we
+    have to come up with, and anyone that is in the correct channel receives
+    them. This is why I have been pushing for data-driven stuff"*).
+    - **The size he is describing**: `dist/naiowod.ts` is 14,912 lines / 787 KB.
+      The SHARED core every distributed script would still need (host + core/* +
+      command) is ~2,200 lines. So a satellite that owned time would be roughly
+      2,400 lines rather than 14,900 - and the duplication of that core across
+      slots is the real, quantified cost of distribution. Worth knowing before
+      committing, not after.
+    - **`ParsedCommand` was already the wire format.** Four fields, no methods,
+      no classes: `{name, positional, named, raw}`. The long push toward data
+      paid here without anyone planning it. `commandEnvelope()` adds only what a
+      second script cannot work out for itself - **who it is about, who asked,
+      and a correlation id** - and `envelopeToCommand()` reads it back as
+      exactly what the local router already takes, so a received command runs
+      through the ordinary registry with no special path (tested).
+    - **The host hands us a correlation id for free**: `onTextAdventureInput`
+      carries a `continuityId`, documented as *"an id that will be present for
+      any other generation/context building hooks called in continuation of this
+      hook"*. That is precisely the request id an envelope needs.
+    - **CHANNEL CONVENTION** (two per command, because the bus filters by
+      channel and messaging has no wildcards): `command` for every command -
+      where a logger or a ledger listens - and **`command:<verb>`** for one
+      verb, where its OWNER listens. A time script subscribes to
+      `command:advance-time` and hears exactly what it is for.
+    - **THE ARCHITECTURE MAY NOT NEED MESSAGING AT ALL, and this is the finding
+      of the pass.** `docs/hooks.md` already promises: *"Scripts execute their
+      hooks in the same order as they are listed in the User Scripts modal"*,
+      each may modify `inputText`, and any one may set `stopFurtherScripts` to
+      halt the rest. **That is an ordered bus with priority and
+      stop-propagation, provided by the host, synchronous, requiring no
+      messages.** So there are two candidate architectures:
+      - **A. The hook chain.** Every script registers the input hook and handles
+        the verbs it owns. Guaranteed by the docs today, synchronous, no
+        correlation ids, no timeouts. Cost: each slot carries the parser, and
+        ordering is the player's modal ordering rather than ours.
+      - **B. Kernel plus satellites** (the owner's plan). One script parses and
+        publishes; the others subscribe. Needs a reply to arrive **while the
+        input hook is awaiting it** - which is undocumented, and which decides
+        the whole thing: `onTextAdventureInput` must RETURN the text, so if the
+        host does not deliver messages during that await, the hook returns
+        before any answer exists and only fire-and-forget events can be
+        distributed.
+      **Q5 in `scripts/probe-messaging.ts` is that exact test** (publish inside
+      the real hook, await a sibling's reply, report answered-in-Nms or TIMED
+      OUT). Nothing further should be built on B until it has been run on-host.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

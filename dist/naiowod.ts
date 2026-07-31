@@ -5360,6 +5360,84 @@ interface ParsedCommand {
   raw: string;
 }
 
+// =============================================================================
+// A COMMAND ON THE WIRE - the formalized shape a distributed engine passes around
+// -----------------------------------------------------------------------------
+// The goal is one script per concern (one that owns time, one that owns the
+// sheet, one that owns rolls) instead of one 15,000-line file. What crosses
+// between them has to be PLAIN DATA, because api.v1.messaging serializes - and
+// that is why everything has been pushed toward data for the last several
+// passes. ParsedCommand was already there: four fields, no methods, no classes.
+// It crosses a wire unchanged.
+//
+// An ENVELOPE is that, plus the three things a second script cannot work out
+// for itself: who it is about, who asked, and which reply answers which ask.
+//
+// CHANNEL CONVENTION. Two per command, because the bus filters by channel and
+// has no wildcards (docs/api-reference.md §messaging: the only filters are
+// `channel` and `fromScriptId`):
+//   `command`            - every command; where a logger or a ledger listens
+//   `command:<verb>`     - one verb; where its OWNER listens
+// So a time script subscribes to `command:advance-time` and hears exactly what
+// it is for, while a monitor subscribes to `command` and hears everything.
+// =============================================================================
+const COMMAND_CHANNEL = "command";
+const COMMAND_RESULT_CHANNEL = "command:result";
+function commandChannel(verb: string): string {
+  return `${COMMAND_CHANNEL}:${verb.trim().toLowerCase()}`;
+}
+
+interface CommandEnvelope {
+  // Correlation id: a result names the command it answers. The host hands out
+  // a `continuityId` on the input hook that is ideal for this - it is already
+  // shared by every hook called in continuation of the same input.
+  id: string;
+  verb: string;                       // the command name, normalized
+  positional: string[];
+  named: Record<string, string>;
+  raw: string;                        // what the player actually typed
+  character?: string;                 // whose sheet this is about
+  player?: string;
+  at: number;
+}
+
+// What a script sends back when it has handled (or refused) a command.
+// `handled: false` is a real answer, not a failure: it means "this verb is not
+// mine", which is how a router learns nobody owns it.
+interface CommandResult {
+  id: string;
+  handled: boolean;
+  by?: string;                        // the script id that answered
+  text?: string;                      // the [SYSTEM: ...] note, ready to show
+  error?: string;
+}
+
+// A parsed command, addressed. Pure: no host, no clock beyond `at`, so it is
+// as testable as the parser it follows.
+function commandEnvelope(
+  cmd: ParsedCommand,
+  meta: { id: string; character?: string; player?: string; at?: number },
+): CommandEnvelope {
+  return {
+    id: meta.id,
+    verb: cmd.name,
+    positional: [...cmd.positional],
+    named: { ...cmd.named },
+    raw: cmd.raw,
+    ...(meta.character ? { character: meta.character } : {}),
+    ...(meta.player ? { player: meta.player } : {}),
+    at: meta.at ?? Date.now(),
+  };
+}
+
+// The other direction: an envelope read back as the parser's own shape, so a
+// receiving script routes it through exactly the machinery a local command
+// takes. This is the "match the interface" half - the METHODS are rebuilt from
+// the registry on the receiving side; only the data travels.
+function envelopeToCommand(env: CommandEnvelope): ParsedCommand {
+  return { name: env.verb, positional: [...env.positional], named: { ...env.named }, raw: env.raw };
+}
+
 class CommandParser {
   static parse(body: string): ParsedCommand {
     const raw = body.trim();

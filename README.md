@@ -736,6 +736,37 @@ function call. So the bus dispatches locally in-process and relays outward, and
 > ordered, whether it is ever synchronous, and whether a second script hears it.
 > Off-host green proves none of those.
 
+### A command on the wire — and whether it needs one
+
+The long-term aim is **one script per concern** instead of one 15,000-line file:
+a script that owns time, one that owns the sheet, one that owns rolls. What
+crosses between them must be **plain data**, because messaging serializes —
+which is why so much of this engine is data in the first place.
+
+`ParsedCommand` was already the wire format: `{name, positional, named, raw}` —
+four fields, no methods. An **envelope** adds only what a second script cannot
+work out for itself:
+
+```ts
+commandEnvelope(CommandParser.parse("advance-time 1 hour"), { id: continuityId })
+// → { id, verb: "advance-time", positional: ["1","hour"], named: {}, raw, at }
+envelopeToCommand(env)   // → exactly what the local router already takes
+```
+
+Channels come in twos, because the bus filters by channel and has no wildcards:
+**`command`** (every command — where a logger or ledger listens) and
+**`command:<verb>`** (one verb — where its *owner* listens). A time script
+subscribes to `command:advance-time` and hears exactly what it is for.
+
+> ⚠️ **This may not need messaging at all.** `docs/hooks.md` already promises
+> that *"scripts execute their hooks in the same order as they are listed in the
+> User Scripts modal"*, that each may modify `inputText`, and that any one may
+> set `stopFurtherScripts` to halt the rest — **an ordered bus with priority and
+> stop-propagation, provided by the host, synchronous, needing no messages.**
+> Which architecture wins depends on one undocumented fact: whether a sibling's
+> reply can arrive *while the input hook is still awaiting it*. `Q5` in
+> `scripts/probe-messaging.ts` tests exactly that.
+
 ### Normalization — one internal form for every string
 
 Every string that enters the engine — command arguments and lorebook data alike

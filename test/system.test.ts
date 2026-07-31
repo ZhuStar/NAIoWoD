@@ -41,6 +41,7 @@ import {
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
   EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, LOCAL_PREFIX,
+  commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -6694,5 +6695,45 @@ describe("the post office: local delivery, and the wire", () => {
     const id = PostOffice.subscribe("ping", () => undefined);
     expect(Bus.listeners("ping")).toHaveLength(1);
     PostOffice.unsubscribe(id);
+  });
+});
+
+describe("a command on the wire: the formalized envelope", () => {
+  test("a parsed command survives the round trip as plain data", () => {
+    const parsed = CommandParser.parse('roll strength+brawl difficulty=7 spend=`living resolve`');
+    const env = commandEnvelope(parsed, { id: "continuity-1", character: "marius", player: "storyteller", at: 42 });
+    expect(env).toEqual({
+      id: "continuity-1", verb: "roll",
+      positional: parsed.positional, named: parsed.named, raw: parsed.raw,
+      character: "marius", player: "storyteller", at: 42,
+    });
+    // Plain data all the way down: it must survive being serialized, because
+    // api.v1.messaging says it will be.
+    expect(JSON.parse(JSON.stringify(env))).toEqual(env);
+    // ...and read back as exactly what the local router already takes.
+    expect(envelopeToCommand(env)).toEqual(parsed);
+  });
+
+  test("a receiving script routes an envelope through the ordinary registry", async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    // What would arrive over the wire...
+    const env = commandEnvelope(CommandParser.parse("templates ouroboros"), { id: "x" });
+    const wire = JSON.parse(JSON.stringify(env)) as typeof env;
+    // ...routed with no special path: same verbs, same handlers, same reply.
+    const back = envelopeToCommand(wire);
+    const direct = await CommandRouter.route("templates ouroboros");
+    const viaWire = await CommandRouter.route(back.raw);
+    expect(viaWire).toBe(direct);
+  });
+
+  test("channels are per verb, with a catch-all for observers", () => {
+    expect(COMMAND_CHANNEL).toBe("command");
+    expect(commandChannel("Advance-Time")).toBe("command:advance-time");
+    expect(COMMAND_RESULT_CHANNEL).toBe("command:result");
+    // The convention has to survive the bus's own normalization unchanged,
+    // or a publisher and a subscriber would silently miss each other.
+    expect(busChannel(commandChannel("roll"))).toBe(commandChannel("roll"));
   });
 });

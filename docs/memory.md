@@ -3488,6 +3488,71 @@ Ordered roughly by unlock value:
     and the recalculation cache (#16), whose invalidation is what an event bus
     is FOR.
 
+24. **DO THE WORK WHILE THE PLAYER IS READING** (owner, 2026-07-31: *"a lot of
+    the script is asynchronous due to the nature of the NovelAI Scripting API.
+    On a smaller, more budget-oriented device it doesn't run so well ... it gets
+    word-per-second laggy when I play on my cell phone with too much other stuff
+    open. We should find a way to set timers and try to do most of the work when
+    the user is thinking, reading the story"* - and, explicitly, *"that's for the
+    future ... We should think about it only insofar as whether what we are
+    doing contributes or hinders this final objective"*). NOT BUILT. Measured,
+    so the future pass starts from numbers instead of guesses.
+
+    **The hooks that bracket a generation already exist**: `onGenerationRequested`
+    (*"the first hook that triggers when a user generates text ... context has
+    not yet been built"*) and `onGenerationEnd` (*"the generation is fully
+    finished, the editor is unlocked, and generation is no longer blocked"*) -
+    which is precisely the idle moment he wants. `onScriptsLoaded` is the third
+    useful one (setup that would fail at top level).
+
+    **What the engine costs today, counted (not guessed) by wrapping every
+    `api.v1.*` surface and firing each hook:**
+
+    | hook | host round-trips |
+    |---|---|
+    | `onContextBuilt` (once per generation) | **2** - GenCounter get + set |
+    | `onResponse` (per streaming chunk) | **0** |
+    | `onGenerationEnd` (300-paragraph story) | **2** - one `document.scan`, one get |
+    | `onTextAdventureInput`, one `[[roll]]` | **8** - all `storyStorage.get` |
+
+    CPU is not the problem and should not be optimized: the whole
+    `onGenerationEnd` regex pass over 2,000 paragraphs is ~3ms, and 2,000
+    `onResponse` chunks ~4ms. **The cost is the number of awaits against the
+    host**, exactly as the owner diagnosed.
+
+    **THE ONE CONCRETE HOT SPOT, and it is not where either of us looked.** Our
+    `onResponse` handler does zero I/O - but it is declared `async`, so it
+    returns a Promise on **every streaming chunk** and the host awaits a
+    microtask hop several hundred times per generation for a handler that almost
+    always has nothing to do. The typings allow a SYNCHRONOUS return
+    (`OnResponseReturnValue | void | Promise<...>`), so the common path could
+    return `undefined` outright and hand back a Promise only when `<hide` is
+    actually present. Three lines, and it targets the word-per-second symptom
+    directly. Offered and not taken yet, on his "that's for the future" ruling.
+
+    Second: **8 storage reads for one roll** is the Enter-key latency. Those
+    collapse into one read behind the recalculation cache of #16 - which is the
+    same item, approached from the other end.
+
+    **DOES THE BUS/DISTRIBUTION WORK HELP OR HINDER? Both, and the rule matters
+    now rather than later.**
+    - *Helps.* The `monitor` priority is already the "runs last, cannot change
+      the outcome" slot - the natural home for deferrable work. Local bus
+      dispatch is in-memory: **zero host calls**. And distribution means a
+      satellite's hooks are its OWN: a script that owns time need not register
+      `onResponse` at all, whereas today one script registers all four hooks and
+      every generation pays for all of them.
+    - *Hinders, badly, if undisciplined.* **N scripts each registering
+      `onResponse` is N host-to-script awaits per chunk** - distribution would
+      multiply the exact cost that is hurting him. Likewise anything that put
+      MESSAGE traffic on the streaming path would be strictly worse than a
+      function call, since messaging is async and serializes.
+    - **The rules to hold to, from here on:** only ONE script registers
+      `onResponse`, and it returns synchronously unless it has real work; nothing
+      on a per-chunk path may await the host; deferred work goes on
+      `onGenerationEnd` at `monitor` priority; and a satellite registers the
+      fewest hooks it can.
+
 ## 9. Session-restart checklist
 
 1. Read this file, then `README.md` (player-facing view of the same facts).

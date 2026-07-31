@@ -12,6 +12,7 @@ export * from "./core/expr";
 export * from "./core/dice";
 export * from "./core/damage";
 export * from "./core/time";
+export * from "./core/bus";
 export * from "./wizard";
 export * from "./rolls";
 export * from "./rules";
@@ -25,7 +26,7 @@ export * from "./window";
 import { log } from "./host";
 import {
   LorebookManager, MeritFlawRegistry, reloadAllConfigStores,
-  ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER,
+  ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER, PostOffice,
 } from "./services";
 import { NamedRollStore, StoryClock } from "./state";
 import { processAdventureInput, processGeneratedText, processContextBuilt, processGenerationEnd, reconcileLorebook } from "./game";
@@ -56,6 +57,10 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onGenerationEnd", async (_params: Parameters<OnGenerationEnd>[0]) => {
     await processGenerationEnd();
   });
+  // Open the post office: from here on, anything a sibling script broadcasts
+  // reaches this script's bus. A host with no messaging surface is fine - the
+  // local half of the bus works either way.
+  await PostOffice.open();
   const boot = await LorebookManager.bootstrap();
   await ensurePath("config", CONFIG_GENERAL_HEADER);
   await ensurePath("config:success-tables", TABLE_GENERAL_HEADER);

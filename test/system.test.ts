@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage } from "../src/host-mock";
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -40,6 +40,7 @@ import {
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
+  EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, LOCAL_PREFIX,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -6523,5 +6524,175 @@ describe("a vampire's blood pool is what generation allows", () => {
     expect(r).toContain("blood 10/20");
     expect(r).toContain("5/turn");
     expect(await CommandRouter.route("gain blood 99")).toContain("Now 20/20");
+  });
+});
+
+// =============================================================================
+// THE EVENT BUS AND THE POST OFFICE
+// -----------------------------------------------------------------------------
+// core/bus.ts is pure dispatch; PostOffice is the half that knows about
+// api.v1.messaging. The tests that matter are the ones that pin the two facts
+// the whole design rests on: local delivery is SYNCHRONOUS, and a broadcast
+// never comes back to its sender.
+// =============================================================================
+describe("the event bus: priority, cancel, and stopping the spread", () => {
+  test("handlers run by priority, then by registration order", () => {
+    const bus = new EventBus();
+    const order: string[] = [];
+    bus.on("thing", () => { order.push("normal-1"); });
+    bus.on("thing", () => { order.push("last"); }, "last");
+    bus.on("thing", () => { order.push("first"); }, "first");
+    bus.on("thing", () => { order.push("normal-2"); });
+    bus.on("thing", () => { order.push("monitor"); }, "monitor");
+    bus.emit("thing", {});
+    expect(order).toEqual(["first", "normal-1", "normal-2", "last", "monitor"]);
+    expect(bus.listeners("thing").map(l => l.priority))
+      .toEqual(["first", "normal", "normal", "last", "monitor"]);
+  });
+
+  test("cancel is a FLAG later handlers may honour or ignore; stop ends the run", () => {
+    const bus = new EventBus();
+    const saw: string[] = [];
+    bus.on("hit", () => ({ cancel: true }), "first");
+    // One handler honours the flag...
+    bus.on("hit", (e) => { if (e.cancelled) return; saw.push("careful ran"); });
+    // ...another never checks, which is allowed and is the point of a flag.
+    bus.on("hit", () => { saw.push("heedless ran"); });
+    const cancelled = bus.emit("hit", {});
+    expect(cancelled.cancelled).toBe(true);
+    expect(saw).toEqual(["heedless ran"]);
+
+    const bus2 = new EventBus();
+    const ran: string[] = [];
+    bus2.on("hit", () => { ran.push("a"); return { stop: true }; }, "first");
+    bus2.on("hit", () => { ran.push("b"); });
+    const stopped = bus2.emit("hit", {});
+    expect(ran).toEqual(["a"]);              // nothing after the stop
+    expect(stopped.stopped).toBe(true);
+    expect(stopped.cancelled).toBe(false);   // stopping is not cancelling
+  });
+
+  test("a monitor watches and does not vote", () => {
+    const bus = new EventBus();
+    bus.on("hit", () => ({ cancel: true, stop: true }), "monitor");
+    const e = bus.emit("hit", {});
+    expect(e.cancelled).toBe(false);
+    expect(e.stopped).toBe(false);
+  });
+
+  test("a throwing handler is recorded, not fatal - the rest still run", () => {
+    const bus = new EventBus();
+    const ran: string[] = [];
+    bus.on("hit", () => { throw new Error("bad handler"); }, "first");
+    bus.on("hit", () => { ran.push("still ran"); });
+    const e = bus.emit("hit", {});
+    expect(ran).toEqual(["still ran"]);
+    expect(e.errors.join()).toContain("bad handler");
+  });
+
+  test("emit is SYNCHRONOUS - the verdict is readable on the next line", () => {
+    const bus = new EventBus();
+    bus.on("roll", (e) => { (e.data as { dice: number }).dice += 2; });
+    const data = { dice: 5 };
+    bus.emit("roll", data);
+    // This is the whole reason local dispatch is not a round trip: a handler
+    // adjusted the thing BEFORE the caller read it back.
+    expect(data.dice).toBe(7);
+  });
+
+  test("off stops a handler; channels and names are normalized once", () => {
+    const bus = new EventBus();
+    let hits = 0;
+    const id = bus.on("Some Channel", () => { hits++; });
+    expect(bus.channels()).toEqual(["some channel"]);   // stored normalized
+    bus.emit("some channel", {});                        // and matched normalized
+    expect(hits).toBe(1);
+    expect(bus.off(id)).toBe(true);
+    expect(bus.off(id)).toBe(false);
+    bus.emit("Some Channel", {});
+    expect(hits).toBe(1);
+    expect(busChannel("  MIXED Case ")).toBe("mixed case");
+    expect(bus.channels()).toEqual([]);                  // nobody left listening
+  });
+
+  test("a local: channel is recognized as never leaving", () => {
+    expect(isLocalChannel(`${LOCAL_PREFIX}rolls`)).toBe(true);
+    expect(isLocalChannel("Local:Rolls")).toBe(true);
+    expect(isLocalChannel("rolls")).toBe(false);
+    expect(BUS_PRIORITIES[BUS_PRIORITIES.length - 1]).toBe("monitor");
+  });
+});
+
+describe("the post office: local delivery, and the wire", () => {
+  beforeEach(async () => {
+    // A fresh script run: the host's subscriptions are gone, so the post office
+    // must forget the one it was holding. (Finding its own bug: `open` was
+    // idempotent on a flag the host could invalidate underneath it.)
+    await PostOffice.close();
+    __resetStorageMock(); __resetLorebookMock(); __resetMessagingMock();
+    await LorebookManager.bootstrap();
+  });
+
+  test("publish delivers locally AND relays - the publisher cannot tell which mattered", async () => {
+    const heard: unknown[] = [];
+    const id = PostOffice.subscribe("resources", (e) => { heard.push(e.data); });
+    const event = await PostOffice.publish("resources", { spent: 2, of: "resolve" });
+    // Local handlers have already run by the time publish resolves.
+    expect(heard).toEqual([{ spent: 2, of: "resolve" }]);
+    expect(event.cancelled).toBe(false);
+    // ...and it went out on the wire too.
+    expect(__sentMessages()).toEqual([{ data: { spent: 2, of: "resolve" }, channel: "resources" }]);
+    PostOffice.unsubscribe(id);
+  });
+
+  test("a local: channel never reaches the wire", async () => {
+    const heard: unknown[] = [];
+    const id = PostOffice.subscribe(`${LOCAL_PREFIX}rolls`, (e) => { heard.push(e.data); });
+    await PostOffice.publish(`${LOCAL_PREFIX}rolls`, { pool: "strength" });
+    expect(heard).toHaveLength(1);
+    expect(__sentMessages()).toEqual([]);
+    PostOffice.unsubscribe(id);
+  });
+
+  test("a handler that says stop keeps it off the wire entirely", async () => {
+    const id = PostOffice.subscribe("secrets", () => ({ stop: true }), "first");
+    const seen: unknown[] = [];
+    const id2 = PostOffice.subscribe("secrets", (e) => { seen.push(e.data); });
+    const event = await PostOffice.publish("secrets", { hidden: true });
+    expect(event.stopped).toBe(true);
+    expect(seen).toEqual([]);          // no further local handler
+    expect(__sentMessages()).toEqual([]);  // and nothing left the script
+    PostOffice.unsubscribe(id); PostOffice.unsubscribe(id2);
+  });
+
+  test("a sibling script's broadcast arrives on the bus, marked with where it came from", async () => {
+    const heard: Array<{ from?: string; data: unknown }> = [];
+    const id = PostOffice.subscribe("rolls", (e) => { heard.push({ from: e.from, data: e.data }); });
+    await PostOffice.open();
+    await __deliverMessage({ fromScriptId: "other-script", channel: "rolls", data: { net: 3 } });
+    expect(heard).toEqual([{ from: "other-script", data: { net: 3 } }]);
+    // A relayed event is NOT repeated onward - this script subscribes, it does
+    // not act as a repeater.
+    expect(__sentMessages()).toEqual([]);
+    PostOffice.unsubscribe(id);
+  });
+
+  test("a locally raised event has no `from`, which is how a handler tells them apart", async () => {
+    const froms: Array<string | undefined> = [];
+    const id = PostOffice.subscribe("mixed", (e) => { froms.push(e.from); });
+    await PostOffice.open();
+    await PostOffice.publish("mixed", { n: 1 });
+    await __deliverMessage({ fromScriptId: "elsewhere", channel: "mixed", data: { n: 2 } });
+    expect(froms).toEqual([undefined, "elsewhere"]);
+    PostOffice.unsubscribe(id);
+  });
+
+  test("the shared Bus is what init() opened, and it survives a host with no messaging", async () => {
+    expect(Bus).toBeInstanceOf(EventBus);
+    await PostOffice.open();   // idempotent
+    await PostOffice.open();
+    const id = PostOffice.subscribe("ping", () => undefined);
+    expect(Bus.listeners("ping")).toHaveLength(1);
+    PostOffice.unsubscribe(id);
   });
 });

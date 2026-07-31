@@ -695,6 +695,47 @@ add one by hand. A def that extends something nobody defines — or that extends
 itself — is **skipped and reported**, never fatal: a half-written card must
 never cost you the engine.
 
+### The event bus and the post office
+
+Every script keeps a **post office**. You walk to it to send something; you wait
+at home and it brings you what arrived. Send something to yourself and you still
+get it — the publisher never has to know whether anyone outside was listening.
+
+```ts
+PostOffice.subscribe("resources", (e) => { ... }, "monitor");   // priority slot
+const event = await PostOffice.publish("resources", { spent: 2, of: "resolve" });
+if (event.cancelled) { /* somebody objected */ }
+```
+
+- **Handlers run by priority**: `first · early · normal · late · last · monitor`.
+  `monitor` runs last and its verdict is **ignored** — the observe-only slot, for
+  logging and ledgers, where reacting is right and interfering is not.
+- **`cancel` is a flag, `stop` is an interruption.** A handler returning
+  `{cancel: true}` marks the event; later handlers still run and may honour it
+  (`if (e.cancelled) return;`) or ignore it entirely. `{stop: true}` ends the
+  run *and* keeps the event off the wire.
+- **A channel can be anything.** `rolls`, or
+  `character-healed-aggravated-with-a-resource` — whatever is worth naming.
+  A channel starting with **`local:`** never leaves the script.
+- **A throwing handler is recorded, not fatal** (`event.errors`), the same law
+  as a malformed lorebook card.
+
+**Local delivery is a direct, synchronous call — and that is a correctness
+choice, not a performance one.** NovelAI's `api.v1.messaging.broadcast()`
+explicitly excludes the sender, so a script cannot receive its own broadcast;
+and every messaging call is a Promise, so an event that went out and came back
+would arrive *after* the thing that raised it had finished. "Let a handler adjust
+this roll before it is rolled" is impossible across the wire and trivial in a
+function call. So the bus dispatches locally in-process and relays outward, and
+`publish` looks the same either way.
+
+> 🚧 **Nothing in the engine publishes to the bus yet** — this is deliberate.
+> The bus exists and is tested; adopting it is its own pass.
+> `scripts/probe-messaging.ts` is a paste-into-NovelAI script that answers what
+> the docs do not: whether `send` to your own id delivers, whether delivery is
+> ordered, whether it is ever synchronous, and whether a second script hears it.
+> Off-host green proves none of those.
+
 ### Normalization — one internal form for every string
 
 Every string that enters the engine — command arguments and lorebook data alike

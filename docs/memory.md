@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `25de8bf`** ("Say what the
-> spend did, and say that you can spend two").
+> **Last synced with the code as of commit `9101ce3`** ("A post office,
+> and the one thing a message cannot do").
+> Prior: `25de8bf` ("Say what the spend did, and say that you can spend two").
 > Prior: `12a9fae` ("A purse with prices, a pool you cannot use, and
 > Disciplines that are his own").
 > Prior: `a05d8d4` ("A pool that reads the sheet"); `3639376` ("A template you
@@ -506,6 +507,16 @@ derived values.
   `exclusiveDefs()` + **`EXCLUSIVE_MERITS_FLAWS`** (13+6 pairs, prepended to
   `DEFAULT_MERITS_FLAWS`). `DEFAULT_ADVANCEMENT_COSTS`: foundation freebie 5,
   pillar 3, new `specialty` row.
+**`src/core/bus.ts`** (§7.62, PURE — no `api`, no imports at all): the dispatch
+rule and nothing else. `BUS_PRIORITIES` (first/early/normal/late/last/**monitor**,
+where monitor runs last and its verdict is IGNORED — the observe-only slot),
+`LOCAL_PREFIX = "local:"` + `isLocalChannel`, `busChannel` (trim+lowercase, so
+two spellings of one intent cannot drift), **`BusEvent {channel, data, from?,
+at, cancelled, stopped, errors}`**, `BusVerdict {cancel?, stop?}`, `BusHandler`,
+and **`class EventBus`** (`on`/`off`/`emit`/`listeners`/`channels`). `emit` is
+SYNCHRONOUS and a throwing handler is recorded on `event.errors` rather than
+ending the run.
+
 - **§7.60 additions — purses, capabilities, affinity**: **`BudgetDef {allows?,
   freebie?, experience?, note?}`** + `BudgetEntry = string | BudgetDef` +
   `budgetDef(entry)` + `budgetBuyable(price)` + **`NOT_PURCHASABLE = "-"`**;
@@ -3013,6 +3024,62 @@ and `prefill` are mocked/available but not yet written.
       exist"). The conditional case (a Regeneration arcanum letting Resolve
       heal) is the shape `requiresResource` + a granted effect will take.
 
+62. **The post office** (owner, designing it himself: *"suppose the bus is Amazon
+    and suppose you both buy and sell from it. Each script will have their post
+    office ... If you use Amazon to sell something to yourself, you still
+    receive it"*; plus a priority enum, a stop-spreading verdict, a cancel
+    boolean *"some scripts can ignore the cancel thing and never check for it,
+    others could check if(event.isCancelled) return"*, and *"anything can be a
+    channel"*).
+    - **His model is right and is what shipped.** `core/bus.ts` is the dispatch
+      rule (pure); `PostOffice` in services.ts is the half that knows about
+      `api.v1.messaging`. `publish` delivers LOCALLY first, then relays — and
+      the publisher cannot tell which mattered, which is the simplicity he asked
+      for.
+    - **WHY LOCAL DISPATCH IS A DIRECT CALL, NOT A ROUND TRIP.** He asked
+      whether a self-message could just go through the bus *"for the sake of
+      simplicity"*, and whether the cost would be efficiency. It is not an
+      efficiency question and the answer is no, for two documented reasons:
+      `broadcast()` **excludes the sender** (a script cannot receive its own
+      broadcast at all), and every messaging call is a **Promise** — so an event
+      that left and came back would arrive on a later tick, after the thing that
+      raised it had already finished. "Let a handler adjust this roll before it
+      is rolled" is impossible across the wire and trivial in a function call.
+      The test `emit is SYNCHRONOUS - the verdict is readable on the next line`
+      is the one that pins this.
+    - **cancel vs stop are different, exactly as he specified.** `cancel` is a
+      FLAG: later handlers still run and may honour it or ignore it entirely
+      (both branches are tested). `stop` is the interruption: no further
+      handlers, and **the post office does not relay it onward** — a handler can
+      keep something off the wire.
+    - **`local:` is his "loco" prefix**, spelled the way the rest of the engine
+      spells things. A channel named that way never reaches messaging.
+    - **On sending methods across the wire as an IIFE's `toString()`** (his
+      idea): not built, and recorded as a hazard rather than a plan. `toString`
+      is the one thing that does NOT carry the closure, rebuilding needs
+      `eval`/`new Function` which the sandbox may not allow, and it would put
+      un-reviewable code in a paste-able artifact. The engine already solves this
+      the boring way: **plain data plus a NAME both sides resolve through their
+      own registries** (`REACTIONS`, `SOAK_TABLES`, `MORALITIES` are all
+      string-keyed for exactly this reason). Templates-as-data (§7.58) turns out
+      to have been the prerequisite for distribution.
+    - `src/host-mock.ts` grew a messaging mock faithful to the DOCUMENTED
+      contract and no further (`__resetMessagingMock`, `__sentMessages`,
+      `__deliverMessage`) — a broadcast is never delivered back to its sender
+      there either.
+    - **`scripts/probe-messaging.ts`** (not in the build): a paste-into-NovelAI
+      script that answers the four things the docs are silent on — does `send`
+      to your own id deliver, is delivery ordered, is it ever synchronous, and
+      does a second script hear it. **Off-host green proves nothing about these**;
+      the mock can only be as truthful as the docs it was written from.
+    - Its own bug, found by its own test: `PostOffice.open()` was idempotent on
+      a flag the HOST can invalidate underneath it (a reload drops the
+      subscription while `_wired` still claims it). `close()` is now
+      best-effort and always clears the flag.
+    - **Nothing in the engine publishes to the bus yet.** This pass is additive
+      on purpose: the bus exists, is proven, and adopting it is a later
+      deliberate pass rather than a rewrite smuggled in beside it.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
@@ -3361,11 +3428,14 @@ Ordered roughly by unlock value:
       For a rules engine whose backbone this would be, that is the risk to probe
       first with a throwaway two-script experiment before committing.
 
-    **What is missing on our side: `src/host-mock.ts` implements no messaging**,
-    so nothing about a bus is testable off-host until it does. That mock (a
-    subscription list, a delivery loop, and a `__deliverMessage` test hook beside
-    the existing `__fireOnResponse`) is the honest first step of this item — the
-    same order every host surface has been added in.
+    **The bus itself SHIPPED in §7.62** (`core/bus.ts` + `PostOffice`, with the
+    messaging mock and `scripts/probe-messaging.ts`). What is LEFT of this item:
+    running the probe on-host to learn what messaging actually guarantees, and
+    then **adopting** the bus — nothing in the engine publishes to it yet, by
+    design. The obvious first publishers are the ones the owner has already
+    asked for: the per-character resource ledger (#21) as a `monitor` handler,
+    and the recalculation cache (#16), whose invalidation is what an event bus
+    is FOR.
 
 ## 9. Session-restart checklist
 

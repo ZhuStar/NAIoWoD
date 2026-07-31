@@ -1,6 +1,7 @@
 import { log } from "./host";
 import { sys } from "./command";
 import { StringUtil, Stat, Category } from "./core/traits";
+import { EventBus, BusEvent, BusHandler, BusPriority, isLocalChannel } from "./core/bus";
 import {
   CardValue, CardMap, parseCardText, formatCardText, canonicalCardText,
   asMap, asNamedList, asText,
@@ -629,4 +630,85 @@ export class LorebookParser {
     }
     return { abilities, backgrounds };
   }
+}
+
+// =============================================================================
+// THE POST OFFICE - the bus, wired to the other scripts
+// -----------------------------------------------------------------------------
+// core/bus.ts is the dispatch rule; this is the half that knows about
+// api.v1.messaging. The owner's picture: every script keeps a post office. You
+// walk to it to send something; you wait at home and it brings you what
+// arrived. Send something to yourself and you still get it.
+//
+// So `publish` does two things in one call, and the caller never has to know
+// which of them mattered:
+//
+//   1. DELIVERS LOCALLY, synchronously, through the bus - because
+//      api.v1.messaging.broadcast() excludes the sender and every messaging
+//      call resolves on a later tick. An event that went out and came back
+//      would arrive after the thing that raised it had already finished, which
+//      is useless for "let a handler adjust this before it happens". This is a
+//      correctness choice, not a performance one.
+//   2. RELAYS ONWARD - unless the channel is local: (never leaves), or a
+//      handler said `stop` (nothing further, here or anywhere).
+//
+// `subscribe` is the same idea from the other side: a handler registered here
+// hears local events AND anything a sibling script broadcast on that channel,
+// and `event.from` is how it tells them apart when it cares.
+// =============================================================================
+export const Bus = new EventBus();
+
+export class PostOffice {
+  private static _wired: number | undefined;
+
+  // Start listening to the wire. Idempotent: calling it twice keeps the one
+  // subscription, so init() may call it without bookkeeping.
+  static async open(): Promise<void> {
+    if (PostOffice._wired !== undefined) return;
+    const messaging = (api as { v1?: { messaging?: {
+      onMessage?: (cb: (m: unknown) => unknown, filter?: unknown) => Promise<number>;
+    } } }).v1?.messaging;
+    if (!messaging?.onMessage) return;   // a host without messaging is not an error
+    PostOffice._wired = await messaging.onMessage((raw: unknown) => {
+      const m = (raw ?? {}) as { fromScriptId?: string; channel?: string; data?: unknown; timestamp?: number };
+      if (!m.channel) return;
+      // Arrived from outside, so it is announced with `from` set - and it is
+      // NOT relayed onward: this script is a subscriber, not a repeater.
+      Bus.emit(m.channel, m.data, { from: m.fromScriptId, at: m.timestamp });
+    });
+  }
+
+  static async close(): Promise<void> {
+    const messaging = (api as { v1?: { messaging?: { unsubscribe?: (i: number) => Promise<void> } } }).v1?.messaging;
+    // Best-effort: a host that has already dropped our subscription (a reload,
+    // a fresh script run) will refuse the index, and that is not a failure -
+    // the point of closing is that `_wired` stops claiming we are listening.
+    if (PostOffice._wired !== undefined) {
+      try { await messaging?.unsubscribe?.(PostOffice._wired); } catch { /* already gone */ }
+    }
+    PostOffice._wired = undefined;
+  }
+
+  // Announce something. Local handlers have all run by the time this resolves;
+  // the returned event carries their verdicts, so a caller may ask "was this
+  // cancelled?" and act on the answer.
+  static async publish<T>(channel: string, data: T): Promise<BusEvent<T>> {
+    const event = Bus.emit(channel, data);
+    if (event.stopped || isLocalChannel(channel)) return event;
+    const messaging = (api as { v1?: { messaging?: {
+      broadcast?: (data: unknown, channel?: string) => Promise<void>;
+    } } }).v1?.messaging;
+    // Only PLAIN DATA crosses a wire (the docs say "will be serialized"), which
+    // is why the engine's shareable layers are already plain: TemplateDef,
+    // ResourceDef, SavedRoll, the card text. A class instance would arrive
+    // stripped of its methods, so nothing here tries to send one.
+    try { await messaging?.broadcast?.(event.data, event.channel); }
+    catch (err) { event.errors.push(`relay: ${err instanceof Error ? err.message : String(err)}`); }
+    return event;
+  }
+
+  static subscribe<T = unknown>(channel: string, handler: BusHandler<T>, priority: BusPriority = "normal"): number {
+    return Bus.on(channel, handler, priority);
+  }
+  static unsubscribe(id: number): boolean { return Bus.off(id); }
 }

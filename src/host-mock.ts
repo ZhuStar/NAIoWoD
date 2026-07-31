@@ -139,6 +139,55 @@ export async function __uiClickButton(text: string): Promise<boolean> {
   return false;
 }
 
+// --- MESSAGING MOCK ----------------------------------------------------------
+// Faithful to the DOCUMENTED contract and no more (docs/api-reference.md
+// §api.v1.messaging). The two rules that shape everything built on it:
+//
+//   * `broadcast` goes to all scripts EXCEPT the sender, so this mock never
+//     delivers a broadcast back to the script that sent it. Code that expects
+//     to hear its own event must not go through the wire - that is exactly the
+//     trap core/bus.ts's direct dispatch avoids.
+//   * every call is a Promise, so delivery is a LATER TICK, never the current
+//     one. The mock keeps that: `__deliverMessage` is how a test plays the part
+//     of the other script.
+//
+// What the docs do NOT promise - ordering, retries, what happens when nobody is
+// listening - this mock does not invent. Off-host green here is not proof of
+// on-host behaviour, and scripts/probe-messaging.ts is how to find out for real.
+const __mockSubs: { index: number; cb: (m: unknown) => unknown; filter?: { fromScriptId?: string; channel?: string } }[] = [];
+let __mockSubIndex = 0;
+const __mockSent: { toScriptId?: string; data: unknown; channel?: string }[] = [];
+const __mockMessaging = {
+  send: async (toScriptId: string, data: unknown, channel?: string) => { __mockSent.push({ toScriptId, data, channel }); },
+  broadcast: async (data: unknown, channel?: string) => { __mockSent.push({ data, channel }); },
+  onMessage: async (cb: (m: unknown) => unknown, filter?: { fromScriptId?: string; channel?: string }) => {
+    const index = ++__mockSubIndex;
+    __mockSubs.push({ index, cb, filter });
+    return index;
+  },
+  unsubscribe: async (index: number) => {
+    const at = __mockSubs.findIndex(s => s.index === index);
+    if (at >= 0) __mockSubs.splice(at, 1);
+  },
+};
+// Test hook: what this script has put on the wire (in order), and a reset.
+export function __sentMessages(): { toScriptId?: string; data: unknown; channel?: string }[] {
+  return __mockSent.map(m => ({ ...m }));
+}
+export function __resetMessagingMock(): void {
+  __mockSubs.length = 0; __mockSent.length = 0; __mockSubIndex = 0;
+}
+// Test hook: play the part of ANOTHER script and deliver a message inward,
+// honouring each subscription's filter exactly as the documented API would.
+export async function __deliverMessage(message: { fromScriptId: string; toScriptId?: string; data: unknown; channel?: string; timestamp?: number }): Promise<void> {
+  const full = { timestamp: Date.now(), ...message };
+  for (const sub of [...__mockSubs]) {
+    if (sub.filter?.channel !== undefined && sub.filter.channel !== full.channel) continue;
+    if (sub.filter?.fromScriptId !== undefined && sub.filter.fromScriptId !== full.fromScriptId) continue;
+    await sub.cb(full);
+  }
+}
+
 // --- INSTALL -----------------------------------------------------------------
 // Yield to a real host-provided `api` when one exists; otherwise install the
 // mock. The mock lorebook starts EMPTY, like a fresh NovelAI story: it is the
@@ -210,6 +259,7 @@ if (!__g.api) {
         part: __mockPart,
         toast: async (_message: string) => { /* off-host: no toast surface */ },
       },
+      messaging: __mockMessaging,
     },
   };
 }

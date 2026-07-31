@@ -1892,6 +1892,143 @@ function nextFullMoon(epoch: number): number {
 }
 //#endregion src/core/time.ts
 
+//#region src/core/bus.ts
+// =============================================================================
+// THE EVENT BUS - one place a thing that happened is announced
+// -----------------------------------------------------------------------------
+// PURE. No `api`, no storage, no imports: this file is the dispatch rule and
+// nothing else, so it can be reasoned about and tested on its own. The half
+// that talks to other scripts (api.v1.messaging) lives in services.ts and is
+// built ON this - see PostOffice.
+//
+// The owner's model, and it is the right one: every script keeps a POST OFFICE.
+// You walk to it to send something, or you wait at home and it brings you what
+// arrived. Sending something to yourself still gets delivered.
+//
+// That last part is why `emit` here is DIRECT and SYNCHRONOUS rather than a
+// round trip through messaging. It is NOT an efficiency choice:
+//
+//   * api.v1.messaging.broadcast() explicitly excludes the sender, so a script
+//     literally cannot receive its own broadcast; and
+//   * every messaging call is a Promise. An event that leaves and comes back
+//     arrives on a LATER TICK - so the thing that raised it has already
+//     finished. "Let a handler adjust this roll before it is rolled" is
+//     impossible across the wire and trivial in a direct call.
+//
+// So: local dispatch is a function call, the relay is a message, and the
+// PUBLISHER cannot tell the difference. That is the simplicity the owner asked
+// for, kept without the trap underneath it.
+// =============================================================================
+
+// Handlers run in this order. `monitor` is the observe-only slot: it runs last,
+// after everything has had its say, and its verdict is IGNORED - use it for
+// logging and ledgers, where reacting is right and interfering is not.
+const BUS_PRIORITIES = ["first", "early", "normal", "late", "last", "monitor"] as const;
+type BusPriority = typeof BUS_PRIORITIES[number];
+
+// A channel whose name starts with this NEVER leaves the script: the post
+// office recognises it and simply hands it back down the hall. Anything else is
+// relayed. (The owner's "loco" prefix, spelled the way the rest of the engine
+// spells things.)
+const LOCAL_PREFIX = "local:";
+function isLocalChannel(channel: string): boolean {
+  return channel.trim().toLowerCase().startsWith(LOCAL_PREFIX);
+}
+
+// A channel can be ANYTHING - that was the owner's point, and it is worth
+// keeping. "character-healed-aggravated-with-a-resource" is a perfectly good
+// channel; so is "rolls". Names are normalized only by case and trimming, so
+// two spellings of the same intent cannot drift apart.
+function busChannel(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+// What handlers actually see. `cancelled` is a FLAG, not an interruption: later
+// handlers still run and may honour it (`if (event.cancelled) return;`) or
+// ignore it entirely. `stopped` is the interruption - nothing further runs, and
+// the post office does not relay it onward.
+interface BusEvent<T = unknown> {
+  channel: string;
+  data: T;
+  // The script this arrived from, absent when it was raised right here. The
+  // difference matters: a handler may want to act only on local events, or only
+  // on foreign ones, and it should never have to guess.
+  from?: string;
+  at: number;              // epoch ms (the relayed ScriptMessage's timestamp)
+  cancelled: boolean;
+  stopped: boolean;
+  // A handler that throws does not take the emit down with it: the failure is
+  // recorded here and the rest of the handlers still run. Same law as a bad
+  // lorebook card - surfaced, never fatal.
+  errors: string[];
+}
+
+// What a handler may say on the way out. Returning nothing is the common case.
+interface BusVerdict { cancel?: boolean; stop?: boolean }
+type BusHandler<T = unknown> = (event: BusEvent<T>) => BusVerdict | void;
+
+interface Subscription { id: number; channel: string; priority: BusPriority; handler: BusHandler }
+
+class EventBus {
+  private _subs: Subscription[] = [];
+  private _next = 1;
+
+  // Subscribe. The number back is the handle `off` takes - the same shape
+  // api.v1.messaging.onMessage uses, so the two layers read alike.
+  on<T = unknown>(channel: string, handler: BusHandler<T>, priority: BusPriority = "normal"): number {
+    const id = this._next++;
+    this._subs.push({ id, channel: busChannel(channel), priority, handler: handler as BusHandler });
+    return id;
+  }
+
+  off(id: number): boolean {
+    const before = this._subs.length;
+    this._subs = this._subs.filter(s => s.id !== id);
+    return this._subs.length < before;
+  }
+
+  // Every handler on a channel, in the order they will run: by priority, then
+  // by registration. Exposed because "who is listening to this, and when" is a
+  // question worth being able to answer out loud.
+  listeners(channel: string): Array<{ id: number; priority: BusPriority }> {
+    const key = busChannel(channel);
+    return this._subs
+      .filter(s => s.channel === key)
+      .sort((a, b) => BUS_PRIORITIES.indexOf(a.priority) - BUS_PRIORITIES.indexOf(b.priority) || a.id - b.id)
+      .map(s => ({ id: s.id, priority: s.priority }));
+  }
+
+  channels(): string[] { return [...new Set(this._subs.map(s => s.channel))].sort(); }
+
+  // Announce something. SYNCHRONOUS: by the time this returns, every local
+  // handler has run and the event carries their verdicts - which is exactly
+  // what lets a caller ask "was this cancelled?" and act on the answer.
+  emit<T = unknown>(channel: string, data: T, meta: { from?: string; at?: number } = {}): BusEvent<T> {
+    const event: BusEvent<T> = {
+      channel: busChannel(channel), data,
+      ...(meta.from ? { from: meta.from } : {}),
+      at: meta.at ?? Date.now(),
+      cancelled: false, stopped: false, errors: [],
+    };
+    for (const { id } of this.listeners(event.channel)) {
+      if (event.stopped) break;
+      const sub = this._subs.find(s => s.id === id);
+      if (!sub) continue;   // a handler that unsubscribed a handler mid-emit
+      try {
+        const verdict = sub.handler(event as BusEvent);
+        // A monitor watches; it does not vote.
+        if (sub.priority === "monitor" || !verdict) continue;
+        if (verdict.cancel) event.cancelled = true;
+        if (verdict.stop) event.stopped = true;
+      } catch (err) {
+        event.errors.push(`${event.channel} handler #${id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return event;
+  }
+}
+//#endregion src/core/bus.ts
+
 //#region src/wizard.ts
 // =============================================================================
 // WIZARD - a medium-agnostic engine for guided, multi-step configuration
@@ -5994,6 +6131,87 @@ class LorebookParser {
     }
     return { abilities, backgrounds };
   }
+}
+
+// =============================================================================
+// THE POST OFFICE - the bus, wired to the other scripts
+// -----------------------------------------------------------------------------
+// core/bus.ts is the dispatch rule; this is the half that knows about
+// api.v1.messaging. The owner's picture: every script keeps a post office. You
+// walk to it to send something; you wait at home and it brings you what
+// arrived. Send something to yourself and you still get it.
+//
+// So `publish` does two things in one call, and the caller never has to know
+// which of them mattered:
+//
+//   1. DELIVERS LOCALLY, synchronously, through the bus - because
+//      api.v1.messaging.broadcast() excludes the sender and every messaging
+//      call resolves on a later tick. An event that went out and came back
+//      would arrive after the thing that raised it had already finished, which
+//      is useless for "let a handler adjust this before it happens". This is a
+//      correctness choice, not a performance one.
+//   2. RELAYS ONWARD - unless the channel is local: (never leaves), or a
+//      handler said `stop` (nothing further, here or anywhere).
+//
+// `subscribe` is the same idea from the other side: a handler registered here
+// hears local events AND anything a sibling script broadcast on that channel,
+// and `event.from` is how it tells them apart when it cares.
+// =============================================================================
+const Bus = new EventBus();
+
+class PostOffice {
+  private static _wired: number | undefined;
+
+  // Start listening to the wire. Idempotent: calling it twice keeps the one
+  // subscription, so init() may call it without bookkeeping.
+  static async open(): Promise<void> {
+    if (PostOffice._wired !== undefined) return;
+    const messaging = (api as { v1?: { messaging?: {
+      onMessage?: (cb: (m: unknown) => unknown, filter?: unknown) => Promise<number>;
+    } } }).v1?.messaging;
+    if (!messaging?.onMessage) return;   // a host without messaging is not an error
+    PostOffice._wired = await messaging.onMessage((raw: unknown) => {
+      const m = (raw ?? {}) as { fromScriptId?: string; channel?: string; data?: unknown; timestamp?: number };
+      if (!m.channel) return;
+      // Arrived from outside, so it is announced with `from` set - and it is
+      // NOT relayed onward: this script is a subscriber, not a repeater.
+      Bus.emit(m.channel, m.data, { from: m.fromScriptId, at: m.timestamp });
+    });
+  }
+
+  static async close(): Promise<void> {
+    const messaging = (api as { v1?: { messaging?: { unsubscribe?: (i: number) => Promise<void> } } }).v1?.messaging;
+    // Best-effort: a host that has already dropped our subscription (a reload,
+    // a fresh script run) will refuse the index, and that is not a failure -
+    // the point of closing is that `_wired` stops claiming we are listening.
+    if (PostOffice._wired !== undefined) {
+      try { await messaging?.unsubscribe?.(PostOffice._wired); } catch { /* already gone */ }
+    }
+    PostOffice._wired = undefined;
+  }
+
+  // Announce something. Local handlers have all run by the time this resolves;
+  // the returned event carries their verdicts, so a caller may ask "was this
+  // cancelled?" and act on the answer.
+  static async publish<T>(channel: string, data: T): Promise<BusEvent<T>> {
+    const event = Bus.emit(channel, data);
+    if (event.stopped || isLocalChannel(channel)) return event;
+    const messaging = (api as { v1?: { messaging?: {
+      broadcast?: (data: unknown, channel?: string) => Promise<void>;
+    } } }).v1?.messaging;
+    // Only PLAIN DATA crosses a wire (the docs say "will be serialized"), which
+    // is why the engine's shareable layers are already plain: TemplateDef,
+    // ResourceDef, SavedRoll, the card text. A class instance would arrive
+    // stripped of its methods, so nothing here tries to send one.
+    try { await messaging?.broadcast?.(event.data, event.channel); }
+    catch (err) { event.errors.push(`relay: ${err instanceof Error ? err.message : String(err)}`); }
+    return event;
+  }
+
+  static subscribe<T = unknown>(channel: string, handler: BusHandler<T>, priority: BusPriority = "normal"): number {
+    return Bus.on(channel, handler, priority);
+  }
+  static unsubscribe(id: number): boolean { return Bus.off(id); }
 }
 //#endregion src/services.ts
 
@@ -14666,6 +14884,10 @@ async function init(): Promise<{ setupMessage: string | null }> {
   api.v1.hooks.register("onGenerationEnd", async (_params: Parameters<OnGenerationEnd>[0]) => {
     await processGenerationEnd();
   });
+  // Open the post office: from here on, anything a sibling script broadcasts
+  // reaches this script's bus. A host with no messaging surface is fine - the
+  // local half of the bus works either way.
+  await PostOffice.open();
   const boot = await LorebookManager.bootstrap();
   await ensurePath("config", CONFIG_GENERAL_HEADER);
   await ensurePath("config:success-tables", TABLE_GENERAL_HEADER);

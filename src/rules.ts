@@ -210,6 +210,72 @@ export function creationBudget(over: Partial<CreationBudget> = {}): CreationBudg
 }
 
 // =============================================================================
+// PURSES - what a budget IS: an allowance, and what a dot costs to buy
+// -----------------------------------------------------------------------------
+// A purse used to be one string ("25" arcana points). That says how much you
+// GET and nothing about what a thing COSTS, so the two prices a Dark Ages
+// character actually pays live here beside the allowance: `freebie` (at
+// creation) and `experience` (in play). Both are TEXT, exactly like
+// DEFAULT_ADVANCEMENT_COSTS - "current x 5" is a price a Storyteller applies,
+// and there is no advancement engine to evaluate it.
+//
+// NOT_PURCHASABLE is the one the engine DOES read: a purse you cannot shop
+// from at all. The Ouroboros' Arcana are what he IS, not something he buys
+// with freebies or earns with experience, and that is a rule rather than a
+// missing number.
+//
+// 🚧 MATURATION - the third Dark Ages purse, spent in downtime - is deliberately
+// NOT here yet. DEFAULT_ADVANCEMENT_COSTS still carries its column for the
+// Storyteller; a purse grows a `maturation` price when the downtime engine
+// exists to spend it (docs/memory.md roadmap).
+// =============================================================================
+export const NOT_PURCHASABLE = "-";
+export interface BudgetDef {
+  allows?: string;      // EXPRESSION over the character: "25", "role:willpower"
+  freebie?: string;     // what ONE dot costs in freebies, or NOT_PURCHASABLE
+  experience?: string;  // ... and what it costs in experience
+  note?: string;
+}
+// A purse written the short way is just its allowance, which is what every
+// template said before prices existed.
+export type BudgetEntry = string | BudgetDef;
+export function budgetDef(entry: BudgetEntry | undefined): BudgetDef {
+  if (entry === undefined) return {};
+  return typeof entry === "string" ? { allows: entry } : { ...entry };
+}
+// Is this price a price at all? Absent means nobody said (the Storyteller's
+// call, as ever); NOT_PURCHASABLE means the answer is no.
+export function budgetBuyable(price: string | undefined): boolean {
+  const p = (price ?? "").trim();
+  return p !== "" && p !== NOT_PURCHASABLE;
+}
+
+// =============================================================================
+// CAPABILITIES - what a creature can actually USE
+// -----------------------------------------------------------------------------
+// Holding a pool is not the same as being able to spend it. A mage has ten
+// points of blood in his body and no way to use one as a vampire does. A
+// vampire cannot harvest Quintessence from a cray, cannot gain it from Tass,
+// and cannot burn a talisman's store on Awakened magic - he never Awakened at
+// all. This matters most for a pool somebody is GIVEN: an object that grants
+// Resolve is inert in the hands of a man who cannot channel it, and there are
+// few demons and fewer thralls in these centuries.
+//
+// So a resource names the capabilities it NEEDS (ResourceDef.requires) and a
+// template names the ones it HAS (TemplateConfig.Capabilities); a character may
+// be attuned to one on top of that (PlayableCharacter.capabilities). `awakened`
+// used to be a boolean of its own - it is simply the first of these.
+// =============================================================================
+export const CAPABILITIES: Record<string, string> = {
+  awakened: "works Awakened magic: may hold, harvest and spend Quintessence",
+  vitae: "uses vampiric vitae as the Damned do - heal with it, boost with it",
+  resolve: "channels the Resolve of the infernal - rare, in these centuries",
+};
+export function capabilityNote(name: string): string | undefined {
+  return CAPABILITIES[StringUtil.normalize(name)];
+}
+
+// =============================================================================
 // DERIVED VALUES - the parts of a sheet that are consequences of other parts
 // -----------------------------------------------------------------------------
 // A vampire's Road is the sum of its two Road Virtues; its Willpower equals its
@@ -345,6 +411,11 @@ export interface ResourceDef {
   perTurnLimit?: Numeric;   // pools only (e.g. blood expenditure per turn)
   fromGeneration?: boolean; // blood pool: max & perTurn derived from Generation
   roles?: string[];         // abstract capabilities this resource fills
+  // What a character must be CAPABLE OF to use this pool at all (CAPABILITIES).
+  // Not the same as having it: a talisman may hand a mortal ten points of
+  // Quintessence, and he will hold every one of them uselessly. Empty means
+  // anyone can spend it.
+  requires?: string[];
   // "Specifically replace any other resource": this resource takes over the
   // named ones - they are hidden from the character and their names resolve
   // here. Resource-level identity, not a spend effect.
@@ -401,6 +472,9 @@ export function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "resolve", kind: "tracker", start: 3, startMin: 1, startMax: 10, max: 10,
     roles: ["resolve", "magic-fuel"],
+    // Resolve is the rarest substance in these centuries: a handful of demons
+    // and their thralls. Anyone else holding it holds it and no more.
+    requires: ["resolve"],
     effect: { label: "Resolve: -2 difficulty", apply: [{ op: "difficulty", amount: -2 }] },
     // The whole deal when a mage channels Resolve into a spell (limited per
     // scene as a usage-ledger demo; the Storyteller enforces the reset).
@@ -418,6 +492,9 @@ export function bloodResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1,
     roles: ["blood"],
+    // Every living thing has blood. Only the Damned and those they sustain can
+    // DO anything with it - a mage's ten points are just a mage's ten points.
+    requires: ["vitae"],
     effects: {
       heal: {
         label: "Blood knits the body: heal 1 bashing/lethal per point",
@@ -448,25 +525,42 @@ export class TemplateConfig {
     // (e.g. a vampire's undead physiology). Copied onto the character at build
     // time so per-character armour can be appended without touching the template.
     public readonly Reactions: DamageReaction[] = [],
-    // Has the character Awakened? Mages have; so does the Ouroboros. Sanctum,
-    // Library and Cray benefits are all predicated on it (the sleeping world
-    // gets nothing from a place of power).
-    public readonly Awakened: boolean = false,
-    // What this template may SPEND, per purse, as EXPRESSIONS - "15" is fifteen,
-    // and the expression form is what lets a later chronicle write one budget in
-    // terms of another. A sheet may override any of them (PlayableCharacter
-    // .budgets). A purse with no budget anywhere is the Storyteller's call, and
-    // [[budget]] says so rather than inventing a number.
-    public readonly Budgets: Record<string, string> = {},
+    // What this creature can USE (see CAPABILITIES). `awakened` is one of these
+    // - Sanctum, Library and Cray benefits are all predicated on it, and the
+    // sleeping world gets nothing from a place of power.
+    public readonly Capabilities: string[] = [],
+    // What this template may SPEND, per purse: an allowance EXPRESSION ("15",
+    // or one budget written in terms of another), and optionally what a dot
+    // costs from the freebie and experience purses (see BudgetDef). A sheet may
+    // override any of them (PlayableCharacter.budgets). A purse with no budget
+    // anywhere is the Storyteller's call, and [[budget]] says so rather than
+    // inventing a number.
+    public readonly Budgets: Record<string, BudgetEntry> = {},
     // What a fresh character of this template may be (see CreationBudget).
     // Reported by [[creation]], enforced by nobody yet.
     public readonly Creation: CreationBudget = BASE_CREATION,
     // The values this splat's sheet IMPLIES rather than states (see Derivation).
-    public readonly Derived: Derivation[] = []
+    public readonly Derived: Derivation[] = [],
+    // The Disciplines this template counts as its own, on top of (or instead
+    // of) whatever the character's clan or bloodline family grants. See
+    // DisciplineAffinity: this is how a creature with no clan at all still has
+    // Disciplines that are properly his.
+    public readonly Affinity: DisciplineAffinity = { disciplines: [] }
   ) {}
 
   // Resources is the modern name for Pools (trackers + pools with roles/effects).
   get Resources(): ResourceDef[] { return this.Pools; }
+
+  // Awakened is a CAPABILITY now, not a field of its own - this is the name
+  // every reader already knew it by.
+  get Awakened(): boolean { return this.Capabilities.includes("awakened"); }
+
+  // Can a character of this template actually use that pool? A resource with no
+  // `requires` is usable by anyone; the answer names what is MISSING, because
+  // "you cannot" is worth nothing without "because you never Awakened".
+  CannotUse(def: ResourceDef): string[] {
+    return (def.requires ?? []).map(r => StringUtil.normalize(r)).filter(r => !this.Capabilities.includes(r));
+  }
 
   GetPool(name: string): ResourceDef | undefined {
     const n = StringUtil.normalize(name);
@@ -492,7 +586,7 @@ export const TEMPLATE_THRALL = new TemplateConfig(
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true,
-  STANDARD_HEALTH_LEVELS, [], false,
+  STANDARD_HEALTH_LEVELS, [], ["resolve"],   // the bond is what lets him channel it
   { arcana: "10" }   // placeholder, like the demon's
 );
 
@@ -501,13 +595,22 @@ export const TEMPLATE_VAMPIRE = new TemplateConfig(
   RulesetConfig.VAMPIRE,
   [
     willpowerResource(5),
-    bloodResource({ fromGeneration: true }),
+    // The pool a vampire's blood is thick enough to hold, said as what it IS: a
+    // consequence of generation, which is itself a consequence of the
+    // Generation Background. Raise the Background and the capacity follows on
+    // the living sheet, with no number edited anywhere.
+    bloodResource({
+      fromGeneration: true,
+      max: "blood-max(generation)",
+      perTurnLimit: "blood-per-turn(generation)",
+    }),
   ],
   VAMPIRE_SOAK,
   HUMANITY_MORALITY, true,
   STANDARD_HEALTH_LEVELS,
   [new UndeadPhysiology()],   // bullets & blades to bashing; fire/sunlight stay aggravated
-  false, {},
+  ["vitae"],
+  {},
   creationBudget({
     disciplines: 4,   // among CLAN Disciplines
     virtues: 7,       // over a free dot in each Road Virtue and in Courage
@@ -553,6 +656,9 @@ export const TEMPLATE_MAGE = new TemplateConfig(
     { name: "quintessence", kind: "pool", start: 0,
       max: "10 + 2 * background:fount", perTurnLimit: "max(2, background:fount + 1)",
       roles: ["magic-fuel"],
+      // Harvesting from a cray, eating Tass and burning a talisman's store on a
+      // spell are all one capability, and an unAwakened man has none of it.
+      requires: ["awakened"],
       effect: {
         label: "Quintessence: -1 casting difficulty per point (min diff 4; >2/turn needs the Fount Background)",
         apply: [{ op: "difficulty", amount: -1 }],
@@ -568,7 +674,7 @@ export const TEMPLATE_MAGE = new TemplateConfig(
   ],
   MAGE_SOAK,
   null, false,   // Mages have no Road/Humanity and no Virtues
-  STANDARD_HEALTH_LEVELS, [], true,   // Awakened
+  STANDARD_HEALTH_LEVELS, [], ["awakened"],
   {},
   creationBudget({
     notes: [
@@ -591,10 +697,15 @@ export const TEMPLATE_DEMON = new TemplateConfig(
   DEMON_SOAK,
   // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
   { name: "Torment", polarity: "ascending", start: 3 }, false,
-  STANDARD_HEALTH_LEVELS, [], false,
-  // A PLACEHOLDER arcana budget: the owner's number goes here (or on the sheet,
-  // which overrides). Arcana never touch the freebie purse.
-  { arcana: "25" }
+  STANDARD_HEALTH_LEVELS, [], ["resolve"],
+  // A PLACEHOLDER arcana allowance: the owner's number goes here (or on the
+  // sheet, which overrides). The book's own formula is
+  // (Resolve x permanent Torment) + temporary Torment + Willpower + Taints;
+  // 🚧 permanent-vs-temporary Torment is not modelled yet, so the number stands
+  // in for it. The PRICES, though, are already a rule: Arcana are never bought
+  // with freebies or experience.
+  { arcana: { allows: "25", freebie: NOT_PURCHASABLE, experience: NOT_PURCHASABLE,
+    note: "(Resolve x permanent Torment) + temporary Torment + Willpower + Taints" } }
 );
 
 // A modern-WoD illustration (not Dark Ages canon) kept here so the kind/severity
@@ -633,7 +744,8 @@ export const TEMPLATE_GHOUL = new TemplateConfig(
     bloodResource({ start: 0 }),
   ],
   GHOUL_SOAK,
-  HUMANITY_MORALITY, true   // still human: Road/Humanity + Virtues
+  HUMANITY_MORALITY, true,   // still human: Road/Humanity + Virtues
+  STANDARD_HEALTH_LEVELS, [], ["vitae"]   // the domitor's vitae, and he can use it
 );
 
 // A revenant is BORN ghouled: one of the strange bloodlines whose bodies brew
@@ -647,7 +759,8 @@ export const TEMPLATE_REVENANT = new TemplateConfig(
     bloodResource({ start: 10, recovery: [{ amount: 1, per: "day", note: "revenant vitae" }] }),
   ],
   GHOUL_SOAK,
-  HUMANITY_MORALITY, true   // still (technically) human: Road/Humanity + Virtues
+  HUMANITY_MORALITY, true,   // still (technically) human: Road/Humanity + Virtues
+  STANDARD_HEALTH_LEVELS, [], ["vitae"]   // his own vitae, and his to use
 );
 
 // Sorcerers work static / linear (hedge) magic through Paths - rated traits that
@@ -784,9 +897,17 @@ export interface TemplateDef {
   // `replaces` names the parent's hides it (Living Resolve over Quintessence).
   resources?: ResourceDef[];
   reactions?: string[];          // REACTIONS keys, added to the parent's
-  budgets?: Record<string, string>;
+  // ADDED to the parent's, so extending a template never costs you what it
+  // could already do. `awakened: false` is the one way to take one away.
+  capabilities?: string[];
+  // Any purse: an allowance alone ("25") or an allowance with its prices.
+  // MERGED over the parent's purse by purse, so a template may change what
+  // Arcana cost without restating what Backgrounds allow.
+  budgets?: Record<string, BudgetEntry>;
   creation?: Partial<CreationBudget>;
   derived?: Derivation[];
+  // The template's own Disciplines - added to the family's, or replacing them.
+  disciplines?: DisciplineAffinity;
 }
 
 // Resolve a def against its parent into the thing the engine reads.
@@ -795,6 +916,18 @@ export function templateFromDef(def: TemplateDef, parent?: TemplateConfig): Temp
   const morality = def.morality === undefined ? base.Morality
     : StringUtil.normalize(def.morality) === "none" ? null
     : MORALITIES[StringUtil.normalize(def.morality)] ?? base.Morality;
+  // Capabilities accumulate; `awakened: false` is the one that can subtract,
+  // because a template built on a mage may well be something that never woke.
+  const capabilities = new Set([...base.Capabilities, ...(def.capabilities ?? []).map(c => StringUtil.normalize(c))]);
+  if (def.awakened === true) capabilities.add("awakened");
+  if (def.awakened === false) capabilities.delete("awakened");
+  // Purses merge PURSE BY PURSE, and within a purse field by field: stating
+  // `arcana: {freebie: "-"}` prices the parent's allowance rather than erasing it.
+  const budgets: Record<string, BudgetEntry> = { ...base.Budgets };
+  for (const [purse, entry] of Object.entries(def.budgets ?? {})) {
+    const key = StringUtil.normalize(purse);
+    budgets[key] = { ...budgetDef(budgets[key]), ...budgetDef(entry) };
+  }
   return new TemplateConfig(
     def.description ?? (parent ? `${base.Name} (${def.name})` : def.name),
     def.ruleset ? RULESETS[StringUtil.normalize(def.ruleset)] ?? base.Rules : base.Rules,
@@ -804,10 +937,14 @@ export function templateFromDef(def: TemplateDef, parent?: TemplateConfig): Temp
     def.hasVirtues ?? base.HasVirtues,
     base.HealthLevels,
     [...base.Reactions, ...(def.reactions ?? []).map(r => REACTIONS[StringUtil.normalize(r)]?.()).filter((r): r is DamageReaction => !!r)],
-    def.awakened ?? base.Awakened,
-    { ...base.Budgets, ...(def.budgets ?? {}) },
+    [...capabilities],
+    budgets,
     { ...base.Creation, ...(def.creation ?? {}) },
     [...base.Derived, ...(def.derived ?? [])],
+    def.disciplines?.mode === "replace" ? def.disciplines : {
+      disciplines: [...new Set([...base.Affinity.disciplines, ...(def.disciplines?.disciplines ?? [])].map(d => StringUtil.normalize(d)))],
+      ...(base.Affinity.mode === "replace" ? { mode: "replace" as const } : {}),
+    },
   );
 }
 
@@ -824,7 +961,32 @@ export const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
     // their sum - which is why all three are listed. `replaces` then hides the
     // two (and Willpower, and Resolve) behind the one that stands for them.
     resources: [bloodResource({ start: 10, max: 10 }), LIVING_RESOLVE],
+    // He inherits `awakened` from the mage and adds the two nobody else has
+    // both of: a revenant's vitae and a laham's Resolve. Without these he would
+    // HOLD his fused pool and be unable to spend a point of it as any of the
+    // three things it is.
+    capabilities: ["vitae", "resolve"],
+    budgets: {
+      // The owner's ruling, and the shape the demon's formula will take when
+      // permanent-vs-temporary Torment is modelled: the arcana purse is worth
+      // his Willpower - which for him is Living Resolve, because that is what
+      // fills the `willpower` role. Never bought with freebies or experience.
+      arcana: {
+        // "his Willpower, or whatever replaces it" - which is the `role:`
+        // namespace exactly: for him it lands on Living Resolve.
+        allows: "role:willpower",
+        freebie: NOT_PURCHASABLE,
+        experience: NOT_PURCHASABLE,
+        note: "his Arcana are what he is, not something he shops for",
+      },
+    },
     creation: {
+      // A mage has no Discipline allowance; a creature with a revenant's blood
+      // does. The dots are his own (no clan names them) - which is what
+      // `disciplines` on a template is for. 🚧 the list is empty until the
+      // owner names them: [[extend-template name=ouroboros disciplines=`…`]].
+      disciplines: 2,
+      disciplineMax: 5,
       notes: [
         "Starting Willpower 5; note the Aura modifier, if any.",
         "One pool, not four: Living Resolve starts at Cray + Fount, or 5, whichever is higher.",
@@ -832,6 +994,9 @@ export const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
         "Arcana and Taints come out of the arcana purse, not out of freebies ([[budget]]).",
       ],
     },
+    // No clan, no transcribed revenant bloodline: his Disciplines are his own,
+    // and "replace" says the family registries have nothing to add to them.
+    disciplines: { disciplines: [], mode: "replace" },
   },
 ];
 
@@ -866,14 +1031,36 @@ export function makeTemplateDef(parts: Partial<TemplateDef> & { name: string }):
     });
   }
   if (resources.length) def.resources = resources;
-  const budgets: Record<string, string> = {};
-  for (const [purse, expr] of Object.entries(asMap(parts.budgets as unknown as CardValue))) {
-    const v = asText(expr);
-    if (v) budgets[StringUtil.normalize(purse)] = v;
+  const capabilities = asStringList(parts.capabilities as unknown as CardValue).map(c => StringUtil.normalize(c));
+  if (capabilities.length) def.capabilities = capabilities;
+  // A purse is either one line ("arcana: role:willpower") or a block with the
+  // allowance and its prices indented under it. Both reach here.
+  const budgets: Record<string, BudgetEntry> = {};
+  for (const [purse, raw] of Object.entries(asMap(parts.budgets as unknown as CardValue))) {
+    const key = StringUtil.normalize(purse);
+    const flat = asText(raw);
+    if (flat !== undefined && flat !== "") { budgets[key] = flat; continue; }
+    const m = asMap(raw);
+    const entry: BudgetDef = {};
+    for (const field of ["allows", "freebie", "experience", "note"] as const) {
+      const v = asText(m[field]);
+      if (v) entry[field] = v;
+    }
+    if (Object.keys(entry).length) budgets[key] = entry;
   }
   if (Object.keys(budgets).length) def.budgets = budgets;
   if (parts.creation && Object.keys(parts.creation).length) def.creation = parts.creation;
   if (parts.derived?.length) def.derived = parts.derived;
+  // Disciplines as a card writes them: a list, or a block with `mode`.
+  const affinity = parts.disciplines as unknown as CardValue;
+  const listed = asStringList(Array.isArray(affinity) || typeof affinity === "string" ? affinity : asMap(affinity)["disciplines"])
+    .map(d => StringUtil.normalize(d)).filter(Boolean);
+  const mode = StringUtil.normalize(asText(asMap(affinity)["mode"]) ?? "");
+  // "replace" with nothing listed is a real statement, not an empty one: it
+  // says the family registries have nothing to add to this creature.
+  if (listed.length || mode === "replace") {
+    def.disciplines = { disciplines: listed, ...(mode === "replace" ? { mode: "replace" as const } : {}) };
+  }
   return def;
 }
 
@@ -1123,12 +1310,7 @@ export const CLANS: Record<string, Clan> = {
 // because THAT is what a sheet records ([[choose clan …]]) - "Assamite
 // (Warrior)" is a title, `assamite-warrior` is the name of the thing.
 export function clanByName(name: string): (Clan & { id: string }) | undefined {
-  const key = StringUtil.normalize(name);
-  for (const [id, c] of Object.entries(CLANS)) {
-    if (id === key || StringUtil.normalize(c.name) === key) return { ...c, id };
-    if ((c.aliases ?? []).some(a => StringUtil.normalize(a) === key)) return { ...c, id };
-  }
-  return undefined;
+  return familyByName(CLANS, name);
 }
 
 // The thirteen: one entry per CLAN, castes folded into theirs. The label drops
@@ -1147,6 +1329,71 @@ export function clanFamilies(): Array<{ id: string; name: string }> {
 export function clanFamilyOf(name: string): string {
   const clan = clanByName(name);
   return clan ? (clan.family ?? clan.id) : StringUtil.normalize(name);
+}
+
+// =============================================================================
+// DISCIPLINE AFFINITY - whose Disciplines are properly yours
+// -----------------------------------------------------------------------------
+// A vampire's are his clan's. A ghoul's are his domitor's family's; a revenant's
+// are his bloodline's. Those last two registries are EMPTY: no Dark Ages book
+// is transcribed here yet, so the mechanism answers nothing for them - and a
+// template may then say what its creature's Disciplines are outright, which is
+// how a creature with no clan at all (the Ouroboros) still has Disciplines that
+// are his. Fill the registries in later and every reader below picks them up
+// with no further change; a template that OVERRODE the nothing keeps working,
+// because "replace" means replace.
+// =============================================================================
+export interface DisciplineAffinity {
+  disciplines: string[];
+  // "add" (the default) unions with whatever clan/family already grants;
+  // "replace" is the override - these and no others.
+  mode?: "add" | "replace";
+}
+// Ghoul and revenant bloodlines, shaped exactly like clans (a name and three
+// Disciplines) so one lookup serves all three. 🚧 no data yet, on purpose.
+export const GHOUL_FAMILIES: Record<string, Clan> = {};
+export const REVENANT_FAMILIES: Record<string, Clan> = {};
+// The choices a sheet can make that carry Disciplines with them, in the order
+// they are reported. `choice` is the key under PlayableCharacter.choices, so
+// [[choose revenant-family …]] already writes the right thing.
+export const AFFINITY_SOURCES: Array<{ choice: string; label: string; families: Record<string, Clan> }> = [
+  { choice: "clan", label: "clan", families: CLANS },
+  { choice: "ghoul-family", label: "ghoul family", families: GHOUL_FAMILIES },
+  { choice: "revenant-family", label: "revenant family", families: REVENANT_FAMILIES },
+];
+
+// One entry of any such registry, by id, name or alias - clanByName generalized.
+export function familyByName(families: Record<string, Clan>, name: string): (Clan & { id: string }) | undefined {
+  const key = StringUtil.normalize(name);
+  for (const [id, c] of Object.entries(families)) {
+    if (id === key || StringUtil.normalize(c.name) === key) return { ...c, id };
+    if ((c.aliases ?? []).some(a => StringUtil.normalize(a) === key)) return { ...c, id };
+  }
+  return undefined;
+}
+
+// The Disciplines that are this character's own: what his picked families
+// grant, plus (or replaced by) what his template says. Each name appears once,
+// and `sources` says who vouched for them - the whole point of [[creation]]
+// naming "out of affinity" is being able to say WHOSE clan.
+export function affinityDisciplines(
+  choices: Record<string, string> | undefined,
+  template?: DisciplineAffinity,
+): { disciplines: string[]; sources: string[] } {
+  const names: string[] = [];
+  const sources: string[] = [];
+  for (const src of AFFINITY_SOURCES) {
+    const picked = choices?.[src.choice];
+    if (!picked) continue;
+    const family = familyByName(src.families, picked);
+    if (!family) continue;
+    sources.push(family.name);
+    for (const d of family.disciplines) names.push(StringUtil.normalize(d));
+  }
+  const own = (template?.disciplines ?? []).map(d => StringUtil.normalize(d));
+  const all = template?.mode === "replace" ? own : [...names, ...own];
+  if (own.length) sources.push(template?.mode === "replace" ? "the template (only these)" : "the template");
+  return { disciplines: [...new Set(all)], sources };
 }
 
 // =============================================================================

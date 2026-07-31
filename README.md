@@ -204,8 +204,16 @@ per-template starting-value constraints. Examples baked in:
   Resolve**. Like a mage he has **no Road/Humanity and no Virtues**. See *The
   Ouroboros & Living Resolve*.
 
-Templates also carry an **`Awakened`** flag (Mage, Ouroboros). Places of power —
-sanctum, library, cray — answer only to the Awakened.
+Templates also carry **capabilities** — `awakened` (Mage, Ouroboros), `vitae`
+(Vampire, Ghoul, Revenant, Ouroboros), `resolve` (Demon, Thrall, Ouroboros).
+Places of power — sanctum, library, cray — answer only to the Awakened, and a
+pool nobody can *use* is only points; see *Capabilities*.
+
+A **vampire's blood pool is what generation allows**, live: `max` is
+`blood-max(generation)` and `generation` is `12 - background:generation`, so a
+12th holds eleven and spends one a turn, and five dots of the Generation
+Background make him a 7th holding twenty and spending five — with no number
+edited anywhere.
 
 ```ts
 import { CharacterFactory, TEMPLATE_VAMPIRE, DamagePacket, Kind, Source } from "./src";
@@ -527,6 +535,15 @@ than being one. They live in their own `choices` map on the sheet:
   all three. A clan may also **bound a trait**: a Nosferatu's Appearance is
   `0-0`, and `[[creation]]` flags a sheet still carrying the free dot everyone
   else gets.
+- **Whose Disciplines these are** is asked of three registries in turn — the
+  clan, the **ghoul family**, the **revenant family** (`[[choose ghoul-family
+  …]]`, `[[choose revenant-family …]]`). 🚧 the last two are **empty**: no Dark
+  Ages bloodline is transcribed yet, so they answer nothing — and a **template**
+  may then say what its creature's Disciplines are outright, which is how a
+  creature no book speaks for still has Disciplines that are properly his. Fill
+  the registries in later and every reader picks them up unchanged; a template
+  that said `=`(replace) keeps its own. `[[creation]]` flags anything **out of
+  affinity**, and says nothing when nothing has named them.
 - **`[[choose road <name>]]`** — the Road of Humanity, of Kings, or of the
   Beast. It decides which three Virtues the sheet carries and which **two** the
   Road rating sums, so a Ventrue on the Road of Kings derives from Conviction +
@@ -600,11 +617,65 @@ that extends the mage, swaps in a ghoul's soak, and adds one fused pool.
   stands in for Blood, Willpower, Resolve *and* Quintessence at once.
 - **`soak`** / **`morality`** / **`ruleset`** are chosen **by name**
   (`ghoul`, `humanity`, `none` …), because a card cannot hold an object.
-- **`budgets`**, **`creation`** and **`derived`** merge field-by-field over the
-  parent's; `reactions` append.
+- **`capabilities`** append (see *Capabilities* below); **`budgets`**,
+  **`creation`** and **`derived`** merge field-by-field over the parent's;
+  `reactions` append.
 - **`[[templates]]`** lists them (a `*` marks the ones written as data),
   **`[[templates <name>]]`** details one, **`[[forget-template]]`** drops a
   chronicle's and lets the shipped one resurface.
+
+**`[[extend-template]]` edits as well as creates.** Naming a template that
+already exists lays your arguments over the def in force rather than starting
+from nothing, so changing one purse costs one line and keeps the soak, the
+pools and the notes it came with:
+
+```
+[[extend-template name=`Ouroboros` budgets=`arcana=role:willpower`]]   # the allowance
+[[extend-template name=`Ouroboros` budgets=`arcana:freebie=-`]]        # and its price
+[[extend-template name=`Ouroboros` creation=`disciplines=2,discipline-max=5`]]
+[[extend-template name=`Ouroboros` disciplines=`=celerity,potence`]]   # = means "and no family's"
+```
+
+**Any part of a budget is yours.** `purse=<expression>` sets what the purse
+allows; `purse:freebie=` and `purse:experience=` set what **one dot costs** from
+each side, and `-` means *that purse cannot be bought from at all*. The
+creation pools take the same treatment: `attribute-start`, `attribute-max`,
+`ability-start`, `ability-max`, `backgrounds`, `freebies`, `disciplines`,
+`discipline-max`, `virtues`, `virtue-start` — each a number **or an
+expression**.
+
+### Capabilities — holding a pool is not being able to spend it
+
+A mage has ten points of blood in his body and no way to use one as a vampire
+does. A vampire cannot harvest Quintessence from a cray, cannot gain it from
+Tass, and cannot burn a talisman's store on Awakened magic — he never Awakened.
+So a **resource** names the capabilities it *needs* and a **template** names the
+ones it *has*:
+
+| Capability | What it lets you do |
+|---|---|
+| `awakened` | work Awakened magic: hold, harvest and spend Quintessence |
+| `vitae` | use vampiric vitae as the Damned do — heal with it, boost with it |
+| `resolve` | channel the Resolve of the infernal — rare, in these centuries |
+
+`awakened` used to be a boolean on the template; it is simply the first of
+these (`TemplateConfig.Awakened` still answers, and places of power still
+consult it). A pool whose `requires` is unmet is **held and inert**:
+
+```
+[[define-resource name=`Stolen Vitae` kind=pool start=10 max=10 requires=`vitae`]]
+[[spend stolen-vitae 1]]
+  → "Sleeper holds stolen-vitae but cannot use it - that needs vitae."
+[[attune vitae]]                 # something taught him the trick of it
+[[spend stolen-vitae 1]]         → "Now 9/10"
+[[attune vitae off]]  [[attune]] # what he can use, and what sits inert
+```
+
+`[[attune]]` writes to the **sheet**, on top of what the template can already
+do; it cannot take back what the template *is* (a mage who forgets he Awakened
+is a different template). This is the seam an item system will use — 🚧 objects
+that *grant* a pool are on the roadmap; the question of who can use one is
+answered now.
 
 Defs live in the **`wod:config:templates`** card, so a chronicle can edit or
 add one by hand. A def that extends something nobody defines — or that extends
@@ -685,6 +756,8 @@ max(cray + fount, 5)          starting Quintessence
   | `derived:willpower` | what it *would* be, ignoring the sheet |
   | `granted:sanctum` | only what a Background confers |
   | `budget:freebie` / `spent:freebie` / `left:freebie` | the purse |
+  | `resource:quintessence:max` | that pool **by name** (`:start` / `:max` / `:per-turn`) |
+  | `role:willpower` | whatever fills that **role** here, replacement applied — for the Ouroboros all four of `blood`, `willpower`, `resolve` and `quintessence` land on Living Resolve. Defaults to `:start`, because a pool's start is its *rating* |
 
   So a Background named *Generation* and the derived `generation` stay different
   numbers: `background:generation` is 5, `generation` is 7.
@@ -1749,13 +1822,30 @@ legal character look overspent, so `kind` decides both the **purse** and the
 Pacts, whose price is a calculation over Obligation, Consequence and Frequency,
 are left as prose for the Storyteller — the engine stores and shows them.)
 
-**A budget is an expression**, declared on the template and overridable on the
-sheet's `budgets:` block — `"25"` is twenty-five, and the expression form is
-what will let a later chronicle write one budget in terms of another. A purse
-with no budget anywhere is the Storyteller's call, and `[[budget]]` says so
-rather than inventing a number. Two purses always have one: `background` and
-`freebie` come from the **creation budget**, so `[[budget]]` and `[[creation]]`
-can never quote different numbers for the same pool.
+**A purse is an allowance *and its prices*.** The allowance is an expression,
+declared on the template and overridable on the sheet's `budgets:` block —
+`"25"` is twenty-five, and the expression form is what lets one budget be
+written in terms of another (the Ouroboros' Arcana are worth `role:willpower`,
+which for him is Living Resolve). Beside it sit **`freebie`** and
+**`experience`**: what **one dot** costs from each side, defaulting to the
+chronicle's cost table and overridable per template. `-` means *not
+purchasable*, and that is a rule the engine reads rather than a missing number:
+
+```
+[[extend-template name=`Ouroboros` budgets=`arcana=role:willpower,arcana:freebie=-,arcana:experience=-`]]
+[[budget]] → arcana: 0/30 (role:willpower), 30 left
+             - not bought with freebies, not bought with experience
+```
+
+🚧 **Maturation** — the third Dark Ages purse, spent in downtime — is
+deliberately *not* on a budget yet. `[[costs]]` still carries its column for the
+Storyteller; a purse grows a `maturation` price when there is a downtime engine
+to spend it.
+
+A purse with no allowance anywhere is the Storyteller's call, and `[[budget]]`
+says so rather than inventing a number. Three always have one: `background`,
+`freebie` and `discipline` come from the **creation budget**, so `[[budget]]`
+and `[[creation]]` can never quote different numbers for the same pool.
 
 **Prices differ per template**, which is what a printed *Celestial Radiance
 (7/5)* means — and the difference can run deeper than money:

@@ -7,8 +7,11 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `72c0076`** ("Successes the
-> Storyteller simply grants"). Prior: `b182c7d` ("Say each thing
+> **Last synced with the code as of commit `12a9fae`** ("A purse with
+> prices, a pool you cannot use, and Disciplines that are his own").
+> Prior: `a05d8d4` ("A pool that reads the sheet"); `3639376` ("A template you
+> can extend, and an Ouroboros that is no longer code"); `72c0076`
+> ("Successes the Storyteller simply grants"); `b182c7d` ("Say each thing
 > once"); `e26e005` ("One arithmetic,
 > and a way to point at the sheet"); `725fa3a` ("The budget a
 > character is built against"); `5778ec5` ("Backgrounds get a bag
@@ -501,6 +504,26 @@ derived values.
   `exclusiveDefs()` + **`EXCLUSIVE_MERITS_FLAWS`** (13+6 pairs, prepended to
   `DEFAULT_MERITS_FLAWS`). `DEFAULT_ADVANCEMENT_COSTS`: foundation freebie 5,
   pillar 3, new `specialty` row.
+- **§7.60 additions — purses, capabilities, affinity**: **`BudgetDef {allows?,
+  freebie?, experience?, note?}`** + `BudgetEntry = string | BudgetDef` +
+  `budgetDef(entry)` + `budgetBuyable(price)` + **`NOT_PURCHASABLE = "-"`**;
+  `TemplateConfig.Budgets` holds `BudgetEntry` and merges FIELD BY FIELD in
+  `templateFromDef`. **`CAPABILITIES`** (awakened / vitae / resolve) +
+  `capabilityNote`; `ResourceDef.requires`; **`TemplateConfig.Capabilities`
+  REPLACED the `Awakened` boolean** (which is now a getter) and
+  `TemplateConfig.CannotUse(def)` names what is missing.
+  **`DisciplineAffinity {disciplines, mode?}`** + `TemplateConfig.Affinity` +
+  empty **`GHOUL_FAMILIES`/`REVENANT_FAMILIES`** + **`AFFINITY_SOURCES`** +
+  `familyByName(registry, name)` (`clanByName` now delegates) +
+  **`affinityDisciplines(choices, template)`**. `TemplateDef` gained
+  `capabilities` and `disciplines`; `makeTemplateDef` decodes a purse written
+  either as one line or as a block. The vampire's blood is
+  `blood-max(generation)` / `blood-per-turn(generation)`; the demon's arcana
+  purse carries both prices as `NOT_PURCHASABLE` plus the book's formula as a
+  note; the Ouroboros def carries `capabilities: ["vitae","resolve"]`,
+  `budgets.arcana = {allows: "role:willpower", freebie: "-", experience: "-"}`,
+  `creation.disciplines = 2`, and `disciplines: {disciplines: [], mode:
+  "replace"}`.
 - **§7.55 additions — expressions**: every `CreationBudget` /`PriorityPools` /
   `TraitLimit` field is now **`Numeric`** (a number OR an expression), plus
   `disciplineMax` and `virtueStart`. `traitLimitFor` takes a `"discipline"`
@@ -735,6 +758,17 @@ and the future "ready character" path):
   virtues were engaged, generation-sized blood, morality (derived from the
   road's two rating virtues when `deriveFromVirtues`), tags→merits ordering.
 
+**§7.60 additions — state.ts**: `PlayableCharacter.capabilities?: string[]`
+(sheet-level attunements, on top of the template's) and `.budgets` retyped to
+`Record<string, BudgetEntry>`; both round-trip through the sheet card (a purse
+is one line when it is only an allowance, a block when it is priced).
+`CharacterResources.capabilities(char)` / `.cannotUse(char, def)`;
+`.spend` returns `{spent: 0, blocked}` for a pool the character cannot use;
+`ResourceView.blocked`. The scope gained **`role:<name>[:start|max|per-turn]`**
+beside `resource:` — same `resourceDepth` guard, but resolved through
+`CharacterResources.resolveDef` (name → role → replaced) and defaulting to
+`:start`, with the player's `poolStarts` entry winning.
+
 **§7.55 — THE CHARACTER SCOPE** (right after `resolveTraitFromRecord`, which is
 unchanged and still the RAW bucket read). One place answers "what is this name
 worth on this sheet", so every expression in the engine reads a character the
@@ -773,7 +807,9 @@ same way.
   (1+, hybrids legal, merge resolved later), stage: "potential"|"ready",
   attributes, abilities, backgrounds, virtues, disciplines, traits,
   poolStarts, meritsFlaws, tags[]}` — plus the optional sidecars added later:
-  `specialties`, `instances` (§7.43), `budgets`/`paid` (§7.50), and
+  `specialties`, `instances` (§7.43), `budgets`/`paid` (§7.50, retyped to
+  `BudgetEntry` in §7.60), `capabilities` (§7.60: what this sheet may USE, on
+  top of the template's), and
   `choices`/`priorities` (§7.54: the clan/fellowship picks, and which
   Attribute/Ability categories are primary/secondary/tertiary).
 - `CharacterStore` — `newPotential(name, templates)` seeds **all nine
@@ -946,6 +982,16 @@ triples; unknown categories refused with the known list), **`cmdClans`**
 WINS over auto-detection; `unmetRequirements` gained the `choices` gate, which
 compares clans by FAMILY. Registrations: `creation`, `choose`, `clans`, `clan`.
 
+**§7.60 additions — priced purses in play**: `budgetsOf(char)` returns
+`Record<string, BudgetDef>` (creation pools → templates → sheet, field by
+field), seeds a **`discipline`** purse from `creation.disciplines`, and fills
+missing prices from `advancementCostsFrom` by purse name; `budgetAllowance`,
+`budgetPrices`; `purseLedger` counts Discipline dots; `affinityOf(char)` (every
+template's Affinity folded, then `affinityDisciplines`); **`[[attune]]`**
+(`cmdAttune`); `cmdSpend` refuses an unusable pool by name; `pairsArg`,
+`CREATION_FIELDS`, `numericArg`, and a `cmdExtendTemplate` that **edits** the
+def in force rather than rebuilding it.
+
 **§7.55 additions — expressions in play**: `purseScope(char)` (the
 `budget:`/`spent:`/`left:` ScopeExtension, built on `purseLedger` +
 `budgetsOf`); `evalBudget(char, expr)` now goes through `evalOn` rather than the
@@ -1078,8 +1124,11 @@ verb's CommandSpec at the bottom of game.ts — the grammars below match it):
 `creator-mode set=true|false` · `create-playable name="…" templates="a,b"` ·
 `play [name="…"]` (no name → default) · `characters` (list; marks
 current/default) · `convert-cards` (§7.43: one-shot, idempotent migration of
-any `wod:`/`srd:` card still holding JSON) · `budget [name]` (§7.50: each purse -
-expression, value, spent, left; advisory) · `paid <key> [expr|listed]` (§7.50:
+any `wod:`/`srd:` card still holding JSON) · `budget [name]` (§7.50/§7.60: each purse -
+allowance expression, value, spent, left, AND what a dot costs in freebies and
+experience; advisory) ·
+`attune [capability] [off]` (§7.60: what this character can USE; a pool he
+cannot use is only points) · `paid <key> [expr|listed]` (§7.50:
 what a purchase REALLY cost; no expression = granted) · `costs [kind]` (§7.44: what a dot
 costs from each purse — chronicle rules, Storyteller-applied) ·
 `sheet [name|@alias]` (the record as the ENGINE reads it —
@@ -2818,6 +2867,105 @@ and `prefill` are mocked/available but not yet written.
       `backgrounds` wholesale and silently dropped the Fount that `set-trait`
       had just written.
 
+60. **A purse with prices, a pool you cannot use, and Disciplines that are his
+    own** (user, six requirements at once: "Can I change any part of the budget
+    of the new template? I should be capable of doing that. If yes, than you
+    just set the Arcana budget to Willpower (or whatever replaces it; not
+    purchasable with freebies or XP) ... The Ouroboros-clone template is supposed
+    to be **capable** of using resolve ... What if the person gaining the
+    resource just has no way of using resolve? ... Same thing for Quintessence
+    and Blood ... is Blood-Pool resolved using the Generation Background
+    already? ... As for Disciplines, we could have a simple form that either
+    overrides or adds whatever is not duplicated in clan, ghouls, and revenant
+    families disciplines ... the budgets must contain how each dot of this costs
+    in freebies, and how much each dot of this costs in XP (we leave maturation
+    for later; put it in memory)").
+    - **A PURSE IS AN ALLOWANCE AND ITS PRICES.** `BudgetDef {allows?, freebie?,
+      experience?, note?}`; `BudgetEntry = string | BudgetDef`, so every purse
+      written the old short way ("25") still parses and `budgetDef()` normalizes
+      at every reader. `NOT_PURCHASABLE = "-"` is the one price the engine
+      READS: `budgetBuyable()` distinguishes *nobody said* (absent - the
+      Storyteller's call, as ever) from *the answer is no*.
+      **Prices default from `DEFAULT_ADVANCEMENT_COSTS` by purse name**, since
+      the purse names ARE the cost kinds (background, discipline, virtue) - so a
+      purse always knows what a dot costs without anyone restating it.
+    - **🚧 MATURATION IS DELIBERATELY ABSENT from a budget** (the owner's
+      instruction, recorded here as asked). `DEFAULT_ADVANCEMENT_COSTS` keeps its
+      `maturation` column for the Storyteller and `[[costs]]` still shows it; a
+      purse grows a `maturation` price when there is a **downtime engine** to
+      spend it. Roadmap item 5.
+    - **The Ouroboros' arcana purse is `role:willpower`, freebie `-`,
+      experience `-`.** That answers the owner's question - yes, any part of any
+      template's budget is overridable - and encodes his ruling. The demon's
+      placeholder 25 gained the same two prices plus the book's formula as a
+      note; 🚧 permanent-vs-temporary Torment is still unmodelled, so the number
+      stands in for `(Resolve x permanent Torment) + temporary Torment +
+      Willpower + Taints`.
+    - **`role:<name>` is a new scope namespace: "or whatever replaces it".**
+      `resource:willpower:max` reads the pool NAMED willpower (before
+      replacement filtering - §7.59 needs that); `role:willpower` resolves the
+      way a character does (name -> role -> replaced), so for the one creature
+      whose four fuels are one substance, all four names land on Living Resolve.
+      It defaults to `:start` rather than `:max` because **a pool's start is its
+      RATING** (a mage's Willpower 5 in a tracker that tops out at 10), and a
+      rating is what a rule means by "equal to your Willpower". The player's own
+      `poolStarts` entry wins over the def, exactly as `permanentRatingOf` does.
+    - **CAPABILITIES: holding a pool is not being able to spend it.** The
+      owner's framing, near-verbatim: a mage cannot use the ten blood points in
+      his body as a vampire does; a vampire cannot harvest Quintessence from a
+      cray, gain it from Tass, or burn a talisman's store on Awakened magic.
+      `ResourceDef.requires: string[]` (blood -> `vitae`, quintessence ->
+      `awakened`, resolve -> `resolve`) meets `TemplateConfig.Capabilities`
+      and `PlayableCharacter.capabilities`.
+      **`TemplateConfig.Awakened` STOPPED BEING A FIELD** and became
+      `Capabilities.includes("awakened")` behind a getter - one concept replacing
+      a special case, with every existing reader (`isAwakened`, the sanctum
+      tiers, `[[templates]]`) untouched. `TemplateDef.awakened` survives as the
+      shorthand that adds/removes it, and is the ONE way a def can SUBTRACT a
+      capability (a template built on a mage may well be something that never
+      woke).
+      `CharacterResources.spend` returns `{spent: 0, blocked: [...]}` rather than
+      paying, `ResourceView.blocked` makes `[[resources]]` say "held but
+      UNUSABLE", and **`[[attune <cap> [off]]]`** grants one on the sheet -
+      the seam an item system will use. It refuses to take back a capability the
+      TEMPLATE has: a mage who forgets he Awakened is a different template.
+      🚧 Objects that GRANT a pool are still roadmap; the question of who can use
+      one is answered now.
+    - **A vampire's blood pool now follows the Generation Background live** (the
+      owner's question, answered yes-for-ceilings/no-for-the-pool and then
+      fixed): `max: "blood-max(generation)"`, `perTurnLimit:
+      "blood-per-turn(generation)"`. A 12th holds **11**, not 10 - three tests
+      asserted the old constant and were wrong about the rules, not about the
+      code. `fromGeneration` stays for the legacy `CharacterFactory` path, which
+      has no sheet to evaluate against.
+    - **DISCIPLINE AFFINITY: whose Disciplines these are.** `DisciplineAffinity
+      {disciplines, mode?: "add"|"replace"}` on `TemplateConfig.Affinity`, and
+      `affinityDisciplines(choices, template)` asks three registries in turn:
+      `CLANS`, **`GHOUL_FAMILIES`** and **`REVENANT_FAMILIES`** - the last two
+      **deliberately empty** (the "empty mechanism that returns no disciplines
+      yet" the owner asked to override). `clanByName` collapsed into a general
+      `familyByName(registry, name)`. A template's `mode: "replace"` is the
+      override, and it is a real statement even with an empty list: it says the
+      family registries have nothing to add. `[[creation]]` now says "out of
+      affinity" rather than "out of clan", and says nothing at all when nothing
+      has named them - the Ouroboros' own list is **left empty on purpose**,
+      because inventing his three Disciplines is the owner's call, not the
+      engine's. He has a discipline BUDGET (2 dots, max 5).
+    - **`discipline` is a purse.** `purseLedger` counts Discipline dots the way
+      it counts Background dots (`paid` overrides, dots are not cost), and
+      `budgetsOf` seeds it from `creation.disciplines` - so `[[budget]]` and
+      `[[creation]]` cannot disagree about it, the same guarantee §7.54 made for
+      Backgrounds.
+    - **`[[extend-template]]` EDITS as well as creates.** It now seeds from the
+      def already in force (chronicle overlay, else the shipped default) and
+      lays the arguments over it. Without that, the second call would gut the
+      first - the overlay REPLACES a default wholesale by name - and "set the
+      Ouroboros' arcana purse" would silently cost him his soak, his pools and
+      his notes. New arguments: `capabilities=`, `budgets=` (`purse=<expr>` for
+      the allowance, `purse:freebie=` / `purse:experience=` for a price),
+      `creation=` (all ten pools, each a number or an expression), `disciplines=`
+      (a leading `=` means replace).
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
@@ -2875,22 +3023,27 @@ Ordered roughly by unlock value:
    decrements a pool, so `[[creation]]` counts what the sheet holds instead of
    gating what may be bought; **freebie arithmetic** (the `[[costs]]` values are
    still text, so nobody multiplies "current x 2" — but `Numeric` + the
-   evaluator are now the obvious home for it); the **XP/maturation engine** the
-   same table waits for; the **creation WIZARD** (the wizard engine exists —
+   evaluator are now the obvious home for it, and §7.60 moved the two prices
+   that matter onto the PURSE itself: `BudgetDef.freebie` / `.experience`, per
+   template, with `NOT_PURCHASABLE` already a rule the engine reads); the
+   **XP engine** the same table waits for; **🚧 MATURATION** — the third Dark
+   Ages purse, spent in downtime — which §7.60 deliberately left OFF a budget
+   at the owner's instruction: `DEFAULT_ADVANCEMENT_COSTS` keeps its column,
+   `[[costs]]` shows it, and `BudgetDef` grows a `maturation` price when there
+   is a downtime engine to spend it; the **creation WIZARD** (the wizard engine exists —
    this is a script over it); and the starting-blood die. **Constraint groups**
    (§7.17) exist as data + `[[check-constraints]]`; creation is where they would
    become enforced (block/allow backgrounds & merits/flaws) instead of advisory.
    ALL OPT-IN stays sacred — play-before-allocating is untouched.
-   **The three passes §7.55 was designed for, and the seams that await them:**
-   - **Modifying a template**: every rules field a chronicle might want to
-     change is `Numeric` (a number OR an expression), so an override has a place
-     to be written. What is missing is the STORE — a `wod:config:templates` card
-     and a `TemplateOverrides` layer, applied the way `ResourceOverrides` already
-     patches resources by normalized name.
-   - **Extending a template** (override only some fields, budgets included):
-     `creationBudgetFor` already merges template budgets field-by-field and
-     concatenates notes; an `extends: <template>` link would reuse exactly that
-     fold. `TemplateConfig.Derived` merges the same way (last name wins).
+   **The three passes §7.55 was designed for:**
+   - **Modifying a template — SHIPPED** (§7.58): `TemplateDef` + the
+     `wod:config:templates` card + `TemplateRegistry` overlay + `[[templates]]`
+     / `[[extend-template]]` / `[[forget-template]]`.
+   - **Extending a template, budgets included — SHIPPED** (§7.58 for the shape,
+     §7.60 for the budgets): purses merge field by field (allowance and both
+     prices separately), the creation pools are settable one at a time, and
+     `[[extend-template]]` EDITS the def in force rather than rebuilding it.
+     `TemplateConfig.Derived` merges the same way (last name wins).
    - **The legality proof** ("what was the budget, and where did it go" —
      including unassigned points): the pieces exist. `purseScope` exposes
      `budget:`/`spent:`/`left:` to any expression, `ExprResult.terms` already
@@ -2901,8 +3054,12 @@ Ordered roughly by unlock value:
 6. **Template choices** — **shipped for clans and fellowships** (§7.54:
    `CLANS` with their Disciplines and `TraitLimit`s, all six `FELLOWSHIPS`,
    `PlayableCharacter.choices`, `[[choose]]`/`[[clans]]`, and
-   `MeritFlawRequirements.choices` as the exclusivity gate). LEFT: **revenant
-   families** (the third choice kind, same shape, no data yet); a clan/
+   `MeritFlawRequirements.choices` as the exclusivity gate). §7.60 added the
+   MECHANISM for the other two — `GHOUL_FAMILIES` / `REVENANT_FAMILIES` are
+   real registries wired into `affinityDisciplines` and `[[choose
+   ghoul-family|revenant-family]]` — but they are **EMPTY**: no Dark Ages
+   bloodline is transcribed yet, and a template's own `disciplines` list
+   (`mode: "replace"`) covers for them meanwhile. LEFT: **the family DATA**; a clan/
    fellowship owning **constraint groups via `scope`**; allowed roads/morality
    per clan; and making a choice a **generic data atom** a template-definer
    window could edit, instead of two hard-coded records in rules.ts.
@@ -2924,6 +3081,10 @@ Ordered roughly by unlock value:
    the one Talisman as a command (asked; chosen over building a general item
    registry now). A real system would own possession, attunement, rituals and
    effects — and `[[measure-door]]` becomes its first entry.
+   **§7.60 answered half of it early**: an object that GRANTS a pool is still
+   deferred, but *who can use one* is settled — `ResourceDef.requires` vs
+   template/sheet `capabilities`, with `[[attune]]` as the sheet-level grant an
+   item system will drive.
 8. **Owned-power roll effects — SHIPPED** (§7.23): Trait Affinity, Trait
    Enhancement and Specialties are live (parameterized merits + passive
    effects + the specialty= knob). LEFT from this item: the

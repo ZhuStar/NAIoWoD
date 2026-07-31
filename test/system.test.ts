@@ -40,6 +40,7 @@ import {
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
+  budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
@@ -1595,9 +1596,10 @@ describe("resource commands", () => {
   });
 
   test("standalone spend/gain adjust and clamp; spending with none is reported", async () => {
-    await CommandRouter.route('create-playable name="Vlad" templates=vampire'); // Blood starts full (10)
-    expect(await CommandRouter.route("spend blood 3")).toContain("Now 7/10");
-    expect(await CommandRouter.route("gain blood 100")).toContain("Now 10/10");
+    // Blood starts at 10; the CAPACITY is generation's - a 12th holds 11.
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    expect(await CommandRouter.route("spend blood 3")).toContain("Now 7/11");
+    expect(await CommandRouter.route("gain blood 100")).toContain("Now 11/11");
     expect(await CommandRouter.route("spend willpower")).toContain("no willpower to spend"); // seeded at 0
   });
 });
@@ -1737,7 +1739,7 @@ describe("heal & boost in play", () => {
     const r = await CommandRouter.route("spend blood:heal 2");
     expect(r).toContain("healing 2 boxes");
     expect(r).toContain("0B/0L/0A");
-    expect(r).toContain("blood now 8/10");
+    expect(r).toContain("blood now 8/11");
   });
 
   test("[[spend blood:boost strength 2]] raises Strength for rolls until cleared", async () => {
@@ -1756,7 +1758,7 @@ describe("heal & boost in play", () => {
     await CommandRouter.route('create-playable name="Vlad" templates=vampire');
     const r = await CommandRouter.route("spend blood:boost charisma 2");
     expect(r).toContain("not a boostable");
-    expect(await CommandRouter.route("resources")).toContain("blood 10/10"); // nothing spent
+    expect(await CommandRouter.route("resources")).toContain("blood 10/11"); // nothing spent
   });
 
   test("heal/boost effects are refused inside a roll, pointing at [[spend]]", async () => {
@@ -5677,11 +5679,11 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     await CommandRouter.route("set-trait celerity 1 group=discipline");
     const r = await CommandRouter.route("creation");
     expect(r).toContain("disciplines: 3/4 (Nosferatu: Animalism, Obfuscate, Potence)");
-    expect(r).toContain("out of clan: Celerity");
+    expect(r).toContain("out of affinity: Celerity");
     // Without a clan it has nothing to compare against, and asks.
     await CommandRouter.route('create-playable name="Anon" templates=vampire');
     await CommandRouter.route('play name="Anon"');
-    expect(await CommandRouter.route("creation")).toContain("disciplines: 0/4 - [[choose clan]] first");
+    expect(await CommandRouter.route("creation")).toContain("disciplines: 0/4 - nothing names his Disciplines yet");
   });
 
   test("dots no priority category claims are reported rather than silently dropped", async () => {
@@ -6126,7 +6128,7 @@ describe("templates: extending one, from a def or a command", () => {
     expect(changed.Soak).toBe(GHOUL_SOAK);
     expect(changed.Awakened).toBe(false);
     expect(changed.Morality!.name).toBe("Road of Humanity");
-    expect(changed.Budgets.arcana).toBe("9");
+    expect(budgetDef(changed.Budgets.arcana).allows).toBe("9");
     expect(changed.Rules).toBe(mage.Rules);                        // still inherited
   });
 
@@ -6172,8 +6174,13 @@ describe("templates: extending one, from a def or a command", () => {
       .toContain('No template "nonesuch" to extend');
     expect(await CommandRouter.route("extend-template name=`Ghost` extends=mage resources=`no-such-pool`"))
       .toContain("define it first with");
-    // A chronicle template that shadows a shipped one steps aside when forgotten.
+    // The verb EDITS a template that already exists: re-parenting the Ouroboros
+    // must not silently drop the soak, the pools and the notes it came with.
     await CommandRouter.route("extend-template name=`Ouroboros` extends=vampire");
+    expect(TEMPLATES["ouroboros"].Soak).toBe(GHOUL_SOAK);
+    expect(TEMPLATES["ouroboros"].Pools.some(p => p.name === "living-resolve")).toBe(true);
+    // Say the soak too and it changes - what you state, and only that.
+    await CommandRouter.route("extend-template name=`Ouroboros` extends=vampire soak=vampire");
     expect(TEMPLATES["ouroboros"].Soak).toBe(TEMPLATES["vampire"].Soak);
     expect(await CommandRouter.route("forget-template ouroboros")).toContain("shipped one resurfaces");
     expect(TEMPLATES["ouroboros"].Soak).toBe(GHOUL_SOAK);
@@ -6253,5 +6260,202 @@ describe("resource capacity as an expression: the Fount ladder, and fusing two p
     // Drop the Fount and the ceiling drops with it - the pool is not a number.
     await CommandRouter.route("set-trait fount 1");
     expect(await CommandRouter.route("resources")).toContain("/22");
+  });
+});
+
+// =============================================================================
+// PRICED PURSES, CAPABILITIES, AND WHOSE DISCIPLINES THESE ARE
+// -----------------------------------------------------------------------------
+// Three things that used to be assumptions: that a budget is only an allowance,
+// that holding a pool means being able to spend it, and that Disciplines come
+// from a clan. Each is now data a template states and a command may change.
+// =============================================================================
+describe("budgets that carry prices, and templates that override any part of one", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+  });
+
+  test("budgetDef normalizes the short form; NOT_PURCHASABLE is a rule, absence is not", () => {
+    expect(budgetDef("25")).toEqual({ allows: "25" });
+    expect(budgetDef(undefined)).toEqual({});
+    expect(budgetDef({ allows: "9", freebie: NOT_PURCHASABLE }).freebie).toBe(NOT_PURCHASABLE);
+    expect(budgetBuyable("5")).toBe(true);
+    expect(budgetBuyable(NOT_PURCHASABLE)).toBe(false);
+    expect(budgetBuyable(undefined)).toBe(false);   // nobody said - the ST's call
+  });
+
+  test("the Ouroboros' arcana purse is his Willpower, and cannot be bought", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait fount 5 paid=0");
+    // "Willpower, or whatever replaces it" - the role, not the hidden tracker.
+    expect(await CommandRouter.route("eval role:willpower")).toContain("= 30");
+    expect(await CommandRouter.route("eval resource:willpower:max")).toContain("= 10");
+    const r = await CommandRouter.route("budget");
+    expect(r).toContain("arcana: 0/30 (role:willpower)");
+    expect(r).toContain("not bought with freebies, not bought with experience");
+    // Backgrounds keep the chronicle's own prices, unstated by any template.
+    expect(r).toContain("background: 0/5, 5 left - freebie 1, experience current x 2");
+  });
+
+  test("Discipline dots are a purse, and [[budget]] and [[creation]] agree on them", async () => {
+    await CommandRouter.route('create-playable name="Nos" templates=vampire');
+    await CommandRouter.route("choose clan nosferatu");
+    await CommandRouter.route("set-trait obfuscate 3 group=discipline");
+    const budget = await CommandRouter.route("budget");
+    expect(budget).toContain("discipline: 3/4");
+    expect(budget).toContain("freebie 7");                       // a Discipline dot's price
+    expect(await CommandRouter.route("creation")).toContain("disciplines: 3/4");
+    // A dot the Storyteller granted costs the purse nothing.
+    await CommandRouter.route("paid obfuscate 0");
+    expect(await CommandRouter.route("budget")).toContain("discipline: 0/4");
+  });
+
+  test("extend-template changes any part of a budget, and edits rather than replaces", async () => {
+    await CommandRouter.route("extend-template name=`Ouroboros` budgets=`arcana=12,arcana:experience=current x 3`");
+    const tpl = TEMPLATES["ouroboros"];
+    const arcana = budgetDef(tpl.Budgets["arcana"]);
+    expect(arcana.allows).toBe("12");
+    expect(arcana.experience).toBe("current x 3");
+    expect(arcana.freebie).toBe(NOT_PURCHASABLE);   // untouched by the edit
+    expect(tpl.Soak).toBe(GHOUL_SOAK);              // and so is everything else
+    // The creation pools are equally open.
+    await CommandRouter.route("extend-template name=`Ouroboros` creation=`disciplines=4,freebies=21`");
+    expect(TEMPLATES["ouroboros"].Creation.disciplines).toBe(4);
+    expect(TEMPLATES["ouroboros"].Creation.freebies).toBe(21);
+    expect(await CommandRouter.route("extend-template name=`Ouroboros` creation=`nonesuch=4`"))
+      .toContain('No creation pool "nonesuch"');
+  });
+
+  test("a sheet's own budget still wins, prices and all", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const char = (await CharacterStore.load("Marius"))!;
+    char.budgets = { arcana: { allows: "7", freebie: "3" } };
+    await CharacterStore.save(char);
+    const r = await CommandRouter.route("budget");
+    expect(r).toContain("arcana: 0/7");
+    expect(r).toContain("freebie 3");
+    // ... and survives the round trip through the card.
+    const again = (await CharacterStore.load("Marius"))!;
+    expect(budgetDef(again.budgets!["arcana"]).freebie).toBe("3");
+  });
+});
+
+describe("capabilities: holding a pool is not being able to spend it", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+  });
+
+  test("the roster is what templates draw on, and Awakened is one of them", () => {
+    expect(Object.keys(CAPABILITIES)).toEqual(["awakened", "vitae", "resolve"]);
+    expect(TEMPLATE_MAGE.Capabilities).toEqual(["awakened"]);
+    expect(TEMPLATE_MAGE.Awakened).toBe(true);          // still the name it had
+    expect(TEMPLATE_VAMPIRE.Capabilities).toEqual(["vitae"]);
+    expect(TEMPLATE_VAMPIRE.Awakened).toBe(false);
+    // The Ouroboros inherits the mage's and adds the two nobody else has both of.
+    expect([...TEMPLATES["ouroboros"].Capabilities].sort()).toEqual(["awakened", "resolve", "vitae"]);
+  });
+
+  test("a mage with blood in his veins holds it and cannot use it, until he is attuned", async () => {
+    await CommandRouter.route("define-resource name=`stolen-vitae` kind=pool start=10 max=10 roles=`blood` requires=`vitae`");
+    await CommandRouter.route("extend-template name=`Blood-Marked` extends=mage resources=`stolen-vitae`");
+    await CommandRouter.route('create-playable name="Sleeper" templates=blood-marked');
+    expect(await CommandRouter.route("resources")).toContain("stolen-vitae 10/10 ⚠ held but UNUSABLE (needs vitae");
+    const refused = await CommandRouter.route("spend stolen-vitae 1");
+    expect(refused).toContain("holds stolen-vitae but cannot use it");
+    expect(await CommandRouter.route("resources")).toContain("stolen-vitae 10/10");   // nothing left the pool
+    // Something teaches him the trick of it.
+    expect(await CommandRouter.route("attune vitae")).toContain("can now spend stolen-vitae");
+    expect(await CommandRouter.route("spend stolen-vitae 1")).toContain("Now 9/10");
+    expect(await CommandRouter.route("attune vitae off")).toContain("no longer attuned");
+    expect(await CommandRouter.route("spend stolen-vitae 1")).toContain("cannot use it");
+    // What the TEMPLATE is cannot be taken back on the sheet.
+    expect(await CommandRouter.route("attune awakened off")).toContain("a sheet cannot take back what the template is");
+  });
+
+  test("an attunement survives the sheet's round trip, and [[attune]] reports both sides", async () => {
+    await CommandRouter.route('create-playable name="Sleeper" templates=mage');
+    await CommandRouter.route("attune resolve");
+    const again = (await CharacterStore.load("Sleeper"))!;
+    expect(again.capabilities).toEqual(["resolve"]);
+    expect(CharacterResources.capabilities(again).sort()).toEqual(["awakened", "resolve"]);
+    const r = await CommandRouter.route("attune");
+    expect(r).toContain("can use: resolve, awakened");
+    expect(r).toContain("attuned: resolve");
+  });
+
+  test("the fused pool needs every capability it stands for, and the Ouroboros has them", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const char = (await CharacterStore.load("Marius"))!;
+    const fused = CharacterResources.resolveDef(char, "willpower")!;
+    expect(fused.name).toBe("living-resolve");
+    expect(CharacterResources.cannotUse(char, fused)).toEqual([]);
+    // The hidden Quintessence still declares what it would need.
+    const quint = resourcesForTemplates(["mage"]).find(r => r.name === "quintessence")!;
+    expect(quint.requires).toEqual(["awakened"]);
+    const mortal = (await CharacterStore.load("Marius"))!;
+    mortal.templates = ["mortal"];
+    expect(CharacterResources.cannotUse(mortal, quint)).toEqual(["awakened"]);
+  });
+});
+
+describe("whose Disciplines these are: clan, family, or the creature's own", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+  });
+
+  test("affinityDisciplines reads the picks; an empty family registry answers nothing", () => {
+    expect(affinityDisciplines({ clan: "nosferatu" }).disciplines)
+      .toEqual(["animalism", "obfuscate", "potence"]);
+    // Ghoul and revenant families are not transcribed yet: the pick is real and
+    // the answer is empty, which is what a template's own list covers for.
+    expect(affinityDisciplines({ "revenant-family": "anything" }).disciplines).toEqual([]);
+    // A template ADDS by default...
+    expect(affinityDisciplines({ clan: "nosferatu" }, { disciplines: ["celerity"] }).disciplines)
+      .toEqual(["animalism", "obfuscate", "potence", "celerity"]);
+    // ... and REPLACES when it says so.
+    const only = affinityDisciplines({ clan: "nosferatu" }, { disciplines: ["celerity"], mode: "replace" });
+    expect(only.disciplines).toEqual(["celerity"]);
+    expect(only.sources).toContain("the template (only these)");
+  });
+
+  test("the Ouroboros' Disciplines are his own, named by a command", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    // Nothing names them yet - said, not guessed at.
+    expect(await CommandRouter.route("creation")).toContain("nothing names his Disciplines yet");
+    await CommandRouter.route("extend-template name=`Ouroboros` disciplines=`=celerity,potence`");
+    expect(TEMPLATES["ouroboros"].Affinity.disciplines).toEqual(["celerity", "potence"]);
+    expect(await CommandRouter.route("templates ouroboros")).toContain("Disciplines: Celerity, Potence (and no family's)");
+    await CommandRouter.route("set-trait obfuscate 2 group=discipline");
+    const r = await CommandRouter.route("creation");
+    expect(r).toContain("(the template (only these): Celerity, Potence)");
+    expect(r).toContain("⚠ out of affinity: Obfuscate");
+  });
+});
+
+describe("a vampire's blood pool is what generation allows", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+  });
+
+  test("the Generation Background moves the capacity and the per-turn limit", async () => {
+    await CommandRouter.route('create-playable name="Elder" templates=vampire');
+    // 12th generation by default: eleven points, one a turn.
+    expect(await CommandRouter.route("resources")).toContain("blood 10/11");
+    expect(await CommandRouter.route("eval resource:blood:max")).toContain("= 11");
+    // Five dots of the Background make him 7th: twenty points, five a turn.
+    await CommandRouter.route("set-trait generation 5 paid=0");
+    expect(await CommandRouter.route("derived")).toContain("Generation 7");
+    const r = await CommandRouter.route("resources");
+    expect(r).toContain("blood 10/20");
+    expect(r).toContain("5/turn");
+    expect(await CommandRouter.route("gain blood 99")).toContain("Now 20/20");
   });
 });

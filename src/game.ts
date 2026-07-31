@@ -34,6 +34,8 @@ import {
   advancementCostsFrom, CostTable, COST_PURSES,
   BackgroundDef, makeBackgroundDef, backgroundTierAt, TraitGrant,
   CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, fellowshipByName, ATTRIBUTES,
+  BudgetDef, BudgetEntry, budgetDef, budgetBuyable, NOT_PURCHASABLE,
+  CAPABILITIES, capabilityNote, affinityDisciplines, AFFINITY_SOURCES,
   roadRatingExpr, roadByName, ROADS,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, SOAK_TABLES,
   DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, supernaturalTraitOf, categoryOpenTo,
@@ -1288,9 +1290,52 @@ async function cmdResources(): Promise<string> {
       named.length ? `spend:${named.join("/")}` : "",
     ].filter(Boolean).join("; ");
     const blurb = v.def.description ? ` - ${v.def.description}` : "";
-    return `${v.def.name} ${v.current}/${v.max}${meta ? ` (${meta})` : ""}${blurb}`;
+    // Points he holds and cannot burn. Said first, because it is the only thing
+    // about that pool that matters until it changes.
+    const inert = v.blocked.length ? ` ⚠ held but UNUSABLE (needs ${v.blocked.join(", ")}; [[attune]])` : "";
+    return `${v.def.name} ${v.current}/${v.max}${inert}${meta ? ` (${meta})` : ""}${blurb}`;
   }).join("; ");
   return sys(`${disp(char.name)} resources - ${items}.`);
+}
+
+// attune [<capability>] [off] - what this character can actually USE. A pool is
+// a thing you hold; using it is a thing you are able to do, and the two come
+// apart the moment an object hands someone a Resolve pool he cannot channel.
+async function cmdAttune(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return noCharacter();
+  const raw = (cmd.named["capability"] ?? cmd.positional[0])?.trim();
+  const fromTemplates = char.templates.flatMap(t => TEMPLATES[StringUtil.normalize(t)]?.Capabilities ?? []);
+  if (!raw) {
+    const own = (char.capabilities ?? []).filter(c => !fromTemplates.includes(c));
+    const held = CharacterResources.capabilities(char);
+    const views = await CharacterResources.all(char);
+    const inert = views.filter(v => v.blocked.length).map(v => `${v.def.name} (needs ${v.blocked.join(", ")})`);
+    return sys(`${disp(char.name)} can use: ${held.length ? held.join(", ") : "nothing in particular"}`
+      + `${own.length ? ` (attuned: ${own.join(", ")})` : ""}. `
+      + `${inert.length ? `Held and unusable: ${inert.join(", ")}. ` : ""}`
+      + `Known: ${Object.entries(CAPABILITIES).map(([k, v]) => `${k} - ${v}`).join("; ")}. `
+      + `[[attune <capability>]] grants one; [[attune <capability> off]] takes it back.`);
+  }
+  const capability = StringUtil.normalize(raw);
+  const off = ["off", "no", "remove"].includes(StringUtil.normalize(cmd.positional[1] ?? cmd.named["off"] ?? ""));
+  if (off) {
+    if (fromTemplates.includes(capability)) {
+      return sys(`${disp(char.name)} has "${capability}" from ${char.templates.join("+")} itself - `
+        + `a sheet cannot take back what the template is. Change the template instead.`);
+    }
+    char.capabilities = (char.capabilities ?? []).filter(c => c !== capability);
+    if (!char.capabilities.length) delete char.capabilities;
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)} is no longer attuned to "${capability}".`);
+  }
+  char.capabilities = [...new Set([...(char.capabilities ?? []), capability])];
+  await CharacterStore.save(char);
+  const views = await CharacterResources.all(char);
+  const freed = views.filter(v => (v.def.requires ?? []).map(r => StringUtil.normalize(r)).includes(capability) && !v.blocked.length);
+  return sys(`${disp(char.name)} is attuned to "${capability}"`
+    + `${capabilityNote(capability) ? ` - ${capabilityNote(capability)}` : " (the engine knows no rule for it; nothing requires it)"}`
+    + `${freed.length ? `. He can now spend ${freed.map(v => v.def.name).join(", ")}` : ""}.`);
 }
 
 // =============================================================================
@@ -1649,17 +1694,42 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
 // no creation engine yet, so [[budget]] reports and the Storyteller decides.
 // =============================================================================
 
-// Every purse this character has a budget for, template first, sheet on top.
-function budgetsOf(char: PlayableCharacter): Record<string, string> {
-  // The creation budget already answers two of these purses; [[budget]] and
+// Every purse this character has a budget for: the creation pools first, then
+// each template's, then the sheet's - each layer merging FIELD BY FIELD, so
+// pricing a purse never erases the allowance underneath and vice versa.
+//
+// The prices come from the chronicle's cost table when nobody states them, so
+// a purse always knows what one of its dots costs in freebies and in
+// experience. A template says otherwise when its creature is otherwise: the
+// Ouroboros' Arcana are NOT_PURCHASABLE from either.
+function budgetsOf(char: PlayableCharacter): Record<string, BudgetDef> {
+  // The creation budget already answers three of these purses; [[budget]] and
   // [[creation]] must not disagree about how many Background dots you get.
   const creation = creationBudgetFor(char.templates);
-  const out: Record<string, string> = { background: String(creation.backgrounds), freebie: String(creation.freebies) };
+  const out: Record<string, BudgetDef> = {
+    background: { allows: String(creation.backgrounds) },
+    freebie: { allows: String(creation.freebies) },
+    ...(creation.disciplines !== undefined ? { discipline: { allows: String(creation.disciplines) } } : {}),
+  };
+  const layer = (purse: string, entry: BudgetEntry): void => {
+    const key = StringUtil.normalize(purse);
+    out[key] = { ...(out[key] ?? {}), ...budgetDef(entry) };
+  };
   for (const t of char.templates) {
-    const tpl = TEMPLATES[StringUtil.normalize(t)];
-    for (const [purse, expr] of Object.entries(tpl?.Budgets ?? {})) out[StringUtil.normalize(purse)] = expr;
+    for (const [purse, entry] of Object.entries(TEMPLATES[StringUtil.normalize(t)]?.Budgets ?? {})) layer(purse, entry);
   }
-  for (const [purse, expr] of Object.entries(char.budgets ?? {})) out[StringUtil.normalize(purse)] = expr;
+  for (const [purse, entry] of Object.entries(char.budgets ?? {})) layer(purse, entry);
+  // The default price of a dot is what the chronicle's table says a dot of that
+  // kind costs - the purses whose names ARE the kind ("background",
+  // "discipline", "virtue"). A purse the table has never heard of keeps its
+  // silence, and [[budget]] reports it as the Storyteller's call.
+  const table = advancementCostsFrom(AdvancementCosts.current() as CostTable);
+  for (const [purse, def] of Object.entries(out)) {
+    const priced = table[purse];
+    if (!priced) continue;
+    if (def.freebie === undefined && priced.freebie) def.freebie = priced.freebie;
+    if (def.experience === undefined && priced.experience) def.experience = priced.experience;
+  }
   return out;
 }
 
@@ -1667,6 +1737,20 @@ function budgetsOf(char: PlayableCharacter): Record<string, string> {
 // may be written in terms of the character's own traits.
 function evalBudget(char: PlayableCharacter, expr: string): number {
   return Math.max(0, evalOn(char, expr).value);
+}
+
+// The allowance a purse holds for this character, or undefined when nobody has
+// said - which is a different answer from zero and must stay one.
+function budgetAllowance(char: PlayableCharacter, def: BudgetDef | undefined): number | undefined {
+  return def?.allows === undefined ? undefined : evalBudget(char, def.allows);
+}
+
+// The two prices, said the way [[budget]] and [[costs]] both want them.
+function budgetPrices(def: BudgetDef): string {
+  const bits = (["freebie", "experience"] as const)
+    .filter(p => def[p] !== undefined)
+    .map(p => budgetBuyable(def[p]) ? `${p} ${def[p]}` : `not bought with ${p === "freebie" ? "freebies" : "experience"}`);
+  return bits.join(", ");
 }
 
 // The purse namespaces an expression may reach: `budget:freebie` (what the
@@ -1684,9 +1768,9 @@ function purseScope(char: PlayableCharacter): ScopeExtension {
     const resolve = (n: string): number => traitValueOf(char, n);
     const spent = purseLedger(char, resolve)[purse]?.spent ?? 0;
     if (head === "spent") return { value: spent };
-    const expr = budgetsOf(char)[purse];
-    if (expr === undefined) return undefined;
-    const budget = Math.max(0, evaluateExpr(expr, characterScope(char)).value);
+    const allows = budgetsOf(char)[purse]?.allows;
+    if (allows === undefined) return undefined;
+    const budget = Math.max(0, evaluateExpr(allows, characterScope(char)).value);
     return { value: head === "budget" ? budget : budget - spent };
   };
 }
@@ -1716,6 +1800,17 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
     backgrounds.items.push(`${name} ${g.rating} (from ${g.from}, free)`);
   }
   if (backgrounds.items.length) out["background"] = backgrounds;
+  // Discipline DOTS are a purse too, and like Backgrounds a dot is not a cost:
+  // `paid` records what the chronicle actually charged for one.
+  const disciplines = { spent: 0, items: [] as string[] };
+  for (const [name, rating] of Object.entries(char.disciplines ?? {})) {
+    if (rating <= 0) continue;
+    const override = char.paid?.[name];
+    const cost = override !== undefined ? evalBudget(char, override) : rating;
+    disciplines.spent += cost;
+    disciplines.items.push(`${name} ${rating}${override !== undefined ? ` (paid ${cost})` : ""}`);
+  }
+  if (disciplines.items.length) out["discipline"] = disciplines;
   for (const inst of ownedMeritInstances(char)) {
     const purse = budgetOfKind(inst.def);
     const override = char.paid?.[inst.key];
@@ -1741,16 +1836,22 @@ async function cmdBudget(cmd: ParsedCommand): Promise<string> {
   const purses = [...new Set([...Object.keys(budgets), ...Object.keys(ledger)])].sort();
   if (!purses.length) return sys(`${disp(char.name)} has no budgets and has bought nothing that draws on one.`);
   const lines = purses.map(purse => {
-    const expr = budgets[purse];
+    const def = budgets[purse] ?? {};
     const spent = ledger[purse]?.spent ?? 0;
     const items = ledger[purse]?.items ?? [];
     const detail = items.length ? ` [${items.join(", ")}]` : "";
-    if (expr === undefined) return `${purse}: ${spent} spent, no budget set (Storyteller's call)${detail}`;
-    const total = evalBudget(char, expr);
-    return `${purse}: ${spent}/${total}${expr !== String(total) ? ` (${expr})` : ""}, ${total - spent} left${detail}`;
+    // A purse says three things: what it holds, what it has spent, and what a
+    // dot of it costs to buy - and "cannot be bought" is one of those answers.
+    const prices = budgetPrices(def);
+    const tail = `${prices ? ` - ${prices}` : ""}${def.note ? ` (${def.note})` : ""}${detail}`;
+    const total = budgetAllowance(char, def);
+    if (total === undefined) return `${purse}: ${spent} spent, no budget set (Storyteller's call)${tail}`;
+    const shown = def.allows !== String(total) ? ` (${def.allows})` : "";
+    return `${purse}: ${spent}/${total}${shown}, ${total - spent} left${tail}`;
   });
   return sys(`${disp(char.name)} budgets - ${lines.join("; ")}. Advisory: nothing is enforced until creation is. `
-    + `Override one on the sheet's "budgets" block; set what a purchase really cost with [[paid <key> <expr>]].`);
+    + `Override one on the sheet's "budgets" block or with [[extend-template ... budgets=\`purse=expr\`]]; `
+    + `set what a purchase really cost with [[paid <key> <expr>]].`);
 }
 
 // paid <key> [expr] - what a purchase ACTUALLY cost. No expression means 0: the
@@ -1825,6 +1926,22 @@ function limitsFor(char: PlayableCharacter): Record<string, TraitLimit> {
   return { ...(creationOf(char).limits ?? {}), ...(clan?.limits ?? {}) };
 }
 
+// The Disciplines that are this character's own, from every source at once: the
+// clan or bloodline family he picked, and what his templates say outright.
+// Templates stack the same way their budgets do - and a "replace" anywhere
+// means the families have nothing to add.
+function affinityOf(char: PlayableCharacter): { disciplines: string[]; sources: string[] } {
+  const own: string[] = [];
+  let replace = false;
+  for (const t of char.templates) {
+    const a = TEMPLATES[StringUtil.normalize(t)]?.Affinity;
+    if (!a) continue;
+    own.push(...a.disciplines);
+    if (a.mode === "replace") replace = true;
+  }
+  return affinityDisciplines(char.choices, { disciplines: own, ...(replace ? { mode: "replace" as const } : {}) });
+}
+
 // choose <what> <value> - the picks a template asks for.
 async function cmdChoose(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
@@ -1833,10 +1950,15 @@ async function cmdChoose(cmd: ParsedCommand): Promise<string> {
   const value = (cmd.positional[1] ?? cmd.named["value"] ?? "").trim();
   if (!what) {
     const made = Object.entries(char.choices ?? {}).map(([k, v]) => `${k}: ${disp(v)}`);
+    // The family choices carry Disciplines with them; two of the three
+    // registries are empty for now, and a template's own list covers for them.
+    const families = AFFINITY_SOURCES.filter(s => s.choice !== "clan")
+      .map(s => `[[choose ${s.choice} <name>]]${Object.keys(s.families).length ? "" : " (none defined yet)"}`);
     return sys(`${disp(char.name)} - ${made.length ? made.join(", ") : "nothing chosen yet"}. `
       + `[[choose clan <name>]] ([[clans]]), [[choose fellowship <name>]] ([[fellowships]]), `
       + `[[choose road <name>]] (${Object.values(ROADS).map(r => r.name).join(", ")}), `
-      + `[[choose attributes physical,social,mental]] (primary, secondary, tertiary).`);
+      + `[[choose attributes physical,social,mental]] (primary, secondary, tertiary), `
+      + `${families.join(", ")}.`);
   }
   if (what === "attributes" || what === "abilities") {
     const groups = await categoryTraits(what);
@@ -1952,12 +2074,16 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
   lines.push(`backgrounds: ${bgSpent}/${num(budget.backgrounds, 5)}`);
 
   if (budget.disciplines !== undefined) {
-    const clan = char.choices?.["clan"] ? clanByName(char.choices["clan"]) : undefined;
-    const inClan = (clan?.disciplines ?? []).map(d => StringUtil.normalize(d));
-    const spent = Object.entries(char.disciplines ?? {}).reduce((sum, [, v]) => sum + v, 0);
-    const out = Object.keys(char.disciplines ?? {}).filter(d => inClan.length && !inClan.includes(d));
-    lines.push(`disciplines: ${spent}/${num(budget.disciplines, 0)}${clan ? ` (${clan.name}: ${inClan.map(d => disp(d)).join(", ")})` : " - [[choose clan]] first"}`
-      + `${out.length ? ` ⚠ out of clan: ${out.map(d => disp(d)).join(", ")}` : ""}`);
+    // Whose Disciplines are properly his: his clan's, his bloodline family's,
+    // or - for a creature no book speaks for - his template's own.
+    const affinity = affinityOf(char);
+    const spent = purseLedger(char, (n) => traitValueOf(char, n))["discipline"]?.spent ?? 0;
+    const out = Object.keys(char.disciplines ?? {}).filter(d => affinity.disciplines.length && !affinity.disciplines.includes(d));
+    const whose = affinity.disciplines.length
+      ? ` (${affinity.sources.join(" + ")}: ${affinity.disciplines.map(d => disp(d)).join(", ")})`
+      : ` - nothing names his Disciplines yet ([[choose clan …]], or [[extend-template … disciplines=\`…\`]])`;
+    lines.push(`disciplines: ${spent}/${num(budget.disciplines, 0)}${whose}`
+      + `${out.length ? ` ⚠ out of affinity: ${out.map(d => disp(d)).join(", ")}` : ""}`);
   }
   if (budget.virtues !== undefined) {
     const free = num(budget.virtueStart, 1);
@@ -2025,7 +2151,8 @@ async function cmdEval(cmd: ParsedCommand): Promise<string> {
   if (!expr) {
     return sys(`[[eval <expression>]] reads an expression against ${disp(char.name)}. `
       + `Names are traits (\`courage\`, \`self-control\`); a path asks one place (\`background:generation\`, `
-      + `\`derived:willpower\`, \`granted:sanctum\`, \`budget:freebie\`, \`spent:freebie\`, \`left:freebie\`). `
+      + `\`derived:willpower\`, \`granted:sanctum\`, \`budget:freebie\`, \`spent:freebie\`, \`left:freebie\`, `
+      + `\`resource:quintessence:max\` for that pool by name, \`role:willpower\` for whatever fills that role here). `
       + `Arithmetic is + - * / and ( ); functions are ${BUILTIN_FUNCTIONS.join(", ")}, trait-max, blood-max, road-virtues. `
       + `Mind the hyphen: \`a - b\` needs the spaces, \`self-control\` does not.`);
   }
@@ -2066,11 +2193,20 @@ async function cmdTemplates(cmd: ParsedCommand): Promise<string> {
     const tpl = TEMPLATES[key];
     if (!tpl) return sys(`No template "${which}". Known: ${Object.keys(TEMPLATES).sort().join(", ")}.`);
     const def = TemplateRegistry.get(key) ?? DEFAULT_TEMPLATE_DEFS.find(d => StringUtil.normalize(d.name) === key);
+    const purses = Object.entries(tpl.Budgets).map(([purse, entry]) => {
+      const d = budgetDef(entry);
+      const prices = budgetPrices(d);
+      return `${purse} ${d.allows ?? "?"}${prices ? ` (${prices})` : ""}`;
+    });
     const bits = [
       `resources: ${tpl.Pools.map(p => disp(p.name)).join(", ") || "none"}`,
       `soak: ${Object.entries(SOAK_TABLES).find(([, v]) => v === tpl.Soak)?.[0] ?? "custom"}`,
       `morality: ${tpl.Morality?.name ?? "none"}${tpl.HasVirtues ? " (with Virtues)" : ""}`,
-      tpl.Awakened ? "Awakened" : "",
+      tpl.Capabilities.length ? `can use: ${tpl.Capabilities.join(", ")}` : "",
+      tpl.Affinity.disciplines.length
+        ? `Disciplines: ${tpl.Affinity.disciplines.map(d => disp(d)).join(", ")}${tpl.Affinity.mode === "replace" ? " (and no family's)" : ""}`
+        : tpl.Affinity.mode === "replace" ? "Disciplines: his own, none named yet" : "",
+      purses.length ? `budgets: ${purses.join(", ")}` : "",
       def?.extends ? `extends ${disp(def.extends)}` : "built in",
     ].filter(Boolean);
     return sys(`${tpl.Name} - ${bits.join("; ")}. ${def ? `Written as data; ` : ""}`
@@ -2083,15 +2219,59 @@ async function cmdTemplates(cmd: ParsedCommand): Promise<string> {
     + `[[templates <name>]] details one; [[extend-template]] makes a new one from an old one.${problems}`);
 }
 
-// extend-template <name> extends=<parent> [soak=] [morality=] [awakened=] [description=]
+// "a=b,c=d" -> {a: "b", c: "d"}. The one place a command carries a small map,
+// used for budgets and for the creation pools alike. Keys come back RAW: a
+// budget key is `purse:field` and the colon must survive to be split on.
+function pairsArg(raw: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const bit of (raw ?? "").split(",")) {
+    const at = bit.indexOf("=");
+    if (at <= 0) continue;
+    const key = bit.slice(0, at).trim();
+    const value = bit.slice(at + 1).trim();
+    if (key && value) out[key] = value;
+  }
+  return out;
+}
+
+// The creation pools a command may set, by the name it writes them under. Every
+// one of them is Numeric, so "5" and "trait-max(generation)" both land.
+const CREATION_FIELDS: Array<[string, keyof CreationBudget]> = [
+  ["attribute-start", "attributeStart"], ["attribute-max", "attributeMax"],
+  ["ability-start", "abilityStart"], ["ability-max", "abilityMax"],
+  ["backgrounds", "backgrounds"], ["freebies", "freebies"],
+  ["disciplines", "disciplines"], ["discipline-max", "disciplineMax"],
+  ["virtues", "virtues"], ["virtue-start", "virtueStart"],
+];
+
+// A creation pool value: a plain integer stays a number, anything else is an
+// expression the character resolves for itself.
+function numericArg(raw: string): Numeric {
+  const v = raw.trim();
+  return /^-?\d+$/.test(v) ? parseInt(v, 10) : v;
+}
+
+// extend-template <name> extends=<parent> [soak=] [morality=] [awakened=]
+//   [capabilities=] [budgets=`arcana=role:willpower`] [creation=`disciplines=4`]
+//   [disciplines=`celerity,potence`] [description=]
 async function cmdExtendTemplate(cmd: ParsedCommand): Promise<string> {
   const rawName = (cmd.named["name"] ?? cmd.positional[0])?.trim();
   if (!rawName) {
     return sys(`extend-template needs a name and a parent, e.g. `
       + `[[extend-template name=\`Ouroboros\` extends=mage soak=ghoul description=\`...\`]]. `
-      + `Add resources to it with [[define-resource]].`);
+      + `Any part of its budget is yours: budgets=\`arcana=role:willpower\` (allowance), `
+      + `budgets=\`arcana:freebie=-\` (a price; "-" means it cannot be bought at all), `
+      + `creation=\`disciplines=4,discipline-max=5\` (the creation pools). `
+      + `Add resources with [[define-resource]].`);
   }
-  const parts: Partial<TemplateDef> & { name: string } = { name: rawName };
+  // This verb EDITS as well as creates: the second call must not gut what the
+  // first one wrote. Start from the def already in force (the chronicle's, else
+  // the shipped one) and lay the arguments over it, so "set the Ouroboros'
+  // arcana purse" costs one line and keeps his soak, his pools and his notes.
+  const existingKey = StringUtil.normalize(rawName);
+  const existing = TemplateRegistry.get(existingKey)
+    ?? DEFAULT_TEMPLATE_DEFS.find(d => StringUtil.normalize(d.name) === existingKey);
+  const parts: Partial<TemplateDef> & { name: string } = { ...(existing ?? {}), name: rawName };
   for (const key of ["extends", "soak", "morality", "ruleset", "description"] as const) {
     const v = (cmd.named[key] ?? (key === "extends" ? cmd.positional[1] : undefined))?.trim();
     if (v) parts[key] = v;
@@ -2111,6 +2291,46 @@ async function cmdExtendTemplate(cmd: ParsedCommand): Promise<string> {
         + `[[define-resource name=\`...\` kind=pool start=N max=N]].`);
     }
     parts.resources = resources.map(r => ({ ...(known[r] as ResourceDef), name: r }));
+  }
+  const capabilities = (cmd.named["capabilities"] ?? "").split(",").map(c => StringUtil.normalize(c)).filter(Boolean);
+  if (capabilities.length) parts.capabilities = [...new Set([...(parts.capabilities ?? []), ...capabilities])];
+  // Any part of a budget, and the whole of one: `arcana=role:willpower` sets the
+  // allowance, `arcana:freebie=-` prices it, and either one leaves the rest of
+  // that purse alone.
+  const budgets: Record<string, BudgetEntry> = { ...(parts.budgets ?? {}) };
+  for (const [raw, value] of Object.entries(pairsArg(cmd.named["budgets"]))) {
+    const at = raw.indexOf(":");
+    // A purse's own name never contains a colon; an ALLOWANCE may ("role:…"),
+    // and that is on the right of the "=", so only the KEY is split here.
+    const purse = StringUtil.normalize(at < 0 ? raw : raw.slice(0, at));
+    const field = StringUtil.normalize(at < 0 ? "" : raw.slice(at + 1));
+    const entry = budgetDef(budgets[purse]);
+    if (field && ["allows", "freebie", "experience", "note"].includes(field)) {
+      entry[field as keyof BudgetDef] = value;
+    } else entry.allows = value;
+    budgets[purse] = entry;
+  }
+  if (Object.keys(budgets).length) parts.budgets = budgets;
+  const creation: Partial<CreationBudget> = { ...(parts.creation ?? {}) };
+  const unknownPools: string[] = [];
+  for (const [raw, value] of Object.entries(pairsArg(cmd.named["creation"]))) {
+    const field = CREATION_FIELDS.find(([name]) => name === StringUtil.normalize(raw))?.[1];
+    if (!field) { unknownPools.push(raw); continue; }
+    (creation as Record<string, Numeric>)[field] = numericArg(value);
+  }
+  if (unknownPools.length) {
+    return sys(`No creation pool ${unknownPools.map(p => `"${p}"`).join(", ")}. `
+      + `Known: ${CREATION_FIELDS.map(([n]) => n).join(", ")}.`);
+  }
+  if (Object.keys(creation).length) parts.creation = creation;
+  // "=celerity,potence" (or mode=replace) means THESE and no others - the way a
+  // creature no clan speaks for still has Disciplines of his own.
+  const rawDisc = (cmd.named["disciplines"] ?? "").trim();
+  if (rawDisc) {
+    const replace = rawDisc.startsWith("=") || StringUtil.normalize(cmd.named["disciplines-mode"] ?? "") === "replace"
+      || (!rawDisc.startsWith("+") && parts.disciplines?.mode === "replace");
+    const listed = rawDisc.replace(/^[=+]/, "").split(",").map(d => StringUtil.normalize(d)).filter(Boolean);
+    parts.disciplines = { disciplines: listed, ...(replace ? { mode: "replace" as const } : {}) };
   }
   const def = makeTemplateDef(parts);
   if (def.extends && !TEMPLATES[StringUtil.normalize(def.extends)]) {
@@ -2153,7 +2373,9 @@ async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
   };
   patch.start = numeric(cmd.named["start"]) ?? 0;
   patch.max = numeric(cmd.named["max"]) ?? (typeof patch.start === "number" ? Math.max(10, patch.start) : 10);
-  for (const key of ["roles", "replaces"] as const) {
+  // `requires` is what a character must be CAPABLE OF to spend this at all -
+  // the difference between holding a talisman's pool and being able to use it.
+  for (const key of ["roles", "replaces", "requires"] as const) {
     const list = (cmd.named[key] ?? "").split(",").map(r => StringUtil.normalize(r)).filter(Boolean);
     if (list.length) patch[key] = list;
   }
@@ -2164,7 +2386,8 @@ async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
   await ResourceOverrides.save({ ...ResourceOverrides.current(), [name]: { ...(ResourceOverrides.current()[name] ?? {}), ...patch } });
   return sys(`Resource "${disp(name)}" - ${kind} ${patch.start}/${patch.max}`
     + `${patch.roles?.length ? `, roles ${patch.roles.join("/")}` : ""}`
-    + `${patch.replaces?.length ? `, replaces ${patch.replaces.join("/")}` : ""}. `
+    + `${patch.replaces?.length ? `, replaces ${patch.replaces.join("/")}` : ""}`
+    + `${patch.requires?.length ? `, usable only by the ${patch.requires.join("/")}-capable` : ""}. `
     + `Give it to a template with [[extend-template ... resources=${name}]]; `
     + `[[configure-resources]] tunes it.`);
 }
@@ -2308,7 +2531,10 @@ async function cmdCosts(cmd: ParsedCommand): Promise<string> {
       + `Storyteller-applied: the engine records prices, it does not spend for you.`);
   }
   const items = Object.entries(table).map(([kind, purses]) => `${disp(kind)}: ${priced(purses)}`).join("; ");
-  return sys(`Advancement costs - ${items}. [[costs <kind>]] for one; edit them in the "${COSTS_CONFIG_ENTRY}" card.`);
+  return sys(`Advancement costs - ${items}. [[costs <kind>]] for one; edit them in the "${COSTS_CONFIG_ENTRY}" card. `
+    + `A template may price its own purse instead ([[budget]] shows the one in force) - `
+    + `"${NOT_PURCHASABLE}" there means that purse cannot be bought from at all. `
+    + `🚧 maturation is recorded here and spent by nobody: there is no downtime engine yet.`);
 }
 
 // =============================================================================
@@ -2498,6 +2724,14 @@ async function cmdSpend(cmd: ParsedCommand, ctx: CommandContext): Promise<string
   const [which, effectName] = raw.split(":").map(s => s.trim());
   const def = CharacterResources.resolveDef(char, which);
   if (!def) return sys(`${disp(char.name)} has no resource "${which}".`);
+  // Having the points and being able to burn them are different questions, and
+  // this is where they come apart: a talisman may hand anyone a pool.
+  const blocked = CharacterResources.cannotUse(char, def);
+  if (blocked.length) {
+    return sys(`${disp(char.name)} holds ${def.name} but cannot use it - that needs ${blocked.join(", ")} `
+      + `(${blocked.map(b => capabilityNote(b)).filter(Boolean).join("; ") || "no rule the engine knows"}). `
+      + `[[attune ${blocked[0]}]] if something granted it to him.`);
+  }
   const e = resourceEffect(def, effectName || undefined);
   if (effectName && !e) return sys(`${def.name} has no "${effectName}" effect.`);
 
@@ -4685,6 +4919,13 @@ CommandRouter.register("cancel-roll", cmdCancelRoll, {
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
 });
 CommandRouter.register("resources", cmdResources, { summary: "list the current character's resources" });
+CommandRouter.register("attune", cmdAttune, {
+  summary: "what this character can USE (a pool he cannot use is only points)",
+  params: [
+    { key: "capability", kind: "positional", hint: "[awakened|vitae|resolve]" },
+    { key: "off", kind: "positional", hint: "[off]" },
+  ],
+});
 CommandRouter.register("spend", cmdSpend, {
   summary: "spend a resource / fire a named effect outside a roll",
   params: [
@@ -4839,6 +5080,19 @@ CommandRouter.register("extend-template", cmdExtendTemplate, {
     { key: "awakened", kind: "named", type: "enum", options: ["true", "false"], desc: "Does it work Awakened magic?" },
     { key: "has-virtues", kind: "named", type: "enum", options: ["true", "false"] },
     { key: "resources", kind: "named", hint: '"a,b"', desc: "Resources to ADD (define them first with [[define-resource]])" },
+    { key: "capabilities", kind: "named", hint: '"vitae,resolve"', desc: "What it can USE, added to the parent's" },
+    {
+      key: "budgets", kind: "named", hint: '"arcana=role:willpower"', example: "arcana=role:willpower,arcana:freebie=-",
+      desc: 'Any part of any purse: "purse=<allowance expression>", or "purse:freebie=" / "purse:experience=" for what a dot costs ("-" = cannot be bought)',
+    },
+    {
+      key: "creation", kind: "named", hint: '"disciplines=4"', example: "disciplines=4,discipline-max=5",
+      desc: `The creation pools: ${CREATION_FIELDS.map(([n]) => n).join(", ")}`,
+    },
+    {
+      key: "disciplines", kind: "named", hint: '"celerity,potence"', example: "=celerity,potence",
+      desc: "The Disciplines that are its own; a leading = means these and no family's",
+    },
   ],
 });
 CommandRouter.register("forget-template", cmdForgetTemplate, {
@@ -4854,6 +5108,7 @@ CommandRouter.register("define-resource", cmdDefineResource, {
     { key: "max", kind: "named", type: "int", desc: "Its ceiling" },
     { key: "roles", kind: "named", hint: '"a,b"', desc: "Names it also answers to (blood, willpower, magic-fuel...)" },
     { key: "replaces", kind: "named", hint: '"a,b"', desc: "Resources it stands in for, hiding them" },
+    { key: "requires", kind: "named", hint: '"vitae"', desc: `What a character must be able to USE (${Object.keys(CAPABILITIES).join(", ")}) to spend it at all` },
     { key: "per-turn", kind: "named", type: "int", desc: "Most that may be spent in one turn" },
     { key: "description", kind: "named", hint: "<text>" },
   ],

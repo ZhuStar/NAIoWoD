@@ -32,6 +32,7 @@ import {
   EffectOp, resolveMeritInstance, passiveOpsOf,
   Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, applyTemplateDefs,
+  BudgetEntry, BudgetDef,
 } from "./rules";
 import { ExprScope, ExprResult, Numeric, evaluateExpr, evalNumeric } from "./core/expr";
 import {
@@ -525,8 +526,15 @@ export interface PlayableCharacter {
   // (that needs targeting), so the engine stores them and surfaces them.
   instances?: Record<string, TraitInstance[]>;
   // What this character may SPEND, per purse, overriding the template's
-  // (rules.ts TemplateConfig.Budgets). Expressions, like the template's.
-  budgets?: Record<string, string>;
+  // (rules.ts TemplateConfig.Budgets): an allowance expression, or an
+  // allowance with the prices a dot costs from freebies and experience.
+  budgets?: Record<string, BudgetEntry>;
+  // What this character can USE, on top of what the template can (rules.ts
+  // CAPABILITIES). A talisman that teaches a mortal to spend the Quintessence
+  // it holds is an `awakened` attunement written here; without it he holds the
+  // pool and nothing else. Removing a template's own capability is not a thing
+  // a sheet does - a mage who forgets he Awakened is a different template.
+  capabilities?: string[];
   // What a purchase ACTUALLY cost, keyed by trait or merit-instance key, as an
   // expression - price paid is not price listed. "0" is the Storyteller
   // granting it outright (a Background you simply have, an arcanum you were
@@ -788,7 +796,16 @@ export function characterToCard(char: PlayableCharacter): CardMap {
     arcana[displayTraitName(name)] = paid === undefined ? points : { [CARD_VALUE_KEY]: points, paid };
   }
   if (Object.keys(arcana).length) card["arcana"] = arcana;
-  if (Object.keys(char.budgets ?? {}).length) card["budgets"] = { ...char.budgets } as CardMap;
+  if (char.capabilities?.length) card["capabilities"] = [...char.capabilities];
+  // A purse is one line when it is only an allowance, a block when it is
+  // priced - the card says whichever the sheet actually holds.
+  if (Object.keys(char.budgets ?? {}).length) {
+    const purses: CardMap = {};
+    for (const [purse, entry] of Object.entries(char.budgets!)) {
+      purses[purse] = typeof entry === "string" ? entry : ({ ...entry } as CardMap);
+    }
+    card["budgets"] = purses;
+  }
   if (Object.keys(char.choices ?? {}).length) card["choices"] = { ...char.choices } as CardMap;
   if (Object.keys(char.priorities ?? {}).length) card["priorities"] = { ...char.priorities } as CardMap;
   return card;
@@ -848,10 +865,20 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
   }
   if (Object.keys(instances).length) char.instances = instances;
   if (Object.keys(paid).length) char.paid = paid;
-  const budgets: Record<string, string> = {};
+  const capabilities = asStringList(card["capabilities"]).map(c => StringUtil.normalize(c));
+  if (capabilities.length) char.capabilities = capabilities;
+  const budgets: Record<string, BudgetEntry> = {};
   for (const [purse, raw] of Object.entries(asMap(card["budgets"]))) {
+    const key = StringUtil.normalize(purse);
     const expr = asText(raw);
-    if (expr) budgets[StringUtil.normalize(purse)] = expr;
+    if (expr) { budgets[key] = expr; continue; }
+    const m = asMap(raw);
+    const entry: BudgetDef = {};
+    for (const field of ["allows", "freebie", "experience", "note"] as const) {
+      const v = asText(m[field]);
+      if (v) entry[field] = v;
+    }
+    if (Object.keys(entry).length) budgets[key] = entry;
   }
   if (Object.keys(budgets).length) char.budgets = budgets;
   for (const key of ["choices", "priorities"] as const) {
@@ -1056,20 +1083,34 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
       // `resource:quintessence:max` - what a POOL is worth, so one resource can
       // be defined from others. The def is read BEFORE replacement filtering, so
       // Living Resolve can still name the Quintessence it hides.
-      if (head === "resource") {
+      // `role:willpower` - "Willpower, OR WHATEVER REPLACES IT". Replacement is
+      // applied first, so for the one character whose Willpower, Blood, Resolve
+      // and Quintessence are one substance, all four names land on Living
+      // Resolve. The default field is `start`, because a pool's start is its
+      // RATING (a mage's Willpower 5 in a tracker that tops out at 10) and a
+      // rating is what a rule means when it says "equal to your Willpower".
+      if (head === "resource" || head === "role") {
         const [resName, ...fieldParts] = rest;
-        const field = StringUtil.normalize(fieldParts.join(":") || "max");
-        const def = resourcesForTemplates(char.templates, ResourceOverrides.current())
-          .find(d => StringUtil.normalize(d.name) === StringUtil.normalize(resName));
+        const key = StringUtil.normalize(resName);
+        const field = StringUtil.normalize(fieldParts.join(":") || (head === "role" ? "start" : "max"));
+        const def = head === "role"
+          ? CharacterResources.resolveDef(char, key)
+          // `resource:` reads the def BEFORE replacement filtering, so Living
+          // Resolve can still name the Quintessence and Blood it hides.
+          : resourcesForTemplates(char.templates, ResourceOverrides.current()).find(d => StringUtil.normalize(d.name) === key);
         if (!def) return undefined;
+        const owner = StringUtil.normalize(def.name);
         // A resource that names ITSELF would spin; the guard makes it 0 and the
         // caller's `unknown`/error path reports the nonsense.
-        if (resourceDepth.has(StringUtil.normalize(resName))) return { value: 0, from: "circular" };
-        resourceDepth.add(StringUtil.normalize(resName));
+        if (resourceDepth.has(owner)) return { value: 0, from: "circular" };
+        resourceDepth.add(owner);
         try {
+          // The player's own chosen start IS the rating when there is one.
+          const chosen = field === "start" ? char.poolStarts?.[owner] : undefined;
+          if (chosen !== undefined) return { value: chosen, from: owner === key ? undefined : def.name };
           const raw = field === "start" ? def.start : field === "per-turn" ? def.perTurnLimit : def.max;
-          return { value: raw === undefined ? 0 : evalNumeric(raw, scope, 0) };
-        } finally { resourceDepth.delete(StringUtil.normalize(resName)); }
+          return { value: raw === undefined ? 0 : evalNumeric(raw, scope, 0), from: owner === key ? undefined : def.name };
+        } finally { resourceDepth.delete(owner); }
       }
       if (head === "derived") return byTrait.has(name) ? { value: derive(name).value } : undefined;
       if (head === "granted") return granted[name] ? { value: granted[name].rating, from: `from ${granted[name].from}` } : undefined;
@@ -1853,9 +1894,16 @@ export const TemplateRegistry = new ListConfigStore<TemplateDef>({
     "  soak        - mortal | vampire | ghoul | mage | demon | werewolf",
     "  morality    - humanity | torment | none",
     "  awakened    - true for a template that works Awakened magic",
+    "  capabilities- what it can USE (awakened, vitae, resolve): a pool whose",
+    "                `requires` names one of these is inert without it",
     "  resources   - ADDED to the parent's; each is a NAME with kind/start/max",
     "                indented under it (a `replaces` list hides the parent's)",
-    "  budgets, creation, derived - as the template's own",
+    "  disciplines - the Disciplines that are this creature's own; add `mode:",
+    "                replace` for a creature no clan or family speaks for",
+    "  budgets     - a purse per line (`arcana: role:willpower`), or a block",
+    "                with allows / freebie / experience / note under it. A price",
+    "                of \"-\" means that purse cannot be bought from at all",
+    "  creation, derived - as the template's own",
     "A def that extends a template nobody defines is skipped and reported.",
   ],
   make: makeTemplateDef,
@@ -2130,7 +2178,9 @@ export class CharacterAfflictions {
 // one resource fills another's job (Quintessence carrying role "resolve").
 // history-aware historyStorage is the eventual home.
 // =============================================================================
-export interface ResourceView { def: ResourceDef; current: number; max: number; }
+// `blocked` is what the character lacks to USE this pool - empty for almost
+// everyone, and the whole story for a man carrying a talisman he cannot work.
+export interface ResourceView { def: ResourceDef; current: number; max: number; blocked: string[] }
 
 export class CharacterResources {
   private static _storage = new ScopedStorage();
@@ -2142,6 +2192,27 @@ export class CharacterResources {
     const defs = resourcesForTemplates(char.templates, ResourceOverrides.current());
     const replaced = new Set(defs.flatMap(d => (d.replaces ?? []).map(r => StringUtil.normalize(r))));
     return defs.filter(d => !replaced.has(StringUtil.normalize(d.name)));
+  }
+
+  // What this character can USE: every template's capabilities, plus whatever
+  // the sheet is attuned to. Holding a pool is a separate question entirely -
+  // see cannotUse.
+  static capabilities(char: PlayableCharacter): string[] {
+    const out = new Set((char.capabilities ?? []).map(c => StringUtil.normalize(c)));
+    for (const t of char.templates) {
+      for (const c of TEMPLATES[StringUtil.normalize(t)]?.Capabilities ?? []) out.add(StringUtil.normalize(c));
+    }
+    return [...out];
+  }
+
+  // What this character LACKS for that pool - empty means he can spend it. A
+  // mage handed ten points of vitae holds every one and can do nothing with
+  // them; this is the list that says why, and it is a list rather than a
+  // boolean because "you cannot" is worth nothing without "you never Awakened".
+  static cannotUse(char: PlayableCharacter, def: ResourceDef): string[] {
+    if (!def.requires?.length) return [];
+    const have = CharacterResources.capabilities(char);
+    return def.requires.map(r => StringUtil.normalize(r)).filter(r => !have.includes(r));
   }
 
   // A resource by exact name, else by a role it fills ("use X as Y"), else as
@@ -2174,14 +2245,21 @@ export class CharacterResources {
     const values = await CharacterResources._values(char);
     return CharacterResources.defsFor(char).map(def => {
       const k = StringUtil.normalize(def.name);
-      return { def, current: k in values ? values[k] : CharacterResources._startOf(char, def), max: resourceNumbers(char, def).max };
+      return {
+        def, current: k in values ? values[k] : CharacterResources._startOf(char, def),
+        max: resourceNumbers(char, def).max, blocked: CharacterResources.cannotUse(char, def),
+      };
     });
   }
 
-  // Spend up to `amount` (never below 0); returns how much actually left the pool.
-  static async spend(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ spent: number; def?: ResourceDef }> {
+  // Spend up to `amount` (never below 0); returns how much actually left the
+  // pool. A pool this character cannot USE spends nothing and says what is
+  // missing - the points are there, the ability to burn them is not.
+  static async spend(char: PlayableCharacter, nameOrRole: string, amount = 1): Promise<{ spent: number; def?: ResourceDef; blocked?: string[] }> {
     const def = CharacterResources.resolveDef(char, nameOrRole);
     if (!def) return { spent: 0 };
+    const blocked = CharacterResources.cannotUse(char, def);
+    if (blocked.length) return { spent: 0, def, blocked };
     const values = await CharacterResources._values(char);
     const k = StringUtil.normalize(def.name);
     const have = k in values ? values[k] : CharacterResources._startOf(char, def);

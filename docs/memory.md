@@ -3302,12 +3302,16 @@ Ordered roughly by unlock value:
     nothing yet refuses the SPEND itself. Default-yes-for-Willpower with an
     opt-out tag is the stated shape.
 
-21. **A RESOURCE LEDGER ON THE STORY CLOCK** (owner: *"we should keep track of
-    the resources spent and recovered now that we have access to time"*). Every
-    spend/gain stamped with the story date, so "how much Quintessence did he burn
-    this week" is answerable and the per-turn limit has something to enforce
-    against. `EffectUses` is the precedent (a per-scene counter); this is its
-    grown-up form.
+21. **A RESOURCE LEDGER, PER CHARACTER** (owner: *"we should keep track of the
+    resources spent and recovered now that we have access to time"* — then,
+    correcting me: *"Resource ledger should not live in the story. It is part of
+    each character in the story"*). Every spend/gain stamped with the story date,
+    so "how much Quintessence did he burn this week" is answerable and the
+    per-turn limit has something to enforce against. **It belongs to the
+    character, not to the chronicle**: the same shape as `res:<char>` (the live
+    values) rather than a story-wide log, so it moves, copies and is forgotten
+    WITH the sheet. `EffectUses` is the precedent (a per-scene counter keyed by
+    character); this is its grown-up form.
 
 22. **LIVING RESOLVE MUST NOT BE IN THE RULES** (owner: *"Living Resolve is
     unique to this game, and it shouldn't be in the rules. I should be able to
@@ -3318,6 +3322,50 @@ Ordered roughly by unlock value:
     needed to build them from commands already exists (`[[define-resource]]` +
     `[[extend-template]]`); the work is **moving them out** into the chronicle's
     own cards and proving the round trip, so `rules.ts` ships only canon.
+
+23. **THE EVENT BUS, AND SPLITTING THE SCRIPT ACROSS SCRIPTS** (owner,
+    2026-07-31: *"What messages will allow us to do is to distribute the script.
+    We will have a bus, an event bus, and that event bus will send events as
+    messages in. I think that will make our architecture more understandable for
+    both of us"*). **The API is documented and vendored already** — no research
+    needed: `docs/api-reference.md` §api.v1.messaging (lines ~3157-3327) and the
+    types at ~8744, with real typings in `types/novelai/script-types.d.ts`
+    (~2756), so it compiles under the standalone artifact check.
+
+    Four calls, and that is the whole surface:
+    ```ts
+    api.v1.messaging.send(toScriptId, data, channel?)   // one script
+    api.v1.messaging.broadcast(data, channel?)          // ALL OTHERS
+    api.v1.messaging.onMessage(cb, {fromScriptId?, channel?}) -> subIndex
+    api.v1.messaging.unsubscribe(subIndex)
+    ```
+    `ScriptMessage = {fromScriptId, toScriptId?, channel?, data: any,
+    timestamp: number}` — a usable event envelope as-is, timestamp included.
+
+    **Four things that shape the design, all from the docs:**
+    - **`broadcast` explicitly excludes the sender.** A script never hears its
+      own events. So messaging is the DISTRIBUTION mechanism, not an in-process
+      emitter: an internal bus still needs a plain synchronous emitter beside it,
+      and the messaging layer is what carries events ACROSS scripts. Conflating
+      the two would produce a bus that silently drops every local event.
+    - **Filtering is only `fromScriptId` and `channel`** — no topic patterns. So
+      either one channel per event family, or the topic rides inside `data` and
+      handlers filter themselves.
+    - **`data` is serialized.** Only plain data crosses: no functions, no class
+      instances. `TemplateConfig` has methods (`GetPool`, `CannotUse`) and
+      `DamageReaction` is a class — those must be rebuilt on the far side from
+      their defs, which is exactly why §7.58 made templates DATA. The
+      already-data-shaped layers (`TemplateDef`, `ResourceDef`, `SavedRoll`, the
+      card text format) are the ones that can cross a wire unchanged.
+    - **Nothing is documented about ordering, delivery guarantees or failure.**
+      For a rules engine whose backbone this would be, that is the risk to probe
+      first with a throwaway two-script experiment before committing.
+
+    **What is missing on our side: `src/host-mock.ts` implements no messaging**,
+    so nothing about a bus is testable off-host until it does. That mock (a
+    subscription list, a delivery loop, and a `__deliverMessage` test hook beside
+    the existing `__fireOnResponse`) is the honest first step of this item — the
+    same order every host surface has been added in.
 
 ## 9. Session-restart checklist
 

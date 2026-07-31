@@ -567,12 +567,25 @@ table somebody has to apply by hand:
 
 ```
 quintessence:
-  max:      10 + 2 * background:fount     # 10, 12, 14, 16, 18, 20
-  per-turn: max(2, background:fount + 1)  #  2,  2,  3,  4,  5,  6
+  max:      10 + 2 * background:fount   # 10, 12, 14, 16, 18, 20
+  per-turn: 1 + background:fount        #  1,  2,  3,  4,  5,  6
 ```
 
-A mage with no Fount holds ten points and spends two a turn, exactly as the book
-says; each dot raises both, and **nothing anywhere stores the number**.
+A mage with no Fount holds ten points and spends one a turn; each dot raises
+both, and **nothing anywhere stores the number**.
+
+The per-turn limit is a **turn** limit, not a per-roll one — but until the turn
+system enforces spends, **one roll counts as one turn**. Spend more than a point
+on a roll with `spend-amount=`:
+
+```
+[[roll strength+brawl spend=resolve spend-amount=2]]   → spent 2 resolve
+[[roll 3 spend=quintessence spend-amount=9]]           → spent 3; capped at 3 per use
+[[name-roll surge 3 spend=resolve spend-amount=2]]     → the saved roll bakes it in
+```
+
+A resource may cap one spend with `limits.maxPerUse` (Quintessence: 3). When it
+bites, the reply says so rather than trimming in silence.
 
 **`resource:<name>:max`** (also `:start`, `:per-turn`) reads one pool's numbers,
 so a pool can be **made of other pools**. Living Resolve is not 30 — it *is* the

@@ -3104,7 +3104,13 @@ function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
 function bloodResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1,
-    roles: ["blood"],
+    // `heal` is a ROLE, not just the name of an effect below: it says "this is
+    // the substance this character mends himself with", so [[spend heal 2]]
+    // finds it without knowing what it is called. Whether a resource CAN heal
+    // is the `heal` effect; how much, and how often aggravated damage may be
+    // mended, is 🚧 unmodelled - the effect says 1 box per point and the
+    // Storyteller rules the rest.
+    roles: ["blood", "heal"],
     // Every living thing has blood. Only the Damned and those they sustain can
     // DO anything with it - a mage's ten points are just a mage's ten points.
     requires: ["vitae"],
@@ -3267,7 +3273,7 @@ const TEMPLATE_MAGE = new TemplateConfig(
     // The Fount Background IS the capacity: no Fount holds 10 and spends 2 a
     // turn; each dot adds two to the store and (from the second) one per turn.
     { name: "quintessence", kind: "pool", start: 0,
-      max: "10 + 2 * background:fount", perTurnLimit: "max(2, background:fount + 1)",
+      max: "10 + 2 * background:fount", perTurnLimit: "1 + background:fount",
       roles: ["magic-fuel"],
       // Harvesting from a cray, eating Tass and burning a talisman's store on a
       // spell are all one capability, and an unAwakened man has none of it.
@@ -3408,7 +3414,7 @@ const LIVING_RESOLVE: ResourceDef = {
   start: "resource:quintessence:max + resource:blood:max",
   max: "resource:quintessence:max + resource:blood:max",
   perTurnLimit: "resource:quintessence:per-turn",
-  roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
+  roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence", "heal"],
   replaces: ["blood", "willpower", "resolve", "quintessence"],
   rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
   recovery: [
@@ -7261,7 +7267,10 @@ interface ProcedureStep {
 // the pure RollSpec - the roll pipeline never sees them - and are stored raw
 // (resolved at invoke time, like every command argument).
 type SavedRoll = RollSpec & {
-  spend?: string; specialty?: string; table?: string;
+  // `spend` is the resource token ("resolve", "blood::heal", "willpower!");
+  // `spendAmount` is how many points of it, so a saved roll can bake in
+  // "always burn two Resolve" instead of making you retype spend-amount=2.
+  spend?: string; spendAmount?: number; specialty?: string; table?: string;
   extended?: ExtendedSavedConfig; description?: string;
   opposed?: OpposedSavedConfig; steps?: ProcedureStep[];
 };
@@ -7296,6 +7305,7 @@ function savedRollToCard(roll: SavedRoll): CardMap {
     const v = roll[key];
     if (v) out[key] = v;
   }
+  if (roll.spendAmount !== undefined && roll.spendAmount !== 1) out["spendAmount"] = roll.spendAmount;
   if (roll.extended) out["extended"] = { ...roll.extended } as CardMap;
   if (roll.opposed) out["opposed"] = { ...roll.opposed, extended: roll.opposed.extended ? { ...roll.opposed.extended } : undefined } as CardMap;
   if (roll.steps?.length) out["steps"] = roll.steps.map(s => ({ ...s }) as CardMap);
@@ -7327,6 +7337,8 @@ function savedRollFromCard(body: CardMap): SavedRoll | undefined {
     const v = asText(body[key]);
     if (v) roll[key] = v;
   }
+  const spendAmount = asNumber(body["spendAmount"]);
+  if (spendAmount && spendAmount > 1) roll.spendAmount = spendAmount;
   const extendedOf = (v: CardValue | undefined): ExtendedSavedConfig | undefined => {
     const m = asMap(v);
     if (!Object.keys(m).length) return undefined;
@@ -9005,8 +9017,8 @@ async function applyEffectSpec(
         if ((extra.uncancelableSuccesses ?? 0) > cap) {
           extra.uncancelableSuccesses = cap;
           notes.push(casting
-            ? `un-cancelable successes capped at ${cap} (Foundation)`
-            : `one un-cancelable success only - stacking Willpower into a single action is a spellcasting rule`);
+            ? `capped at ${cap} sure (Foundation)`
+            : `1 sure only (stacking Willpower is a casting rule)`);
         }
       }
     } else if (kind === "increase") {
@@ -9049,7 +9061,7 @@ async function applyEffectSpec(
 // "!" makes it MANDATORY: if it can't be paid, `refuse` is set and the caller
 // does NOT roll (Willpower/Resolve as required spell fuel). Only roll-op (or
 // pure-cost) effects belong inside a roll; standalone ops point at [[spend]].
-async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[], rollTraits: string[], spendOverride?: string): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
+async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: CommandContext, rollTags: string[], rollTraits: string[], spendOverride?: string, amountOverride?: number): Promise<{ extra?: Partial<RollModifier>; note: string; refuse?: string }> {
   // An explicit spend= on the command wins; otherwise a saved roll's own spend
   // (the `@name` sidecar) applies automatically.
   const raw = cmd.named["spend"] ?? spendOverride;
@@ -9063,7 +9075,9 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
   const e = resourceEffect(def, effectName || undefined);
   if (effectName && !e) return { note: "", refuse: `${def.name} has no "${effectName}" effect` };
 
-  const applications = Math.max(1, parseInt(cmd.named["spend-amount"] ?? "1", 10) || 1);
+  // How many points ride this spend. The command wins over the saved roll's
+  // own amount; a resource's `limits.maxPerUse` clamps it and says so.
+  const applications = Math.max(1, intOrUndef(cmd.named["spend-amount"]) ?? amountOverride ?? 1);
 
   if (!e) {
     // No effect configured: a plain deduction rides along with the roll.
@@ -9082,7 +9096,12 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
   const r = await applyEffectSpec(char, def, effectName ?? "", e, { applications, rng: ctx.rng, rollTags, rollTraits });
   if (r.insufficient) return mandatory ? { note: "", refuse: r.insufficient } : { note: `${r.insufficient} - spent nothing` };
   if (r.refuse) return { note: "", refuse: r.refuse };
-  return { extra: r.extra, note: `${r.notes.join("; ")}: ${e.label}` };
+  // What the spend DID, not what the resource IS. The effect's label is a
+  // paragraph of rules prose - it belongs to [[resources]], not to the tail of
+  // every punch. What the dice actually got is already on the roll line
+  // ("+2 auto +1 sure vs diff 2"); these notes carry what that line cannot say:
+  // how many points left the pool, and anything that capped or skipped an op.
+  return { extra: r.extra, note: r.notes.join("; ") };
 }
 
 // A resource the character ROLLS as a trait (def.rollAs): pooling its name (or
@@ -9381,6 +9400,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   if (!args.pool) return sys(`roll needs a pool, e.g. [[roll strength+brawl]] or a saved [[roll @name]].`);
   let spec: RollSpec;
   let savedSpend: string | undefined;
+  let savedSpendAmount: number | undefined;
   let savedSpecialty: string | undefined;
   let savedTable: string | undefined;
   let savedSteps: ProcedureStep[] | undefined;
@@ -9397,6 +9417,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     if (base.opposed) return launchOpposedFromSaved(char, name, base, cmd, args, ctx);
     if (base.extended) return launchExtendedFromSaved(char, name, base, cmd, args, ctx);
     savedSpend = base.spend;         // auto-paid unless the command overrides spend=
+    savedSpendAmount = base.spendAmount;
     savedSpecialty = base.specialty; // auto-applied unless the command overrides specialty=
     savedTable = base.table;         // read against the outcome unless table= overrides
     savedSteps = base.steps;         // a procedure's follow-ups, surfaced after the entry roll
@@ -9408,7 +9429,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   // RollModifiers (unregistered ones surface as the usual unknown-tag note).
   spec = await withAfflictionTags(char.name, spec);
   const poolTraits = poolTraitsOf(char, spec.pool);
-  const spend = await applySpend(char, cmd, ctx, spec.tags, poolTraits, savedSpend);
+  const spend = await applySpend(char, cmd, ctx, spec.tags, poolTraits, savedSpend, savedSpendAmount);
   if (spend.refuse) return sys(`${disp(char.name)} can't: ${spend.refuse}.`);
   // Rolls see live state: enhancements + boosts add to the record's dots, the
   // wound penalty (negative) comes off the dice pool, owned passives (Trait
@@ -9456,7 +9477,7 @@ function describeSidecars(saved: SavedRoll): string {
     saved.opposed ? describeOpposedSaved(saved.opposed) : "",
     saved.extended ? describeExtendedSaved(saved.extended) : "",
     saved.steps && saved.steps.length ? `[${saved.steps.length}-step procedure]` : "",
-    saved.spend ? `spend=${saved.spend}` : "",
+    saved.spend ? `spend=${saved.spend}${saved.spendAmount && saved.spendAmount > 1 ? ` x${saved.spendAmount}` : ""}` : "",
     saved.specialty ? `specialty=${saved.specialty}` : "",
     saved.table ? `table=${saved.table}` : "",
   ].filter(Boolean).join(", ");
@@ -9518,6 +9539,8 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const description = cmd.named["description"]?.trim();   // literal channel: verbatim prose
   const saved: SavedRoll = { ...spec };
   if (spend) saved.spend = spend;
+  const spendAmount = intOrUndef(cmd.named["spend-amount"]);
+  if (spend && spendAmount !== undefined && spendAmount > 1) saved.spendAmount = spendAmount;
   if (specialty) saved.specialty = specialty;
   if (table) saved.table = table;
   if (description) saved.description = description;
@@ -13230,6 +13253,7 @@ const ROLL_KNOBS: ParamSpec[] = [
   { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (fire registered modifiers)" },
   { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE,
     desc: 'Resource to spend on the roll — "::effect" picks a named effect, "!" means no payment, no roll' },
+  { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1; a resource may cap it per use)" },
   { key: "specialty", kind: "named", hint: "<trait|label>", example: "Swords  ·  or its trait: melee",
     desc: "Apply ONE specialty (+1 die; pool must use its trait)" },
 ];
@@ -13341,6 +13365,7 @@ CommandRouter.register("extended-roll", cmdExtendedRoll, {
     { key: "dice-modifier", kind: "named", type: "int" },
     { key: "tags", kind: "named", hint: '"a,b"' },
     { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
+    { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1)" },
   ],
 });
 CommandRouter.register("continue-roll", cmdContinueRoll, {
@@ -13352,6 +13377,7 @@ CommandRouter.register("continue-roll", cmdContinueRoll, {
     { key: "dice-modifier", kind: "named", type: "int" },
     { key: "tags", kind: "named", hint: '"a,b"' },
     { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
+    { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1)" },
   ],
 });
 CommandRouter.register("roll-status", cmdRollStatus, {
@@ -13408,6 +13434,7 @@ const TWO_SIDED_PARAMS: ParamSpec[] = [
   { key: "vs-difficulty", kind: "named", type: "int" },
   { key: "table", kind: "named", desc: "Success table read with your margin" },
   { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
+  { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1)" },
 ];
 CommandRouter.register("resist", cmdResist, {
   summary: "resisted action: your margin over theirs counts (tie = fail)",
@@ -13473,6 +13500,7 @@ CommandRouter.register("cast", cmdCast, {
     { key: "intervals", kind: "named", type: "int", desc: "Max rolls for an extended casting" },
     { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"], desc: "Extended botch policy (default fail: Backlash ends it)" },
     { key: "spend", kind: "named", hint: "<res[:effect][!]>", desc: "Resource to spend on the roll" },
+    { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1; a resource may cap it per use)" },
   ],
 });
 CommandRouter.register("seal-spell", cmdSealSpell, {
@@ -13921,6 +13949,7 @@ CommandRouter.register("lift", cmdLift, {
     { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>" },
     { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
+    { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1)" },
   ],
 });
 CommandRouter.register("afflictions", cmdAfflictions, {

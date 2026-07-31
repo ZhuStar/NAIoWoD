@@ -491,7 +491,13 @@ export function resolveResource(over: Partial<ResourceDef> = {}): ResourceDef {
 export function bloodResource(over: Partial<ResourceDef> = {}): ResourceDef {
   return {
     name: "blood", kind: "pool", start: 10, max: 10, perTurnLimit: 1,
-    roles: ["blood"],
+    // `heal` is a ROLE, not just the name of an effect below: it says "this is
+    // the substance this character mends himself with", so [[spend heal 2]]
+    // finds it without knowing what it is called. Whether a resource CAN heal
+    // is the `heal` effect; how much, and how often aggravated damage may be
+    // mended, is 🚧 unmodelled - the effect says 1 box per point and the
+    // Storyteller rules the rest.
+    roles: ["blood", "heal"],
     // Every living thing has blood. Only the Damned and those they sustain can
     // DO anything with it - a mage's ten points are just a mage's ten points.
     requires: ["vitae"],
@@ -654,7 +660,7 @@ export const TEMPLATE_MAGE = new TemplateConfig(
     // The Fount Background IS the capacity: no Fount holds 10 and spends 2 a
     // turn; each dot adds two to the store and (from the second) one per turn.
     { name: "quintessence", kind: "pool", start: 0,
-      max: "10 + 2 * background:fount", perTurnLimit: "max(2, background:fount + 1)",
+      max: "10 + 2 * background:fount", perTurnLimit: "1 + background:fount",
       roles: ["magic-fuel"],
       // Harvesting from a cray, eating Tass and burning a talisman's store on a
       // spell are all one capability, and an unAwakened man has none of it.
@@ -795,7 +801,7 @@ export const LIVING_RESOLVE: ResourceDef = {
   start: "resource:quintessence:max + resource:blood:max",
   max: "resource:quintessence:max + resource:blood:max",
   perTurnLimit: "resource:quintessence:per-turn",
-  roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence"],
+  roles: ["blood", "willpower", "resolve", "magic-fuel", "quintessence", "heal"],
   replaces: ["blood", "willpower", "resolve", "quintessence"],
   rollAs: { cap: 10, negatesPenaltiesAbove: 10 },
   recovery: [

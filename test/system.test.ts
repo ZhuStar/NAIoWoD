@@ -5309,7 +5309,7 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
     // successes) but only ONE Willpower - one per action is the old law.
     const two = await CommandRouter.route("roll 3 spend=living-resolve spend-amount=2", { rng: seqRng([1, 1, 1]) });
     expect(two).toContain("+2 auto +1 sure");
-    expect(two).toContain("stacking Willpower into a single action is a spellcasting rule");
+    expect(two).toContain("1 sure only (stacking Willpower is a casting rule)");
     expect(two).not.toContain("BOTCH");
     // A SPELL: the mage may pour it in, up to what Modus 5 holds.
     const spell = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
@@ -5332,7 +5332,7 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
     await CharacterResources.gain(c, "willpower", 5);
     const r = await CommandRouter.route("roll strength spend=willpower spend-amount=2", { rng: seqRng([1, 1, 1]) });
     expect(r).toContain("+1 sure");                 // one Willpower per action, outside a spell
-    expect(r).toContain("stacking Willpower into a single action is a spellcasting rule");
+    expect(r).toContain("1 sure only (stacking Willpower is a casting rule)");
     expect(r).not.toContain("BOTCH");
   });
 
@@ -6194,15 +6194,16 @@ describe("templates: extending one, from a def or a command", () => {
 describe("resource capacity as an expression: the Fount ladder, and fusing two pools", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("a mage without the Fount holds ten and spends two; each dot raises both", async () => {
+  test("a mage without the Fount holds ten and spends one; each dot raises both", async () => {
     await CommandRouter.route('create-playable name="Hermetic" templates=mage');
     const quintessence = (c: PlayableCharacter) =>
       resourceNumbers(c, CharacterResources.resolveDef(c, "quintessence")!);
     // The book's bare capacity, and its bare rate.
     let char = (await CharacterStore.load("Hermetic"))!;
     expect(quintessence(char).max).toBe(10);
-    expect(quintessence(char).perTurn).toBe(2);
-    // ...then the whole published ladder, from ONE pair of expressions.
+    expect(quintessence(char).perTurn).toBe(1);
+    // ...then the whole published ladder, from ONE pair of expressions:
+    // max = 10 + 2 x Fount, per-turn = 1 + Fount.
     const ladder: Array<[number, number, number]> = [[1, 12, 2], [2, 14, 3], [3, 16, 4], [4, 18, 5], [5, 20, 6]];
     for (const [dots, max, perTurn] of ladder) {
       await CommandRouter.route(`set-trait fount ${dots}`);
@@ -6339,6 +6340,71 @@ describe("budgets that carry prices, and templates that override any part of one
     // ... and survives the round trip through the card.
     const again = (await CharacterStore.load("Marius"))!;
     expect(budgetDef(again.budgets!["arcana"]).freebie).toBe("3");
+  });
+});
+
+describe("spending more than one point, and saying so briefly", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+  });
+
+  test("spend-amount is on the roll's own grammar, so [[help roll]] and the window show it", async () => {
+    const params = (CommandRouter.specFor("roll")?.params ?? []).map(p => p.key);
+    expect(params).toContain("spend");
+    expect(params).toContain("spend-amount");
+    expect(await CommandRouter.route("help roll")).toContain("spend-amount=N");
+  });
+
+  test("N points ride one spend, and a per-use cap says so instead of silently trimming", async () => {
+    await CommandRouter.route('create-playable name="Vis" templates=mage');
+    await CommandRouter.route("set-trait fount 3 paid=0");
+    await CommandRouter.route("gain quintessence 16");
+    const two = await CommandRouter.route("roll 3 spend=quintessence spend-amount=2");
+    expect(two).toContain("spent 2 quintessence");
+    // Quintessence caps at 3 per use; asking for 9 pays 3 and SAYS it did.
+    const many = await CommandRouter.route("roll 3 spend=quintessence spend-amount=9");
+    expect(many).toContain("spent 3 quintessence");
+    expect(many).toContain("capped at 3 per use");
+    // Resolve has no such cap - a demon may pour in as much as he holds.
+    await CommandRouter.route('create-playable name="Duke" templates=demon');
+    await CommandRouter.route('play name="Duke"');
+    expect(await CommandRouter.route("roll 3 spend=resolve spend-amount=2")).toContain("spent 2 resolve");
+  });
+
+  test("the roll's tail says what the spend DID, not what the resource IS", async () => {
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    const r = await CommandRouter.route("roll 3 spend=living-resolve");
+    // The mechanical result is on the roll line, where it belongs.
+    expect(r).toContain("+1 auto +1 sure");
+    expect(r).toContain("spent 1 living-resolve");
+    // ...and the resource's paragraph of rules prose is NOT on a punch.
+    expect(r).not.toContain("Quintessence break");
+    expect(r).not.toContain("spellcasting may stack");
+    expect(r.length).toBeLessThan(220);
+    // It is still one [[resources]] away for anyone who wants it.
+    expect(await CommandRouter.route("resources")).toContain("Quintessence break");
+  });
+
+  test("a saved roll can bake in the amount, and the command still overrides it", async () => {
+    await CommandRouter.route('create-playable name="Duke" templates=demon');
+    await CommandRouter.route("name-roll surge 3 spend=resolve spend-amount=2");
+    expect(await CommandRouter.route("roll-info surge")).toContain("spend=resolve x2");
+    expect(await CommandRouter.route("roll @surge")).toContain("spent 2 resolve");
+    expect(await CommandRouter.route("roll @surge spend-amount=1")).toContain("spent 1 resolve");
+    // ...and it survives the card round trip.
+    const again = (await NamedRollStore.get("surge"))!;
+    expect(again.spendAmount).toBe(2);
+  });
+
+  test("a resource declares that it heals by filling the `heal` role", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const char = (await CharacterStore.load("Vlad"))!;
+    // [[spend heal]] finds the substance without knowing its name.
+    expect(CharacterResources.resolveDef(char, "heal")!.name).toBe("blood");
+    await CommandRouter.route("damage lethal 2");
+    expect(await CommandRouter.route("spend heal:heal 2")).toContain("healing 2 boxes");
   });
 });
 

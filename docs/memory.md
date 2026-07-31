@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `12a9fae`** ("A purse with
-> prices, a pool you cannot use, and Disciplines that are his own").
+> **Last synced with the code as of commit `25de8bf`** ("Say what the
+> spend did, and say that you can spend two").
+> Prior: `12a9fae` ("A purse with prices, a pool you cannot use, and
+> Disciplines that are his own").
 > Prior: `a05d8d4` ("A pool that reads the sheet"); `3639376` ("A template you
 > can extend, and an Ouroboros that is no longer code"); `72c0076`
 > ("Successes the Storyteller simply grants"); `b182c7d` ("Say each thing
@@ -1128,7 +1130,9 @@ any `wod:`/`srd:` card still holding JSON) · `budget [name]` (§7.50/§7.60: ea
 allowance expression, value, spent, left, AND what a dot costs in freebies and
 experience; advisory) ·
 `attune [capability] [off]` (§7.60: what this character can USE; a pool he
-cannot use is only points) · `paid <key> [expr|listed]` (§7.50:
+cannot use is only points) ·
+(roll knob everywhere: `spend-amount=N` — §7.61 put it on every spec that
+already honoured it; a resource's `limits.maxPerUse` clamps it and says so) · `paid <key> [expr|listed]` (§7.50:
 what a purchase REALLY cost; no expression = granted) · `costs [kind]` (§7.44: what a dot
 costs from each purse — chronicle rules, Storyteller-applied) ·
 `sheet [name|@alias]` (the record as the ENGINE reads it —
@@ -2966,6 +2970,49 @@ and `prefill` are mocked/available but not yet written.
       `creation=` (all ten pools, each a number or an expression), `disciplines=`
       (a leading `=` means replace).
 
+61. **Say it once, say it short** (user: "I don't know how to spend two points of
+    Resolve in a regular roll ... in Quintessence, I don't remember how to spend
+    more than one point ... The general reply for any roll contains wording
+    about magic and Quintessence. I don't think it should. It should be smaller
+    and more precise, more to the point").
+    - **Both "missing" features already worked.** `spend-amount=N` has been read
+      by `applySpend` since §7.33; it was simply **not in any CommandSpec**, so
+      `[[help roll]]` never listed it and the owner had no way to find it. The
+      lesson is recorded rather than the fix: *a knob the parser honours and the
+      spec omits does not exist.* It is now a param on `roll`, `roll-for`,
+      `extended-roll`, `continue-roll`, `resist`/`contest`, `cast` and `lift` -
+      and because `[[win-roll]]` walks the roll spec, the window gained the
+      field for free.
+    - Likewise the **time commands** (`[[advance-time]]`, `[[story-date]]`,
+      `[[turn]]`, `[[scene]]`) and **`[[win-roll]]`'s spend picker** were both
+      reported missing and are both present in `dist/naiowod.ts`; the owner was
+      running an older paste. Nothing to fix, worth remembering: **"it's gone"
+      usually means "the artifact is stale"**.
+    - **The roll's tail now says what the spend DID, not what the resource IS.**
+      It used to append `e.label` verbatim - a paragraph about spellcasting,
+      Foundations and the Quintessence break - to *every* roll, including a
+      punch. The mechanical result is already on the roll line (`+2 auto +1 sure
+      vs diff 2`), so the note carries only what that line cannot say: how many
+      points left the pool, and anything that capped or skipped an op. The
+      caveat strings shrank with it (`1 sure only (stacking Willpower is a
+      casting rule)`). The full prose is one `[[resources]]` away.
+    - **`SavedRoll.spendAmount`** (data shape): a saved roll can bake in "always
+      burn two Resolve"; the command's `spend-amount=` still overrides it.
+    - **THE FOUNT LADDER WAS WRONG AND THE OWNER CORRECTED IT.** His first
+      statement said a mage with no Fount spends **two** a turn; his second,
+      after checking, gives the table as **1 + Fount** flat - no Fount spends
+      **one**. `perTurnLimit` went from `max(2, background:fount + 1)` to
+      `1 + background:fount`. Recorded because the two statements conflict and
+      the SECOND one is the ruling.
+    - **`heal` is a ROLE now**, on `blood` and on Living Resolve (asked for
+      directly). It says "this is the substance this creature mends himself
+      with", so `[[spend heal::heal 2]]` finds it without knowing its name.
+      🚧 What healing COSTS, how much it mends, and how often aggravated damage
+      may be healed are explicitly NOT modelled - the owner ruled them too
+      complicated to attempt now ("just create the heal role if it doesn't
+      exist"). The conditional case (a Regeneration arcanum letting Resolve
+      heal) is the shape `requiresResource` + a granted effect will take.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
@@ -3179,6 +3226,98 @@ Ordered roughly by unlock value:
     The reason the project exists; everything above serves it.
 16. Old `RulesetConfig` XP/freebie numbers → replaced by the real cost engine
     (5); creation-cap enforcement in `Stat` is partially unused until then.
+
+16. **RESOURCE CAPS AS A GENERAL MECHANISM** (owner, 2026-07-31 — the design is
+    stated, the build is not started). Today two ladders are hard-coded to two
+    Backgrounds: Quintessence's capacity reads `background:fount`, blood's reads
+    `generation`. **Neither the Background nor the numbers should be baked in.**
+    What he wants is one general way to say:
+    - *these things set the MAXIMUM of this resource* (expression or table);
+    - *these things set the MOST THAT MAY BE SPENT IN ONE TURN* (ditto);
+    - *these afflictions (on a character) and tags (on a roll) modify both*,
+      each with its own expression or table.
+
+    His preferred notation, verbatim:
+    ```
+    Quintessence:
+        max: 10 + Backgrounds::Fount * 2
+        per-turn: 1 + Backgrounds::Fount
+
+    override Resources::Quintessence
+        max: super::max - Background::whatever
+        // per-turn can remain the same
+    ```
+    Two things the engine does not have yet: **`Backgrounds::Fount`** (the `::`
+    path form over the existing `background:fount`, which the normalizer already
+    folds `::` → `:` for, so this is nearly free) and **`super::max`** — an
+    override that is written in terms of *the value it overrides*. `super::` is
+    the real new idea: it needs the resolver to keep the shadowed layer
+    reachable while evaluating the shadowing one.
+
+    **Per-turn is a TURN limit, not a per-roll one.** Owner's ruling for now:
+    **one roll counts as one turn**; the turn system (#1) is what will make the
+    distinction real.
+    **Foundation limits WILLPOWER usage** (not Resolve) — already how
+    `uncancelableAllowance` works. **Vitae per turn is limited by generation**,
+    already expressed as `blood-per-turn(generation)`; that function is the
+    hard-coded table this item would replace with data.
+
+    **Recalculation model** (his words): these are *"calculated once,
+    synchronized when creator-mode is toggled on and off, when an update command
+    is called"* — and *"this path will eventually be deprecated, when we do what
+    I have in mind: event bus"*. So: a cache with explicit invalidation now, an
+    **event bus** later. Today every read is live through `resourceNumbers`,
+    which is correct but recomputes; the cache is the optimisation this item
+    buys, not a behaviour change.
+
+17. **BACKGROUNDS IN DICE POOLS** (owner, 2026-07-31): *"Backgrounds must have
+    levels, and they can be part of a dice pool. For example, there's a roll
+    that rolls against Library. There's another that rolls Library plus
+    Intelligence."* `[[roll intelligence+library]]` **already works** —
+    `characterRollEnv`'s resolver goes through `traitValueOf`, which reads the
+    backgrounds bucket — so what is left is the *difficulty* side (`vs library`,
+    a roll whose TARGET is a Background rating) and confirming the seeded
+    Background set carries the levels each one needs. Verify before building.
+
+18. **EVERY TEMPLATE HAVING WILLPOWER IS AN ASSUMPTION** (owner: *"it's not
+    entirely true that all things have willpower. In the worst-case scenario, we
+    should be able to drop willpower, having no resource"*). Every shipped
+    template calls `willpowerResource(n)`; a template with **no resources at
+    all** must be expressible. Mostly a matter of letting a `TemplateDef` SUBTRACT
+    a parent's resource (there is `replaces`, which hides one behind another, but
+    no "remove"), plus auditing the readers that assume a `willpower` role exists
+    (`[[cast]]`'s seal cost, `uncancelableAllowance`, `[[lift spend=willpower]]`).
+
+19. **LOREBOOK ENTRIES FOR THE CONCEPTS** (owner): `Resolve`, `Willpower`,
+    `Quintessence` and the rest as lorebook cards **whose keys are capitalized**
+    (`Resolve`, not `resolve`) — prose that BOTH the player and the AI read, so
+    the Storyteller knows what the substance means, not just what it costs. Note
+    this cuts against the engine's normalize-everything boundary rule: these keys
+    are display text on purpose.
+
+20. **WHICH ROLLS ACCEPT WHICH RESOURCE** (owner, thinking aloud: *"If a roll
+    accepts that resource or not is probably a matter of tags, with Willpower
+    being accepted by default, and needing a tag to say it isn't"*). The
+    machinery exists — `EffectOp.target` already gates an op on a roll tag — but
+    nothing yet refuses the SPEND itself. Default-yes-for-Willpower with an
+    opt-out tag is the stated shape.
+
+21. **A RESOURCE LEDGER ON THE STORY CLOCK** (owner: *"we should keep track of
+    the resources spent and recovered now that we have access to time"*). Every
+    spend/gain stamped with the story date, so "how much Quintessence did he burn
+    this week" is answerable and the per-turn limit has something to enforce
+    against. `EffectUses` is the precedent (a per-scene counter); this is its
+    grown-up form.
+
+22. **LIVING RESOLVE MUST NOT BE IN THE RULES** (owner: *"Living Resolve is
+    unique to this game, and it shouldn't be in the rules. I should be able to
+    create Living Resolve, not hard coded at all. We should have flexible
+    resources, and we should hard code only the ones that we actually know about
+    and that are canon in the World of Darkness rules"*). `LIVING_RESOLVE` and
+    `DEFAULT_TEMPLATE_DEFS`' Ouroboros both live in `rules.ts` today. Everything
+    needed to build them from commands already exists (`[[define-resource]]` +
+    `[[extend-template]]`); the work is **moving them out** into the chronicle's
+    own cards and proving the round trip, so `rules.ts` ships only canon.
 
 ## 9. Session-restart checklist
 

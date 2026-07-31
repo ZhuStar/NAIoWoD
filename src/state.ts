@@ -1301,7 +1301,10 @@ export interface ProcedureStep {
 // the pure RollSpec - the roll pipeline never sees them - and are stored raw
 // (resolved at invoke time, like every command argument).
 export type SavedRoll = RollSpec & {
-  spend?: string; specialty?: string; table?: string;
+  // `spend` is the resource token ("resolve", "blood::heal", "willpower!");
+  // `spendAmount` is how many points of it, so a saved roll can bake in
+  // "always burn two Resolve" instead of making you retype spend-amount=2.
+  spend?: string; spendAmount?: number; specialty?: string; table?: string;
   extended?: ExtendedSavedConfig; description?: string;
   opposed?: OpposedSavedConfig; steps?: ProcedureStep[];
 };
@@ -1336,6 +1339,7 @@ export function savedRollToCard(roll: SavedRoll): CardMap {
     const v = roll[key];
     if (v) out[key] = v;
   }
+  if (roll.spendAmount !== undefined && roll.spendAmount !== 1) out["spendAmount"] = roll.spendAmount;
   if (roll.extended) out["extended"] = { ...roll.extended } as CardMap;
   if (roll.opposed) out["opposed"] = { ...roll.opposed, extended: roll.opposed.extended ? { ...roll.opposed.extended } : undefined } as CardMap;
   if (roll.steps?.length) out["steps"] = roll.steps.map(s => ({ ...s }) as CardMap);
@@ -1367,6 +1371,8 @@ export function savedRollFromCard(body: CardMap): SavedRoll | undefined {
     const v = asText(body[key]);
     if (v) roll[key] = v;
   }
+  const spendAmount = asNumber(body["spendAmount"]);
+  if (spendAmount && spendAmount > 1) roll.spendAmount = spendAmount;
   const extendedOf = (v: CardValue | undefined): ExtendedSavedConfig | undefined => {
     const m = asMap(v);
     if (!Object.keys(m).length) return undefined;

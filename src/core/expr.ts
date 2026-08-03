@@ -95,7 +95,12 @@ function tokenize(src: string): { tokens: Token[]; error?: string } {
       // A hyphen belongs to the NAME only when a letter follows it; otherwise it
       // is the subtraction operator. See THE HYPHEN RULE above.
       while (i < src.length && (isNameChar(src[i]) || (src[i] === "-" && isLetter(src[i + 1] ?? "")))) i++;
-      tokens.push({ t: "name", v: src.slice(start, i).toLowerCase(), start, end: i });
+      // `::` is the path separator everywhere else in the engine and folds to a
+      // single `:` internally. The boundary normalizer does that for ordinary
+      // arguments - but an expression inside BACKTICKS skips normalization by
+      // design, so it has to be done here too or `system::time::now` would be a
+      // different name from `system:time:now`.
+      tokens.push({ t: "name", v: src.slice(start, i).toLowerCase().replace(/::+/g, ":"), start, end: i });
       continue;
     }
     // Two-character comparisons before one-character ones, or ">=" reads as ">".

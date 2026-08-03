@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `86ccd2e`** ("Afflictions are
-> the common currency, and the language learned to say yes or no").
+> **Last synced with the code as of commit `4d3aebc`** ("One prefix for
+> time, and a cooldown is a duration read backwards").
+> Prior: `86ccd2e` ("Afflictions are the common currency, and the
+> language learned to say yes or no").
 > Prior: `a4bf27a` ("Afflictions that run out, places that are afflictions,
 > and magick with a k").
 > Prior: `4881040` ("A command that can travel, and the chain that may make it
@@ -3235,6 +3237,52 @@ and `prefill` are mocked/available but not yet written.
       when may this be applied AGAIN - and wants a per-character "ready at"
       record beside the active list. The expiry model is its substrate; this is
       the next small piece.
+
+66. **`system::time`, and cooldowns as the same shape reversed** (owner: *"We can
+    prefix anything relating to time with `system::time`. We already have the
+    ability to name dates or use them as literals. Maybe a little function
+    `system::time::full-moons-since(date-prev, date-next)` and underneath it, we
+    can shorten it to a property that implicitly fills up the date-prev as the
+    start of the affliction and the now-date as the date next. And yes,
+    cooldowns are the same thing."*).
+    - **THE TIME NAMESPACE, exactly as he specified it: two forms of each fact.**
+      The general FUNCTION takes any two dates -
+      `system:time:full-moons-since(a, b)`, `days-since`, `hours-since` - and
+      the PROPERTY is the same thing with the dates filled in implicitly
+      (`system:time:full-moons` = since this began, until now). The bare
+      shorthands (`full-moons`, `elapsed-days`, `elapsed-hours`) remain, because
+      a condition should read like English. One prefix means a chronicle can see
+      at a glance which names are the engine's and which are its own traits.
+    - **Named dates are first-class arguments**: `system:time:date:<name>` reads
+      the DateBook that `[[save-date]]` writes, so *"the full moon after the
+      wedding"* is expressible without anyone hard-coding an epoch. That was the
+      point of his "we already have the ability to name dates".
+    - **A REAL BUG THIS FOUND, in `core/expr.ts`**: `::` is the path separator
+      everywhere in the engine and the BOUNDARY normalizer folds it to `:` - but
+      an expression inside BACKTICKS skips normalization by design, so
+      `system::time::now` tokenized as a DIFFERENT NAME from `system:time:now`
+      and simply did not resolve. The tokenizer now folds `::` itself, which is
+      where it always belonged: expressions arrive by more routes than commands.
+    - **`[[eval]]` now sees the clock too** (time scope + purse scope, read as a
+      CONDITION), so an until-condition can be tested before it is written onto
+      a card - which is the difference between a language and a guess.
+    - **COOLDOWN IS `AfflictionExpiry` POINTED THE OTHER WAY**, and reusing it
+      cost almost nothing: same six measures, same four ticks, same arithmetic.
+      `ActiveAffliction.cooldown` is the SPEC (armed when the affliction ends,
+      wherever it ends - by hand, out of charges, or timed out);
+      **`CharacterCooldowns`** (`cool:<char>`) holds what is ARMED. An entry
+      exists only while the thing is NOT ready, so absence means ready and
+      nothing needs a separate "is it done" flag.
+    - `expiryFromArgs(cmd, prefix)` gained a prefix, so every measure works as
+      `cooldown-for=`, `cooldown-scenes=`, `` cooldown-until=`…` `` for free -
+      one function, both directions.
+    - **The cooldown is checked in exactly one place**: `[[afflict]]`, the one
+      moment somebody tries to apply the thing again (`waive=true` overrides, as
+      everywhere). And `cooldownLeft` SWEEPS as it reads - an elapsed cooldown is
+      deleted on the way past, so "ready" needs no tick of its own.
+    - `[[afflictions]]` lists what is cooling beside what is active: *"why can't
+      I do that again"* is the same question as *"what is on me"*, from the
+      other side.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

@@ -2152,6 +2152,8 @@ export interface ActiveAffliction {
   bindings: Record<string, string>;
   note?: string;
   expiry?: AfflictionExpiry;
+  // What to ARM when this ends - the cooldown before it may be applied again.
+  cooldown?: AfflictionExpiry;
   // WHERE it came from - an arcanum, a spell, a Discipline, a botched roll.
   // Afflictions are the one currency all of those pay in, so the source is the
   // only thing that tells them apart afterwards. Free-form on purpose.
@@ -2159,6 +2161,38 @@ export interface ActiveAffliction {
   // The story epoch it began, which is what an "until X" condition measures
   // against (`full-moons`, `elapsed-days` are counted from here).
   at?: number;
+}
+
+// A COOLDOWN is an expiry pointed the other way: not "when does this end" but
+// "when may it be applied again". Same six measures, same four ticks, same
+// arithmetic - which is the whole reason it is worth having the expiry model
+// first. An entry exists only while the thing is NOT ready; when its expiry
+// elapses the entry is deleted, and absence means ready.
+export interface ArmedCooldown { expiry: AfflictionExpiry; at: number }
+
+export class CharacterCooldowns {
+  private static _storage = new ScopedStorage();
+  private static _key(name: string): string { return `cool:${StringUtil.normalize(name)}`; }
+
+  static async all(name: string): Promise<Record<string, ArmedCooldown>> {
+    return ((await CharacterCooldowns._storage.get(CharacterCooldowns._key(name))) as Record<string, ArmedCooldown> | undefined) ?? {};
+  }
+  static async arm(name: string, def: string, cooldown: ArmedCooldown): Promise<void> {
+    const map = await CharacterCooldowns.all(name);
+    map[StringUtil.normalize(def)] = cooldown;
+    await CharacterCooldowns._storage.set(CharacterCooldowns._key(name), map);
+  }
+  static async clear(name: string, def: string): Promise<boolean> {
+    const map = await CharacterCooldowns.all(name);
+    const key = StringUtil.normalize(def);
+    if (!(key in map)) return false;
+    delete map[key];
+    await CharacterCooldowns._storage.set(CharacterCooldowns._key(name), map);
+    return true;
+  }
+  static async replace(name: string, map: Record<string, ArmedCooldown>): Promise<void> {
+    await CharacterCooldowns._storage.set(CharacterCooldowns._key(name), map);
+  }
 }
 
 export class CharacterAfflictions {

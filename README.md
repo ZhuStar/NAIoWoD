@@ -790,6 +790,22 @@ Six measures in all, and they **compose** — whichever runs out first ends it:
 | **until X** — a condition the engine decides | `` until=`full-moons >= 1` `` |
 | **until Y** — a narrative event nobody can measure | `` until-event=`you next attend the voivode` `` |
 
+**Time lives under one prefix.** Two forms of every fact — the general function
+taking any two dates, and the property with the dates filled in implicitly
+(from when the affliction began, to now):
+
+```
+system::time::full-moons-since(a, b)   ·  system::time::days-since  ·  hours-since
+system::time::full-moons               ·  system::time::elapsed-days  ·  elapsed-hours
+system::time::date:the-wedding         a date [[save-date]] wrote
+full-moons                             the bare shorthand, for readability
+```
+
+So *"the full moon after the wedding"* is
+`` system::time::full-moons-since(system::time::date:the-wedding, system::time::now) >= 1 ``,
+with no epoch hard-coded anywhere. **`[[eval]]` sees the clock too**, so you can
+test a condition before writing it onto a card.
+
 **"Until X" taught the expression language to answer yes or no.** Comparisons
 (`> < >= <= = != `) and `and` / `or` / `not`, reached only through
 `evaluateCondition` — so every arithmetic expression in the engine parses
@@ -803,6 +819,19 @@ mistyped card must never end something early.
 **"Until Y" is advisory and says so.** It is stored, shown on every listing with
 `⚠ advisory: nothing ends this but [[lift]]`, and the engine never pretends to
 decide it.
+
+**A cooldown is a duration read backwards** — not *when does this end* but *when
+may it happen again* — so it is the same six measures behind one prefix:
+
+```
+[[afflict frenzy scenes=1 cooldown-for=`1 day`]]
+[[afflict blessed cooldown-scenes=1]]   [[afflict cursed cooldown-until=`full-moons >= 1`]]
+[[afflict frenzy]] → "cannot take frenzy again yet - until 1197-01-05 00:00"
+```
+
+It is armed when the affliction ends — however it ends — checked at the one
+moment somebody tries to apply it again (`waive=true` overrides), and listed by
+`[[afflictions]]` beside what is active.
 
 **Afflictions are the common currency.** An arcanum, a spell, a Discipline and a
 botched roll all pay in the same coin, so duration and cooldown live here and

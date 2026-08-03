@@ -6985,3 +6985,65 @@ describe("every way an affliction can end", () => {
     expect(await CommandRouter.route("advance-time 2 hours")).toContain("Blessed ends");
   });
 });
+
+describe("system::time, and cooldowns as the same shape reversed", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("define-affliction name=`Blessed` tags=`blessed`");
+  });
+
+  test("the time namespace answers the long form, the short form, and saved dates", async () => {
+    await CommandRouter.route("afflict blessed until=`system::time::full-moons >= 1`");
+    await CommandRouter.route("advance-time 3 days");
+    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("advance-time 40 days")).toContain("Blessed ends");
+  });
+
+  test("the general function takes any two dates, saved ones included", async () => {
+    await CommandRouter.route("advance-time 40 days");
+    await CommandRouter.route('save-date "the wedding"');
+    await CommandRouter.route("advance-time 40 days");
+    // full-moons-since(the wedding, now) - the explicit two-date form.
+    const r = await CommandRouter.route(
+      "eval `system::time::full-moons-since(system::time::date:the-wedding, system::time::now)`");
+    expect(r).not.toContain("⚠");
+    expect(r).toMatch(/= [1-9]/);
+    // days-since is the same shape.
+    expect(await CommandRouter.route(
+      "eval `system::time::days-since(system::time::date:the-wedding, system::time::now)`")).toContain("= 40");
+  });
+
+  test("a cooldown blocks re-application, and says how long is left", async () => {
+    await CommandRouter.route("afflict blessed scenes=1 cooldown-for=`2 days`");
+    await CommandRouter.route("lift blessed");
+    const refused = await CommandRouter.route("afflict blessed");
+    expect(refused).toContain("cannot take blessed again yet");
+    expect(refused).toContain("until");
+    // It shows on the same listing that shows afflictions.
+    expect(await CommandRouter.route("afflictions")).toContain("cooling");
+    // waive=true overrides, as everywhere else in this engine.
+    expect(await CommandRouter.route("afflict blessed waive=true")).toContain("is now");
+  });
+
+  test("a cooldown runs out on the clock and the thing becomes available again", async () => {
+    await CommandRouter.route("afflict blessed cooldown-for=`2 days`");
+    await CommandRouter.route("lift blessed");
+    expect(await CommandRouter.route("afflict blessed")).toContain("cannot take");
+    await CommandRouter.route("advance-time 3 days");
+    expect(await CommandRouter.route("afflictions")).not.toContain("cooling");
+    expect(await CommandRouter.route("afflict blessed")).toContain("is now");
+  });
+
+  test("a cooldown counts scenes and rolls too - the same six measures", async () => {
+    await CommandRouter.route('scene "The Hall"');
+    await CommandRouter.route("afflict blessed cooldown-scenes=1");
+    await CommandRouter.route("lift blessed");
+    expect(await CommandRouter.route("afflict blessed")).toContain("cannot take");
+    await CommandRouter.route("end-scene");
+    expect(await CommandRouter.route("afflict blessed")).toContain("is now");
+  });
+});

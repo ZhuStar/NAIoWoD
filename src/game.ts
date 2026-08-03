@@ -77,7 +77,7 @@ import {
   OpposedSavedConfig, ProcedureStep, ProcedureCondition,
   ResourceOverrides, RESOURCE_CONFIG_ENTRY, TableLibrary, TableAliases, TABLES_CATEGORY,
   ConstraintRegistry, AfflictionRegistry,
-  ActiveAffliction, CharacterAfflictions,
+  ActiveAffliction, CharacterAfflictions, CharacterCooldowns,
   CharacterResources, CharacterHealth, CharacterBoosts, EffectUses,
   MagicRulesConfig, CastAttempts, CrayStore, CrayState,
   AdvancementCosts, COSTS_CONFIG_ENTRY,
@@ -86,7 +86,7 @@ import {
   characterScope, traitValueOf, evalOn, numericOn, derivedValuesOf, DerivedValue, ScopeExtension, roadOf,
   TemplateRegistry, lastTemplateProblems, resourceNumbers,
 } from "./state";
-import { Numeric, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS , evaluateCondition, mapScope } from "./core/expr";
+import { Numeric, ExprScope, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS, evaluateCondition } from "./core/expr";
 
 // --- The "resources" wizard: a guided editor for ResourceOverrides -----------
 interface RwState {
@@ -2173,7 +2173,17 @@ async function cmdEval(cmd: ParsedCommand): Promise<string> {
       + `Arithmetic is + - * / and ( ); functions are ${BUILTIN_FUNCTIONS.join(", ")}, trait-max, blood-max, road-virtues. `
       + `Mind the hyphen: \`a - b\` needs the spaces, \`self-control\` does not.`);
   }
-  const out = evalOn(char, expr, purseScope(char));
+  // [[eval]] sees everything a rules expression sees, INCLUDING the clock - it
+  // is where you test an affliction's until-condition before writing it onto a
+  // card. Elapsed time is measured from the story's start, since a bare
+  // expression has no "when this began".
+  const clock = await StoryClock.get();
+  const scope = await timedScope(char, clock?.start ?? 0, clock?.now ?? 0);
+  const purse = purseScope(char);
+  const out = evaluateCondition(expr, {
+    lookup: (path) => scope.lookup(path) ?? purse(path),
+    call: scope.call,
+  });
   if (out.error) return sys(`Cannot read "${expr}": ${out.error}.`);
   // Showing the work is only worth it when there IS work: a single reference
   // restating itself ("road = 2 = road 2") is noise, unless it came from
@@ -3158,20 +3168,75 @@ async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
 // `full-moons >= 1` is "until the next full moon" and `blood <= 0` is "until his
 // blood runs out". A condition the engine cannot read is FALSE and says so:
 // nothing ends because a card was malformed.
-async function expiryCondition(char: PlayableCharacter | undefined, c: ActiveAffliction, now: number): Promise<boolean> {
-  if (!c.expiry?.untilExpr) return false;
-  const began = c.at ?? now;
+// The TIME NAMESPACE, `system::time::…` (the parser folds `::` to `:`).
+// Everything the clock can tell an expression lives under one prefix, so a
+// chronicle can see at a glance which names are the engine's and which are its
+// own traits. Two forms of each fact, and the short one is the point:
+//
+//   system:time:full-moons-since(a, b)   the general function, any two dates
+//   system:time:full-moons               the same, with a = when this began
+//                                        and b = now, filled in implicitly
+//   full-moons                           the bare shorthand, for readability
+//
+// Dates come from anywhere a date can: an epoch literal, or a SAVED date by
+// name (`system:time:date:my-wedding`, from the DateBook that [[save-date]]
+// writes). So "until the full moon after the wedding" is expressible without
+// anyone hard-coding a number.
+const TIME_PREFIX = "system:time";
+async function timeScopeExtension(fromEpoch: number, now: number): Promise<ScopeExtension> {
+  const dates = await DateBook.all();
   const facts: Record<string, number> = {
-    now, applied: began,
-    "full-moons": countFullMoons(began, now),
-    "elapsed-days": countDayBoundaries(began, now),
-    "elapsed-hours": Math.floor((now - began) / 3_600_000),
+    now, applied: fromEpoch,
+    "full-moons": countFullMoons(fromEpoch, now),
+    "elapsed-days": countDayBoundaries(fromEpoch, now),
+    "elapsed-hours": Math.floor((now - fromEpoch) / 3_600_000),
   };
-  const scope = char
-    ? characterScope(char, (path) => (path.length === 1 && path[0] in facts ? { value: facts[path[0]] } : undefined))
-    : mapScope(facts);
-  const out = evaluateCondition(c.expiry.untilExpr, scope);
-  return out.truth;
+  return (path) => {
+    // The bare shorthands, so a condition reads like English.
+    if (path.length === 1 && path[0] in facts) return { value: facts[path[0]] };
+    const joined = path.join(":");
+    if (!joined.startsWith(`${TIME_PREFIX}:`)) return undefined;
+    const rest = joined.slice(TIME_PREFIX.length + 1);
+    if (rest in facts) return { value: facts[rest], from: TIME_PREFIX };
+    // A SAVED date by name - the same book [[dates]] lists.
+    const named = rest.startsWith("date:") ? dates[rest.slice("date:".length)] : undefined;
+    return named === undefined ? undefined : { value: named, from: "saved date" };
+  };
+}
+
+// The general functions, taking any two dates. `-since` reads left to right:
+// how many of these fell between the first and the second.
+function timeScopeCalls(): (name: string, args: number[]) => number | undefined {
+  return (name, args) => {
+    if (!name.startsWith(`${TIME_PREFIX}:`)) return undefined;
+    const [a, b] = [args[0] ?? 0, args[1] ?? 0];
+    switch (name.slice(TIME_PREFIX.length + 1)) {
+      case "full-moons-since": return countFullMoons(a, b);
+      case "days-since": return countDayBoundaries(a, b);
+      case "hours-since": return Math.floor((b - a) / 3_600_000);
+      default: return undefined;
+    }
+  };
+}
+
+// One scope for anything asked "has this run out yet?" - an affliction's
+// until-condition, and a cooldown's.
+async function timedScope(char: PlayableCharacter | undefined, fromEpoch: number, now: number): Promise<ExprScope> {
+  const extend = await timeScopeExtension(fromEpoch, now);
+  const calls = timeScopeCalls();
+  const base = char ? characterScope(char, extend) : { lookup: extend, call: undefined };
+  return {
+    lookup: base.lookup,
+    // The time functions answer first; the character's own (trait-max,
+    // road-virtues) answer for everything else.
+    call: (name: string, args: number[]) => calls(name, args) ?? base.call?.(name, args),
+  };
+}
+
+async function expiryCondition(char: PlayableCharacter | undefined, c: { expiry?: AfflictionExpiry; at?: number }, now: number): Promise<boolean> {
+  if (!c.expiry?.untilExpr) return false;
+  const scope = await timedScope(char, c.at ?? now, now);
+  return evaluateCondition(c.expiry.untilExpr, scope).truth;
 }
 
 // Has this instance ended, by any of its measures at once?
@@ -3206,6 +3271,7 @@ async function spendAfflictionCharges(subject: string, tags: string[], poolTrait
     return { ...c, expiry: { ...c.expiry, rolls: c.expiry.rolls - 1 } };
   });
   await CharacterAfflictions.replace(subject, next);
+  await countDownCooldowns("rolls", 1, subject);
   const now = (await StoryClock.get())?.now ?? 0;
   const char = await CharacterStore.load(subject);
   for (const c of next) {
@@ -3225,6 +3291,7 @@ async function spendAfflictionCharges(subject: string, tags: string[], poolTrait
 // whole table and not only for whoever is selected.
 async function countDownAfflictions(field: "turns" | "scenes", n: number): Promise<string[]> {
   const ended: string[] = [];
+  await countDownCooldowns(field, n);
   const now = (await StoryClock.get())?.now ?? 0;
   for (const name of await CharacterStore.listNames()) {
     const active = await CharacterAfflictions.list(name);
@@ -4430,7 +4497,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
 // Apply one definition to a subject: validate + resolve bindings, write the
 // instance, then fire the def's mirror onto the bound target. Shared by
 // afflict and advance. Returns the reply fragments or an error.
-async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string): Promise<{ lines?: string[]; error?: string }> {
+async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string, cooldown?: AfflictionExpiry): Promise<{ lines?: string[]; error?: string }> {
   const bindings: Record<string, string> = {};
   for (const slot of def.bindings ?? []) {
     const raw = rawBindings[slot];
@@ -4447,6 +4514,7 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
   // Where it came from (an arcanum, a spell, a Discipline, a botch) and when it
   // began - the second is what an "until X" condition measures against.
   if (from) inst.from = StringUtil.normalize(from);
+  if (cooldown) inst.cooldown = cooldown;
   inst.at = (await StoryClock.get())?.now ?? 0;
   await CharacterAfflictions.afflict(subject, inst);
   const lines = [`${disp(subject)} is now ${afflictionLine(inst)}`];
@@ -4465,9 +4533,46 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
 }
 
 // Remove one affliction from a subject AND its mirror from the bound target.
+// When an affliction ends, arm whatever cooldown it carried. One place, so it
+// happens whether it was lifted by hand, ran out of charges, or timed out.
+async function armCooldown(subject: string, c: ActiveAffliction | undefined): Promise<void> {
+  if (!c?.cooldown) return;
+  await CharacterCooldowns.arm(subject, c.def, { expiry: { ...c.cooldown }, at: (await StoryClock.get())?.now ?? 0 });
+}
+
+// Is this def still cooling for this character? Returns how long is left, or
+// undefined when it is ready. Also SWEEPS: a cooldown whose expiry has elapsed
+// is deleted on the way past, so "ready" needs no separate tick.
+async function cooldownLeft(char: PlayableCharacter | undefined, subject: string, def: string): Promise<string | undefined> {
+  const armed = (await CharacterCooldowns.all(subject))[StringUtil.normalize(def)];
+  if (!armed) return undefined;
+  const now = (await StoryClock.get())?.now ?? 0;
+  const condition = await expiryCondition(char, { expiry: armed.expiry, at: armed.at }, now);
+  if (expiryElapsed(armed.expiry, now, condition)) {
+    await CharacterCooldowns.clear(subject, def);
+    return undefined;
+  }
+  return describeExpiry(armed.expiry, formatStoryDate);
+}
+
+// The counted sides of a cooldown tick exactly as an affliction's do.
+async function countDownCooldowns(field: "rolls" | "turns" | "scenes", n: number, only?: string): Promise<void> {
+  for (const name of only ? [only] : await CharacterStore.listNames()) {
+    const map = await CharacterCooldowns.all(name);
+    let touched = false;
+    for (const [def, armed] of Object.entries(map)) {
+      if (armed.expiry[field] === undefined) continue;
+      map[def] = { ...armed, expiry: { ...armed.expiry, [field]: armed.expiry[field]! - n } };
+      touched = true;
+    }
+    if (touched) await CharacterCooldowns.replace(name, map);
+  }
+}
+
 async function removeAffliction(subject: string, defName: string): Promise<{ removed?: ActiveAffliction; alsoLifted?: string; error?: string }> {
   const removed = await CharacterAfflictions.lift(subject, defName);
   if (!removed) return { error: `${disp(subject)} does not have "${StringUtil.normalize(defName)}". [[afflictions${subject ? ` ${subject}` : ""}]] lists them.` };
+  await armCooldown(subject, removed);
   const def = AfflictionRegistry.get(removed.def);
   if (def?.mirror && removed.bindings["target"]) {
     const gone = await CharacterAfflictions.lift(removed.bindings["target"], def.mirror);
@@ -4530,7 +4635,15 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   if (subject.error) return sys(`${subject.error}`);
   const expiry = await expiryFromArgs(cmd);
   if (expiry.error) return sys(expiry.error);
-  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"]);
+  // A cooldown is checked HERE and nowhere else: the one moment somebody tries
+  // to apply the thing again.
+  const cooling = await cooldownLeft(await CharacterStore.load(subject.name!) ?? undefined, subject.name!, def.name);
+  if (cooling && cmd.named["waive"] !== "true") {
+    return sys(`${disp(subject.name!)} cannot take ${def.name} again yet - ${cooling}. Add waive=true to override.`);
+  }
+  const cooldown = await expiryFromArgs(cmd, "cooldown-");
+  if (cooldown.error) return sys(cooldown.error);
+  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"], cooldown.value);
   if (r.error) return sys(`${r.error}`);
   return sys(`${r.lines!.join("; ")}.`);
 }
@@ -4538,10 +4651,15 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
 // How long, read off a command. `rolls=` is the counted side and its four
 // filters narrow WHICH rolls count; `for=` is the timed side, taken as a
 // duration off the story clock. Both may be given - whichever ends first wins.
-async function expiryFromArgs(cmd: ParsedCommand): Promise<{ value?: AfflictionExpiry; error?: string }> {
-  const list = (key: string): string[] => (cmd.named[key] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+//
+// A COOLDOWN is read by the same function with a `cooldown-` prefix, because it
+// is the same six measures asking the opposite question. `cooldown-for=1 day`,
+// `cooldown-scenes=1`, `` cooldown-until=`full-moons >= 1` `` - all of it, free.
+async function expiryFromArgs(cmd: ParsedCommand, prefix = ""): Promise<{ value?: AfflictionExpiry; error?: string }> {
+  const arg = (key: string): string | undefined => cmd.named[`${prefix}${key}`];
+  const list = (key: string): string[] => (arg(key) ?? "").split(",").map(t => t.trim()).filter(Boolean);
   let until: number | undefined;
-  const forRaw = cmd.named["for"]?.trim();
+  const forRaw = arg("for")?.trim();
   if (forRaw) {
     const clock = await StoryClock.get();
     if (!clock) return { error: NO_CLOCK };
@@ -4551,13 +4669,13 @@ async function expiryFromArgs(cmd: ParsedCommand): Promise<{ value?: AfflictionE
   }
   return {
     value: makeAfflictionExpiry({
-      rolls: intOrUndef(cmd.named["rolls"] ?? ""),
+      rolls: intOrUndef(arg("rolls") ?? ""),
       withTags: list("with-tags"), withoutTags: list("without-tags"),
       usingTraits: list("using"), notUsingTraits: list("not-using"),
-      turns: intOrUndef(cmd.named["turns"] ?? ""),
-      scenes: intOrUndef(cmd.named["scenes"] ?? ""),
-      untilExpr: cmd.named["until"],
-      untilEvent: cmd.named["until-event"],
+      turns: intOrUndef(arg("turns") ?? ""),
+      scenes: intOrUndef(arg("scenes") ?? ""),
+      untilExpr: arg("until"),
+      untilEvent: arg("until-event"),
       until,
     }),
   };
@@ -4615,9 +4733,18 @@ async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
     subject = StringUtil.normalize(cur.name);
   }
   const list = await CharacterAfflictions.list(subject);
-  if (!list.length) return sys(`${disp(subject)} has no afflictions.`);
   const char = await CharacterStore.load(subject);   // a sheet lets scaled afflictions report their tiers
-  return sys(`${disp(subject)} - ${list.map(c => afflictionLine(c, char)).join("; ")}.`);
+  // What is COOLING belongs on the same listing: "why can't I do that again"
+  // is the same question as "what is on me", asked from the other side. The
+  // read sweeps expired cooldowns on its way past, so nothing else has to.
+  const cooling: string[] = [];
+  for (const def of Object.keys(await CharacterCooldowns.all(subject))) {
+    const left = await cooldownLeft(char ?? undefined, subject, def);
+    if (left) cooling.push(`${disp(def)} (cooling - ${left})`);
+  }
+  if (!list.length && !cooling.length) return sys(`${disp(subject)} has no afflictions.`);
+  const bits = [...list.map(c => afflictionLine(c, char)), ...cooling];
+  return sys(`${disp(subject)} - ${bits.join("; ")}.`);
 }
 
 // --- ALIASES & PLAYERS ------------------------------------------------------
@@ -5709,6 +5836,14 @@ const EXPIRY_PARAMS: ParamSpec[] = [
   },
   { key: "until-event", kind: "named", hint: "<text>", example: "you next attend the voivode", desc: "ADVISORY: nothing ends it but [[lift]]" },
   { key: "from", kind: "named", hint: "<source>", example: "arcanum:sharpened-senses", desc: "What inflicted it - an arcanum, a spell, a Discipline, a botch" },
+  // A cooldown is the same six measures asking "when may this happen again",
+  // so it is the same argument names behind one prefix.
+  { key: "cooldown-for", kind: "named", hint: "<duration>", example: "1 day", desc: "After it ends, this long before it may be taken again" },
+  { key: "cooldown-rolls", kind: "named", type: "int" },
+  { key: "cooldown-turns", kind: "named", type: "int" },
+  { key: "cooldown-scenes", kind: "named", type: "int" },
+  { key: "cooldown-until", kind: "named", hint: "<condition>", example: "full-moons >= 1" },
+  { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Apply it even while cooling" },
 ];
 CommandRouter.register("afflict", cmdAfflict, {
   summary: "apply an affliction; extra <slot>=<name|@alias> args fill its bindings",

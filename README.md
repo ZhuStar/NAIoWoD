@@ -551,7 +551,7 @@ than being one. They live in their own `choices` map on the sheet:
 - **`[[fellowships]]`** / **`[[fellowships <name>]]`** — all six, each with its
   Foundation and its four Pillars, findable by the other names they go by
   (`batini`, `aedun`, `runecrafters`, `hermetic`, …). Once chosen, the
-  fellowship's Foundation is what **`[[cast]]`** channels through, whatever else
+  fellowship's Foundation is what **`[[magick]]`** channels through, whatever else
   the caster happens to have a rating in.
 - Each clan and each fellowship ships one **`<name>-exclusive-merit`** and one
   **`<name>-exclusive-flaw`**: placeholders gated on the *choice*, so the shape
@@ -766,6 +766,48 @@ subscribes to `command:advance-time` and hears exactly what it is for.
 > Which architecture wins depends on one undocumented fact: whether a sibling's
 > reply can arrive *while the input hook is still awaiting it*. `Q5` in
 > `scripts/probe-messaging.ts` tests exactly that.
+
+### Afflictions in time — and places that are afflictions
+
+An affliction can now **run out on its own**, counted in rolls, in story time,
+or both with whichever ends first winning:
+
+```
+[[afflict blessed rolls=3]]                       three rolls, any rolls
+[[afflict blessed rolls=3 using=melee]]           three MELEE rolls
+[[afflict cursed rolls=5 for=`1 hour`]]           whichever comes first
+[[afflict warded for=`1 hour` without-tags=magic]]
+```
+
+The roll side is filtered because *"your next three attacks"* is not *"your next
+three rolls"* — `with-tags`, `without-tags`, `using`, `not-using`, all optional
+and all AND-ed. A charge is spent **after** the dice (it buys the roll it paid
+for), and the reply that reports the roll also reports the ending. The clock
+side is checked on `[[advance-time]]`, across **every** character — a curse on an
+absent NPC ends whether or not anyone was looking at his sheet. A mirror
+inherits its original's expiry, so a curse and its reflection end together.
+
+**Being somewhere is an affliction.** A sanctum grants nothing in code:
+
+```
+[[enter-sanctum]]   [[exit-sanctum]]   [[enter-library]]   [[exit-library]]
+```
+
+...only apply and lift `in-sanctum` / `in-library`, and what *those* grant is
+data — the rating-scaled tiers on their own cards, editable in the lorebook.
+
+### `[[flush-context]]` — clean the story on demand
+
+The heaviest thing the engine asks of the host is the post-generation cleanup:
+one document scan plus an edit per dirty paragraph. It runs automatically after
+each generation, but if the story feels sluggish or engine notes are showing
+through, do it when *you* choose:
+
+```
+[[flush-context]] → Flushed: 312 paragraphs scanned, 4 cleaned.
+```
+
+Unlike the automatic pass it clears **everything**, not just what has aged out.
 
 ### Normalization — one internal form for every string
 

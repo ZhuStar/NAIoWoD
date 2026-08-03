@@ -5131,6 +5131,90 @@ function parseAfflictionDuration(raw: string | undefined): EffectDuration | unde
   return undefined;
 }
 
+// =============================================================================
+// WHEN AN AFFLICTION ENDS - counted in rolls, in time, or in whichever comes first
+// -----------------------------------------------------------------------------
+// A duration used to be prose the Storyteller applied. This is the part of it
+// the engine can actually hold: an affliction that lasts "the next three rolls"
+// and one that lasts "an hour" are the same shape with different fields, and an
+// affliction may carry BOTH - the owner's ruling is that whichever runs out
+// first ends it.
+//
+// The roll side is filtered, because "your next three ATTACKS" is not "your
+// next three rolls": a roll only spends a charge when it matches. Four filters,
+// all optional and all AND-ed:
+//   withTags / withoutTags   - the action tags a roll carries
+//   usingTraits / notUsingTraits - what the roll's POOL is made of
+// An expiry with no filters counts every roll, which is the common case.
+//
+// 🚧 COOLDOWN is the same shape pointed the other way (when may this be applied
+// AGAIN) and is not modelled yet - see docs/memory.md.
+// =============================================================================
+interface AfflictionExpiry {
+  rolls?: number;              // charges: how many matching rolls remain
+  withTags?: string[];         // a matching roll carries ALL of these
+  withoutTags?: string[];      // ...and NONE of these
+  usingTraits?: string[];      // ...and its pool uses at least one of these
+  notUsingTraits?: string[];   // ...and none of these
+  until?: number;              // story epoch (ms): the timed side
+}
+
+// Does THIS roll spend a charge? Unfiltered expiries count every roll; each
+// filter present must be satisfied. Names are compared normalized, so a
+// chronicle writing "Melee" and a pool writing "melee" agree.
+function rollSpendsCharge(expiry: AfflictionExpiry, tags: string[], poolTraits: string[]): boolean {
+  const has = (list: string[], want: string): boolean => list.includes(StringUtil.normalize(want));
+  if ((expiry.withTags ?? []).some(t => !has(tags, t))) return false;
+  if ((expiry.withoutTags ?? []).some(t => has(tags, t))) return false;
+  const using = expiry.usingTraits ?? [];
+  if (using.length && !using.some(t => has(poolTraits, t))) return false;
+  if ((expiry.notUsingTraits ?? []).some(t => has(poolTraits, t))) return false;
+  return true;
+}
+
+// Has it run out? `now` is the story clock. Either side ending is enough - the
+// owner's "whichever happens first wins".
+function expiryElapsed(expiry: AfflictionExpiry, now: number): boolean {
+  if (expiry.rolls !== undefined && expiry.rolls <= 0) return true;
+  if (expiry.until !== undefined && now >= expiry.until) return true;
+  return false;
+}
+
+// Said the way a player would ask "how long have I got?".
+function describeExpiry(expiry: AfflictionExpiry | undefined, formatDate?: (n: number) => string): string {
+  if (!expiry) return "";
+  const bits: string[] = [];
+  if (expiry.rolls !== undefined) {
+    const filters = [
+      (expiry.withTags ?? []).length ? `tagged ${expiry.withTags!.join("+")}` : "",
+      (expiry.withoutTags ?? []).length ? `not tagged ${expiry.withoutTags!.join("/")}` : "",
+      (expiry.usingTraits ?? []).length ? `using ${expiry.usingTraits!.join("/")}` : "",
+      (expiry.notUsingTraits ?? []).length ? `not using ${expiry.notUsingTraits!.join("/")}` : "",
+    ].filter(Boolean);
+    bits.push(`${expiry.rolls} more roll${expiry.rolls === 1 ? "" : "s"}${filters.length ? ` (${filters.join(", ")})` : ""}`);
+  }
+  if (expiry.until !== undefined) bits.push(`until ${formatDate ? formatDate(expiry.until) : expiry.until}`);
+  return bits.length > 1 ? `${bits.join(" or ")} - whichever first` : bits.join("");
+}
+
+// An expiry as a command writes it, or undefined when nothing was asked for.
+function makeAfflictionExpiry(parts: {
+  rolls?: number; withTags?: string[]; withoutTags?: string[];
+  usingTraits?: string[]; notUsingTraits?: string[]; until?: number;
+}): AfflictionExpiry | undefined {
+  const out: AfflictionExpiry = {};
+  if (parts.rolls !== undefined && parts.rolls > 0) out.rolls = parts.rolls;
+  for (const key of ["withTags", "withoutTags", "usingTraits", "notUsingTraits"] as const) {
+    const list = (parts[key] ?? []).map(v => StringUtil.normalize(v)).filter(Boolean);
+    if (list.length) out[key] = list;
+  }
+  if (parts.until !== undefined) out.until = parts.until;
+  // Filters with no charge count are meaningless on their own: an affliction
+  // that "ends on melee rolls" needs to know HOW MANY.
+  if (out.rolls === undefined && out.until === undefined) return undefined;
+  return out;
+}
+
 function describeDuration(d: EffectDuration | undefined): string {
   if (!d) return "";
   if (d.kind === "instant") return "instant";
@@ -8401,7 +8485,15 @@ class CreatorMode {
 
 // One live affliction on someone: which definition, and what its slots are bound
 // to (normalized names - possibly NPCs).
-interface ActiveAffliction { def: string; bindings: Record<string, string>; note?: string }
+// `expiry` is what makes an affliction a thing IN TIME rather than a flag
+// somebody has to remember to clear: charges counted in matching rolls, a story
+// date, or both with whichever runs out first ending it (rules.ts).
+interface ActiveAffliction {
+  def: string;
+  bindings: Record<string, string>;
+  note?: string;
+  expiry?: AfflictionExpiry;
+}
 
 class CharacterAfflictions {
   private static _storage = new ScopedStorage();
@@ -8415,6 +8507,11 @@ class CharacterAfflictions {
     const rest = (await CharacterAfflictions.list(name)).filter(c => c.def !== affl.def);
     await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), [...rest, affl]);
   }
+  // Replace the whole list (the tick writes once rather than per affliction).
+  static async replace(name: string, list: ActiveAffliction[]): Promise<void> {
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), list);
+  }
+
   // Remove one affliction; returns the removed instance (bindings drive mirror-lifting).
   static async lift(name: string, defName: string): Promise<ActiveAffliction | undefined> {
     const n = StringUtil.normalize(defName);
@@ -9739,6 +9836,9 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, spec.diceMod, extra);
   const exec = runRoll(spec, env.resolver, { rng: ctx.rng, extra });
+  // The roll HAPPENED, so anything counting rolls counts this one - after the
+  // dice, because a charge buys the roll it was spent on.
+  const charges = await spendAfflictionCharges(char.name, spec.tags, poolTraits);
   const notes = [
     spend.note,
     ...passive.notes,
@@ -9746,6 +9846,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     specialty.note,
     env.penalty !== 0 ? `wound penalty ${env.penalty}` : "",
     shieldNote,
+    ...charges,
     await tableNote(cmd.named["table"] ?? savedTable, exec.outcome, exec.result?.net ?? 0),
   ].filter(Boolean).join("; ");
   return sys(`${disp(char.name)} - ${formatExecution(exec)}${notes ? ` - ${notes}` : ""}${surfaceSteps(savedSteps, exec.outcome)}`);
@@ -11309,6 +11410,54 @@ async function cmdCosts(cmd: ParsedCommand): Promise<string> {
 // =============================================================================
 const LIBRARY_STATES = ["in-sanctum", "in-umbra", "in-library"];
 
+// BEING SOMEWHERE IS AN AFFLICTION. That is the whole model: a sanctum grants
+// no affordances of its own - it applies `in-sanctum`, and what THAT grants is
+// data (rules.ts DEFAULT_AFFLICTIONS, editable as a story card, tier by tier
+// against the character's rating). So the place verbs below are thin: they
+// afflict and they lift, and every affordance stays describable without code.
+const PLACES: Record<string, { states: string[]; needs: string; blurb: string }> = {
+  sanctum: {
+    states: ["in-sanctum"], needs: "sanctum",
+    blurb: "his own place of power - what its rating grants is on the in-sanctum card",
+  },
+  library: {
+    states: ["in-library"], needs: "library",
+    blurb: "the shelves he knows - what its rating grants is on the in-library card",
+  },
+};
+
+// enter <place> / exit <place>, shared: afflict or lift, and say what the place
+// is doing right now rather than what it is.
+async function enterPlace(key: string, enter: boolean): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return noCharacter();
+  const place = PLACES[key];
+  const subject = StringUtil.normalize(char.name);
+  if (enter) {
+    const rating = effectiveTraitOf(char, place.needs);
+    if (rating <= 0) {
+      return sys(`${disp(char.name)} has no ${disp(place.needs)} to enter - rate one with `
+        + `[[set-trait ${place.needs} <n>]], or it is somebody else's.`);
+    }
+    const applied: string[] = [];
+    for (const state of place.states) {
+      const def = AfflictionRegistry.get(state);
+      if (!def) { applied.push(`⚠ "${state}" is not defined`); continue; }
+      const r = await applyAffliction(subject, def, {});
+      if (!r.error) applied.push(state);
+    }
+    return sys(`${disp(char.name)} enters his ${disp(key)} (${disp(place.needs)} ${rating}) - ${place.blurb}. `
+      + `Now ${applied.join(" + ")}; [[afflictions]] shows what it grants. Leave with [[exit-${key}]].`);
+  }
+  const lifted: string[] = [];
+  for (const state of place.states) {
+    const r = await removeAffliction(subject, state);
+    if (!r.error) lifted.push(state);
+  }
+  if (!lifted.length) return sys(`${disp(char.name)} is not in his ${disp(key)}.`);
+  return sys(`${disp(char.name)} leaves his ${disp(key)} (${lifted.join(", ")} lifted).`);
+}
+
 // The Talisman "Cosmos Within the Measure": ritually measure any door (ten
 // minutes, no roll, no resource) and it opens onto the Library of the Unseen -
 // an Umbral realm that is also the mage's sanctum, hence all three states.
@@ -11847,6 +11996,48 @@ async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
 // (`requires`) check the character's ACTIVE afflictions (def names and tags -
 // "in-umbra" for Umbral communion). Returns "" when nothing was credited (a
 // short hop inside one day, or everyone already full).
+// AFFLICTIONS IN TIME, half one: the CLOCK side. Anything whose expiry has run
+// out at `now` is lifted - through removeAffliction, so a mirror on somebody
+// else goes with it. Every character, not just the current one: a curse on an
+// absent NPC ends whether or not anyone was looking at his sheet.
+async function expireAfflictions(now: number): Promise<string[]> {
+  const lifted: string[] = [];
+  for (const name of await CharacterStore.listNames()) {
+    for (const c of await CharacterAfflictions.list(name)) {
+      if (!c.expiry || !expiryElapsed(c.expiry, now)) continue;
+      const r = await removeAffliction(name, c.def);
+      if (r.removed) lifted.push(`${disp(name)}: ${disp(c.def)} ends${r.alsoLifted ? ` (and ${disp(r.alsoLifted)})` : ""}`);
+    }
+  }
+  return lifted;
+}
+
+// AFFLICTIONS IN TIME, half two: the ROLL side. A roll spends a charge only on
+// the afflictions whose filter it matches ("your next three MELEE rolls"), and
+// whatever hits zero is lifted right here - so the reply that says the roll
+// happened is the same reply that says the effect ended.
+async function spendAfflictionCharges(subject: string, tags: string[], poolTraits: string[]): Promise<string[]> {
+  const active = await CharacterAfflictions.list(subject);
+  if (!active.some(c => c.expiry?.rolls !== undefined)) return [];
+  const notes: string[] = [];
+  const next = active.map(c => {
+    if (c.expiry?.rolls === undefined || !rollSpendsCharge(c.expiry, tags, poolTraits)) return c;
+    return { ...c, expiry: { ...c.expiry, rolls: c.expiry.rolls - 1 } };
+  });
+  await CharacterAfflictions.replace(subject, next);
+  const now = (await StoryClock.get())?.now ?? 0;
+  for (const c of next) {
+    if (!c.expiry) continue;
+    if (expiryElapsed(c.expiry, now)) {
+      const r = await removeAffliction(subject, c.def);
+      if (r.removed) notes.push(`${disp(c.def)} ends${r.alsoLifted ? ` (and ${disp(r.alsoLifted)})` : ""}`);
+    } else if (c.expiry.rolls !== undefined && active.find(a => a.def === c.def)?.expiry?.rolls !== c.expiry.rolls) {
+      notes.push(`${disp(c.def)}: ${c.expiry.rolls} roll${c.expiry.rolls === 1 ? "" : "s"} left`);
+    }
+  }
+  return notes;
+}
+
 async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string> {
   const days = countDayBoundaries(fromEpoch, toEpoch);
   const moons = countFullMoons(fromEpoch, toEpoch);
@@ -11901,7 +12092,9 @@ async function cmdAdvanceTime(cmd: ParsedCommand): Promise<string> {
   const span = diffCalendar(after.start, after.now);
   const since = after.now === after.start ? "back to the very beginning" : `${formatCalendarSpan(span)} since it began`;
   const recovery = await applyRecovery(before.now, after.now);
-  return sys(`Time advances: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)} (${since}).${recovery}`);
+  const ended = await expireAfflictions(after.now);
+  const endedBit = ended.length ? ` ${ended.join("; ")}.` : "";
+  return sys(`Time advances: ${formatStoryDate(before.now)} -> ${formatStoryDate(after.now)} (${since}).${recovery}${endedBit}`);
 }
 
 async function cmdStoryDate(): Promise<string> {
@@ -12993,8 +13186,12 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
   const bits = [c.def];
   const bound = Object.entries(c.bindings).map(([k, v]) => `${k}: ${disp(v)}`).join(", ");
   if (bound) bits.push(`(${bound})`);
+  // What the ENGINE is counting comes first; the def's prose duration is the
+  // fallback for an affliction nobody gave an expiry to.
+  const left = describeExpiry(c.expiry, formatStoryDate);
+  if (left) bits.push(`- ${left}`);
   const dur = describeDuration(def?.duration);
-  if (dur && dur !== "instant") bits.push(`- ${dur} (ST-enforced)`);
+  if (!left && dur && dur !== "instant") bits.push(`- ${dur} (ST-enforced)`);
   if (def?.then) bits.push(`- then ${def.then}`);
   if (char && def?.tiers?.length) {
     if (def.requiresAwakened && !isAwakened(char.templates)) {
@@ -13019,7 +13216,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
 // Apply one definition to a subject: validate + resolve bindings, write the
 // instance, then fire the def's mirror onto the bound target. Shared by
 // afflict and advance. Returns the reply fragments or an error.
-async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string): Promise<{ lines?: string[]; error?: string }> {
+async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry): Promise<{ lines?: string[]; error?: string }> {
   const bindings: Record<string, string> = {};
   for (const slot of def.bindings ?? []) {
     const raw = rawBindings[slot];
@@ -13030,13 +13227,18 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
   }
   const inst: ActiveAffliction = { def: def.name, bindings };
   if (note) inst.note = note;
+  // The expiry rides on the INSTANCE, not the def: the same affliction may be
+  // three rolls long on one man and an hour long on another.
+  if (expiry) inst.expiry = expiry;
   await CharacterAfflictions.afflict(subject, inst);
   const lines = [`${disp(subject)} is now ${afflictionLine(inst)}`];
   if (def.mirror && bindings["target"]) {
     const mirrorDef = AfflictionRegistry.get(def.mirror);
     if (!mirrorDef) lines.push(`mirror "${def.mirror}" is not defined - skipped`);
     else {
+      // A mirror ends when its original does: same expiry, copied.
       const mirrorInst: ActiveAffliction = { def: mirrorDef.name, bindings: { target: subject }, note: "(mirror)" };
+      if (expiry) mirrorInst.expiry = { ...expiry };
       await CharacterAfflictions.afflict(bindings["target"], mirrorInst);
       lines.push(`${disp(bindings["target"])} is now ${afflictionLine(mirrorInst)}`);
     }
@@ -13108,9 +13310,35 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". Define it with [[define-affliction]].`);
   const subject = await afflictionSubject(cmd);
   if (subject.error) return sys(`${subject.error}`);
-  const r = await applyAffliction(subject.name!, def, cmd.named);
+  const expiry = await expiryFromArgs(cmd);
+  if (expiry.error) return sys(expiry.error);
+  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value);
   if (r.error) return sys(`${r.error}`);
   return sys(`${r.lines!.join("; ")}.`);
+}
+
+// How long, read off a command. `rolls=` is the counted side and its four
+// filters narrow WHICH rolls count; `for=` is the timed side, taken as a
+// duration off the story clock. Both may be given - whichever ends first wins.
+async function expiryFromArgs(cmd: ParsedCommand): Promise<{ value?: AfflictionExpiry; error?: string }> {
+  const list = (key: string): string[] => (cmd.named[key] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  let until: number | undefined;
+  const forRaw = cmd.named["for"]?.trim();
+  if (forRaw) {
+    const clock = await StoryClock.get();
+    if (!clock) return { error: NO_CLOCK };
+    const dur = parseDuration(forRaw);
+    if ("error" in dur) return { error: dur.error };
+    until = addDuration(clock.now, dur);
+  }
+  return {
+    value: makeAfflictionExpiry({
+      rolls: intOrUndef(cmd.named["rolls"] ?? ""),
+      withTags: list("with-tags"), withoutTags: list("without-tags"),
+      usingTraits: list("using"), notUsingTraits: list("not-using"),
+      until,
+    }),
+  };
 }
 
 // The manual chain trigger (the turn system will automate it): end the
@@ -13782,8 +14010,12 @@ CommandRouter.register("advance-time", cmdAdvanceTime, {
   summary: "move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery",
   params: [{ key: "duration", kind: "positional", required: true, hint: "<duration>", example: "2d 6h" }],
 });
-CommandRouter.register("cast", cmdCast, {
-  summary: "cast a spell (Dark Ages: Mage) - pillars carry the REQUIRED levels",
+// MAGICK, with the k, and the reason is disambiguation rather than flavour:
+// Sorcery, Blood Sorcery (Kulunic among them) and Disciplines that look like
+// spellcasting (Chimerstry) are all "casting" too, and each will want its own
+// verb. `magick` is the AWAKENED one and says so in its name.
+CommandRouter.register("magick", cmdCast, {
+  summary: "work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels",
   params: [
     { key: "pillars", kind: "named", required: true, hint: '"name:level[,name:level...]"', example: 'e.g. "warrior:4,chieftain:2"' },
     { key: "foundation", kind: "named", hint: "<trait>", desc: "Foundation trait name (default: foundation)" },
@@ -13798,6 +14030,12 @@ CommandRouter.register("cast", cmdCast, {
     { key: "spend", kind: "named", hint: "<res[:effect][!]>", desc: "Resource to spend on the roll" },
     { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1; a resource may cap it per use)" },
   ],
+});
+// @deprecated - the old name for [[magick]]. Kept so live stories and saved
+// rolls do not break; Sorcery and Blood Sorcery will want "cast" for themselves.
+CommandRouter.register("cast", cmdCast, {
+  summary: "@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery",
+  params: CommandRouter.specFor("magick")?.params ?? [],
 });
 CommandRouter.register("seal-spell", cmdSealSpell, {
   summary: "seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10",
@@ -13925,6 +14163,15 @@ CommandRouter.register("fellowships", cmdFellowships, {
   summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
 });
+CommandRouter.register("flush-context", cmdFlushContext, {
+  summary: "clean the story now: strip engine notes and hidden blocks (run this if things feel slow)",
+});
+// Being somewhere IS an affliction: these four only afflict and lift, and every
+// affordance they grant lives in the affliction's own card.
+CommandRouter.register("enter-sanctum", () => enterPlace("sanctum", true), { summary: "enter your sanctum (applies in-sanctum)" });
+CommandRouter.register("exit-sanctum", () => enterPlace("sanctum", false), { summary: "leave your sanctum (lifts in-sanctum)" });
+CommandRouter.register("enter-library", () => enterPlace("library", true), { summary: "enter your library (applies in-library)" });
+CommandRouter.register("exit-library", () => enterPlace("library", false), { summary: "leave your library (lifts in-library)" });
 CommandRouter.register("measure-door", cmdMeasureDoor, {
   summary: "the Talisman ritual: ten minutes measuring a door opens the Library of the Unseen",
 });
@@ -14289,7 +14536,9 @@ const QUIET_VERBS = new Set<string>([
   "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
   // The creation-side listings: all read-only, all for the player's eyes.
   "creation", "clans", "clan", "budget", "paid", "costs", "backgrounds", "background",
-  "arcana", "arcanum", "supernatural", "derived", "eval", "templates",
+  "arcana", "arcanum", "supernatural", "derived", "eval", "templates", "attune",
+  // Maintenance: the player operating the machine, never a story beat.
+  "flush-context",
 ]);
 
 // =============================================================================
@@ -14354,12 +14603,17 @@ const CTX_SKIP_KEEP = 2;   // keep a noise block visible for this many generatio
 // <hide>...</hide>, route it to the scene plan/Author's Note, and strip it out;
 // (b) age-out - delete ctx-skip noise blocks older than CTX_SKIP_KEEP generations
 // from the story itself (onContextBuilt already keeps them out of the AI's view).
-async function processGenerationEnd(): Promise<void> {
+// `keepFor` is how many generations a noise block stays visible before it is
+// deleted from the story. The automatic pass keeps them briefly (a player may
+// want to read the reply they just got); an EXPLICIT flush passes 0, because
+// somebody asking for a clean story now means now.
+async function processGenerationEnd(keepFor: number = CTX_SKIP_KEEP): Promise<{ scanned: number; cleaned: number; recovered: number } | undefined> {
   let sections: { sectionId: number; section: { text: string } }[];
   try { sections = await api.v1.document.scan(); }
-  catch { return; }   // no documentEdit permission - nothing to clean
+  catch { return undefined; }   // no documentEdit permission - nothing to clean
   const now = await GenCounter.get();
   const recovered: HideDirective[] = [];
+  let cleaned = 0;
   for (const { sectionId, section } of sections) {
     let text = section.text ?? "";
     let dirty = false;
@@ -14368,9 +14622,10 @@ async function processGenerationEnd(): Promise<void> {
       recovered.push(...ex.directives);
       text = ex.cleaned; dirty = true;
     }
-    const aged = stripAgedCtxSkip(text, now, CTX_SKIP_KEEP);    // (b) old noise
+    const aged = stripAgedCtxSkip(text, now, keepFor);          // (b) old noise
     if (aged !== null) { text = aged; dirty = true; }
     if (!dirty) continue;
+    cleaned++;
     text = text.replace(/[ \t]{2,}/g, " ").trimEnd();           // tidy the gap a removed block left
     try {
       if (text.trim()) await api.v1.document.updateParagraph(sectionId, { text });
@@ -14378,6 +14633,27 @@ async function processGenerationEnd(): Promise<void> {
     } catch { /* best-effort per section */ }
   }
   if (recovered.length) await applyHideDirectives(recovered);
+  return { scanned: sections.length, cleaned, recovered: recovered.length };
+}
+
+// flush-context - do the post-generation cleanup NOW, on demand.
+//
+// The same work onGenerationEnd does, and the heaviest thing the engine asks of
+// the host: one document scan plus an edit per dirty paragraph. On a slow
+// device that is exactly the work worth doing when the PLAYER chooses rather
+// than while they wait - so it is also a verb. If the story feels sluggish or
+// engine notes are showing through, run it, wait a beat, carry on.
+async function cmdFlushContext(): Promise<string> {
+  const r = await processGenerationEnd(0);   // everything, not just what has aged out
+  if (!r) {
+    return sys(`Cannot reach the story text - the script needs the documentEdit permission. Nothing was changed.`);
+  }
+  const bits = [
+    `${r.scanned} paragraph${r.scanned === 1 ? "" : "s"} scanned`,
+    r.cleaned ? `${r.cleaned} cleaned` : "nothing needed clearing",
+    r.recovered ? `${r.recovered} hidden block${r.recovered === 1 ? "" : "s"} recovered to the scene plan` : "",
+  ].filter(Boolean);
+  return sys(`Flushed: ${bits.join(", ")}. Engine notes are out of the story and out of the AI's context.`);
 }
 
 // Replace every [[command]] in the player's adventure-mode input with its

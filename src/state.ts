@@ -31,6 +31,7 @@ import {
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
   EffectOp, resolveMeritInstance, passiveOpsOf,
   Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
+  AfflictionExpiry, rollSpendsCharge, expiryElapsed,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, applyTemplateDefs,
   BudgetEntry, BudgetDef,
 } from "./rules";
@@ -2139,7 +2140,15 @@ export class CreatorMode {
 
 // One live affliction on someone: which definition, and what its slots are bound
 // to (normalized names - possibly NPCs).
-export interface ActiveAffliction { def: string; bindings: Record<string, string>; note?: string }
+// `expiry` is what makes an affliction a thing IN TIME rather than a flag
+// somebody has to remember to clear: charges counted in matching rolls, a story
+// date, or both with whichever runs out first ending it (rules.ts).
+export interface ActiveAffliction {
+  def: string;
+  bindings: Record<string, string>;
+  note?: string;
+  expiry?: AfflictionExpiry;
+}
 
 export class CharacterAfflictions {
   private static _storage = new ScopedStorage();
@@ -2153,6 +2162,11 @@ export class CharacterAfflictions {
     const rest = (await CharacterAfflictions.list(name)).filter(c => c.def !== affl.def);
     await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), [...rest, affl]);
   }
+  // Replace the whole list (the tick writes once rather than per affliction).
+  static async replace(name: string, list: ActiveAffliction[]): Promise<void> {
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), list);
+  }
+
   // Remove one affliction; returns the removed instance (bindings drive mirror-lifting).
   static async lift(name: string, defName: string): Promise<ActiveAffliction | undefined> {
     const n = StringUtil.normalize(defName);

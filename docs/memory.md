@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `4881040`** ("A command that
-> can travel, and the chain that may make it unnecessary").
+> **Last synced with the code as of commit `a4bf27a`** ("Afflictions that
+> run out, places that are afflictions, and magick with a k").
+> Prior: `4881040` ("A command that can travel, and the chain that may make it
+> unnecessary").
 > Prior: `9101ce3` ("A post office, and the one thing a message cannot do").
 > Prior: `25de8bf` ("Say what the spend did, and say that you can spend two").
 > Prior: `12a9fae` ("A purse with prices, a pool you cannot use, and
@@ -3130,6 +3132,49 @@ and `prefill` are mocked/available but not yet written.
       **Q5 in `scripts/probe-messaging.ts` is that exact test** (publish inside
       the real hook, await a sibling's reply, report answered-in-Nms or TIMED
       OUT). Nothing further should be built on B until it has been run on-host.
+
+64. **Afflictions in time, places as afflictions, and magick with a k** (owner:
+    *"our next step should be to take care of afflictions in time"*; afflictions
+    with *"cooldown/durations such as 'next N rolls (maybe rolls with/without
+    these tags or using or not using these traits)' ... Optionally, these could
+    also have a timed cooldown/duration, and whichever happens first wins"*).
+    - **`AfflictionExpiry`** (rules.ts, pure): `{rolls?, withTags?, withoutTags?,
+      usingTraits?, notUsingTraits?, until?}` on the ACTIVE INSTANCE, not the
+      def - the same affliction may be three rolls long on one man and an hour
+      long on another. `rollSpendsCharge` (filters AND together; unfiltered
+      counts every roll), `expiryElapsed` (either side ending is enough - the
+      owner's "whichever happens first"), `describeExpiry`,
+      `makeAfflictionExpiry` (filters WITHOUT a charge count are not an expiry -
+      "ends on melee rolls" has to say how many).
+    - **Two tick points, and they are the only two**: `spendAfflictionCharges`
+      runs AFTER the dice in `rollAndReport` (a charge buys the roll it was
+      spent on) and `expireAfflictions` runs on `advance-time`, over EVERY
+      character - a curse on an absent NPC ends whether or not anyone was
+      looking at his sheet. Both lift through `removeAffliction`, so a mirror
+      goes with its original; a mirror also inherits the expiry, so a curse and
+      its reflection end together.
+    - **`[[afflict <name> rolls=N with-tags= without-tags= using= not-using=
+      for=<duration>]]`** is the whole surface.
+    - **BEING SOMEWHERE IS AN AFFLICTION** (owner: *"the commands to enter
+      library and exit library, enter sanctum and exit sanctum should be
+      commands to cause afflictions and remove afflictions ... We should be able
+      to describe these affordances in data and in story cards"*). `PLACES` is a
+      two-entry table and `enterPlace` only afflicts or lifts;
+      **`[[enter-sanctum]] / [[exit-sanctum]] / [[enter-library]] /
+      [[exit-library]]`**. Every affordance stays in the affliction's own card
+      (the rating-scaled tiers of §7.35), so a place grants nothing in code.
+    - **`[[flush-context]]`** (his name): the post-generation cleanup on demand -
+      *"if the user is experiencing issues, they are encouraged to use this
+      command and wait"*. It passes `keepFor = 0`, so unlike the automatic pass
+      it does NOT respect the keep-noise-for-two-generations age-out: somebody
+      asking for a clean story means now. Its own test found that.
+      QUIET, since it is the player operating the machine.
+    - **`[[cast]]` became `[[magick]]`** (owner: *"it should be magick, with a k
+      ... because we will have Blood Sorcery and Regular Sorcery and Kulunic
+      Sorcery ... and disciplines that look like you are casting something, like
+      Chimerstry, so the name would be confusing"*). `cast` stays registered and
+      **`@deprecated`**, sharing magick's params, so live stories and saved
+      rolls do not break - and so that "cast" is free for Sorcery when it comes.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

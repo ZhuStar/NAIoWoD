@@ -2381,6 +2381,90 @@ export function parseAfflictionDuration(raw: string | undefined): EffectDuration
   return undefined;
 }
 
+// =============================================================================
+// WHEN AN AFFLICTION ENDS - counted in rolls, in time, or in whichever comes first
+// -----------------------------------------------------------------------------
+// A duration used to be prose the Storyteller applied. This is the part of it
+// the engine can actually hold: an affliction that lasts "the next three rolls"
+// and one that lasts "an hour" are the same shape with different fields, and an
+// affliction may carry BOTH - the owner's ruling is that whichever runs out
+// first ends it.
+//
+// The roll side is filtered, because "your next three ATTACKS" is not "your
+// next three rolls": a roll only spends a charge when it matches. Four filters,
+// all optional and all AND-ed:
+//   withTags / withoutTags   - the action tags a roll carries
+//   usingTraits / notUsingTraits - what the roll's POOL is made of
+// An expiry with no filters counts every roll, which is the common case.
+//
+// 🚧 COOLDOWN is the same shape pointed the other way (when may this be applied
+// AGAIN) and is not modelled yet - see docs/memory.md.
+// =============================================================================
+export interface AfflictionExpiry {
+  rolls?: number;              // charges: how many matching rolls remain
+  withTags?: string[];         // a matching roll carries ALL of these
+  withoutTags?: string[];      // ...and NONE of these
+  usingTraits?: string[];      // ...and its pool uses at least one of these
+  notUsingTraits?: string[];   // ...and none of these
+  until?: number;              // story epoch (ms): the timed side
+}
+
+// Does THIS roll spend a charge? Unfiltered expiries count every roll; each
+// filter present must be satisfied. Names are compared normalized, so a
+// chronicle writing "Melee" and a pool writing "melee" agree.
+export function rollSpendsCharge(expiry: AfflictionExpiry, tags: string[], poolTraits: string[]): boolean {
+  const has = (list: string[], want: string): boolean => list.includes(StringUtil.normalize(want));
+  if ((expiry.withTags ?? []).some(t => !has(tags, t))) return false;
+  if ((expiry.withoutTags ?? []).some(t => has(tags, t))) return false;
+  const using = expiry.usingTraits ?? [];
+  if (using.length && !using.some(t => has(poolTraits, t))) return false;
+  if ((expiry.notUsingTraits ?? []).some(t => has(poolTraits, t))) return false;
+  return true;
+}
+
+// Has it run out? `now` is the story clock. Either side ending is enough - the
+// owner's "whichever happens first wins".
+export function expiryElapsed(expiry: AfflictionExpiry, now: number): boolean {
+  if (expiry.rolls !== undefined && expiry.rolls <= 0) return true;
+  if (expiry.until !== undefined && now >= expiry.until) return true;
+  return false;
+}
+
+// Said the way a player would ask "how long have I got?".
+export function describeExpiry(expiry: AfflictionExpiry | undefined, formatDate?: (n: number) => string): string {
+  if (!expiry) return "";
+  const bits: string[] = [];
+  if (expiry.rolls !== undefined) {
+    const filters = [
+      (expiry.withTags ?? []).length ? `tagged ${expiry.withTags!.join("+")}` : "",
+      (expiry.withoutTags ?? []).length ? `not tagged ${expiry.withoutTags!.join("/")}` : "",
+      (expiry.usingTraits ?? []).length ? `using ${expiry.usingTraits!.join("/")}` : "",
+      (expiry.notUsingTraits ?? []).length ? `not using ${expiry.notUsingTraits!.join("/")}` : "",
+    ].filter(Boolean);
+    bits.push(`${expiry.rolls} more roll${expiry.rolls === 1 ? "" : "s"}${filters.length ? ` (${filters.join(", ")})` : ""}`);
+  }
+  if (expiry.until !== undefined) bits.push(`until ${formatDate ? formatDate(expiry.until) : expiry.until}`);
+  return bits.length > 1 ? `${bits.join(" or ")} - whichever first` : bits.join("");
+}
+
+// An expiry as a command writes it, or undefined when nothing was asked for.
+export function makeAfflictionExpiry(parts: {
+  rolls?: number; withTags?: string[]; withoutTags?: string[];
+  usingTraits?: string[]; notUsingTraits?: string[]; until?: number;
+}): AfflictionExpiry | undefined {
+  const out: AfflictionExpiry = {};
+  if (parts.rolls !== undefined && parts.rolls > 0) out.rolls = parts.rolls;
+  for (const key of ["withTags", "withoutTags", "usingTraits", "notUsingTraits"] as const) {
+    const list = (parts[key] ?? []).map(v => StringUtil.normalize(v)).filter(Boolean);
+    if (list.length) out[key] = list;
+  }
+  if (parts.until !== undefined) out.until = parts.until;
+  // Filters with no charge count are meaningless on their own: an affliction
+  // that "ends on melee rolls" needs to know HOW MANY.
+  if (out.rolls === undefined && out.until === undefined) return undefined;
+  return out;
+}
+
 export function describeDuration(d: EffectDuration | undefined): string {
   if (!d) return "";
   if (d.kind === "instant") return "instant";

@@ -42,6 +42,7 @@ import {
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
   EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, LOCAL_PREFIX,
   commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
+  rollSpendsCharge, expiryElapsed, makeAfflictionExpiry, describeExpiry,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -6735,5 +6736,144 @@ describe("a command on the wire: the formalized envelope", () => {
     // The convention has to survive the bus's own normalization unchanged,
     // or a publisher and a subscriber would silently miss each other.
     expect(busChannel(commandChannel("roll"))).toBe(commandChannel("roll"));
+  });
+});
+
+// =============================================================================
+// AFFLICTIONS IN TIME - charges counted in rolls, or a clock, or both
+// =============================================================================
+describe("an affliction that runs out", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("set-trait strength 3");
+    await CommandRouter.route("set-trait melee 2");
+    await CommandRouter.route("define-affliction name=`Blessed` tags=`blessed`");
+  });
+
+  test("rollSpendsCharge: unfiltered counts everything, each filter must be satisfied", () => {
+    expect(rollSpendsCharge({ rolls: 1 }, [], [])).toBe(true);
+    // tags
+    expect(rollSpendsCharge({ rolls: 1, withTags: ["melee"] }, ["melee"], [])).toBe(true);
+    expect(rollSpendsCharge({ rolls: 1, withTags: ["melee"] }, ["magic"], [])).toBe(false);
+    expect(rollSpendsCharge({ rolls: 1, withoutTags: ["magic"] }, ["magic"], [])).toBe(false);
+    // traits: ANY of usingTraits, NONE of notUsingTraits
+    expect(rollSpendsCharge({ rolls: 1, usingTraits: ["melee", "brawl"] }, [], ["strength", "melee"])).toBe(true);
+    expect(rollSpendsCharge({ rolls: 1, usingTraits: ["melee"] }, [], ["strength", "brawl"])).toBe(false);
+    expect(rollSpendsCharge({ rolls: 1, notUsingTraits: ["wits"] }, [], ["wits", "melee"])).toBe(false);
+    // filters AND together
+    expect(rollSpendsCharge({ rolls: 1, withTags: ["melee"], notUsingTraits: ["wits"] }, ["melee"], ["wits"])).toBe(false);
+  });
+
+  test("expiryElapsed: either side ending is enough - whichever comes first", () => {
+    expect(expiryElapsed({ rolls: 1 }, 0)).toBe(false);
+    expect(expiryElapsed({ rolls: 0 }, 0)).toBe(true);
+    expect(expiryElapsed({ until: 100 }, 99)).toBe(false);
+    expect(expiryElapsed({ until: 100 }, 100)).toBe(true);
+    // rolls still left, but the clock ran out
+    expect(expiryElapsed({ rolls: 5, until: 100 }, 100)).toBe(true);
+    // a filter alone is not an expiry
+    expect(makeAfflictionExpiry({ withTags: ["melee"] })).toBeUndefined();
+    expect(makeAfflictionExpiry({ rolls: 2, withTags: ["Melee"] })).toEqual({ rolls: 2, withTags: ["melee"] });
+  });
+
+  test("a charge is spent per MATCHING roll, and the affliction ends on the last one", async () => {
+    await CommandRouter.route("afflict blessed rolls=2");
+    expect(await CommandRouter.route("afflictions")).toContain("2 more rolls");
+    const first = await CommandRouter.route("roll strength+melee");
+    expect(first).toContain("Blessed: 1 roll left");
+    const second = await CommandRouter.route("roll strength+melee");
+    expect(second).toContain("Blessed ends");
+    expect(await CommandRouter.route("afflictions")).not.toContain("blessed");
+  });
+
+  test("a filtered charge is spent only by the rolls it names", async () => {
+    await CommandRouter.route("afflict blessed rolls=1 using=melee");
+    // Not a melee roll: the charge is untouched.
+    await CommandRouter.route("roll strength");
+    expect(await CommandRouter.route("afflictions")).toContain("1 more roll");
+    // This one matches, and it is the last.
+    expect(await CommandRouter.route("roll strength+melee")).toContain("Blessed ends");
+  });
+
+  test("the clock ends it too, on whoever is carrying it", async () => {
+    await CommandRouter.route("afflict blessed for=`1 hour`");
+    const shown = await CommandRouter.route("afflictions");
+    expect(shown).toContain("until");
+    expect(await CommandRouter.route("advance-time 30 minutes")).not.toContain("Blessed ends");
+    expect(await CommandRouter.route("advance-time 45 minutes")).toContain("Blessed ends");
+    expect(await CommandRouter.route("afflictions")).not.toContain("blessed");
+  });
+
+  test("rolls and a clock together: whichever runs out first wins", async () => {
+    await CommandRouter.route("afflict blessed rolls=5 for=`1 hour`");
+    expect(await CommandRouter.route("afflictions")).toContain("whichever first");
+    // Four of five charges left, but the hour is up.
+    await CommandRouter.route("roll strength");
+    expect(await CommandRouter.route("advance-time 2 hours")).toContain("Blessed ends");
+  });
+
+  test("an affliction with no expiry is untouched by either tick", async () => {
+    await CommandRouter.route("afflict blessed");
+    await CommandRouter.route("roll strength+melee");
+    await CommandRouter.route("advance-time 3 days");
+    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+  });
+});
+
+describe("places, renamed verbs, and flushing the story", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); __resetUiMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+  });
+
+  test("being somewhere IS an affliction: enter applies it, exit lifts it", async () => {
+    expect(await CommandRouter.route("enter-sanctum")).toContain("has no Sanctum to enter");
+    await CommandRouter.route("set-trait sanctum 8");
+    const entered = await CommandRouter.route("enter-sanctum");
+    expect(entered).toContain("Sanctum 8");
+    expect(entered).toContain("in-sanctum");
+    // What the place GRANTS is the affliction's data, not the verb's code.
+    expect(await CommandRouter.route("afflictions")).toContain("in-sanctum");
+    expect(await CommandRouter.route("exit-sanctum")).toContain("leaves his Sanctum");
+    expect(await CommandRouter.route("exit-sanctum")).toContain("is not in his Sanctum");
+  });
+
+  test("the library is the same shape, and the two are independent", async () => {
+    await CommandRouter.route("set-trait library 5");
+    await CommandRouter.route("set-trait sanctum 4");
+    await CommandRouter.route("enter-library");
+    await CommandRouter.route("enter-sanctum");
+    const both = await CommandRouter.route("afflictions");
+    expect(both).toContain("in-library");
+    expect(both).toContain("in-sanctum");
+    await CommandRouter.route("exit-library");
+    const after = await CommandRouter.route("afflictions");
+    expect(after).not.toContain("in-library");
+    expect(after).toContain("in-sanctum");
+  });
+
+  test("magick is the Awakened verb; cast survives as a deprecated alias", async () => {
+    expect(CommandRouter.verbs()).toContain("magick");
+    expect(CommandRouter.specFor("magick")?.summary).toContain("Awakened magick");
+    expect(CommandRouter.specFor("cast")?.summary).toContain("@deprecated");
+    // Same grammar, so an old command still parses and still works.
+    expect(CommandRouter.specFor("cast")?.params?.map(p => p.key))
+      .toEqual(CommandRouter.specFor("magick")?.params?.map(p => p.key));
+  });
+
+  test("flush-context cleans the story on demand and reports what it did", async () => {
+    __seedDocument(["Plain prose.", "<!--wod:ctx-skip:0-->[SYSTEM: noise]<!--/wod:ctx-skip-->", "More prose."]);
+    const r = await CommandRouter.route("flush-context");
+    expect(r).toContain("3 paragraphs scanned");
+    expect(r).toContain("1 cleaned");
+    expect(__document().map(d => d.text).join(" ")).not.toContain("ctx-skip");
+    // Nothing left to do the second time.
+    expect(await CommandRouter.route("flush-context")).toContain("nothing needed clearing");
   });
 });

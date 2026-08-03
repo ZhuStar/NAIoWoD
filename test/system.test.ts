@@ -44,6 +44,7 @@ import {
   commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
   rollSpendsCharge, expiryElapsed, makeAfflictionExpiry, describeExpiry,
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
+  GRANT_SOURCES, sourceDrawsOnPurse, describeCreationGrant,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -7045,5 +7046,70 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
     expect(await CommandRouter.route("afflict blessed")).toContain("cannot take");
     await CommandRouter.route("end-scene");
     expect(await CommandRouter.route("afflict blessed")).toContain("is now");
+  });
+});
+
+// =============================================================================
+// WHERE IT CAME FROM - a price of zero is not one fact but several
+// =============================================================================
+describe("grants: the template's free dot and the Storyteller's bonus", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await CommandRouter.route('create-playable name="Gwen" templates=ghoul');
+  });
+
+  test("only the creation purses draw on a purse; every other source is real and free", () => {
+    expect(sourceDrawsOnPurse("freebies")).toBe(true);
+    expect(sourceDrawsOnPurse("arcana")).toBe(true);
+    expect(sourceDrawsOnPurse(undefined)).toBe(true);     // unstated = bought normally
+    expect(sourceDrawsOnPurse("template")).toBe(false);
+    expect(sourceDrawsOnPurse("storyteller")).toBe(false);
+    expect(sourceDrawsOnPurse("experience")).toBe(false);
+    expect(Object.keys(GRANT_SOURCES)).toContain("maturation");
+  });
+
+  test("a ghoul's free dot is the TEMPLATE's, and [[creation]] says which it may be", async () => {
+    const grants = TEMPLATE_GHOUL.Creation.grants ?? [];
+    expect(describeCreationGrant(grants[0])).toContain("Potence or Fortitude");
+    const before = await CommandRouter.route("creation");
+    expect(before).toContain("free: 1 free dot of Potence or Fortitude");
+    expect(before).toContain("not on the sheet yet");
+    // Taking it, and saying where it came from.
+    await CommandRouter.route("set-trait potence 1 group=discipline");
+    expect(await CommandRouter.route("creation")).toContain("✓");
+    // Until it is marked, it looks like a purchase.
+    expect(await CommandRouter.route("budget")).toContain("discipline: 1/2");
+    expect(await CommandRouter.route("grant potence source=template")).toContain("is template");
+    const after = await CommandRouter.route("budget");
+    expect(after).toContain("discipline: 0/2");
+    expect(after).toContain("potence 1 (template)");
+  });
+
+  test("a Storyteller's bonus ADDS to a purse, and carries its reason", async () => {
+    expect(await CommandRouter.route("budget")).toContain("freebie: 0/15");
+    const g = await CommandRouter.route("grant freebie 3 source=storyteller note=`everyone here is Suspect`");
+    expect(g).toContain("freebie purse +3");
+    const b = await CommandRouter.route("budget");
+    expect(b).toContain("freebie: 0/18");
+    expect(b).toContain("+3 from storyteller: everyone here is Suspect");
+    // It survives the round trip through the sheet card.
+    const again = (await CharacterStore.load("Gwen"))!;
+    expect(again.purseGrants).toEqual([{ purse: "freebie", points: 3, source: "storyteller", note: "everyone here is Suspect" }]);
+  });
+
+  test("the flaw ceiling is data, and [[creation]] states it", async () => {
+    expect(await CommandRouter.route("creation")).toContain("Flaws pay up to 7");
+  });
+
+  test("[[grant]] lists what is granted, refuses an unknown source, and forgets", async () => {
+    expect(await CommandRouter.route("grant")).toContain("nothing granted");
+    expect(await CommandRouter.route("grant potence source=nonesuch")).toContain('No grant source "nonesuch"');
+    await CommandRouter.route("set-trait potence 1 group=discipline");
+    await CommandRouter.route("grant potence source=template");
+    expect(await CommandRouter.route("grant")).toContain("potence: template");
+    expect(await CommandRouter.route("forget-grant potence")).toContain("back to being bought normally");
+    expect(await CommandRouter.route("budget")).toContain("discipline: 1/2");
   });
 });

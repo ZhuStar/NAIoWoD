@@ -541,6 +541,16 @@ export interface PlayableCharacter {
   // granting it outright (a Background you simply have, an arcanum you were
   // made with). Anything not listed here paid the listed price.
   paid?: Record<string, string>;
+  // WHERE each of those came from, keyed the same way (rules.ts GRANT_SOURCES).
+  // `paid` says what it cost; this says why it cost that - and only the
+  // creation sources actually draw on a purse, so a legality proof can tell a
+  // ghoul's free Potence dot from a Storyteller's favour from an XP purchase.
+  source?: Record<string, string>;
+  // Points the chronicle ADDED to a purse, with its reason. The Storyteller's
+  // "everyone here is Suspect, so take the Flaw past your cap and keep the
+  // freebies" is exactly this: a bonus, recorded as one, rather than a silent
+  // edit to the budget.
+  purseGrants?: Array<{ purse: string; points: number; source: string; note?: string }>;
   // The choices a template asks for: a vampire's clan, a mage's fellowship.
   // They are not traits - they STEER traits (a clan names its Disciplines, a
   // fellowship its Foundation and Pillars) - so they live in their own map.
@@ -798,6 +808,14 @@ export function characterToCard(char: PlayableCharacter): CardMap {
   }
   if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (char.capabilities?.length) card["capabilities"] = [...char.capabilities];
+  if (Object.keys(char.source ?? {}).length) card["source"] = { ...char.source } as CardMap;
+  if (char.purseGrants?.length) {
+    const bonuses: CardMap = {};
+    for (const g of char.purseGrants) {
+      bonuses[`${g.purse}:${g.source}`] = g.note ? { [CARD_VALUE_KEY]: g.points, note: g.note } : g.points;
+    }
+    card["purse-grants"] = bonuses;
+  }
   // A purse is one line when it is only an allowance, a block when it is
   // priced - the card says whichever the sheet actually holds.
   if (Object.keys(char.budgets ?? {}).length) {
@@ -868,6 +886,21 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
   if (Object.keys(paid).length) char.paid = paid;
   const capabilities = asStringList(card["capabilities"]).map(c => StringUtil.normalize(c));
   if (capabilities.length) char.capabilities = capabilities;
+  const source: Record<string, string> = {};
+  for (const [k, v] of Object.entries(asMap(card["source"]))) {
+    const t = asText(v);
+    if (t) source[StringUtil.normalize(k)] = StringUtil.normalize(t);
+  }
+  if (Object.keys(source).length) char.source = source;
+  const purseGrants: PlayableCharacter["purseGrants"] = [];
+  for (const [k, v] of Object.entries(asMap(card["purse-grants"]))) {
+    const [purse, src] = StringUtil.normalize(k).split(":");
+    const points = asNumber(v) ?? 0;
+    if (!purse || !points) continue;
+    const note = asText(asMap(v)["note"]);
+    purseGrants.push({ purse, points, source: src || "storyteller", ...(note ? { note } : {}) });
+  }
+  if (purseGrants.length) char.purseGrants = purseGrants;
   const budgets: Record<string, BudgetEntry> = {};
   for (const [purse, raw] of Object.entries(asMap(card["budgets"]))) {
     const key = StringUtil.normalize(purse);

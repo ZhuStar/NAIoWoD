@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `4d3aebc`** ("One prefix for
-> time, and a cooldown is a duration read backwards").
+> **Last synced with the code as of commit `490b719`** ("Say where it
+> came from, not just that it was free").
+> Prior: `4d3aebc` ("One prefix for time, and a cooldown is a duration
+> read backwards").
 > Prior: `86ccd2e` ("Afflictions are the common currency, and the
 > language learned to say yes or no").
 > Prior: `a4bf27a` ("Afflictions that run out, places that are afflictions,
@@ -3283,6 +3285,42 @@ and `prefill` are mocked/available but not yet written.
     - `[[afflictions]]` lists what is cooling beside what is active: *"why can't
       I do that again"* is the same question as *"what is on me"*, from the
       other side.
+
+67. **A price of zero is not one fact but several** (owner: *"Instead of paid=0,
+    we should have explicit bonuses ... my paid=0 were bonuses given by
+    storyteller's discretion. This both says what you paid, for legality
+    reasons, but also where did that come from. For example, a storyteller might
+    allow you to get a couple flaws, getting more freebies in the process, that
+    are beyond your maximum of 7 points of flaws, because everyone in the
+    campaign has those flaws ... Also, a ghoul gains a free dot in Potence
+    (which sometimes can be Fortitude). That unpaid dot is not Storyteller
+    discretion, but it has to do with the template."*).
+    - **`paid` says WHAT it cost; `source` says WHY.** §7.50's `paid=0`
+      conflated two different facts and the owner named both: a ghoul's free
+      Potence dot is *what a ghoul is*, and a Storyteller's bonus is *a ruling
+      about this chronicle*. `GRANT_SOURCES` (freebies, arcana, template, clan,
+      background, storyteller, experience, maturation) with
+      **`CREATION_SOURCES` = freebies + arcana** and `sourceDrawsOnPurse()`:
+      everything else is real, costs a creation purse nothing, and the ledger
+      prints WHICH source rather than an unexplained zero. `undefined` still
+      means "bought normally", so nothing already on a sheet changes meaning.
+    - **`CreationGrant`** on the creation budget - the template's free dots, with
+      **`choose`** for the ghoul's case exactly: *"1 free dot of Potence or
+      Fortitude"*. `TEMPLATE_GHOUL` carries it. **Reported, never auto-applied**:
+      which of the two it is belongs to the player, so `[[creation]]` states the
+      grant and marks it ✓ once the sheet has it.
+    - **`CreationBudget.flawMax` (7)** is the ceiling the owner mentioned, and it
+      is data rather than a constant, so a chronicle may move it.
+    - **THE STORYTELLER'S RULING IS A PURSE BONUS, RECORDED AS ONE.**
+      `PlayableCharacter.purseGrants` - `{purse, points, source, note}` - and
+      `budgetsOf` ADDS them to the allowance with the reason attached, so
+      `[[budget]]` reads `freebie: 0/18 ... +3 from storyteller: everyone here is
+      Suspect`. That is the exact case he described (Flaws past the cap that
+      still pay), kept as a stated bonus instead of a silently larger budget.
+    - **`[[grant]]`** is one verb with two shapes, because he named two things:
+      `[[grant potence source=template]]` marks a purchase as off-purse, and
+      `[[grant freebie 3 source=storyteller note=\`…\`]]` adds to a purse.
+      `[[forget-grant]]` undoes either. Both round-trip through the sheet card.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

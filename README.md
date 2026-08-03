@@ -2052,6 +2052,35 @@ Naming templates is **exhaustive**: a definition anyone may take simply names
 none. `cost: 0` is free-to-that-template; `available: false` bars one that would
 otherwise qualify; `waive=true` overrides any of it.
 
+**A price of zero is not one fact but several.** `paid` says *what* something
+cost; **`source`** says *why* — and only `freebies` and `arcana` are creation
+purses, so everything else is real and costs them nothing:
+
+| source | means |
+|---|---|
+| `template` | what this kind of creature simply **is** — a ghoul's free Potence dot |
+| `clan` · `background` | the bloodline, or a Background conferring it |
+| `storyteller` | discretion, for **this** chronicle |
+| `experience` · `maturation` | bought in play or in downtime, not from a creation purse |
+
+```
+[[grant potence source=template]]        → discipline: 0/2  [potence 1 (template)]
+```
+
+**A Storyteller's ruling is a purse bonus, recorded as one.** *"Everyone here is
+Suspect, so take the Flaw past your cap and keep the freebies"* is not a silently
+larger budget — it is a bonus with its reason attached:
+
+```
+[[grant freebie 3 source=storyteller note=`everyone here is Suspect`]]
+[[budget]] → freebie: 0/18 ... +3 from storyteller: everyone here is Suspect
+```
+
+**Templates hand out free dots.** A ghoul gets one dot of Potence — *sometimes*
+Fortitude — so `[[creation]]` **states** the grant and marks it ✓ once the sheet
+has it, rather than choosing for you. (`Flaws pay up to 7` is data too:
+`CreationBudget.flawMax`.)
+
 **Price paid is not price listed.** A Storyteller may simply grant a thing — a
 Background you just have, an arcanum you were made with:
 

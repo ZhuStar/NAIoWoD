@@ -3032,6 +3032,12 @@ interface CreationBudget {
   disciplineMax?: Numeric;            // and their ceiling, which generation raises
   virtues?: Numeric;                  // vampires: seven, over a free dot each
   virtueStart?: Numeric;              // the free dot in each Virtue (1)
+  // Free dots the TEMPLATE hands out - a ghoul's Potence, a revenant's blood.
+  grants?: CreationGrant[];
+  // Most points of Flaws a character may take FOR freebies. Past it the Flaws
+  // are still real, they just stop paying - unless a Storyteller says otherwise
+  // ([[grant]] with a purse bonus, which is what his ruling actually is).
+  flawMax?: Numeric;
   // Per-trait exceptions, by trait name.
   limits?: Record<string, TraitLimit>;
   notes?: string[];                   // the derived values a splat records
@@ -3043,7 +3049,60 @@ const BASE_CREATION: CreationBudget = {
   abilities: { primary: 13, secondary: 9, tertiary: 5 }, abilityStart: 0, abilityMax: 5,
   backgrounds: 5,
   freebies: 15,
+  flawMax: 7,   // the usual ceiling on Flaws-for-freebies
 };
+
+// =============================================================================
+// WHERE IT CAME FROM - a price of zero is not one fact but several
+// -----------------------------------------------------------------------------
+// `paid=0` said "this cost nothing" and stopped there, which conflates two
+// different things (the owner's correction):
+//
+//   * A GHOUL'S FREE POTENCE DOT is not a favour - it is what a ghoul IS. The
+//     template grants it, every ghoul has it, and a legality proof should say
+//     "template" rather than shrug.
+//   * A STORYTELLER'S BONUS is a ruling about THIS chronicle: "everyone here is
+//     Suspect, so take the Flaw past your cap and keep the freebies it pays".
+//     That is discretion, and it should be recorded as discretion.
+//
+// So a purchase records BOTH what it cost and where it came from. The source is
+// what a legality proof reads: only `freebie` and `arcana` are creation purses,
+// and anything from another source is legitimately outside them.
+// =============================================================================
+const GRANT_SOURCES: Record<string, string> = {
+  freebies: "bought at creation, from the freebie purse",
+  arcana: "bought at creation, from the arcana purse",
+  template: "what this kind of creature simply is (a ghoul's free Potence dot)",
+  clan: "the clan or bloodline it was born to",
+  background: "conferred by a Background (a Talisman's library)",
+  storyteller: "the Storyteller's discretion, for this chronicle",
+  experience: "bought in play, with experience - not from a creation purse",
+  maturation: "bought in downtime (🚧 no engine yet - recorded, never spent)",
+};
+// Which sources actually DRAW on a creation purse. Everything else is real, and
+// costs the purse nothing, and says so.
+const CREATION_SOURCES = ["freebies", "arcana"];
+function sourceDrawsOnPurse(source: string | undefined): boolean {
+  return source === undefined || CREATION_SOURCES.includes(StringUtil.normalize(source));
+}
+function grantSourceNote(source: string): string | undefined {
+  return GRANT_SOURCES[StringUtil.normalize(source)];
+}
+
+// A dot the TEMPLATE hands out, free, to everyone of its kind. `choose` is the
+// ghoul's case exactly: one dot of Potence, "which sometimes can be Fortitude".
+interface CreationGrant {
+  trait?: string;             // the specific trait, when there is no choice
+  choose?: string[];          // ...or one of these, the player's pick
+  rating: number;
+  bucket?: string;            // which bucket it lands in (default: discipline)
+  note?: string;
+}
+function describeCreationGrant(g: CreationGrant): string {
+  const what = g.trait ? StringUtil.toTitleCase(g.trait)
+    : (g.choose ?? []).map(c => StringUtil.toTitleCase(c)).join(" or ");
+  return `${g.rating} free dot${g.rating === 1 ? "" : "s"} of ${what}${g.note ? ` (${g.note})` : ""}`;
+}
 
 function creationBudget(over: Partial<CreationBudget> = {}): CreationBudget {
   return { ...BASE_CREATION, ...over };
@@ -3591,7 +3650,14 @@ const TEMPLATE_GHOUL = new TemplateConfig(
   ],
   GHOUL_SOAK,
   HUMANITY_MORALITY, true,   // still human: Road/Humanity + Virtues
-  STANDARD_HEALTH_LEVELS, [], ["vitae"]   // the domitor's vitae, and he can use it
+  STANDARD_HEALTH_LEVELS, [], ["vitae"],   // the domitor's vitae, and he can use it
+  {}, creationBudget({
+    disciplines: 2,
+    // Not a favour - it is what a ghoul IS. The domitor's blood teaches the
+    // body Potence; some lines teach Fortitude instead.
+    grants: [{ choose: ["potence", "fortitude"], rating: 1, bucket: "discipline",
+      note: "the domitor's vitae; usually Potence" }],
+  })
 );
 
 // A revenant is BORN ghouled: one of the strange bloodlines whose bodies brew
@@ -7022,6 +7088,16 @@ interface PlayableCharacter {
   // granting it outright (a Background you simply have, an arcanum you were
   // made with). Anything not listed here paid the listed price.
   paid?: Record<string, string>;
+  // WHERE each of those came from, keyed the same way (rules.ts GRANT_SOURCES).
+  // `paid` says what it cost; this says why it cost that - and only the
+  // creation sources actually draw on a purse, so a legality proof can tell a
+  // ghoul's free Potence dot from a Storyteller's favour from an XP purchase.
+  source?: Record<string, string>;
+  // Points the chronicle ADDED to a purse, with its reason. The Storyteller's
+  // "everyone here is Suspect, so take the Flaw past your cap and keep the
+  // freebies" is exactly this: a bonus, recorded as one, rather than a silent
+  // edit to the budget.
+  purseGrants?: Array<{ purse: string; points: number; source: string; note?: string }>;
   // The choices a template asks for: a vampire's clan, a mage's fellowship.
   // They are not traits - they STEER traits (a clan names its Disciplines, a
   // fellowship its Foundation and Pillars) - so they live in their own map.
@@ -7279,6 +7355,14 @@ function characterToCard(char: PlayableCharacter): CardMap {
   }
   if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (char.capabilities?.length) card["capabilities"] = [...char.capabilities];
+  if (Object.keys(char.source ?? {}).length) card["source"] = { ...char.source } as CardMap;
+  if (char.purseGrants?.length) {
+    const bonuses: CardMap = {};
+    for (const g of char.purseGrants) {
+      bonuses[`${g.purse}:${g.source}`] = g.note ? { [CARD_VALUE_KEY]: g.points, note: g.note } : g.points;
+    }
+    card["purse-grants"] = bonuses;
+  }
   // A purse is one line when it is only an allowance, a block when it is
   // priced - the card says whichever the sheet actually holds.
   if (Object.keys(char.budgets ?? {}).length) {
@@ -7349,6 +7433,21 @@ function characterFromCard(raw: CardValue | undefined): PlayableCharacter | unde
   if (Object.keys(paid).length) char.paid = paid;
   const capabilities = asStringList(card["capabilities"]).map(c => StringUtil.normalize(c));
   if (capabilities.length) char.capabilities = capabilities;
+  const source: Record<string, string> = {};
+  for (const [k, v] of Object.entries(asMap(card["source"]))) {
+    const t = asText(v);
+    if (t) source[StringUtil.normalize(k)] = StringUtil.normalize(t);
+  }
+  if (Object.keys(source).length) char.source = source;
+  const purseGrants: PlayableCharacter["purseGrants"] = [];
+  for (const [k, v] of Object.entries(asMap(card["purse-grants"]))) {
+    const [purse, src] = StringUtil.normalize(k).split(":");
+    const points = asNumber(v) ?? 0;
+    if (!purse || !points) continue;
+    const note = asText(asMap(v)["note"]);
+    purseGrants.push({ purse, points, source: src || "storyteller", ...(note ? { note } : {}) });
+  }
+  if (purseGrants.length) char.purseGrants = purseGrants;
   const budgets: Record<string, BudgetEntry> = {};
   for (const [purse, raw] of Object.entries(asMap(card["budgets"]))) {
     const key = StringUtil.normalize(purse);
@@ -10764,6 +10863,18 @@ function budgetsOf(char: PlayableCharacter): Record<string, BudgetDef> {
     for (const [purse, entry] of Object.entries(TEMPLATES[StringUtil.normalize(t)]?.Budgets ?? {})) layer(purse, entry);
   }
   for (const [purse, entry] of Object.entries(char.budgets ?? {})) layer(purse, entry);
+  // Chronicle bonuses ADD to the allowance rather than replacing it, and keep
+  // their reason attached - "everyone here is Suspect" is part of the budget
+  // now, not a number somebody remembers.
+  for (const g of char.purseGrants ?? []) {
+    const key = StringUtil.normalize(g.purse);
+    const base = out[key]?.allows;
+    out[key] = {
+      ...(out[key] ?? {}),
+      allows: base ? `(${base}) + ${g.points}` : String(g.points),
+      note: [out[key]?.note, `+${g.points} from ${g.source}${g.note ? `: ${g.note}` : ""}`].filter(Boolean).join("; "),
+    };
+  }
   // The default price of a dot is what the chronicle's table says a dot of that
   // kind costs - the purses whose names ARE the kind ("background",
   // "discipline", "virtue"). A purse the table has never heard of keeps its
@@ -10830,8 +10941,14 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
   // exactly what `paid` records. A CONFERRED rating never cost anything either.
   const conferred = grantedTraitsOf(char);
   const backgrounds = { spent: 0, items: [] as string[] };
+  // A purchase whose SOURCE is not a creation purse costs the purse nothing -
+  // and the ledger says which source, so the proof reads "template" or
+  // "storyteller" rather than an unexplained zero.
+  const sourceOf = (key: string): string | undefined => char.source?.[StringUtil.normalize(key)];
+  const offPurse = (key: string): boolean => !sourceDrawsOnPurse(sourceOf(key));
   for (const [name, rating] of Object.entries(char.backgrounds ?? {})) {
     if (rating <= 0) continue;
+    if (offPurse(name)) { backgrounds.items.push(`${name} ${rating} (${sourceOf(name)})`); continue; }
     const held = char.instances?.[name];
     const each = held?.length ? held : [{ rating, paid: char.paid?.[name] }];
     for (const one of each) {
@@ -10850,6 +10967,7 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
   const disciplines = { spent: 0, items: [] as string[] };
   for (const [name, rating] of Object.entries(char.disciplines ?? {})) {
     if (rating <= 0) continue;
+    if (offPurse(name)) { disciplines.items.push(`${name} ${rating} (${sourceOf(name)})`); continue; }
     const override = char.paid?.[name];
     const cost = override !== undefined ? evalBudget(char, override) : rating;
     disciplines.spent += cost;
@@ -10858,6 +10976,12 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
   if (disciplines.items.length) out["discipline"] = disciplines;
   for (const inst of ownedMeritInstances(char)) {
     const purse = budgetOfKind(inst.def);
+    if (offPurse(inst.key)) {
+      const row = out[purse] ?? { spent: 0, items: [] };
+      row.items.push(`${inst.key} (${sourceOf(inst.key)})`);
+      out[purse] = row;
+      continue;
+    }
     const override = char.paid?.[inst.key];
     const listed = inst.points;
     const cost = override !== undefined ? evalBudget(char, override) : listed;
@@ -10897,6 +11021,66 @@ async function cmdBudget(cmd: ParsedCommand): Promise<string> {
   return sys(`${disp(char.name)} budgets - ${lines.join("; ")}. Advisory: nothing is enforced until creation is. `
     + `Override one on the sheet's "budgets" block or with [[extend-template ... budgets=\`purse=expr\`]]; `
     + `set what a purchase really cost with [[paid <key> <expr>]].`);
+}
+
+// grant - where something came from, when it was not bought from a purse.
+//
+// Two shapes, because the owner named two different things:
+//   [[grant potence source=template]]        this trait costs the purse nothing
+//   [[grant freebie 3 source=storyteller note=`everyone here is Suspect`]]
+//                                            the chronicle ADDS to a purse
+// The second is the ruling he described: Flaws past the cap that still pay,
+// recorded as a bonus with its reason rather than as a silently larger budget.
+async function cmdGrant(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return noCharacter();
+  const key = StringUtil.normalize(cmd.positional[0] ?? "");
+  const source = StringUtil.normalize(cmd.named["source"] ?? "storyteller");
+  if (!key) {
+    const owned = Object.entries(char.source ?? {}).map(([k, v]) => `${k}: ${v}`);
+    const bonuses = (char.purseGrants ?? []).map(g => `${g.purse} +${g.points} (${g.source}${g.note ? `: ${g.note}` : ""})`);
+    return sys(`${disp(char.name)} - ${owned.length ? `granted: ${owned.join(", ")}` : "nothing granted"}`
+      + `${bonuses.length ? `; purse bonuses: ${bonuses.join(", ")}` : ""}. `
+      + `Sources: ${Object.entries(GRANT_SOURCES).map(([k, v]) => `${k} (${v})`).join("; ")}. `
+      + `[[grant <trait> source=template]] marks one; [[grant <purse> <points> source=storyteller note=\`why\`]] adds to a purse.`);
+  }
+  if (!(source in GRANT_SOURCES)) {
+    return sys(`No grant source "${source}". Known: ${Object.keys(GRANT_SOURCES).join(", ")}.`);
+  }
+  const points = intOrUndef(cmd.positional[1] ?? "");
+  if (points !== undefined) {
+    // A PURSE bonus: more points to spend, and the reason travels with them.
+    const note = cmd.named["note"]?.trim();
+    char.purseGrants = [
+      ...(char.purseGrants ?? []).filter(g => !(g.purse === key && g.source === source)),
+      { purse: key, points, source, ...(note ? { note } : {}) },
+    ];
+    await CharacterStore.save(char);
+    return sys(`${disp(char.name)}: ${key} purse +${points} (${source}${note ? ` - ${note}` : ""}). `
+      + `[[budget]] counts it, with the reason attached.`);
+  }
+  // A TRAIT or merit instance: it costs the purse nothing, and this says why.
+  char.source = { ...(char.source ?? {}), [key]: source };
+  await CharacterStore.save(char);
+  return sys(`${disp(char.name)}: ${disp(key)} is ${source} - ${grantSourceNote(source)}. `
+    + `It costs no creation purse${sourceDrawsOnPurse(source) ? " differently than before" : ""}; [[budget]] shows it.`);
+}
+
+async function cmdUngrant(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return noCharacter();
+  const key = StringUtil.normalize(cmd.positional[0] ?? "");
+  if (!key) return sys(`forget-grant needs a trait or a purse.`);
+  const hadSource = char.source?.[key] !== undefined;
+  if (hadSource) { delete char.source![key]; if (!Object.keys(char.source!).length) delete char.source; }
+  const before = (char.purseGrants ?? []).length;
+  char.purseGrants = (char.purseGrants ?? []).filter(g => g.purse !== key);
+  if (!char.purseGrants.length) delete char.purseGrants;
+  await CharacterStore.save(char);
+  const dropped = (hadSource ? 1 : 0) + (before - (char.purseGrants?.length ?? 0));
+  return dropped
+    ? sys(`${disp(char.name)}: ${disp(key)} is back to being bought normally.`)
+    : sys(`${disp(char.name)} had no grant for "${key}".`);
 }
 
 // paid <key> [expr] - what a purchase ACTUALLY cost. No expression means 0: the
@@ -11135,7 +11319,17 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
     const spent = Object.values(char.virtues ?? {}).reduce((a, b) => a + b, 0) - free * Object.keys(char.virtues ?? {}).length;
     lines.push(`virtues: ${Math.max(0, spent)}/${num(budget.virtues, 0)} (over ${free} free dot each)`);
   }
-  lines.push(`freebies: ${num(budget.freebies, 15)} to spend ([[costs]] prices them)`);
+  lines.push(`freebies: ${num(budget.freebies, 15)} to spend ([[costs]] prices them)`
+    + `${budget.flawMax !== undefined ? `, Flaws pay up to ${num(budget.flawMax, 7)}` : ""}`);
+  // What the TEMPLATE hands out free. Reported, never auto-applied: a ghoul's
+  // dot is usually Potence and sometimes Fortitude, and that is the player's
+  // pick, not the engine's.
+  for (const g of budget.grants ?? []) {
+    const has = g.trait ? traitValueOf(char, g.trait) > 0
+      : (g.choose ?? []).some(c => traitValueOf(char, c) > 0);
+    lines.push(`free: ${describeCreationGrant(g)}${has ? " ✓" : " - not on the sheet yet"}`
+      + `${has ? "" : ` ([[set-trait ${g.trait ?? g.choose?.[0]} ${g.rating} group=${g.bucket ?? "discipline"}]] then [[grant ${g.trait ?? g.choose?.[0]} source=template]])`}`);
+  }
 
   // The ceilings, which for a vampire are a consequence of generation rather
   // than a number: Attributes 1-6 at the 7th. Per-trait exceptions follow.
@@ -14524,6 +14718,19 @@ CommandRouter.register("supernatural", cmdSupernatural, {
 CommandRouter.register("budget", cmdBudget, {
   summary: "what each purse allows, what is spent, what is left (advisory)",
   params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
+});
+CommandRouter.register("grant", cmdGrant, {
+  summary: "where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus",
+  params: [
+    { key: "what", kind: "positional", hint: "<trait|merit|purse>", example: "potence  ·  freebie" },
+    { key: "points", kind: "positional", type: "int", hint: "[points]", desc: "Given: this ADDS to that purse" },
+    { key: "source", kind: "named", type: "enum", options: Object.keys(GRANT_SOURCES), desc: "Where it came from (default: storyteller)" },
+    { key: "note", kind: "named", hint: "<text>", example: "everyone in this chronicle is Suspect" },
+  ],
+});
+CommandRouter.register("forget-grant", cmdUngrant, {
+  summary: "drop a grant - the thing goes back to being bought normally",
+  params: [{ key: "what", kind: "positional", required: true, hint: "<trait|purse>" }],
 });
 CommandRouter.register("paid", cmdPaid, {
   summary: "record what a purchase really cost (no expression = the Storyteller granted it)",

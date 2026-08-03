@@ -192,6 +192,12 @@ export interface CreationBudget {
   disciplineMax?: Numeric;            // and their ceiling, which generation raises
   virtues?: Numeric;                  // vampires: seven, over a free dot each
   virtueStart?: Numeric;              // the free dot in each Virtue (1)
+  // Free dots the TEMPLATE hands out - a ghoul's Potence, a revenant's blood.
+  grants?: CreationGrant[];
+  // Most points of Flaws a character may take FOR freebies. Past it the Flaws
+  // are still real, they just stop paying - unless a Storyteller says otherwise
+  // ([[grant]] with a purse bonus, which is what his ruling actually is).
+  flawMax?: Numeric;
   // Per-trait exceptions, by trait name.
   limits?: Record<string, TraitLimit>;
   notes?: string[];                   // the derived values a splat records
@@ -203,7 +209,60 @@ export const BASE_CREATION: CreationBudget = {
   abilities: { primary: 13, secondary: 9, tertiary: 5 }, abilityStart: 0, abilityMax: 5,
   backgrounds: 5,
   freebies: 15,
+  flawMax: 7,   // the usual ceiling on Flaws-for-freebies
 };
+
+// =============================================================================
+// WHERE IT CAME FROM - a price of zero is not one fact but several
+// -----------------------------------------------------------------------------
+// `paid=0` said "this cost nothing" and stopped there, which conflates two
+// different things (the owner's correction):
+//
+//   * A GHOUL'S FREE POTENCE DOT is not a favour - it is what a ghoul IS. The
+//     template grants it, every ghoul has it, and a legality proof should say
+//     "template" rather than shrug.
+//   * A STORYTELLER'S BONUS is a ruling about THIS chronicle: "everyone here is
+//     Suspect, so take the Flaw past your cap and keep the freebies it pays".
+//     That is discretion, and it should be recorded as discretion.
+//
+// So a purchase records BOTH what it cost and where it came from. The source is
+// what a legality proof reads: only `freebie` and `arcana` are creation purses,
+// and anything from another source is legitimately outside them.
+// =============================================================================
+export const GRANT_SOURCES: Record<string, string> = {
+  freebies: "bought at creation, from the freebie purse",
+  arcana: "bought at creation, from the arcana purse",
+  template: "what this kind of creature simply is (a ghoul's free Potence dot)",
+  clan: "the clan or bloodline it was born to",
+  background: "conferred by a Background (a Talisman's library)",
+  storyteller: "the Storyteller's discretion, for this chronicle",
+  experience: "bought in play, with experience - not from a creation purse",
+  maturation: "bought in downtime (🚧 no engine yet - recorded, never spent)",
+};
+// Which sources actually DRAW on a creation purse. Everything else is real, and
+// costs the purse nothing, and says so.
+export const CREATION_SOURCES = ["freebies", "arcana"];
+export function sourceDrawsOnPurse(source: string | undefined): boolean {
+  return source === undefined || CREATION_SOURCES.includes(StringUtil.normalize(source));
+}
+export function grantSourceNote(source: string): string | undefined {
+  return GRANT_SOURCES[StringUtil.normalize(source)];
+}
+
+// A dot the TEMPLATE hands out, free, to everyone of its kind. `choose` is the
+// ghoul's case exactly: one dot of Potence, "which sometimes can be Fortitude".
+export interface CreationGrant {
+  trait?: string;             // the specific trait, when there is no choice
+  choose?: string[];          // ...or one of these, the player's pick
+  rating: number;
+  bucket?: string;            // which bucket it lands in (default: discipline)
+  note?: string;
+}
+export function describeCreationGrant(g: CreationGrant): string {
+  const what = g.trait ? StringUtil.toTitleCase(g.trait)
+    : (g.choose ?? []).map(c => StringUtil.toTitleCase(c)).join(" or ");
+  return `${g.rating} free dot${g.rating === 1 ? "" : "s"} of ${what}${g.note ? ` (${g.note})` : ""}`;
+}
 
 export function creationBudget(over: Partial<CreationBudget> = {}): CreationBudget {
   return { ...BASE_CREATION, ...over };
@@ -751,7 +810,14 @@ export const TEMPLATE_GHOUL = new TemplateConfig(
   ],
   GHOUL_SOAK,
   HUMANITY_MORALITY, true,   // still human: Road/Humanity + Virtues
-  STANDARD_HEALTH_LEVELS, [], ["vitae"]   // the domitor's vitae, and he can use it
+  STANDARD_HEALTH_LEVELS, [], ["vitae"],   // the domitor's vitae, and he can use it
+  {}, creationBudget({
+    disciplines: 2,
+    // Not a favour - it is what a ghoul IS. The domitor's blood teaches the
+    // body Potence; some lines teach Fortitude instead.
+    grants: [{ choose: ["potence", "fortitude"], rating: 1, bucket: "discipline",
+      note: "the domitor's vitae; usually Potence" }],
+  })
 );
 
 // A revenant is BORN ghouled: one of the strange bloodlines whose bodies brew

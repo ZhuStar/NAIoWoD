@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `a4bf27a`** ("Afflictions that
-> run out, places that are afflictions, and magick with a k").
+> **Last synced with the code as of commit `86ccd2e`** ("Afflictions are
+> the common currency, and the language learned to say yes or no").
+> Prior: `a4bf27a` ("Afflictions that run out, places that are afflictions,
+> and magick with a k").
 > Prior: `4881040` ("A command that can travel, and the chain that may make it
 > unnecessary").
 > Prior: `9101ce3` ("A post office, and the one thing a message cannot do").
@@ -3175,6 +3177,64 @@ and `prefill` are mocked/available but not yet written.
       Chimerstry, so the name would be confusing"*). `cast` stays registered and
       **`@deprecated`**, sharing magick's params, so live stories and saved
       rolls do not break - and so that "cast" is free for Sorcery when it comes.
+
+65. **Every way an affliction can end** (owner, generalizing: *"Not only Arcana
+    have cooldown and durations. We should put those in afflictions: passive,
+    togglable passive, time-based duration and cooldown, turn/scene based ...
+    'until X' based (where X is a boolean expression using time events, such as
+    next full moon, and/or values in the character), 'until Y' based (where Y is
+    some event that cannot be measured ... and should be advisory). Afflictions
+    can be inflicted (or self-inflicted) by Arcana, Spells, Disciplines, the
+    result of rolls, etc."*).
+    - **AFFLICTIONS ARE THE COMMON CURRENCY.** That is the architectural point
+      and it is the owner's: an arcanum, a spell, a Discipline and a botched
+      roll all pay in the same coin, so duration and cooldown belong to the
+      AFFLICTION and none of those four need their own timer. `ActiveAffliction`
+      gained **`from`** (free-form: `arcanum:sharpened-senses`, `spell`,
+      `botch`) - afterwards, the source is the only thing that tells them apart.
+      It is printed RAW, never through `disp()`: it is an identifier, and
+      title-casing would mangle the thing that makes it matchable.
+    - **`AfflictionExpiry` now carries all six measures** and they COMPOSE -
+      whichever runs out first ends it: `rolls` (+ the four filters of §7.64),
+      `turns`, `scenes`, `until` (a story epoch), **`untilExpr`** and
+      **`untilEvent`**. `AfflictionMode` (passive / togglable / temporary)
+      records intent beside it.
+    - **"UNTIL X" MEANT TEACHING THE EXPRESSION LANGUAGE TO SAY YES OR NO.**
+      `core/expr.ts` gained a CONDITION layer above the arithmetic:
+      comparisons (`> < >= <= = == !=`) and `and`/`or`/`not`, reached ONLY
+      through the new **`evaluateCondition`** - so every existing arithmetic
+      expression (a difficulty, a budget, a pool) parses exactly as before and
+      never sees it. `and`/`or`/`not` are recognised as NAME values rather than
+      by the tokenizer, so a trait may still be called "order" or "android".
+      Truth is 1 and falsehood is 0, so a condition is still a number.
+      **An empty or malformed condition is FALSE**, deliberately: "no condition"
+      must never read as "already over", or a mistyped card would end an
+      affliction instantly.
+    - The condition's scope is the CHARACTER plus the clock facts an affliction
+      cares about, all measured from when it began (`ActiveAffliction.at`):
+      `full-moons`, `elapsed-days`, `elapsed-hours`, `now`, `applied`. So "until
+      the next full moon" is `full-moons >= 1`, "until his blood runs out" is
+      `blood <= 0`, and both together join with `or`.
+    - **A REAL BUG THIS FOUND, in `buildScope`**: a BARE name the sheet could
+      not answer returned `undefined` WITHOUT offering the path to the scope
+      extension. So an extension could only ever supply PREFIXED paths, and
+      `full-moons >= 1` read as an unknown trait worth 0 - which is to say,
+      never true. Bare names now fall through to `extend` as prefixed ones
+      always did.
+    - **"UNTIL Y" IS ADVISORY AND SAYS SO.** `untilEvent` ("until you next
+      attend the voivode") is stored, shown on every listing with
+      `⚠ advisory: nothing ends this but [[lift]]`, and deliberately absent from
+      `expiryElapsed` - the engine never pretends to decide it.
+      `expiryIsAdvisoryOnly` is how a reader tells that case apart.
+    - **Four tick points now, all of them lifting through `removeAffliction`**
+      (so a mirror goes with its original): rolls (after the dice), the clock
+      (`advance-time`), turns (`[[turn]]`) and scenes (`[[end-scene]]`). The
+      turn tick also re-checks the timed side, since a turn with a `turnLength`
+      moves the clock.
+    - 🚧 **COOLDOWN is NOT built.** It is the same shape pointed the other way -
+      when may this be applied AGAIN - and wants a per-character "ready at"
+      record beside the active list. The expiry model is its substrate; this is
+      the next small piece.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

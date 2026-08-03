@@ -27,6 +27,7 @@ import {
   ConstraintRelation, ConstraintDomain, CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS,
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionExpiry, makeAfflictionExpiry, describeExpiry, rollSpendsCharge, expiryElapsed,
+  expiryIsAdvisoryOnly,
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
   magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers, uncancelableCap,
@@ -85,7 +86,7 @@ import {
   characterScope, traitValueOf, evalOn, numericOn, derivedValuesOf, DerivedValue, ScopeExtension, roadOf,
   TemplateRegistry, lastTemplateProblems, resourceNumbers,
 } from "./state";
-import { Numeric, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS } from "./core/expr";
+import { Numeric, evaluateExpr, describeTerms, BUILTIN_FUNCTIONS , evaluateCondition, mapScope } from "./core/expr";
 
 // --- The "resources" wizard: a guided editor for ResourceOverrides -----------
 interface RwState {
@@ -3152,11 +3153,39 @@ async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
 // out at `now` is lifted - through removeAffliction, so a mirror on somebody
 // else goes with it. Every character, not just the current one: a curse on an
 // absent NPC ends whether or not anyone was looking at his sheet.
+// "UNTIL X", decided. The condition sees the CHARACTER plus the handful of
+// clock facts an affliction cares about, all measured from when it began - so
+// `full-moons >= 1` is "until the next full moon" and `blood <= 0` is "until his
+// blood runs out". A condition the engine cannot read is FALSE and says so:
+// nothing ends because a card was malformed.
+async function expiryCondition(char: PlayableCharacter | undefined, c: ActiveAffliction, now: number): Promise<boolean> {
+  if (!c.expiry?.untilExpr) return false;
+  const began = c.at ?? now;
+  const facts: Record<string, number> = {
+    now, applied: began,
+    "full-moons": countFullMoons(began, now),
+    "elapsed-days": countDayBoundaries(began, now),
+    "elapsed-hours": Math.floor((now - began) / 3_600_000),
+  };
+  const scope = char
+    ? characterScope(char, (path) => (path.length === 1 && path[0] in facts ? { value: facts[path[0]] } : undefined))
+    : mapScope(facts);
+  const out = evaluateCondition(c.expiry.untilExpr, scope);
+  return out.truth;
+}
+
+// Has this instance ended, by any of its measures at once?
+async function afflictionEnded(char: PlayableCharacter | undefined, c: ActiveAffliction, now: number): Promise<boolean> {
+  if (!c.expiry) return false;
+  return expiryElapsed(c.expiry, now, await expiryCondition(char, c, now));
+}
+
 async function expireAfflictions(now: number): Promise<string[]> {
   const lifted: string[] = [];
   for (const name of await CharacterStore.listNames()) {
+    const char = await CharacterStore.load(name);
     for (const c of await CharacterAfflictions.list(name)) {
-      if (!c.expiry || !expiryElapsed(c.expiry, now)) continue;
+      if (!(await afflictionEnded(char ?? undefined, c, now))) continue;
       const r = await removeAffliction(name, c.def);
       if (r.removed) lifted.push(`${disp(name)}: ${disp(c.def)} ends${r.alsoLifted ? ` (and ${disp(r.alsoLifted)})` : ""}`);
     }
@@ -3178,9 +3207,10 @@ async function spendAfflictionCharges(subject: string, tags: string[], poolTrait
   });
   await CharacterAfflictions.replace(subject, next);
   const now = (await StoryClock.get())?.now ?? 0;
+  const char = await CharacterStore.load(subject);
   for (const c of next) {
     if (!c.expiry) continue;
-    if (expiryElapsed(c.expiry, now)) {
+    if (await afflictionEnded(char ?? undefined, c, now)) {
       const r = await removeAffliction(subject, c.def);
       if (r.removed) notes.push(`${disp(c.def)} ends${r.alsoLifted ? ` (and ${disp(r.alsoLifted)})` : ""}`);
     } else if (c.expiry.rolls !== undefined && active.find(a => a.def === c.def)?.expiry?.rolls !== c.expiry.rolls) {
@@ -3188,6 +3218,29 @@ async function spendAfflictionCharges(subject: string, tags: string[], poolTrait
     }
   }
   return notes;
+}
+
+// The TURN and SCENE sides. Same shape as the roll charges: decrement, then
+// lift whatever ended - across every character, since a scene ends for the
+// whole table and not only for whoever is selected.
+async function countDownAfflictions(field: "turns" | "scenes", n: number): Promise<string[]> {
+  const ended: string[] = [];
+  const now = (await StoryClock.get())?.now ?? 0;
+  for (const name of await CharacterStore.listNames()) {
+    const active = await CharacterAfflictions.list(name);
+    if (!active.some(c => c.expiry?.[field] !== undefined)) continue;
+    const next = active.map(c => c.expiry?.[field] === undefined
+      ? c
+      : { ...c, expiry: { ...c.expiry, [field]: c.expiry[field]! - n } });
+    await CharacterAfflictions.replace(name, next);
+    const char = await CharacterStore.load(name);
+    for (const c of next) {
+      if (!(await afflictionEnded(char ?? undefined, c, now))) continue;
+      const r = await removeAffliction(name, c.def);
+      if (r.removed) ended.push(`${disp(name)}: ${disp(c.def)} ends`);
+    }
+  }
+  return ended;
 }
 
 async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string> {
@@ -3367,7 +3420,11 @@ async function cmdTurn(cmd: ParsedCommand): Promise<string> {
   scene.turnsElapsed += n;
   await SceneStore.save(scene);
   const tag = scene.turnLength ? `${describeTurnLength(scene.turnLength)}/turn${clockNote}` : "freeform - no clock move";
-  return sys(`${disp(scene.name)}: turn ${scene.turnsElapsed}${n > 1 ? ` (+${n})` : ""} (${tag}).`);
+  const ended = await countDownAfflictions("turns", n);
+  // A turn that moved the clock may also have run a TIMED affliction out.
+  if (scene.turnLength) ended.push(...await expireAfflictions((await StoryClock.get())?.now ?? 0));
+  return sys(`${disp(scene.name)}: turn ${scene.turnsElapsed}${n > 1 ? ` (+${n})` : ""} (${tag}).`
+    + `${ended.length ? ` ${ended.join("; ")}.` : ""}`);
 }
 
 async function cmdEndScene(): Promise<string> {
@@ -3381,7 +3438,9 @@ async function cmdEndScene(): Promise<string> {
   await syncSceneToAuthorNote(undefined);   // no open scene -> clear the plan block from the Author's Note
   const span = clock && scene.startedAt !== clock.now ? diffCalendar(scene.startedAt, clock.now) : undefined;
   const spanBit = span && span.totalSeconds ? `, ${formatCalendarSpan(span)} of story time` : "";
-  return sys(`Scene "${scene.name}" ends after ${scene.turnsElapsed} turn${scene.turnsElapsed === 1 ? "" : "s"}${spanBit}.`);
+  const ended = await countDownAfflictions("scenes", 1);
+  return sys(`Scene "${scene.name}" ends after ${scene.turnsElapsed} turn${scene.turnsElapsed === 1 ? "" : "s"}${spanBit}.`
+    + `${ended.length ? ` ${ended.join("; ")}.` : ""}`);
 }
 
 async function cmdDowntime(cmd: ParsedCommand): Promise<string> {
@@ -4341,7 +4400,10 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
   // What the ENGINE is counting comes first; the def's prose duration is the
   // fallback for an affliction nobody gave an expiry to.
   const left = describeExpiry(c.expiry, formatStoryDate);
-  if (left) bits.push(`- ${left}`);
+  if (left) bits.push(`- ${left}${expiryIsAdvisoryOnly(c.expiry) ? " ⚠ advisory: nothing ends this but [[lift]]" : ""}`);
+  // The source is an IDENTIFIER ("arcanum:sharpened-senses"), not a display
+  // name: title-casing it would mangle the very thing that makes it matchable.
+  if (c.from) bits.push(`- from ${c.from}`);
   const dur = describeDuration(def?.duration);
   if (!left && dur && dur !== "instant") bits.push(`- ${dur} (ST-enforced)`);
   if (def?.then) bits.push(`- then ${def.then}`);
@@ -4368,7 +4430,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
 // Apply one definition to a subject: validate + resolve bindings, write the
 // instance, then fire the def's mirror onto the bound target. Shared by
 // afflict and advance. Returns the reply fragments or an error.
-async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry): Promise<{ lines?: string[]; error?: string }> {
+async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string): Promise<{ lines?: string[]; error?: string }> {
   const bindings: Record<string, string> = {};
   for (const slot of def.bindings ?? []) {
     const raw = rawBindings[slot];
@@ -4382,6 +4444,10 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
   // The expiry rides on the INSTANCE, not the def: the same affliction may be
   // three rolls long on one man and an hour long on another.
   if (expiry) inst.expiry = expiry;
+  // Where it came from (an arcanum, a spell, a Discipline, a botch) and when it
+  // began - the second is what an "until X" condition measures against.
+  if (from) inst.from = StringUtil.normalize(from);
+  inst.at = (await StoryClock.get())?.now ?? 0;
   await CharacterAfflictions.afflict(subject, inst);
   const lines = [`${disp(subject)} is now ${afflictionLine(inst)}`];
   if (def.mirror && bindings["target"]) {
@@ -4464,7 +4530,7 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   if (subject.error) return sys(`${subject.error}`);
   const expiry = await expiryFromArgs(cmd);
   if (expiry.error) return sys(expiry.error);
-  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value);
+  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"]);
   if (r.error) return sys(`${r.error}`);
   return sys(`${r.lines!.join("; ")}.`);
 }
@@ -4488,6 +4554,10 @@ async function expiryFromArgs(cmd: ParsedCommand): Promise<{ value?: AfflictionE
       rolls: intOrUndef(cmd.named["rolls"] ?? ""),
       withTags: list("with-tags"), withoutTags: list("without-tags"),
       usingTraits: list("using"), notUsingTraits: list("not-using"),
+      turns: intOrUndef(cmd.named["turns"] ?? ""),
+      scenes: intOrUndef(cmd.named["scenes"] ?? ""),
+      untilExpr: cmd.named["until"],
+      untilEvent: cmd.named["until-event"],
       until,
     }),
   };
@@ -5622,6 +5692,24 @@ CommandRouter.register("forget-affliction", cmdForgetAffliction, {
   summary: "remove an overlay definition; built-ins can only be shadowed",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
+// Every way an affliction can end, on one verb. They compose: whichever
+// measure runs out first ends it.
+const EXPIRY_PARAMS: ParamSpec[] = [
+  { key: "rolls", kind: "named", type: "int", desc: "Ends after this many MATCHING rolls" },
+  { key: "with-tags", kind: "named", hint: '"a,b"', desc: "Only rolls carrying all of these count" },
+  { key: "without-tags", kind: "named", hint: '"a,b"', desc: "Rolls carrying any of these do not count" },
+  { key: "using", kind: "named", hint: '"melee"', desc: "Only rolls whose pool uses one of these count" },
+  { key: "not-using", kind: "named", hint: '"wits"', desc: "Rolls whose pool uses any of these do not count" },
+  { key: "turns", kind: "named", type: "int", desc: "Ends after this many turns ([[turn]] counts them)" },
+  { key: "scenes", kind: "named", type: "int", desc: "Ends after this many scenes ([[end-scene]] counts them)" },
+  { key: "for", kind: "named", hint: "<duration>", example: "1 hour", desc: "Ends after this much story time" },
+  {
+    key: "until", kind: "named", hint: "<condition>", example: "full-moons >= 1",
+    desc: "Ends when this becomes true: full-moons, elapsed-days, elapsed-hours and any trait, with > < >= <= = != and and/or/not",
+  },
+  { key: "until-event", kind: "named", hint: "<text>", example: "you next attend the voivode", desc: "ADVISORY: nothing ends it but [[lift]]" },
+  { key: "from", kind: "named", hint: "<source>", example: "arcanum:sharpened-senses", desc: "What inflicted it - an arcanum, a spell, a Discipline, a botch" },
+];
 CommandRouter.register("afflict", cmdAfflict, {
   summary: "apply an affliction; extra <slot>=<name|@alias> args fill its bindings",
   note: "mirror defs also afflict the bound target",
@@ -5629,6 +5717,7 @@ CommandRouter.register("afflict", cmdAfflict, {
   params: [
     { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
+    ...EXPIRY_PARAMS,
   ],
 });
 CommandRouter.register("advance", cmdAdvance, {

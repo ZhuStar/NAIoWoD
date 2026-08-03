@@ -1066,7 +1066,11 @@ function buildScope(char: PlayableCharacter, extend?: ScopeExtension): Character
         if (byTrait.has(key) || resolveTraitFromRecord(char, key) || granted[key]) {
           return { value: valueOf(key), from: granted[key] && !resolveTraitFromRecord(char, key) ? `from ${granted[key].from}` : undefined };
         }
-        return undefined;
+        // A BARE name the sheet cannot answer still gets offered to the
+        // extension. Without this an extension could only ever supply PREFIXED
+        // paths, and `full-moons >= 1` on an affliction's until-condition read
+        // as an unknown trait worth 0 - which is to say, never true.
+        return extend?.(path);
       }
       const [head, ...rest] = path;
       const name = rest.join(":");
@@ -2148,6 +2152,13 @@ export interface ActiveAffliction {
   bindings: Record<string, string>;
   note?: string;
   expiry?: AfflictionExpiry;
+  // WHERE it came from - an arcanum, a spell, a Discipline, a botched roll.
+  // Afflictions are the one currency all of those pay in, so the source is the
+  // only thing that tells them apart afterwards. Free-form on purpose.
+  from?: string;
+  // The story epoch it began, which is what an "until X" condition measures
+  // against (`full-moons`, `elapsed-days` are counted from here).
+  at?: number;
 }
 
 export class CharacterAfflictions {

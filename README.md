@@ -779,6 +779,39 @@ or both with whichever ends first winning:
 [[afflict warded for=`1 hour` without-tags=magic]]
 ```
 
+Six measures in all, and they **compose** — whichever runs out first ends it:
+
+| measure | written |
+|---|---|
+| matching rolls | `rolls=3 using=melee` |
+| turns | `turns=2` (counted by `[[turn]]`) |
+| scenes | `scenes=1` (counted by `[[end-scene]]`) |
+| story time | `` for=`1 hour` `` |
+| **until X** — a condition the engine decides | `` until=`full-moons >= 1` `` |
+| **until Y** — a narrative event nobody can measure | `` until-event=`you next attend the voivode` `` |
+
+**"Until X" taught the expression language to answer yes or no.** Comparisons
+(`> < >= <= = != `) and `and` / `or` / `not`, reached only through
+`evaluateCondition` — so every arithmetic expression in the engine parses
+exactly as before and never sees them. The condition reads the **character** and
+the clock facts measured from when the affliction began: `full-moons`,
+`elapsed-days`, `elapsed-hours`. So *"until the next full moon"* is
+`full-moons >= 1`, *"until his blood runs out"* is `blood <= 0`, and both
+together join with `or`. An empty or malformed condition is **false** — a
+mistyped card must never end something early.
+
+**"Until Y" is advisory and says so.** It is stored, shown on every listing with
+`⚠ advisory: nothing ends this but [[lift]]`, and the engine never pretends to
+decide it.
+
+**Afflictions are the common currency.** An arcanum, a spell, a Discipline and a
+botched roll all pay in the same coin, so duration and cooldown live here and
+none of those four needs its own timer. `from=` records which it was:
+
+```
+[[afflict blessed rolls=3 from=`arcanum:sharpened-senses`]]
+```
+
 The roll side is filtered because *"your next three attacks"* is not *"your next
 three rolls"* — `with-tags`, `without-tags`, `using`, `not-using`, all optional
 and all AND-ed. A charge is spent **after** the dice (it buys the roll it paid

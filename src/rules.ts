@@ -2400,6 +2400,15 @@ export function parseAfflictionDuration(raw: string | undefined): EffectDuration
 // 🚧 COOLDOWN is the same shape pointed the other way (when may this be applied
 // AGAIN) and is not modelled yet - see docs/memory.md.
 // =============================================================================
+// HOW an affliction relates to ending at all. The owner's three:
+//   passive    - always on, never ends on its own (a Sanctum's benefits)
+//   togglable  - a passive the character switches ([[lift]] / [[afflict]] again)
+//   temporary  - it runs out, by one of the measures below
+// The mode is about INTENT; the expiry is about mechanism. A passive with an
+// expiry is a contradiction the report names rather than silently resolving.
+export type AfflictionMode = "passive" | "togglable" | "temporary";
+export const AFFLICTION_MODES: AfflictionMode[] = ["passive", "togglable", "temporary"];
+
 export interface AfflictionExpiry {
   rolls?: number;              // charges: how many matching rolls remain
   withTags?: string[];         // a matching roll carries ALL of these
@@ -2407,6 +2416,19 @@ export interface AfflictionExpiry {
   usingTraits?: string[];      // ...and its pool uses at least one of these
   notUsingTraits?: string[];   // ...and none of these
   until?: number;              // story epoch (ms): the timed side
+  turns?: number;              // turns remaining ([[turn]] counts them down)
+  scenes?: number;             // scenes remaining ([[end-scene]] counts them down)
+  // "UNTIL X": a boolean CONDITION the engine can actually decide, written in
+  // the expression language with comparisons (core/expr.ts evaluateCondition).
+  // Its scope is the character PLUS the clock facts an affliction cares about -
+  // `full-moons`, `elapsed-days`, `elapsed-hours`, `now`, `applied`. So
+  // "until the next full moon" is `full-moons >= 1`, and "until his blood runs
+  // out" is `blood <= 0`, and both together join with `or`.
+  untilExpr?: string;
+  // "UNTIL Y": a narrative event nobody can measure - "until you next attend
+  // the voivode". ADVISORY: stored, shown on every listing, and ended by a
+  // human with [[lift]]. The engine never pretends to decide it.
+  untilEvent?: string;
 }
 
 // Does THIS roll spend a charge? Unfiltered expiries count every roll; each
@@ -2422,18 +2444,36 @@ export function rollSpendsCharge(expiry: AfflictionExpiry, tags: string[], poolT
   return true;
 }
 
-// Has it run out? `now` is the story clock. Either side ending is enough - the
-// owner's "whichever happens first wins".
-export function expiryElapsed(expiry: AfflictionExpiry, now: number): boolean {
+// Has it run out? `now` is the story clock; `condition` is the already-evaluated
+// truth of `untilExpr` (this function stays pure - the caller owns the scope).
+// ANY side ending is enough: the owner's "whichever happens first wins".
+// `untilEvent` is deliberately absent - an unmeasurable event never elapses on
+// its own, which is exactly what advisory means.
+export function expiryElapsed(expiry: AfflictionExpiry, now: number, condition?: boolean): boolean {
   if (expiry.rolls !== undefined && expiry.rolls <= 0) return true;
+  if (expiry.turns !== undefined && expiry.turns <= 0) return true;
+  if (expiry.scenes !== undefined && expiry.scenes <= 0) return true;
   if (expiry.until !== undefined && now >= expiry.until) return true;
+  if (expiry.untilExpr && condition) return true;
   return false;
+}
+
+// Does this expiry measure anything the engine can decide, or is it purely a
+// note to the humans? An affliction with only an `untilEvent` is the second.
+export function expiryIsAdvisoryOnly(expiry: AfflictionExpiry | undefined): boolean {
+  if (!expiry) return false;
+  return !!expiry.untilEvent && expiry.rolls === undefined && expiry.turns === undefined
+    && expiry.scenes === undefined && expiry.until === undefined && !expiry.untilExpr;
 }
 
 // Said the way a player would ask "how long have I got?".
 export function describeExpiry(expiry: AfflictionExpiry | undefined, formatDate?: (n: number) => string): string {
   if (!expiry) return "";
   const bits: string[] = [];
+  if (expiry.turns !== undefined) bits.push(`${expiry.turns} more turn${expiry.turns === 1 ? "" : "s"}`);
+  if (expiry.scenes !== undefined) bits.push(`${expiry.scenes} more scene${expiry.scenes === 1 ? "" : "s"}`);
+  if (expiry.untilExpr) bits.push(`until ${expiry.untilExpr}`);
+  if (expiry.untilEvent) bits.push(`until ${expiry.untilEvent} (ST calls it)`);
   if (expiry.rolls !== undefined) {
     const filters = [
       (expiry.withTags ?? []).length ? `tagged ${expiry.withTags!.join("+")}` : "",
@@ -2451,9 +2491,14 @@ export function describeExpiry(expiry: AfflictionExpiry | undefined, formatDate?
 export function makeAfflictionExpiry(parts: {
   rolls?: number; withTags?: string[]; withoutTags?: string[];
   usingTraits?: string[]; notUsingTraits?: string[]; until?: number;
+  turns?: number; scenes?: number; untilExpr?: string; untilEvent?: string;
 }): AfflictionExpiry | undefined {
   const out: AfflictionExpiry = {};
   if (parts.rolls !== undefined && parts.rolls > 0) out.rolls = parts.rolls;
+  if (parts.turns !== undefined && parts.turns > 0) out.turns = parts.turns;
+  if (parts.scenes !== undefined && parts.scenes > 0) out.scenes = parts.scenes;
+  if (parts.untilExpr?.trim()) out.untilExpr = parts.untilExpr.trim();
+  if (parts.untilEvent?.trim()) out.untilEvent = parts.untilEvent.trim();
   for (const key of ["withTags", "withoutTags", "usingTraits", "notUsingTraits"] as const) {
     const list = (parts[key] ?? []).map(v => StringUtil.normalize(v)).filter(Boolean);
     if (list.length) out[key] = list;
@@ -2461,7 +2506,8 @@ export function makeAfflictionExpiry(parts: {
   if (parts.until !== undefined) out.until = parts.until;
   // Filters with no charge count are meaningless on their own: an affliction
   // that "ends on melee rolls" needs to know HOW MANY.
-  if (out.rolls === undefined && out.until === undefined) return undefined;
+  if (out.rolls === undefined && out.until === undefined && out.turns === undefined
+      && out.scenes === undefined && !out.untilExpr && !out.untilEvent) return undefined;
   return out;
 }
 

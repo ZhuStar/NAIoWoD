@@ -43,6 +43,7 @@ import {
   EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, LOCAL_PREFIX,
   commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
   rollSpendsCharge, expiryElapsed, makeAfflictionExpiry, describeExpiry,
+  expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -6875,5 +6876,112 @@ describe("places, renamed verbs, and flushing the story", () => {
     expect(__document().map(d => d.text).join(" ")).not.toContain("ctx-skip");
     // Nothing left to do the second time.
     expect(await CommandRouter.route("flush-context")).toContain("nothing needed clearing");
+  });
+});
+
+describe("conditions: the expression language, asked a yes/no question", () => {
+  const scope = mapScope({ "full-moons": 1, blood: 0, courage: 3 });
+  test("comparisons yield truth, and truth is still a number", () => {
+    expect(evaluateCondition("full-moons >= 1", scope).truth).toBe(true);
+    expect(evaluateCondition("full-moons >= 2", scope).truth).toBe(false);
+    expect(evaluateCondition("blood <= 0", scope).truth).toBe(true);
+    expect(evaluateCondition("courage = 3", scope).truth).toBe(true);
+    expect(evaluateCondition("courage != 3", scope).truth).toBe(false);
+    expect(evaluateCondition("courage > 1", scope).value).toBe(1);
+  });
+
+  test("and / or / not compose, and are words not tokens", () => {
+    expect(evaluateCondition("full-moons >= 1 or blood > 5", scope).truth).toBe(true);
+    expect(evaluateCondition("full-moons >= 1 and blood > 5", scope).truth).toBe(false);
+    expect(evaluateCondition("not blood > 5", scope).truth).toBe(true);
+    // Arithmetic still works underneath a comparison.
+    expect(evaluateCondition("courage * 2 >= 6", scope).truth).toBe(true);
+  });
+
+  test("an empty or malformed condition is FALSE and says why", () => {
+    expect(evaluateCondition("", scope).truth).toBe(false);
+    const bad = evaluateCondition("courage >", scope);
+    expect(bad.truth).toBe(false);
+    expect(bad.error).toBeTruthy();
+    // Nothing ends because a card was mistyped.
+    expect(evaluateCondition("courage $$ 3", scope).truth).toBe(false);
+  });
+
+  test("plain arithmetic is untouched - a difficulty never sees a comparison", () => {
+    expect(parsePoolExpression("3 + 2", () => 0).total).toBe(5);
+    expect(evaluateExpr("courage + 1", scope).value).toBe(4);
+  });
+});
+
+describe("every way an affliction can end", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    await CommandRouter.route("define-affliction name=`Blessed` tags=`blessed`");
+  });
+
+  test("turns count down, and the scene counts its own", async () => {
+    await CommandRouter.route('scene "The Hall" turn=3s');
+    await CommandRouter.route("afflict blessed turns=2");
+    expect(await CommandRouter.route("afflictions")).toContain("2 more turns");
+    await CommandRouter.route("turn");
+    expect(await CommandRouter.route("afflictions")).toContain("1 more turn");
+    expect(await CommandRouter.route("turn")).toContain("Blessed ends");
+  });
+
+  test("scenes count down on end-scene", async () => {
+    await CommandRouter.route('scene "The Hall"');
+    await CommandRouter.route("afflict blessed scenes=1");
+    expect(await CommandRouter.route("end-scene")).toContain("Blessed ends");
+  });
+
+  test("until X is a condition the engine decides: the next full moon", async () => {
+    await CommandRouter.route("afflict blessed until=`full-moons >= 1`");
+    expect(await CommandRouter.route("afflictions")).toContain("until full-moons >= 1");
+    await CommandRouter.route("advance-time 3 days");
+    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    // A full moon passes.
+    expect(await CommandRouter.route("advance-time 40 days")).toContain("Blessed ends");
+  });
+
+  test("until X can read the CHARACTER, not only the clock", async () => {
+    await CommandRouter.route("set-trait courage 3");
+    await CommandRouter.route("afflict blessed until=`courage >= 5`");
+    await CommandRouter.route("advance-time 1 hour");
+    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    await CommandRouter.route("set-trait courage 5");
+    expect(await CommandRouter.route("advance-time 1 hour")).toContain("Blessed ends");
+  });
+
+  test("until Y is ADVISORY - nothing but [[lift]] ends it, and it says so", async () => {
+    await CommandRouter.route("afflict blessed until-event=`you next attend the voivode`");
+    const shown = await CommandRouter.route("afflictions");
+    expect(shown).toContain("until you next attend the voivode");
+    expect(shown).toContain("advisory");
+    expect(expiryIsAdvisoryOnly({ untilEvent: "x" })).toBe(true);
+    expect(expiryIsAdvisoryOnly({ untilEvent: "x", rolls: 2 })).toBe(false);
+    // Time does not touch it.
+    await CommandRouter.route("advance-time 100 days");
+    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("lift blessed")).toContain("blessed");
+  });
+
+  test("an affliction records what inflicted it", async () => {
+    await CommandRouter.route("afflict blessed from=`arcanum:sharpened-senses` scenes=1");
+    expect(await CommandRouter.route("afflictions")).toContain("from arcanum:sharpened-senses");
+    expect(AFFLICTION_MODES).toEqual(["passive", "togglable", "temporary"]);
+  });
+
+  test("measures compose: whichever runs out first ends it", async () => {
+    await CommandRouter.route('scene "The Hall"');
+    await CommandRouter.route("afflict blessed turns=9 scenes=9 until=`full-moons >= 99` for=`1 hour`");
+    const shown = await CommandRouter.route("afflictions");
+    expect(shown).toContain("9 more turns");
+    expect(shown).toContain("whichever first");
+    // The hour is the shortest measure, and it is the one that ends it.
+    expect(await CommandRouter.route("advance-time 2 hours")).toContain("Blessed ends");
   });
 });

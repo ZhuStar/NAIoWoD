@@ -98,7 +98,10 @@ function tokenize(src: string): { tokens: Token[]; error?: string } {
       tokens.push({ t: "name", v: src.slice(start, i).toLowerCase(), start, end: i });
       continue;
     }
-    if ("+-*/(),".includes(c)) { tokens.push({ t: "op", v: c, start, end: ++i }); continue; }
+    // Two-character comparisons before one-character ones, or ">=" reads as ">".
+    const two = src.slice(i, i + 2);
+    if ([">=", "<=", "==", "!="].includes(two)) { tokens.push({ t: "op", v: two, start, end: i += 2 }); continue; }
+    if ("+-*/(),><=".includes(c)) { tokens.push({ t: "op", v: c, start, end: ++i }); continue; }
     return { tokens, error: `unexpected "${c}" at position ${i + 1}` };
   }
   return { tokens };
@@ -122,10 +125,22 @@ export const BUILTIN_FUNCTIONS: string[] = Object.keys(BUILTINS);
 // Recursive descent, evaluating as it goes: there is no tree to keep, because
 // nothing re-runs an expression against a different scope.
 //
+//   condition := disjunction                       (evaluateCondition only)
+//   disjunction := conjunction ('or' conjunction)*
+//   conjunction := negation ('and' negation)*
+//   negation    := 'not' negation | comparison
+//   comparison  := expr (('>'|'>='|'<'|'<='|'='|'=='|'!=') expr)?
 //   expr    := term (('+' | '-') term)*
 //   term    := factor (('*' | '/') factor)*
 //   factor  := '-' factor | primary
 //   primary := number | name '(' args ')' | name | '(' expr ')'
+//
+// The comparison layer exists for one reason: an affliction that lasts "until
+// the next full moon" or "until his blood runs out" is a CONDITION, not a sum.
+// It is reached only through evaluateCondition, so every existing arithmetic
+// expression parses exactly as it did - a difficulty or a budget never sees it.
+// Truth is 1 and falsehood is 0, so a condition is still a number and still
+// composes with the rest of the language.
 class Evaluator {
   private pos = 0;
   readonly unknown: string[] = [];
@@ -138,6 +153,49 @@ class Evaluator {
   private isOp(v: string): boolean { const t = this.peek(); return !!t && t.t === "op" && t.v === v; }
   private take(): Token | undefined { return this.tokens[this.pos++]; }
   private fail(msg: string): number { this.error ??= msg; return 0; }
+
+  // --- THE CONDITION LAYER (evaluateCondition only) --------------------------
+  // `and` / `or` / `not` are NAME tokens, so they are recognised here by value
+  // rather than by the tokenizer - which means a trait may still be called
+  // "order" or "android" without colliding.
+  condition(): number { return this.disjunction(); }
+
+  private isWord(w: string): boolean { const t = this.peek(); return !!t && t.t === "name" && t.v === w; }
+
+  private disjunction(): number {
+    let value = this.conjunction();
+    while (this.isWord("or")) { this.take(); const rhs = this.conjunction(); value = (value || rhs) ? 1 : 0; }
+    return value;
+  }
+
+  private conjunction(): number {
+    let value = this.negation();
+    while (this.isWord("and")) { this.take(); const rhs = this.negation(); value = (value && rhs) ? 1 : 0; }
+    return value;
+  }
+
+  private negation(): number {
+    if (this.isWord("not")) { this.take(); return this.negation() ? 0 : 1; }
+    return this.comparison();
+  }
+
+  private comparison(): number {
+    const left = this.expr(true);
+    for (const op of [">=", "<=", "==", "!=", ">", "<", "="] as const) {
+      if (!this.isOp(op)) continue;
+      this.take();
+      const right = this.expr(true);
+      switch (op) {
+        case ">": return left > right ? 1 : 0;
+        case "<": return left < right ? 1 : 0;
+        case ">=": return left >= right ? 1 : 0;
+        case "<=": return left <= right ? 1 : 0;
+        case "!=": return left !== right ? 1 : 0;
+        default: return left === right ? 1 : 0;   // "=" and "=="
+      }
+    }
+    return left;
+  }
 
   // The TOP level is where terms are recorded, so `a + b - 3` reports three
   // addends the way the roll report has always shown a pool.
@@ -247,6 +305,33 @@ export function evaluateExpr(expr: string, scope: ExprScope): ExprResult {
     terms: ev.error ? [] : ev.terms,
     unknown: ev.error ? [] : ev.unknown,
     ...(ev.error ? { error: ev.error } : {}),
+  };
+}
+
+// A CONDITION: the same language with comparisons and and/or/not on top,
+// answering true or false. This is what "until X" is written in - an affliction
+// that lasts "until the next full moon" (`full-moons >= 1`) or "until his blood
+// runs out" (`blood <= 0`) or both (`full-moons >= 1 or blood <= 0`).
+//
+// An empty condition is FALSE, not true: "no condition" must never read as
+// "already over", or an affliction with a malformed card would end instantly.
+export interface ConditionResult extends ExprResult { truth: boolean }
+export function evaluateCondition(expr: string, scope: ExprScope): ConditionResult {
+  const src = (expr ?? "").trim();
+  if (!src) return { value: 0, terms: [], unknown: [], truth: false };
+  const { tokens, error } = tokenize(src);
+  if (error) return { value: 0, terms: [], unknown: [], error, truth: false };
+  const ev = new Evaluator(src, tokens, scope);
+  const value = ev.condition();
+  if (!ev.error && !ev.atEnd()) ev.error = `nothing joins "${ev.rest()}" to what comes before it`;
+  return {
+    value: ev.error ? 0 : value,
+    terms: ev.error ? [] : ev.terms,
+    unknown: ev.error ? [] : ev.unknown,
+    ...(ev.error ? { error: ev.error } : {}),
+    // A condition the engine could not read is FALSE and says why, rather than
+    // quietly ending something.
+    truth: !ev.error && value !== 0,
   };
 }
 

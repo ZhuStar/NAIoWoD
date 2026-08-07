@@ -4662,11 +4662,15 @@ interface DisciplineDef {
   arena: DisciplineArena;
   clans: string[];          // Dark Ages clans for whom it is in-clan
   description?: string;
+  // Potence and Fortitude are simply ON. See PassiveGrant.
+  grants?: PassiveGrant;
 }
 
 const DISCIPLINES: Record<string, DisciplineDef> = {
-  potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength." },
-  fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't." },
+  potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength.",
+    grants: { afflicts: "potent", note: "the strength is always there, not something you switch on" } },
+  fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't.",
+    grants: { afflicts: "fortified", note: "the toughness is always there" } },
   celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
   animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
   auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
@@ -4682,6 +4686,26 @@ const DISCIPLINES: Record<string, DisciplineDef> = {
   mortis:        { name: "Mortis",        arena: "mental",   clans: ["cappadocian"] },
   thaumaturgy:   { name: "Thaumaturgy",   arena: "mental",   clans: ["tremere"] },
 };
+
+// =============================================================================
+// A POWER THAT IS SIMPLY ON - the one rule that binds three different things
+// -----------------------------------------------------------------------------
+// Potence is always working. So is an always-on arcanum, and so is a Merit like
+// Iron Will. Three different KINDS of thing (a Discipline, an Arcanum, a
+// Merit/Flaw - and the owner is right that arcana are none of the other two:
+// they are Devil's Due's own category) with one behaviour in common: TAKING IT
+// APPLIES ITS PASSIVE, and LOSING IT TAKES THE PASSIVE AWAY.
+//
+// Afflictions are how the engine already says "something is on you", with a
+// source, an expiry and an orphan policy - so a passive power names the
+// affliction it applies and everything downstream is machinery that exists.
+// `afflicts` is that name; `orphan` is what happens when the power goes, and it
+// defaults to `immediately`, because a power you no longer have is not working.
+interface PassiveGrant {
+  afflicts: string;          // the affliction applied when this is taken
+  orphan?: string;           // what happens when it goes (default: immediately)
+  note?: string;
+}
 
 function disciplineDef(name: string): DisciplineDef | undefined {
   return DISCIPLINES[StringUtil.normalize(name)];
@@ -4780,6 +4804,9 @@ interface MeritFlawDef {
   // so a character whose Resolve IS Living Resolve is capped by that), and the
   // reading is the PERMANENT rating, never the spent-down current.
   maxFromTrait?: string;
+  // Taking this applies an affliction; dropping it takes the affliction away.
+  // See PassiveGrant - the same field a Discipline carries, for the same reason.
+  grants?: PassiveGrant;
 }
 
 // What this definition costs THIS character, and whether they may take it at
@@ -5035,6 +5062,13 @@ const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
   ...Object.entries(FELLOWSHIPS).flatMap(([id, f]) => exclusiveDefs("fellowship", id, f.name)),
 ];
 
+const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
+  { name: "potent", description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it).", tags: ["potent"] },
+  { name: "fortified", description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can.", tags: ["fortified"] },
+  { name: "trait-aptitude", description: "An arcanum sharpens one trait: -1 difficulty per level on rolls whose pool uses it.", tags: ["trait-aptitude"] },
+  { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
+];
+
 const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   ...EXCLUSIVE_MERITS_FLAWS,
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
@@ -5042,6 +5076,7 @@ const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
+    grants: { afflicts: "trait-aptitude" },
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
       + "([[take-merit trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
       + "Abilities; every other trait caps at 2.",
@@ -5049,6 +5084,7 @@ const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   {
     name: "Trait Enhancement", kind: "arcanum", points: [1, 2, 3], param: "trait",
     passive: [{ op: "enhance", amount: 1, target: "$trait" }],
+    grants: { afflicts: "trait-expansion" },
     description: "Devil's Due: permanently raises the trait's effective value AND its advancement ceiling by the points taken; XP still prices from the un-enhanced base.",
   },
   {
@@ -5488,6 +5524,7 @@ function describeAfflictionDef(d: AfflictionDef): string {
 // in the eyes for a moment (concentrating-on, one turn), then converse in its
 // tongue (feral-whispers, mirrored - the animal is in the conversation too).
 const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
+  ...PASSIVE_AFFLICTIONS,
   makeAfflictionDef({
     name: "concentrating-on",
     description: "Locked eyes with the target; nothing else exists this turn",
@@ -13613,11 +13650,18 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const paidExpr = cmd.named["paid"]?.trim();
   if (paidExpr !== undefined) char.paid = { ...(char.paid ?? {}), [key]: paidExpr };
   await CharacterStore.save(char);
+  // Taking it turns it ON: the passive affliction is applied here, not by the
+  // player remembering to. The reply says so.
+  const granted = hit.def.grants
+    ? await applyPassiveGrant(StringUtil.normalize(char.name), budgetOfKind(hit.def) === "arcana" ? "arcanum" : "merit",
+        key, hit.def.grants)
+    : "";
   const passiveBits = passiveOpsOf(hit.def, hit.param, points).map(describePassiveOp);
   const purse = budgetOfKind(hit.def);
   const paidBit = paidExpr !== undefined ? `, paid ${paidExpr}` : "";
   return sys(`${disp(char.name)} takes ${hit.def.name}${hit.param ? `::${hit.param}` : ""} `
     + `(${points} ${purse} point${points === 1 ? "" : "s"}${priced.from ? ` - a ${priced.from}'s price` : ""}${paidBit})`
+    + `${granted ? `. ${granted}` : ""}`
     + `${priced.note ? ` - ${priced.note}` : ""}`
     + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}. [[budget]] tracks the purse.`);
 }
@@ -13881,6 +13925,28 @@ async function orphanAfflictions(subject: string, sourceKey: string): Promise<st
     notes.push(`${disp(c.def)} lingers - ${describeExpiry(c.expiry, formatStoryDate)}`);
   }
   return notes;
+}
+
+// TAKING A POWER APPLIES ITS PASSIVE. One function for all three kinds, because
+// a Discipline, an Arcanum and a Merit differ in what they ARE and not in this:
+// Potence is simply on, and so is an always-on arcanum, and so is Iron Will.
+//
+// The source is written `<kind>:<key>`, which is what makes losing it work:
+// orphanAfflictions matches by prefix, so dropping the arcanum takes every
+// trait it was applied to with it. The orphan policy defaults to `immediately`,
+// because a power you no longer have is not working.
+//
+// Every application is ANNOUNCED on the bus (channel `affliction:applied`), so
+// a distributed engine's other scripts learn about it without being asked.
+async function applyPassiveGrant(subject: string, kind: string, key: string, grant: PassiveGrant): Promise<string> {
+  const def = AfflictionRegistry.get(grant.afflicts);
+  if (!def) return `⚠ "${grant.afflicts}" is not a defined affliction`;
+  const from = `${kind}:${StringUtil.normalize(key)}`;
+  const orphan = makeOrphanPolicy(grant.orphan ?? "immediately");
+  const r = await applyAffliction(subject, def, {}, grant.note, undefined, from, undefined, orphan);
+  if (r.error) return `⚠ ${r.error}`;
+  await PostOffice.publish("affliction:applied", { character: subject, affliction: def.name, from, automatic: true });
+  return `${disp(def.name)} is now applied (from ${from}${grant.note ? ` - ${grant.note}` : ""})`;
 }
 
 // When an affliction ends, arm whatever cooldown it carried. One place, so it
@@ -14299,13 +14365,26 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
     if (paid !== undefined) char.paid = { ...(char.paid ?? {}), [trait]: paid };
   }
   await CharacterStore.save(char);
+  // A Discipline that is simply ON (Potence, Fortitude) applies its passive the
+  // moment it is rated, and takes it away again at 0 - the same rule the take
+  // verbs follow, because a Discipline is a power like any other.
+  let passiveNote = "";
+  const disc = group === "disciplines" ? disciplineDef(trait) : undefined;
+  if (disc?.grants) {
+    const who = StringUtil.normalize(char.name);
+    if (rating > 0 && (had ?? 0) <= 0) passiveNote = ` ${await applyPassiveGrant(who, "discipline", trait, disc.grants)}.`;
+    else if (rating <= 0 && (had ?? 0) > 0) {
+      const gone = await orphanAfflictions(who, `discipline:${trait}`);
+      if (gone.length) passiveNote = ` ${gone.join("; ")}.`;
+    }
+  }
   const held = char.instances?.[trait];
   const shown = held && held.length > 1
     ? held.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(" + ")
     : String(bucket[trait]);
   return sys(`${disp(char.name)} ${group === "poolStarts" ? "pool start" : StringUtil.normalize(group).replace(/ies$/, "y").replace(/s$/, "")} `
     + `${disp(trait)}: ${shown}${had !== undefined && !add ? ` (was ${had})` : ""}`
-    + `${paid !== undefined ? `, paid ${paid}` : ""}. [[sheet]] shows the whole record.`);
+    + `${paid !== undefined ? `, paid ${paid}` : ""}.${passiveNote} [[sheet]] shows the whole record.`);
 }
 
 // --- MIGRATION: the one place that still understands the old JSON cards ------
@@ -15430,8 +15509,19 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
   let anyQuiet = false;
   for (const m of matches) {
     out += rawInputText.slice(cursor, m.index);
-    const quiet = QUIET_VERBS.has(CommandParser.parse(m[1]).name);
+    const parsed = CommandParser.parse(m[1]);
+    const quiet = QUIET_VERBS.has(parsed.name);
     if (quiet) anyQuiet = true;
+    // EVERY command is announced on the bus, in the formalized envelope, on
+    // both the catch-all channel and its own verb's. Locally this costs a
+    // function call; in a distributed engine it is how a script that owns a
+    // verb hears about it. Nothing subscribes yet - the announcement is the
+    // seam, and it exists before anything needs it.
+    const envelope = commandEnvelope(parsed, {
+      id: `${Date.now()}-${m.index}`, character: (await CharacterStore.getCurrent())?.name, at: Date.now(),
+    });
+    await PostOffice.publish(COMMAND_CHANNEL, envelope);
+    await PostOffice.publish(commandChannel(parsed.name), envelope);
     const reply = await CommandRouter.route(m[1]);
     out += quiet ? await markCtxSkip(reply) : reply;   // quiet replies are noise the AI shouldn't read
     cursor = (m.index ?? 0) + m[0].length;

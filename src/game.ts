@@ -27,7 +27,7 @@ import {
   ConstraintRelation, ConstraintDomain, CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS,
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionExpiry, makeAfflictionExpiry, describeExpiry, rollSpendsCharge, expiryElapsed,
-  OrphanPolicy, makeOrphanPolicy, describeOrphanPolicy,
+  OrphanPolicy, makeOrphanPolicy, describeOrphanPolicy, PassiveGrant,
   expiryIsAdvisoryOnly,
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
@@ -43,13 +43,13 @@ import {
   roadRatingExpr, roadByName, ROADS,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, SOAK_TABLES,
   DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, supernaturalTraitOf, categoryOpenTo,
-  MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER,
+  MeritFlawDef, parsePassiveOps, describePassiveOp, SRD_HEADER_MARKER, disciplineDef,
   meritFlawFromCard, InstanceLimit, instanceLimitsOf,
   meritCostFor, budgetOfKind, kindSpends, MERIT_FLAW_KINDS, MeritFlawKind,
   TemplateVariant,
 } from "./rules";
 import {
-  MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage,
+  MeritFlawRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage, PostOffice,
   TrackedLorebook, ReconcileFinding, combineConfigTexts, structuralHash,
   writeTrackedEntry, ensurePath, TABLE_GENERAL_HEADER,
   configEntryText, namedDefsToCard,
@@ -67,6 +67,7 @@ import {
 } from "./wizard";
 import {
   ParsedCommand, CommandParser, CommandContext, CommandHandler, CommandRouter, ParamSpec, sys,
+  commandEnvelope, commandChannel, COMMAND_CHANNEL,
 } from "./command";
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, characterToCard,
@@ -4437,11 +4438,18 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   const paidExpr = cmd.named["paid"]?.trim();
   if (paidExpr !== undefined) char.paid = { ...(char.paid ?? {}), [key]: paidExpr };
   await CharacterStore.save(char);
+  // Taking it turns it ON: the passive affliction is applied here, not by the
+  // player remembering to. The reply says so.
+  const granted = hit.def.grants
+    ? await applyPassiveGrant(StringUtil.normalize(char.name), budgetOfKind(hit.def) === "arcana" ? "arcanum" : "merit",
+        key, hit.def.grants)
+    : "";
   const passiveBits = passiveOpsOf(hit.def, hit.param, points).map(describePassiveOp);
   const purse = budgetOfKind(hit.def);
   const paidBit = paidExpr !== undefined ? `, paid ${paidExpr}` : "";
   return sys(`${disp(char.name)} takes ${hit.def.name}${hit.param ? `::${hit.param}` : ""} `
     + `(${points} ${purse} point${points === 1 ? "" : "s"}${priced.from ? ` - a ${priced.from}'s price` : ""}${paidBit})`
+    + `${granted ? `. ${granted}` : ""}`
     + `${priced.note ? ` - ${priced.note}` : ""}`
     + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}. [[budget]] tracks the purse.`);
 }
@@ -4705,6 +4713,28 @@ async function orphanAfflictions(subject: string, sourceKey: string): Promise<st
     notes.push(`${disp(c.def)} lingers - ${describeExpiry(c.expiry, formatStoryDate)}`);
   }
   return notes;
+}
+
+// TAKING A POWER APPLIES ITS PASSIVE. One function for all three kinds, because
+// a Discipline, an Arcanum and a Merit differ in what they ARE and not in this:
+// Potence is simply on, and so is an always-on arcanum, and so is Iron Will.
+//
+// The source is written `<kind>:<key>`, which is what makes losing it work:
+// orphanAfflictions matches by prefix, so dropping the arcanum takes every
+// trait it was applied to with it. The orphan policy defaults to `immediately`,
+// because a power you no longer have is not working.
+//
+// Every application is ANNOUNCED on the bus (channel `affliction:applied`), so
+// a distributed engine's other scripts learn about it without being asked.
+async function applyPassiveGrant(subject: string, kind: string, key: string, grant: PassiveGrant): Promise<string> {
+  const def = AfflictionRegistry.get(grant.afflicts);
+  if (!def) return `⚠ "${grant.afflicts}" is not a defined affliction`;
+  const from = `${kind}:${StringUtil.normalize(key)}`;
+  const orphan = makeOrphanPolicy(grant.orphan ?? "immediately");
+  const r = await applyAffliction(subject, def, {}, grant.note, undefined, from, undefined, orphan);
+  if (r.error) return `⚠ ${r.error}`;
+  await PostOffice.publish("affliction:applied", { character: subject, affliction: def.name, from, automatic: true });
+  return `${disp(def.name)} is now applied (from ${from}${grant.note ? ` - ${grant.note}` : ""})`;
 }
 
 // When an affliction ends, arm whatever cooldown it carried. One place, so it
@@ -5123,13 +5153,26 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
     if (paid !== undefined) char.paid = { ...(char.paid ?? {}), [trait]: paid };
   }
   await CharacterStore.save(char);
+  // A Discipline that is simply ON (Potence, Fortitude) applies its passive the
+  // moment it is rated, and takes it away again at 0 - the same rule the take
+  // verbs follow, because a Discipline is a power like any other.
+  let passiveNote = "";
+  const disc = group === "disciplines" ? disciplineDef(trait) : undefined;
+  if (disc?.grants) {
+    const who = StringUtil.normalize(char.name);
+    if (rating > 0 && (had ?? 0) <= 0) passiveNote = ` ${await applyPassiveGrant(who, "discipline", trait, disc.grants)}.`;
+    else if (rating <= 0 && (had ?? 0) > 0) {
+      const gone = await orphanAfflictions(who, `discipline:${trait}`);
+      if (gone.length) passiveNote = ` ${gone.join("; ")}.`;
+    }
+  }
   const held = char.instances?.[trait];
   const shown = held && held.length > 1
     ? held.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(" + ")
     : String(bucket[trait]);
   return sys(`${disp(char.name)} ${group === "poolStarts" ? "pool start" : StringUtil.normalize(group).replace(/ies$/, "y").replace(/s$/, "")} `
     + `${disp(trait)}: ${shown}${had !== undefined && !add ? ` (was ${had})` : ""}`
-    + `${paid !== undefined ? `, paid ${paid}` : ""}. [[sheet]] shows the whole record.`);
+    + `${paid !== undefined ? `, paid ${paid}` : ""}.${passiveNote} [[sheet]] shows the whole record.`);
 }
 
 // --- MIGRATION: the one place that still understands the old JSON cards ------
@@ -6254,8 +6297,19 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
   let anyQuiet = false;
   for (const m of matches) {
     out += rawInputText.slice(cursor, m.index);
-    const quiet = QUIET_VERBS.has(CommandParser.parse(m[1]).name);
+    const parsed = CommandParser.parse(m[1]);
+    const quiet = QUIET_VERBS.has(parsed.name);
     if (quiet) anyQuiet = true;
+    // EVERY command is announced on the bus, in the formalized envelope, on
+    // both the catch-all channel and its own verb's. Locally this costs a
+    // function call; in a distributed engine it is how a script that owns a
+    // verb hears about it. Nothing subscribes yet - the announcement is the
+    // seam, and it exists before anything needs it.
+    const envelope = commandEnvelope(parsed, {
+      id: `${Date.now()}-${m.index}`, character: (await CharacterStore.getCurrent())?.name, at: Date.now(),
+    });
+    await PostOffice.publish(COMMAND_CHANNEL, envelope);
+    await PostOffice.publish(commandChannel(parsed.name), envelope);
     const reply = await CommandRouter.route(m[1]);
     out += quiet ? await markCtxSkip(reply) : reply;   // quiet replies are noise the AI shouldn't read
     cursor = (m.index ?? 0) + m[0].length;

@@ -1822,11 +1822,15 @@ export interface DisciplineDef {
   arena: DisciplineArena;
   clans: string[];          // Dark Ages clans for whom it is in-clan
   description?: string;
+  // Potence and Fortitude are simply ON. See PassiveGrant.
+  grants?: PassiveGrant;
 }
 
 export const DISCIPLINES: Record<string, DisciplineDef> = {
-  potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength." },
-  fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't." },
+  potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength.",
+    grants: { afflicts: "potent", note: "the strength is always there, not something you switch on" } },
+  fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't.",
+    grants: { afflicts: "fortified", note: "the toughness is always there" } },
   celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
   animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
   auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
@@ -1842,6 +1846,26 @@ export const DISCIPLINES: Record<string, DisciplineDef> = {
   mortis:        { name: "Mortis",        arena: "mental",   clans: ["cappadocian"] },
   thaumaturgy:   { name: "Thaumaturgy",   arena: "mental",   clans: ["tremere"] },
 };
+
+// =============================================================================
+// A POWER THAT IS SIMPLY ON - the one rule that binds three different things
+// -----------------------------------------------------------------------------
+// Potence is always working. So is an always-on arcanum, and so is a Merit like
+// Iron Will. Three different KINDS of thing (a Discipline, an Arcanum, a
+// Merit/Flaw - and the owner is right that arcana are none of the other two:
+// they are Devil's Due's own category) with one behaviour in common: TAKING IT
+// APPLIES ITS PASSIVE, and LOSING IT TAKES THE PASSIVE AWAY.
+//
+// Afflictions are how the engine already says "something is on you", with a
+// source, an expiry and an orphan policy - so a passive power names the
+// affliction it applies and everything downstream is machinery that exists.
+// `afflicts` is that name; `orphan` is what happens when the power goes, and it
+// defaults to `immediately`, because a power you no longer have is not working.
+export interface PassiveGrant {
+  afflicts: string;          // the affliction applied when this is taken
+  orphan?: string;           // what happens when it goes (default: immediately)
+  note?: string;
+}
 
 export function disciplineDef(name: string): DisciplineDef | undefined {
   return DISCIPLINES[StringUtil.normalize(name)];
@@ -1940,6 +1964,9 @@ export interface MeritFlawDef {
   // so a character whose Resolve IS Living Resolve is capped by that), and the
   // reading is the PERMANENT rating, never the spent-down current.
   maxFromTrait?: string;
+  // Taking this applies an affliction; dropping it takes the affliction away.
+  // See PassiveGrant - the same field a Discipline carries, for the same reason.
+  grants?: PassiveGrant;
 }
 
 // What this definition costs THIS character, and whether they may take it at
@@ -2195,6 +2222,13 @@ export const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
   ...Object.entries(FELLOWSHIPS).flatMap(([id, f]) => exclusiveDefs("fellowship", id, f.name)),
 ];
 
+export const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
+  { name: "potent", description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it).", tags: ["potent"] },
+  { name: "fortified", description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can.", tags: ["fortified"] },
+  { name: "trait-aptitude", description: "An arcanum sharpens one trait: -1 difficulty per level on rolls whose pool uses it.", tags: ["trait-aptitude"] },
+  { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
+];
+
 export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   ...EXCLUSIVE_MERITS_FLAWS,
   // Devil's Due arcana, modeled as parameterized merits with passive effects.
@@ -2202,6 +2236,7 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
+    grants: { afflicts: "trait-aptitude" },
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
       + "([[take-merit trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
       + "Abilities; every other trait caps at 2.",
@@ -2209,6 +2244,7 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
   {
     name: "Trait Enhancement", kind: "arcanum", points: [1, 2, 3], param: "trait",
     passive: [{ op: "enhance", amount: 1, target: "$trait" }],
+    grants: { afflicts: "trait-expansion" },
     description: "Devil's Due: permanently raises the trait's effective value AND its advancement ceiling by the points taken; XP still prices from the un-enhanced base.",
   },
   {
@@ -2648,6 +2684,7 @@ export function describeAfflictionDef(d: AfflictionDef): string {
 // in the eyes for a moment (concentrating-on, one turn), then converse in its
 // tongue (feral-whispers, mirrored - the animal is in the conversation too).
 export const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
+  ...PASSIVE_AFFLICTIONS,
   makeAfflictionDef({
     name: "concentrating-on",
     description: "Locked eyes with the target; nothing else exists this turn",

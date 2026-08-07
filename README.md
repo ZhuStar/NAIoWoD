@@ -5,6 +5,11 @@ flavour) for NovelAI — a foundation for single-player games run by the AI as
 Storyteller. This repository is the rules engine: characters, dice, health,
 damage, soak, resource pools and morality. UI and game loop come later.
 
+> **Working on this?** Read **`docs/invariants.md`** first — the rules that must
+> not break, each one recorded because breaking it caused a real bug — then
+> **`docs/architecture.md`** for which file does what. `docs/memory.md` is the
+> full decision record.
+
 ## Layout
 
 | Path | What |
@@ -2113,6 +2118,30 @@ Master) [paid 3]*.
 
 All of it is **advisory**: there is no creation engine yet, so the engine
 records and reports and the Storyteller decides.
+
+### Arcana are not Merits, and a passive power applies itself
+
+**Merits/Flaws**, **Arcana/Taints** (Devil's Due — a companion to *Dark Ages:
+Vampire* and *Dark Ages: Mage*) and **Disciplines** are three different
+categories. They share a storage shape and they share one behaviour, and neither
+makes them the same thing: a report must never call an arcanum a merit.
+
+The shared behaviour is that **taking a power turns it on**:
+
+```
+[[set-trait potence 2 group=discipline]]
+  → "Potent is now applied (from discipline:potence)"
+[[take-arcanum trait-affinity::melee 2]]
+  → "Trait Aptitude is now applied (from arcanum:trait-affinity:melee)"
+[[set-trait potence 0 group=discipline]]
+  → "Potent ends with discipline:potence"
+```
+
+A def carries `grants: {afflicts, orphan?}`; taking it applies that affliction
+with `from` set and an orphan policy of `immediately`, so **losing the power
+loses what it granted**. Every application is announced on the bus
+(`affliction:applied`), and **every command is announced too** — on `command` and
+on `command:<verb>` — which is the seam a distributed engine subscribes to.
 
 ### Rationed top ratings — "two traits may reach 3, at most one an Attribute"
 

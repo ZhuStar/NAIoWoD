@@ -46,6 +46,7 @@ import {
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
   GRANT_SOURCES, sourceDrawsOnPurse, describeCreationGrant,
   makeOrphanPolicy, describeOrphanPolicy, ORPHAN_IMMEDIATELY, ORPHAN_KEEP,
+  PASSIVE_AFFLICTIONS, budgetOfKind,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -7187,3 +7188,73 @@ describe("losing the arcanum that granted it", () => {
 async function orphanTestDrop(): Promise<string> {
   return CommandRouter.route("drop-arcanum trait-affinity::melee");
 }
+
+// =============================================================================
+// A POWER THAT IS SIMPLY ON - taking it applies it, losing it takes it away
+// =============================================================================
+describe("passive powers apply themselves", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); __resetMessagingMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+  });
+
+  test("three different KINDS of thing, one behaviour - and arcana are their own kind", () => {
+    // Devil's Due arcana are NOT merits or flaws: they trade in their own purse.
+    const aptitude = MeritFlawRegistry.get("trait-affinity")!;
+    expect(aptitude.kind).toBe("arcanum");
+    expect(budgetOfKind(aptitude)).toBe("arcana");
+    expect(aptitude.grants?.afflicts).toBe("trait-aptitude");
+    // A Discipline carries the same field, for the same reason.
+    expect(disciplineDef("potence")!.grants?.afflicts).toBe("potent");
+    expect(disciplineDef("fortitude")!.grants?.afflicts).toBe("fortified");
+    expect(PASSIVE_AFFLICTIONS.map(a => a.name))
+      .toEqual(["potent", "fortified", "trait-aptitude", "trait-expansion"]);
+  });
+
+  test("rating Potence applies its affliction, and the reply says so", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const r = await CommandRouter.route("set-trait potence 2 group=discipline");
+    expect(r).toContain("Potent is now applied");
+    expect(r).toContain("from discipline:potence");
+    const shown = await CommandRouter.route("afflictions");
+    expect(shown).toContain("potent");
+    expect(shown).toContain("ends at once");           // the default orphan policy
+    // Dropping it to 0 takes the passive away again.
+    const gone = await CommandRouter.route("set-trait potence 0 group=discipline");
+    expect(gone).toContain("Potent ends with discipline:potence");
+    expect(await CommandRouter.route("afflictions")).not.toContain("potent");
+  });
+
+  test("taking an arcanum applies its passive; dropping it takes it back", async () => {
+    await CommandRouter.route('create-playable name="Duke" templates=demon');
+    const took = await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    expect(took).toContain("Trait Aptitude is now applied");
+    expect(took).toContain("from arcanum:trait-affinity:melee");
+    expect(await CommandRouter.route("afflictions")).toContain("trait-aptitude");
+    expect(await CommandRouter.route("drop-arcanum trait-affinity::melee"))
+      .toContain("Trait Aptitude ends with");
+  });
+
+  test("an application is ANNOUNCED on the bus", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const heard: unknown[] = [];
+    const id = PostOffice.subscribe("affliction:applied", (e) => { heard.push(e.data); });
+    await CommandRouter.route("set-trait potence 1 group=discipline");
+    expect(heard).toEqual([{ character: "vlad", affliction: "potent", from: "discipline:potence", automatic: true }]);
+    PostOffice.unsubscribe(id);
+  });
+
+  test("every command is announced too, on the catch-all and on its own verb", async () => {
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+    const all: string[] = [];
+    const mine: string[] = [];
+    const a = PostOffice.subscribe(COMMAND_CHANNEL, (e) => { all.push((e.data as { verb: string }).verb); });
+    const b = PostOffice.subscribe(commandChannel("health"), (e) => { mine.push((e.data as { verb: string }).verb); });
+    await processAdventureInput("[[health]] and then [[resources]]");
+    expect(all).toEqual(["health", "resources"]);
+    expect(mine).toEqual(["health"]);          // the verb's own channel heard only its own
+    PostOffice.unsubscribe(a); PostOffice.unsubscribe(b);
+  });
+});

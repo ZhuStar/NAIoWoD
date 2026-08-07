@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `1d0e480`** ("Lose the
-> arcanum, lose what it granted").
+> **Last synced with the code as of commit `a704283`** ("A power that is
+> simply on, and the traps written down").
+> Prior: `1d0e480` ("Lose the arcanum, lose what it granted").
 > Prior: `490b719` ("Say where it came from, not just that it was
 > free").
 > Prior: `4d3aebc` ("One prefix for time, and a cooldown is a duration
@@ -54,6 +55,11 @@
 > (scenes); `cb5b4c3` (vendor script-types.d.ts).
 
 ---
+
+> **Two companion files, both newer than most of this one:**
+> **`docs/invariants.md`** — the rules that must not break, each recorded with
+> the commit that found it. Read it before changing code.
+> **`docs/architecture.md`** — what each file is and which one to open.
 
 ## 1. What this project is
 
@@ -3365,6 +3371,54 @@ and `prefill` are mocked/available but not yet written.
       and an orphan's "1 hour" became 41 days. Caught by the first test that
       asserted a real interval rather than a boolean - which is the argument for
       testing durations against the clock instead of against themselves.
+
+69. **A power that is simply on, and three docs for the next reader** (owner:
+    *"arcana are not merits or flaws. They should not be considered such
+    anywhere in our code ... We should have both merits and flaws and Arcanum
+    and disciplines with passive powers like potence and fortitude. We should
+    have the effect that, when you take any of these, it immediately applies the
+    passive affliction ... the reply to all commands that cause afflictions
+    would make it clear for the user that the related affliction is now
+    applied ... which is using the infrastructure of our event bus."*; plus a
+    documentation pass, *"because you keep introducing mistakes, for example
+    this one about the time length"*).
+    - **`PassiveGrant {afflicts, orphan?, note?}`** on BOTH `MeritFlawDef` and
+      `DisciplineDef`. Three categories that are not each other, sharing one
+      behaviour: taking the power applies its affliction (`from` =
+      `<kind>:<key>`, orphan defaulting to `immediately`), and losing it takes
+      the affliction away through §7.68's orphan sweep. Potence grants `potent`,
+      Fortitude grants `fortified`, and the two Devil's Due arcana grant
+      `trait-aptitude` / `trait-expansion`.
+    - **The reply says so**, on every path: `[[set-trait potence 2
+      group=discipline]]` answers *"Potent is now applied (from
+      discipline:potence)"*, and rating it back to 0 answers *"Potent ends
+      with discipline:potence"*.
+    - **THE BUS IS NOW CARRYING TRAFFIC.** `affliction:applied` on every
+      automatic application, and **every command** on `command` plus
+      `command:<verb>` in the §7.63 envelope. Nothing subscribes yet - the
+      announcement is the seam, and it exists before anything needs it, which is
+      the point of having built the bus first.
+    - **NAMING SETTLED**: the owner confirmed the existing names are right, so
+      `Trait Affinity` / `Trait Enhancement` stay as the def names and
+      `trait-aptitude` / `trait-expansion` are the afflictions they apply.
+    - **THREE DOCS, and the reason is a bug I wrote** (the seconds-vs-
+      milliseconds error of §7.68, which every earlier time test missed because
+      they compared durations against themselves):
+      - **`docs/invariants.md`** - the rules that must not break, each recorded
+        WITH the commit that found it: units, the two normalizers, the hyphen
+        rule, what crosses a wire, the performance rules, the policies that look
+        like bugs, the battery, and a symptom → cause table. Written flatly, for
+        a reader with no context - **including a less capable model**, which the
+        owner asked for explicitly.
+      - **`docs/architecture.md`** - what each file is and which one to open,
+        the build/dependency order, the load-bearing ideas, and the four
+        categories that are NOT each other (Merits/Flaws, Arcana/Taints,
+        Disciplines, Backgrounds).
+      - README gained a pointer to both, and a section stating the arcana
+        distinction in the player-facing voice.
+    - 🚧 STILL TO DO from this message: a per-file MD for the remaining modules,
+      and an audit of the older `docs/*.md` (the transcribed NovelAI docs are
+      fine; the project's own prose has not been re-read end to end).
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

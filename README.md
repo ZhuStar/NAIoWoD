@@ -5,6 +5,10 @@ flavour) for NovelAI — a foundation for single-player games run by the AI as
 Storyteller. This repository is the rules engine: characters, dice, health,
 damage, soak, resource pools and morality. UI and game loop come later.
 
+> **Every command, generated from the registry: [`docs/commands.md`](docs/commands.md)**
+> — all 131 verbs, what each does, every argument, and the exact `[[help <verb>]]`
+> reply. `bun run docs:commands` rewrites it and a test asserts it is in sync.
+
 > **Working on this?** Read **`docs/invariants.md`** first — the rules that must
 > not break, each one recorded because breaking it caused a real bug — then
 > **`docs/architecture.md`** for which file does what. `docs/memory.md` is the

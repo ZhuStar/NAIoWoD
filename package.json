@@ -7,6 +7,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "bun scripts/build-single.ts"
+    "build": "bun scripts/build-single.ts",
+    "docs:commands": "bun scripts/command-reference.ts"
   }
 }

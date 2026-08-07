@@ -141,6 +141,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ```bash
 bun run build          # dist/naiowod.ts is COMMITTED; the suite checks it is in sync
+bun run docs:commands  # docs/commands.md is GENERATED; the suite checks it too
 bun test
 bun run typecheck
 # standalone: the artifact must compile alone, against the vendored .d.ts
@@ -166,3 +167,4 @@ Then a live `init()` smoke reproducing whatever the change was about.
 | A name resolves to 0 | `::` folding, or the hyphen rule, or a bare name not reaching the extension. |
 | A duration is wildly wrong | Seconds vs milliseconds. §1. |
 | A window has no field for a knob | Windows walk the verb's `CommandSpec`. Add the param and the field appears. |
+| `docs/commands.md is in sync` fails | You added or renamed a verb. Run `bun run docs:commands`. |

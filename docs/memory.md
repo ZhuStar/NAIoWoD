@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `dc271c4`** ("The event does
-> the work, and a passive you can switch off").
+> **Last synced with the code as of commit `0ecd2c3`** ("A command
+> reference that writes itself").
+> Prior: `dc271c4` ("The event does the work, and a passive you can
+> switch off").
 > Prior: `a704283` ("A power that is simply on, and the traps written
 > down").
 > Prior: `1d0e480` ("Lose the arcanum, lose what it granted").
@@ -58,6 +60,9 @@
 
 ---
 
+> **`docs/commands.md`** — every verb, GENERATED from the registry
+> (`bun run docs:commands`). Never hand-edit it.
+>
 > **Two companion files, both newer than most of this one:**
 > **`docs/invariants.md`** — the rules that must not break, each recorded with
 > the commit that found it. Read it before changing code.
@@ -3459,6 +3464,29 @@ and `prefill` are mocked/available but not yet written.
       handlers a script owns, so this is the right shape anyway. **Lesson worth
       keeping: a module-level registration that tests can disturb needs a named,
       re-runnable way back.**
+
+71. **The command reference generates itself** (owner: *"Can you produce a list
+    of all the commands we have and what they do ... That's probably achievable
+    with a script. I also want to know the help command and what it publishes,
+    as well as the targeted help command on each of the commands we have."*).
+    - **`scripts/command-reference.ts` -> `docs/commands.md`**, run by
+      **`bun run docs:commands`**. It boots the host mock, calls `init()`, walks
+      the live `CommandRouter`, and ROUTES `[[help]]` and `[[help <verb>]]` for
+      real rather than reconstructing them - so the document shows what a player
+      actually sees. **131 commands, 2,714 lines.**
+    - Three sections: what bare `[[help]]` publishes; a one-line table of every
+      verb; then each verb in full - its grammar, its note, a table of every
+      argument (kind, type, required, enum options, description or hint,
+      example), and its own `[[help <verb>]]` reply.
+    - **A SYNC TEST, like dist/'s** (`test/build.test.ts`): the committed file
+      must equal what the script prints. A verb added or renamed without
+      regenerating fails the suite. That is the only way a 131-row document
+      stays true - **the same bet as the committed single-file build.**
+    - Its own bug, caught by reading the output: a pipe must be ESCAPED inside a
+      markdown table cell and left ALONE inside a fenced block, and the first
+      version escaped once for both - putting backslashes into the usage line a
+      reader is meant to copy and type. Two contexts, two forms; `cell()` is now
+      the only place that escapes.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

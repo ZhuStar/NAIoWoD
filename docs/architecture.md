@@ -1,5 +1,8 @@
 # Architecture — what each file is, and how they fit together
 
+> **[`docs/commands.md`](commands.md)** is the generated reference for all 131
+> verbs — do not hand-edit it; run `bun run docs:commands`.
+>
 > Companion to `docs/invariants.md` (the rules you must not break) and
 > `docs/memory.md` (every decision and *why*). This file answers a narrower
 > question: **if I have to change X, which file do I open?**

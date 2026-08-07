@@ -4,6 +4,7 @@
 // silently drift from the modules it is generated from.
 import { test, expect } from "bun:test";
 import { buildSingleFile, OUTPUT_PATH } from "../scripts/build-single";
+import { renderCommandReference, COMMANDS_DOC_PATH } from "../scripts/command-reference";
 
 test("dist/naiowod.ts is in sync with src/ (run `bun run build`)", async () => {
   const committed = await Bun.file(OUTPUT_PATH).text();
@@ -49,4 +50,14 @@ test("window.ts holds no user-facing copy of its own", async () => {
     }
   }
   expect(offenders).toEqual([]);
+});
+
+// docs/commands.md is GENERATED from the live CommandRouter, for the same
+// reason dist/ is generated from src/: a hand-written list of 131 verbs drifts
+// the first time somebody adds one. Add or rename a command without running
+// `bun run docs:commands` and this fails.
+test("docs/commands.md is in sync with the registry (run `bun run docs:commands`)", async () => {
+  const committed = await Bun.file(COMMANDS_DOC_PATH).text();
+  const fresh = await renderCommandReference();
+  expect(committed).toBe(fresh);
 });

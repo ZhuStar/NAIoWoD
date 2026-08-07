@@ -833,6 +833,22 @@ It is armed when the affliction ends — however it ends — checked at the one
 moment somebody tries to apply it again (`waive=true` overrides), and listed by
 `[[afflictions]]` beside what is active.
 
+**When the source is no more.** An arcanum grants an always-on passive; lose the
+arcanum and the passive should go with it. Four behaviours, and they are one
+mechanism — **an expression over what is left**, evaluated the moment the source
+goes:
+
+| you want | you write |
+|---|---|
+| it ends immediately | `orphan=immediately` |
+| it ends in T | `` orphan=`1 hour` `` |
+| the duration continues as normal | *(nothing — that's the default)* |
+| an expression over its duration | `` orphan=`remaining-seconds / 2` `` |
+
+`from` matches **by prefix**, so dropping `arcanum:trait-affinity` takes
+`arcanum:trait-affinity:melee` with it — the instance key is a path, and losing
+the arcanum loses every trait it was applied to.
+
 **Afflictions are the common currency.** An arcanum, a spell, a Discipline and a
 botched roll all pay in the same coin, so duration and cooldown live here and
 none of those four needs its own timer. `from=` records which it was:

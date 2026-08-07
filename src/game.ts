@@ -27,6 +27,7 @@ import {
   ConstraintRelation, ConstraintDomain, CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS,
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   AfflictionExpiry, makeAfflictionExpiry, describeExpiry, rollSpendsCharge, expiryElapsed,
+  OrphanPolicy, makeOrphanPolicy, describeOrphanPolicy,
   expiryIsAdvisoryOnly,
   AfflictionDef,
   MeritFlawRequirements, resolveMeritInstance, passiveOpsOf,
@@ -3285,7 +3286,7 @@ async function timeScopeExtension(fromEpoch: number, now: number): Promise<Scope
     now, applied: fromEpoch,
     "full-moons": countFullMoons(fromEpoch, now),
     "elapsed-days": countDayBoundaries(fromEpoch, now),
-    "elapsed-hours": Math.floor((now - fromEpoch) / 3_600_000),
+    "elapsed-hours": Math.floor((now - fromEpoch) / 3600),   // the story clock counts SECONDS
   };
   return (path) => {
     // The bare shorthands, so a condition reads like English.
@@ -3309,7 +3310,7 @@ function timeScopeCalls(): (name: string, args: number[]) => number | undefined 
     switch (name.slice(TIME_PREFIX.length + 1)) {
       case "full-moons-since": return countFullMoons(a, b);
       case "days-since": return countDayBoundaries(a, b);
-      case "hours-since": return Math.floor((b - a) / 3_600_000);
+      case "hours-since": return Math.floor((b - a) / 3600);
       default: return undefined;
     }
   };
@@ -4453,7 +4454,13 @@ async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
   if (!(key in char.meritsFlaws)) return sys(`${disp(char.name)} does not have "${key}". [[merits]] lists them.`);
   delete char.meritsFlaws[key];
   await CharacterStore.save(char);
-  return sys(`${disp(char.name)} drops ${key}.`);
+  // Losing an arcanum loses what it granted. Every affliction that named this
+  // as its source is re-measured through its own orphan policy - immediately,
+  // after a while, unchanged, or by an expression over what was left.
+  const orphaned = await orphanAfflictions(StringUtil.normalize(char.name), `arcanum:${key}`);
+  const alsoMerit = await orphanAfflictions(StringUtil.normalize(char.name), key);
+  const notes = [...orphaned, ...alsoMerit];
+  return sys(`${disp(char.name)} drops ${key}.${notes.length ? ` ${notes.join("; ")}.` : ""}`);
 }
 
 async function cmdMerits(): Promise<string> {
@@ -4566,7 +4573,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
   if (left) bits.push(`- ${left}${expiryIsAdvisoryOnly(c.expiry) ? " ⚠ advisory: nothing ends this but [[lift]]" : ""}`);
   // The source is an IDENTIFIER ("arcanum:sharpened-senses"), not a display
   // name: title-casing it would mangle the very thing that makes it matchable.
-  if (c.from) bits.push(`- from ${c.from}`);
+  if (c.from) bits.push(`- from ${c.from}${c.orphan ? ` (${describeOrphanPolicy(c.orphan)})` : ""}`);
   const dur = describeDuration(def?.duration);
   if (!left && dur && dur !== "instant") bits.push(`- ${dur} (ST-enforced)`);
   if (def?.then) bits.push(`- then ${def.then}`);
@@ -4593,7 +4600,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
 // Apply one definition to a subject: validate + resolve bindings, write the
 // instance, then fire the def's mirror onto the bound target. Shared by
 // afflict and advance. Returns the reply fragments or an error.
-async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string, cooldown?: AfflictionExpiry): Promise<{ lines?: string[]; error?: string }> {
+async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string, cooldown?: AfflictionExpiry, orphan?: OrphanPolicy): Promise<{ lines?: string[]; error?: string }> {
   const bindings: Record<string, string> = {};
   for (const slot of def.bindings ?? []) {
     const raw = rawBindings[slot];
@@ -4609,8 +4616,13 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
   if (expiry) inst.expiry = expiry;
   // Where it came from (an arcanum, a spell, a Discipline, a botch) and when it
   // began - the second is what an "until X" condition measures against.
-  if (from) inst.from = StringUtil.normalize(from);
+  // `::` is the path separator and folds to `:` - StringUtil.normalize does not
+  // do that (only the command boundary does), and a source arriving inside
+  // backticks skips the boundary entirely. Fold it here or an orphan sweep
+  // would look for a name one colon different from the one it stored.
+  if (from) inst.from = StringUtil.normalize(from).replace(/::+/g, ":");
   if (cooldown) inst.cooldown = cooldown;
+  if (orphan) inst.orphan = orphan;
   inst.at = (await StoryClock.get())?.now ?? 0;
   await CharacterAfflictions.afflict(subject, inst);
   const lines = [`${disp(subject)} is now ${afflictionLine(inst)}`];
@@ -4629,6 +4641,72 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
 }
 
 // Remove one affliction from a subject AND its mirror from the bound target.
+// THE SOURCE IS NO MORE. Every affliction whose `from` names the thing that
+// just went is re-measured through its orphan policy - which is one expression
+// over what remains, so the owner's four behaviours are one code path:
+//
+//   ends at once      the policy evaluates to 0 and the affliction is lifted
+//   ends in T         the policy is T, and what remains becomes T
+//   carries on        no policy, nothing recomputed
+//   an expression     `remaining-seconds / 2` and the like, with the remainder
+//                     in scope
+//
+// `from` matches by PREFIX, so dropping `arcanum:trait-aptitude` takes the
+// afflictions of `arcanum:trait-aptitude:melee` with it - the instance is a
+// path, and losing the arcanum loses every trait it was applied to.
+async function orphanAfflictions(subject: string, sourceKey: string): Promise<string[]> {
+  const key = StringUtil.normalize(sourceKey).replace(/::+/g, ":");
+  const active = await CharacterAfflictions.list(subject);
+  const touched = active.filter(c => c.from && (c.from === key || c.from.startsWith(`${key}:`)));
+  if (!touched.length) return [];
+  const notes: string[] = [];
+  const clock = await StoryClock.get();
+  const now = clock?.now ?? 0;
+  const char = await CharacterStore.load(subject);
+  const next: ActiveAffliction[] = [];
+  for (const c of active) {
+    if (!touched.includes(c)) { next.push(c); continue; }
+    // No policy is the owner's third case: the duration continues as normal.
+    if (!c.orphan || (!c.orphan.rolls && !c.orphan.seconds)) {
+      notes.push(`${disp(c.def)} outlives ${c.from}`);
+      next.push(c);
+      continue;
+    }
+    // What is LEFT, put in scope so a policy can speak about it.
+    const remainingSeconds = c.expiry?.until !== undefined ? Math.max(0, c.expiry.until - now) : 0;
+    const remainingRolls = c.expiry?.rolls ?? 0;
+    const scope = await timedScope(char ?? undefined, c.at ?? now, now);
+    const withRemainder: ExprScope = {
+      lookup: (path) => (path.length === 1 && path[0] === "remaining-seconds" ? { value: remainingSeconds }
+        : path.length === 1 && path[0] === "remaining-rolls" ? { value: remainingRolls }
+        : scope.lookup(path)),
+      call: scope.call,
+    };
+    const expiry: AfflictionExpiry = { ...(c.expiry ?? {}) };
+    if (c.orphan.seconds !== undefined) {
+      const secs = Math.max(0, Math.round(evaluateExpr(c.orphan.seconds, withRemainder).value));
+      expiry.until = now + secs;
+    }
+    if (c.orphan.rolls !== undefined) {
+      expiry.rolls = Math.max(0, Math.round(evaluateExpr(c.orphan.rolls, withRemainder).value));
+    }
+    next.push({ ...c, expiry });
+  }
+  await CharacterAfflictions.replace(subject, next);
+  // Anything the policy reduced to nothing goes now, mirrors and all.
+  for (const c of next) {
+    if (!(await afflictionEnded(char ?? undefined, c, now))) continue;
+    const r = await removeAffliction(subject, c.def);
+    if (r.removed) notes.push(`${disp(c.def)} ends with ${c.from}`);
+  }
+  for (const c of next) {
+    if (!touched.some(t => t.def === c.def) || !c.expiry?.until) continue;
+    if (await afflictionEnded(char ?? undefined, c, now)) continue;
+    notes.push(`${disp(c.def)} lingers - ${describeExpiry(c.expiry, formatStoryDate)}`);
+  }
+  return notes;
+}
+
 // When an affliction ends, arm whatever cooldown it carried. One place, so it
 // happens whether it was lifted by hand, ran out of charges, or timed out.
 async function armCooldown(subject: string, c: ActiveAffliction | undefined): Promise<void> {
@@ -4739,7 +4817,14 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   }
   const cooldown = await expiryFromArgs(cmd, "cooldown-");
   if (cooldown.error) return sys(cooldown.error);
-  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"], cooldown.value);
+  // A bare duration ("1 hour") is the only orphan form that needs the clock;
+  // everything else is already an expression in seconds.
+  let orphan = makeOrphanPolicy(cmd.named["orphan"]);
+  if (orphan?.seconds && !/^[\d\s+\-*/().]*$/.test(orphan.seconds)) {
+    const dur = parseDuration(orphan.seconds);
+    if (!("error" in dur)) orphan = { ...orphan, seconds: String(dur.seconds + dur.months * 2_592_000) };
+  }
+  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"], cooldown.value, orphan);
   if (r.error) return sys(`${r.error}`);
   return sys(`${r.lines!.join("; ")}.`);
 }
@@ -5953,6 +6038,10 @@ const EXPIRY_PARAMS: ParamSpec[] = [
   { key: "cooldown-scenes", kind: "named", type: "int" },
   { key: "cooldown-until", kind: "named", hint: "<condition>", example: "full-moons >= 1" },
   { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Apply it even while cooling" },
+  {
+    key: "orphan", kind: "named", hint: "immediately | keep | <expression>", example: "immediately",
+    desc: "What happens if its source goes: end at once, carry on unchanged, or an expression over what is left (remaining-seconds, remaining-rolls)",
+  },
 ];
 CommandRouter.register("afflict", cmdAfflict, {
   summary: "apply an affliction; extra <slot>=<name|@alias> args fill its bindings",

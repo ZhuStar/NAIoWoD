@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `490b719`** ("Say where it
-> came from, not just that it was free").
+> **Last synced with the code as of commit `1d0e480`** ("Lose the
+> arcanum, lose what it granted").
+> Prior: `490b719` ("Say where it came from, not just that it was
+> free").
 > Prior: `4d3aebc` ("One prefix for time, and a cooldown is a duration
 > read backwards").
 > Prior: `86ccd2e` ("Afflictions are the common currency, and the
@@ -3321,6 +3323,48 @@ and `prefill` are mocked/available but not yet written.
       `[[grant potence source=template]]` marks a purchase as off-purse, and
       `[[grant freebie 3 source=storyteller note=\`…\`]]` adds to a purse.
       `[[forget-grant]]` undoes either. Both round-trip through the sheet card.
+
+68. **When the source is no more** (owner, asking whether Trait Aptitude and
+    Trait Expansion could already be arcana with always-on passives, then: *"If
+    you lose (temporarily or forever) any arcanum, you have to lose the powers
+    granted by it, especially always-on passives ... If the source of this
+    affliction is no more, you immediately lose it / you will lose it in T time
+    / the duration continues as normal / you apply the following expression to
+    its duration. Some of those things could be the same thing in the
+    implementation, I don't know."*).
+    - **THEY ARE THE SAME THING, and his instinct was right.** An orphan policy
+      is **one expression over what is LEFT**, evaluated the moment the source
+      goes. All four behaviours are that one code path:
+      immediately = `0`; in T = the seconds of T; continues = no policy at all;
+      an expression = itself, with `remaining-seconds` and `remaining-rolls` in
+      scope. `OrphanPolicy {rolls?, seconds?}`, `makeOrphanPolicy` for the
+      shorthands (`immediately`/`at-once`/`now`, `keep`/`continue`/`as-normal`).
+      **No policy is the default**, and the default is "carries on" - an
+      affliction does not vanish because nobody thought about it.
+    - **`orphanAfflictions(subject, sourceKey)` matches `from` BY PREFIX**, so
+      dropping `arcanum:trait-affinity` takes `arcanum:trait-affinity:melee`
+      with it: the instance key is a path, and losing the arcanum loses every
+      trait it was applied to. Fired from `[[drop-merit]]`/`[[drop-arcanum]]`.
+    - **`[[afflict … orphan=immediately | keep | \`1 hour\` | \`remaining-seconds / 2\`]]`**
+      is the whole surface, and `[[afflictions]]` shows the policy beside the
+      source.
+    - **ANSWER TO THE ARCANA QUESTION: they already are arcana, not merits.**
+      `Trait Affinity` and `Trait Enhancement` ship as `kind: "arcanum"` with the
+      exact mechanics he re-described - affinity is `difficulty -1 per point on
+      rolls whose pool uses the trait`, enhancement is `enhance +1 per point`
+      raising both the effective value and the ceiling while XP still prices
+      from the un-enhanced base. Parameterized per trait, stackable across
+      traits, priced in arcana points. **NAMING IS UNRESOLVED**: he called them
+      *Trait Aptitude* and *Trait Expansion* this time; an earlier message had
+      corrected "Aptitude" to "Affinity" (recorded in the roadmap). Left as-is
+      and flagged rather than renamed twice.
+    - **A LIVE BUG THIS FOUND, in §7.66's own time namespace**: the story clock
+      counts **SECONDS** (core/time.ts is explicit), and `elapsed-hours`,
+      `hours-since` and the orphan arithmetic all divided or multiplied by
+      1000 as though it were milliseconds. `elapsed-hours` was 1000x too small
+      and an orphan's "1 hour" became 41 days. Caught by the first test that
+      asserted a real interval rather than a boolean - which is the argument for
+      testing durations against the clock instead of against themselves.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

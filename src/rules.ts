@@ -2524,6 +2524,54 @@ export function expiryElapsed(expiry: AfflictionExpiry, now: number, condition?:
   return false;
 }
 
+// =============================================================================
+// WHEN THE SOURCE IS NO MORE - one mechanism, the owner's four behaviours
+// -----------------------------------------------------------------------------
+// An arcanum grants an always-on passive; lose the arcanum and the passive must
+// go with it. The owner named four things that could happen, and suspected they
+// might be one thing underneath. They are:
+//
+//   "you lose it immediately"                 -> nothing remains
+//   "you lose it in T time"                   -> what remains becomes T
+//   "the duration continues as normal"        -> what remains is unchanged
+//   "apply this expression to its duration"   -> what remains is that expression
+//
+// So an orphan policy is just **an expression over what is left**, evaluated at
+// the moment the source goes. `remaining-rolls` and `remaining-seconds` are in
+// scope, which is what makes "half of whatever is left" as easy as "an hour".
+// The first three are the shorthands `immediately`, a duration, and `keep`.
+// =============================================================================
+export interface OrphanPolicy {
+  rolls?: string;      // expression -> the charges that remain
+  seconds?: string;    // expression -> the story-seconds that remain
+  note?: string;
+}
+// `keep` is the DEFAULT and is written as an empty policy: an affliction whose
+// source vanished carries on unless somebody said otherwise.
+export const ORPHAN_KEEP: OrphanPolicy = {};
+export const ORPHAN_IMMEDIATELY: OrphanPolicy = { rolls: "0", seconds: "0" };
+
+// Read a policy off a command or a card. "immediately" / "at-once" / "0" end it;
+// "keep" / "continue" leave it alone; anything else is an EXPRESSION over what
+// remains - and a bare duration ("1 hour") is handled by the caller, which is
+// the only part that needs the clock.
+export function makeOrphanPolicy(raw: string | undefined): OrphanPolicy | undefined {
+  const t = (raw ?? "").trim();
+  if (!t) return undefined;
+  const key = StringUtil.normalize(t);
+  if (["immediately", "at-once", "now", "0"].includes(key)) return { ...ORPHAN_IMMEDIATELY };
+  if (["keep", "continue", "as-normal", "unchanged"].includes(key)) return { ...ORPHAN_KEEP };
+  return { seconds: t };
+}
+
+export function describeOrphanPolicy(p: OrphanPolicy | undefined): string {
+  if (!p) return "";
+  if (p.rolls === "0" && p.seconds === "0") return "ends at once if its source goes";
+  if (!p.rolls && !p.seconds) return "outlives its source";
+  const bits = [p.seconds ? `${p.seconds} seconds` : "", p.rolls ? `${p.rolls} rolls` : ""].filter(Boolean);
+  return `if its source goes, ${bits.join(" and ")} remain`;
+}
+
 // Does this expiry measure anything the engine can decide, or is it purely a
 // note to the humans? An affliction with only an `untilEvent` is the second.
 export function expiryIsAdvisoryOnly(expiry: AfflictionExpiry | undefined): boolean {

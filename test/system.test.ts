@@ -45,6 +45,7 @@ import {
   rollSpendsCharge, expiryElapsed, makeAfflictionExpiry, describeExpiry,
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
   GRANT_SOURCES, sourceDrawsOnPurse, describeCreationGrant,
+  makeOrphanPolicy, describeOrphanPolicy, ORPHAN_IMMEDIATELY, ORPHAN_KEEP,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -7113,3 +7114,76 @@ describe("grants: the template's free dot and the Storyteller's bonus", () => {
     expect(await CommandRouter.route("budget")).toContain("discipline: 1/2");
   });
 });
+
+// =============================================================================
+// WHEN THE SOURCE IS NO MORE - four behaviours, one expression
+// =============================================================================
+describe("losing the arcanum that granted it", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Duke" templates=demon');
+    await CommandRouter.route("define-affliction name=`Keen` tags=`keen`");
+  });
+
+  test("the shorthands are the same mechanism as the expression", () => {
+    expect(makeOrphanPolicy("immediately")).toEqual(ORPHAN_IMMEDIATELY);
+    expect(makeOrphanPolicy("at-once")).toEqual(ORPHAN_IMMEDIATELY);
+    expect(makeOrphanPolicy("keep")).toEqual(ORPHAN_KEEP);
+    expect(makeOrphanPolicy("continue")).toEqual(ORPHAN_KEEP);
+    expect(makeOrphanPolicy("remaining-seconds / 2")).toEqual({ seconds: "remaining-seconds / 2" });
+    expect(makeOrphanPolicy(undefined)).toBeUndefined();
+    expect(describeOrphanPolicy(ORPHAN_IMMEDIATELY)).toContain("ends at once");
+    expect(describeOrphanPolicy(ORPHAN_KEEP)).toContain("outlives its source");
+  });
+
+  test("(1) it ends immediately when its source goes", async () => {
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` orphan=immediately");
+    expect(await CommandRouter.route("afflictions")).toContain("ends at once");
+    const dropped = await CommandRouter.route("drop-arcanum trait-affinity::melee");
+    expect(dropped).toContain("Keen ends with");
+    expect(await CommandRouter.route("afflictions")).not.toContain("keen");
+  });
+
+  test("(2) it ends in T time - and the clock finishes it", async () => {
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` orphan=`1 hour`");
+    const dropped = await CommandRouter.route("drop-arcanum trait-affinity::melee");
+    expect(dropped).toContain("Keen lingers");
+    expect(await CommandRouter.route("advance-time 30 minutes")).not.toContain("Keen ends");
+    expect(await CommandRouter.route("advance-time 45 minutes")).toContain("Keen ends");
+  });
+
+  test("(3) with no policy the duration continues as normal", async () => {
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` for=`2 hours`");
+    expect(await CommandRouter.route("drop-arcanum trait-affinity::melee")).toContain("outlives");
+    expect(await CommandRouter.route("afflictions")).toContain("keen");
+    // ...and still ends on its own schedule.
+    expect(await CommandRouter.route("advance-time 3 hours")).toContain("Keen ends");
+  });
+
+  test("(4) an expression over what is left: half of it", async () => {
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` for=`4 hours` orphan=`remaining-seconds / 2`");
+    expect(await CommandRouter.route("drop-arcanum trait-affinity::melee")).toContain("Keen lingers");
+    // Two hours left of the four, not four.
+    expect(await CommandRouter.route("advance-time 90 minutes")).not.toContain("Keen ends");
+    expect(await CommandRouter.route("advance-time 45 minutes")).toContain("Keen ends");
+  });
+
+  test("the source matches by PREFIX, so one arcanum takes every trait it touched", async () => {
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` orphan=immediately");
+    // Dropping the family key, not the exact instance.
+    const r = await orphanTestDrop();
+    expect(r).toContain("Keen ends with");
+  });
+});
+
+async function orphanTestDrop(): Promise<string> {
+  return CommandRouter.route("drop-arcanum trait-affinity::melee");
+}

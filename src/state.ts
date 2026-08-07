@@ -31,7 +31,7 @@ import {
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
   EffectOp, resolveMeritInstance, passiveOpsOf,
   Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
-  AfflictionExpiry, rollSpendsCharge, expiryElapsed,
+  AfflictionExpiry, rollSpendsCharge, expiryElapsed, OrphanPolicy,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, applyTemplateDefs,
   BudgetEntry, BudgetDef,
 } from "./rules";
@@ -2187,6 +2187,9 @@ export interface ActiveAffliction {
   expiry?: AfflictionExpiry;
   // What to ARM when this ends - the cooldown before it may be applied again.
   cooldown?: AfflictionExpiry;
+  // What happens if `from` (the arcanum, the spell) is no longer there. Absent
+  // means the owner's third case: the duration continues as normal.
+  orphan?: OrphanPolicy;
   // WHERE it came from - an arcanum, a spell, a Discipline, a botched roll.
   // Afflictions are the one currency all of those pay in, so the source is the
   // only thing that tells them apart afterwards. Free-form on purpose.

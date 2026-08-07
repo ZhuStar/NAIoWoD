@@ -694,6 +694,13 @@ export class PostOffice {
   // cancelled?" and act on the answer.
   static async publish<T>(channel: string, data: T): Promise<BusEvent<T>> {
     const event = Bus.emit(channel, data);
+    // Handlers voted synchronously; now let whatever they STARTED finish. This
+    // is what lets an event CAUSE something (apply an affliction, write a
+    // store) rather than merely announce that it already happened.
+    if (event.pending.length) {
+      const settled = await Promise.allSettled(event.pending);
+      for (const r of settled) if (r.status === "rejected") event.errors.push(`handler: ${String(r.reason)}`);
+    }
     if (event.stopped || isLocalChannel(channel)) return event;
     const messaging = (api as { v1?: { messaging?: {
       broadcast?: (data: unknown, channel?: string) => Promise<void>;

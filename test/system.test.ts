@@ -46,7 +46,7 @@ import {
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
   GRANT_SOURCES, sourceDrawsOnPurse, describeCreationGrant,
   makeOrphanPolicy, describeOrphanPolicy, ORPHAN_IMMEDIATELY, ORPHAN_KEEP,
-  PASSIVE_AFFLICTIONS, budgetOfKind,
+  PASSIVE_AFFLICTIONS, budgetOfKind, SYSTEM, grantIsAutomatic, registerSystemHandlers,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -7256,5 +7256,87 @@ describe("passive powers apply themselves", () => {
     expect(all).toEqual(["health", "resources"]);
     expect(mine).toEqual(["health"]);          // the verb's own channel heard only its own
     PostOffice.unsubscribe(a); PostOffice.unsubscribe(b);
+  });
+});
+
+describe("the event CAUSES it: system channels, toggling, invoking", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); __resetMessagingMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Vlad" templates=vampire');
+  });
+
+  test("system channels are local: they never reach the wire", async () => {
+    expect(SYSTEM.powerTaken.startsWith(LOCAL_PREFIX)).toBe(true);
+    expect(isLocalChannel(SYSTEM.powerLost)).toBe(true);
+    await CommandRouter.route("set-trait potence 1 group=discipline");
+    // The OUTSIDE channel went out; the system one did not.
+    const channels = __sentMessages().map(m => m.channel);
+    expect(channels).toContain("affliction:applied");
+    expect(channels.some(c => (c ?? "").startsWith(LOCAL_PREFIX))).toBe(false);
+  });
+
+  test("the command publishes and the HANDLER applies - remove the handler, nothing happens", async () => {
+    // Proof the work is in the subscriber, not in the command: silence the
+    // handler and the affliction is never applied.
+    const ids = Bus.listeners(SYSTEM.powerTaken).map(l => l.id);
+    for (const id of ids) Bus.off(id);
+    await CommandRouter.route("set-trait potence 1 group=discipline");
+    expect(await CommandRouter.route("afflictions")).not.toContain("potent");
+    // Put it back the way the module does - registration is a function, and an
+    // idempotent one, precisely so this is possible.
+    registerSystemHandlers();
+    expect(Bus.listeners(SYSTEM.powerTaken)).toHaveLength(1);
+    // A DIFFERENT power, since the passive fires on 0 -> rated and Potence is
+    // already rated by the failed attempt above.
+    await CommandRouter.route("set-trait fortitude 1 group=discipline");
+    expect(await CommandRouter.route("afflictions")).toContain("fortified");
+  });
+
+  test("a handler may do async work, and the publisher waits for it", async () => {
+    const bus = new EventBus();
+    let done = false;
+    bus.on("slow", (e) => {
+      e.pending.push(new Promise<void>(r => setTimeout(() => { done = true; r(); }, 5)));
+    });
+    const event = bus.emit("slow", {});
+    expect(done).toBe(false);            // emit is still synchronous
+    await Promise.all(event.pending);
+    expect(done).toBe(true);             // ...and the work is awaitable
+  });
+
+  test("a togglable passive switches off and back on without losing the power", async () => {
+    await CommandRouter.route("set-trait potence 2 group=discipline");
+    expect(await CommandRouter.route("afflictions")).toContain("potent");
+    const off = await CommandRouter.route("toggle potent");
+    expect(off).toContain("switches Potent OFF");
+    expect(await CommandRouter.route("afflictions")).not.toContain("potent");
+    // The Discipline is still rated - he simply is not using it.
+    expect(await CommandRouter.route("sheet")).toContain("otence");
+    const on = await CommandRouter.route("toggle potent");
+    expect(on).toContain("switches Potent ON");
+    expect(on).toContain("is now applied");
+  });
+
+  test("automatic vs offered is data, and offered waits for [[invoke]]", async () => {
+    expect(grantIsAutomatic({ afflicts: "x" })).toBe(true);
+    expect(grantIsAutomatic({ afflicts: "x", mode: "offered" })).toBe(false);
+    await CommandRouter.route("define-affliction name=`Veil` tags=`veil`");
+    await CommandRouter.route("define-merit name=`Shroud` kind=merit points=2");
+    // An OFFERED power grants the ability, not the state.
+    const reg = MeritFlawRegistry.get("shroud")!;
+    reg.grants = { afflicts: "veil", mode: "offered" };
+    const took = await CommandRouter.route("take-merit shroud 2");
+    expect(took).toContain("Veil is now available");
+    expect(await CommandRouter.route("afflictions")).not.toContain("veil");
+    const used = await CommandRouter.route("invoke veil");
+    expect(used).toContain("invokes Veil");
+    expect(await CommandRouter.route("afflictions")).toContain("veil");
+  });
+
+  test("invoke refuses what nobody offers", async () => {
+    expect(await CommandRouter.route("invoke nonesuch")).toContain("Nothing Vlad has offers");
   });
 });

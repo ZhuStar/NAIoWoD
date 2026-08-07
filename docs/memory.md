@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `a704283`** ("A power that is
-> simply on, and the traps written down").
+> **Last synced with the code as of commit `dc271c4`** ("The event does
+> the work, and a passive you can switch off").
+> Prior: `a704283` ("A power that is simply on, and the traps written
+> down").
 > Prior: `1d0e480` ("Lose the arcanum, lose what it granted").
 > Prior: `490b719` ("Say where it came from, not just that it was
 > free").
@@ -3419,6 +3421,44 @@ and `prefill` are mocked/available but not yet written.
     - 🚧 STILL TO DO from this message: a per-file MD for the remaining modules,
       and an audit of the older `docs/*.md` (the transcribed NovelAI docs are
       fine; the project's own prose has not been re-read end to end).
+
+70. **The event CAUSES it** (owner: *"If we do this command, it should emit an
+    event, and someone should use that event to apply the affliction ... Maybe
+    we have a subtype of events that happen just inside communications between
+    the various parts of the system. We should use one of those to turn on an
+    affliction when its source is taken, which must contain data detailing that
+    when it is taken, such and such afflictions are applied automatically, or
+    that it grants the ability to apply such and such afflictions."*).
+    - **THE INVERSION.** §7.69 applied the affliction and THEN announced it,
+      which is an event that reports. Now the command publishes
+      `local:power:taken` and **a handler does the work** - the thing that knows
+      WHEN is no longer the thing that knows HOW. The test that proves it
+      removes the handler and asserts nothing happens.
+    - **SYSTEM CHANNELS are his "subtype of events"**: `SYSTEM.powerTaken`,
+      `.powerLost`, `.afflictionRequested`, `.afflictionLiftRequested`, all under
+      the `local:` prefix, so they are internal by construction and can never
+      reach the wire (asserted).
+    - **A HANDLER MAY NOW DO ASYNC WORK.** `emit` has to stay synchronous - a
+      verdict must be readable on the next line - but applying an affliction
+      touches storage. So `BusEvent.pending` is an array a handler pushes its
+      promise onto, and `PostOffice.publish` awaits them all (collecting
+      rejections into `event.errors`). **Verdicts stay synchronous; effects may
+      take their time.** This is the piece that makes an event able to CAUSE
+      anything at all.
+    - **AUTOMATIC vs OFFERED is data**, exactly as he framed it:
+      `PassiveGrant.mode` - `automatic` applies the affliction on taking
+      (Potence), `offered` grants the ABILITY and waits for **`[[invoke]]`**.
+      `togglable` marks an automatic passive the character may switch off:
+      **`[[toggle <affliction>]]`** lifts it and switches it back on WITHOUT
+      losing the power, finding the source through `passiveSourceFor` (merits,
+      arcana and Disciplines in one walk). Potence and Fortitude are togglable.
+    - **`registerSystemHandlers()` is a FUNCTION, and idempotent.** Handlers used
+      to be bare module-level side effects; a test that silenced one had no way
+      to put it back, and it poisoned every later test through the module-level
+      `Bus` singleton. A distributed engine will want to say explicitly which
+      handlers a script owns, so this is the right shape anyway. **Lesson worth
+      keeping: a module-level registration that tests can disturb needs a named,
+      re-runnable way back.**
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

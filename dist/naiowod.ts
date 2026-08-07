@@ -2025,6 +2025,19 @@ function isLocalChannel(channel: string): boolean {
   return channel.trim().toLowerCase().startsWith(LOCAL_PREFIX);
 }
 
+// THE SYSTEM CHANNELS: events the parts of this engine raise at each other,
+// never at the outside world. They are `local:` (so they never reach the wire)
+// and they are the ONLY events that CAUSE things - a command publishes one and
+// a handler does the work, rather than the command doing the work and
+// announcing it afterwards. That inversion is the point: the thing that knows
+// WHEN is not the thing that knows HOW.
+const SYSTEM = {
+  powerTaken: `${LOCAL_PREFIX}power:taken`,
+  powerLost: `${LOCAL_PREFIX}power:lost`,
+  afflictionRequested: `${LOCAL_PREFIX}affliction:requested`,
+  afflictionLiftRequested: `${LOCAL_PREFIX}affliction:lift-requested`,
+} as const;
+
 // A channel can be ANYTHING - that was the owner's point, and it is worth
 // keeping. "character-healed-aggravated-with-a-resource" is a perfectly good
 // channel; so is "rolls". Names are normalized only by case and trimming, so
@@ -2051,6 +2064,11 @@ interface BusEvent<T = unknown> {
   // recorded here and the rest of the handlers still run. Same law as a bad
   // lorebook card - surfaced, never fatal.
   errors: string[];
+  // ASYNC WORK A HANDLER STARTED. `emit` is synchronous on purpose - a verdict
+  // has to be readable on the next line - but a handler that must touch storage
+  // cannot be. So it pushes its promise here and the PUBLISHER awaits them all
+  // before returning. Verdicts stay synchronous; effects may take their time.
+  pending: Array<Promise<unknown>>;
 }
 
 // What a handler may say on the way out. Returning nothing is the common case.
@@ -2098,7 +2116,7 @@ class EventBus {
       channel: busChannel(channel), data,
       ...(meta.from ? { from: meta.from } : {}),
       at: meta.at ?? Date.now(),
-      cancelled: false, stopped: false, errors: [],
+      cancelled: false, stopped: false, errors: [], pending: [],
     };
     for (const { id } of this.listeners(event.channel)) {
       if (event.stopped) break;
@@ -4668,9 +4686,9 @@ interface DisciplineDef {
 
 const DISCIPLINES: Record<string, DisciplineDef> = {
   potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength.",
-    grants: { afflicts: "potent", note: "the strength is always there, not something you switch on" } },
+    grants: { afflicts: "potent", togglable: true, note: "the strength is always there; a vampire may still hold it back" } },
   fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't.",
-    grants: { afflicts: "fortified", note: "the toughness is always there" } },
+    grants: { afflicts: "fortified", togglable: true, note: "the toughness is always there" } },
   celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
   animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
   auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
@@ -4702,10 +4720,22 @@ const DISCIPLINES: Record<string, DisciplineDef> = {
 // `afflicts` is that name; `orphan` is what happens when the power goes, and it
 // defaults to `immediately`, because a power you no longer have is not working.
 interface PassiveGrant {
-  afflicts: string;          // the affliction applied when this is taken
+  afflicts: string;          // the affliction this power deals in
+  // AUTOMATIC: taking the power applies the affliction at once - Potence is
+  // simply on. OFFERED: taking the power gives you the ABILITY to apply it,
+  // when you choose to ([[invoke]]), which is how a power you switch on differs
+  // from a power you have. The distinction is the owner's, and it is data:
+  // "when it is taken, such and such afflictions are applied automatically, or
+  // it grants the ability to apply such and such afflictions".
+  mode?: "automatic" | "offered";
+  // An automatic passive the character may switch off and back on. Toggling
+  // OFF lifts the affliction and remembers that he chose to; it does not lose
+  // him the power.
+  togglable?: boolean;
   orphan?: string;           // what happens when it goes (default: immediately)
   note?: string;
 }
+function grantIsAutomatic(g: PassiveGrant): boolean { return (g.mode ?? "automatic") === "automatic"; }
 
 function disciplineDef(name: string): DisciplineDef | undefined {
   return DISCIPLINES[StringUtil.normalize(name)];
@@ -6644,6 +6674,13 @@ class PostOffice {
   // cancelled?" and act on the answer.
   static async publish<T>(channel: string, data: T): Promise<BusEvent<T>> {
     const event = Bus.emit(channel, data);
+    // Handlers voted synchronously; now let whatever they STARTED finish. This
+    // is what lets an event CAUSE something (apply an affliction, write a
+    // store) rather than merely announce that it already happened.
+    if (event.pending.length) {
+      const settled = await Promise.allSettled(event.pending);
+      for (const r of settled) if (r.status === "rejected") event.errors.push(`handler: ${String(r.reason)}`);
+    }
     if (event.stopped || isLocalChannel(channel)) return event;
     const messaging = (api as { v1?: { messaging?: {
       broadcast?: (data: unknown, channel?: string) => Promise<void>;
@@ -13939,15 +13976,70 @@ async function orphanAfflictions(subject: string, sourceKey: string): Promise<st
 // Every application is ANNOUNCED on the bus (channel `affliction:applied`), so
 // a distributed engine's other scripts learn about it without being asked.
 async function applyPassiveGrant(subject: string, kind: string, key: string, grant: PassiveGrant): Promise<string> {
-  const def = AfflictionRegistry.get(grant.afflicts);
-  if (!def) return `⚠ "${grant.afflicts}" is not a defined affliction`;
-  const from = `${kind}:${StringUtil.normalize(key)}`;
-  const orphan = makeOrphanPolicy(grant.orphan ?? "immediately");
-  const r = await applyAffliction(subject, def, {}, grant.note, undefined, from, undefined, orphan);
-  if (r.error) return `⚠ ${r.error}`;
-  await PostOffice.publish("affliction:applied", { character: subject, affliction: def.name, from, automatic: true });
-  return `${disp(def.name)} is now applied (from ${from}${grant.note ? ` - ${grant.note}` : ""})`;
+  // The command does NOT apply the affliction. It says a power was taken, and
+  // the handler registered below decides what that means - which is the whole
+  // difference between an event that announces and an event that causes.
+  const event = await PostOffice.publish(SYSTEM.powerTaken, {
+    character: subject, kind, key: StringUtil.normalize(key), grant,
+  });
+  const said = (event.data as { said?: string }).said;
+  return event.errors.length ? `⚠ ${event.errors.join("; ")}` : (said ?? "");
 }
+
+// --- THE SYSTEM HANDLERS ------------------------------------------------------
+// These are the "someone" the owner asked for: the parts that DO the work when
+// a system event says something happened. They live on `local:` channels, so
+// they never touch the wire, and they are registered once at module load beside
+// every other registration in this file.
+//
+// A handler is synchronous (the bus wants a verdict on the next line) but its
+// WORK is not, so it pushes its promise onto `event.pending` and the publisher
+// awaits it. See core/bus.ts.
+// Registration is a FUNCTION, not a bare side effect, and it is idempotent:
+// calling it twice keeps one of each. A distributed engine will want to say
+// explicitly which handlers a given script owns, and a test that silences one
+// needs a way to put it back.
+function registerSystemHandlers(): void {
+  for (const channel of [SYSTEM.powerTaken, SYSTEM.powerLost]) {
+    for (const l of Bus.listeners(channel)) Bus.off(l.id);
+  }
+  Bus.on(SYSTEM.powerTaken, onPowerTaken);
+  Bus.on(SYSTEM.powerLost, onPowerLost);
+}
+
+const onPowerTaken: BusHandler = (event) => {
+  const d = event.data as { character: string; kind: string; key: string; grant: PassiveGrant; said?: string };
+  event.pending.push((async () => {
+    const def = AfflictionRegistry.get(d.grant.afflicts);
+    if (!def) { event.errors.push(`"${d.grant.afflicts}" is not a defined affliction`); return; }
+    const from = `${d.kind}:${d.key}`;
+    // OFFERED means the power gives you the ABILITY, not the state: nothing is
+    // applied now, and [[invoke]] is how it happens later.
+    if (!grantIsAutomatic(d.grant)) {
+      d.said = `${disp(def.name)} is now available - [[invoke ${def.name}]] to use it`;
+      return;
+    }
+    const r = await applyAffliction(d.character, def, {}, d.grant.note, undefined, from,
+      undefined, makeOrphanPolicy(d.grant.orphan ?? "immediately"));
+    if (r.error) { event.errors.push(r.error); return; }
+    d.said = `${disp(def.name)} is now applied (from ${from}${d.grant.note ? ` - ${d.grant.note}` : ""})`
+      + `${d.grant.togglable ? ` - [[toggle ${def.name}]] switches it off` : ""}`;
+    // ...and the OUTSIDE world hears about it on a channel that does leave.
+    await PostOffice.publish("affliction:applied", {
+      character: d.character, affliction: def.name, from, automatic: true,
+    });
+  })());
+};
+
+const onPowerLost: BusHandler = (event) => {
+  const d = event.data as { character: string; kind: string; key: string; said?: string };
+  event.pending.push((async () => {
+    const notes = await orphanAfflictions(d.character, `${d.kind}:${d.key}`);
+    if (notes.length) d.said = notes.join("; ");
+  })());
+};
+
+registerSystemHandlers();
 
 // When an affliction ends, arm whatever cooldown it carried. One place, so it
 // happens whether it was lifted by hand, ran out of charges, or timed out.
@@ -14102,6 +14194,65 @@ async function expiryFromArgs(cmd: ParsedCommand, prefix = ""): Promise<{ value?
       until,
     }),
   };
+}
+
+// toggle <affliction> - switch a TOGGLABLE passive off, or back on. The power
+// is not lost either way; the character is choosing whether it is working.
+// Like everything else here it goes through a system event, so the deciding and
+// the doing stay separate.
+async function cmdToggle(cmd: ParsedCommand): Promise<string> {
+  const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  if (!name) return sys(`toggle needs an affliction, e.g. [[toggle potent]]. [[afflictions]] lists what is on.`);
+  const subject = await afflictionSubject(cmd);
+  if (subject.error) return sys(`${subject.error}`);
+  const char = await CharacterStore.load(subject.name!);
+  if (!char) return sys(`No character named "${subject.name}".`);
+  const on = (await CharacterAfflictions.list(subject.name!)).find(c => c.def === name);
+  // WHICH power offers this, so toggling back on can restore the same source.
+  const source = passiveSourceFor(char, name);
+  if (!on && !source) {
+    return sys(`Nothing ${disp(char.name)} has offers "${name}", and it is not active. `
+      + `[[afflict ${name}]] applies it outright.`);
+  }
+  if (on) {
+    const r = await removeAffliction(subject.name!, name);
+    return sys(`${disp(char.name)} switches ${disp(name)} OFF${r.alsoLifted ? ` (${r.alsoLifted})` : ""}. `
+      + `${source ? `[[toggle ${name}]] switches it back on.` : ""}`);
+  }
+  const said = await applyPassiveGrant(subject.name!, source!.kind, source!.key, source!.grant);
+  return sys(`${disp(char.name)} switches ${disp(name)} ON. ${said}`);
+}
+
+// invoke <affliction> - use a power that was OFFERED rather than automatic.
+// Same door, and the cooldown check in [[afflict]] is what rations it.
+async function cmdInvoke(cmd: ParsedCommand): Promise<string> {
+  const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  if (!name) return sys(`invoke needs an affliction, e.g. [[invoke veil]].`);
+  const char = await CharacterStore.getCurrent();
+  if (!char) return noCharacter();
+  const source = passiveSourceFor(char, name);
+  if (!source) {
+    return sys(`Nothing ${disp(char.name)} has offers "${name}". [[merits]] and [[sheet]] show what he holds.`);
+  }
+  const said = await applyPassiveGrant(StringUtil.normalize(char.name), source.kind, source.key,
+    { ...source.grant, mode: "automatic" });
+  return sys(`${disp(char.name)} invokes ${disp(name)}. ${said}`);
+}
+
+// Which power a character holds that deals in this affliction - the arcanum,
+// the merit or the Discipline. One walk, used by both verbs above.
+function passiveSourceFor(char: PlayableCharacter, affliction: string):
+    { kind: string; key: string; grant: PassiveGrant } | undefined {
+  for (const inst of ownedMeritInstances(char)) {
+    if (inst.def.grants?.afflicts === affliction) {
+      return { kind: budgetOfKind(inst.def) === "arcana" ? "arcanum" : "merit", key: inst.key, grant: inst.def.grants };
+    }
+  }
+  for (const [trait, rating] of Object.entries(char.disciplines ?? {})) {
+    const d = rating > 0 ? disciplineDef(trait) : undefined;
+    if (d?.grants?.afflicts === affliction) return { kind: "discipline", key: trait, grant: d.grants };
+  }
+  return undefined;
 }
 
 // The manual chain trigger (the turn system will automate it): end the
@@ -14374,8 +14525,9 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
     const who = StringUtil.normalize(char.name);
     if (rating > 0 && (had ?? 0) <= 0) passiveNote = ` ${await applyPassiveGrant(who, "discipline", trait, disc.grants)}.`;
     else if (rating <= 0 && (had ?? 0) > 0) {
-      const gone = await orphanAfflictions(who, `discipline:${trait}`);
-      if (gone.length) passiveNote = ` ${gone.join("; ")}.`;
+      const lost = await PostOffice.publish(SYSTEM.powerLost, { character: who, kind: "discipline", key: trait });
+      const said = (lost.data as { said?: string }).said;
+      if (said) passiveNote = ` ${said}.`;
     }
   }
   const held = char.instances?.[trait];
@@ -15307,6 +15459,17 @@ CommandRouter.register("afflict", cmdAfflict, {
     { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
     ...EXPIRY_PARAMS,
   ],
+});
+CommandRouter.register("toggle", cmdToggle, {
+  summary: "switch a togglable passive off, or back on (the power is not lost either way)",
+  params: [
+    { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
+    { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
+  ],
+});
+CommandRouter.register("invoke", cmdInvoke, {
+  summary: "use a power that OFFERS an affliction rather than applying it automatically",
+  params: [{ key: "affliction", kind: "positional", required: true, hint: "<affliction>" }],
 });
 CommandRouter.register("advance", cmdAdvance, {
   summary: "end an affliction and begin its successor, bindings carried forward",

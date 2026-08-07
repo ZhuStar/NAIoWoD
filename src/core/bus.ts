@@ -40,6 +40,19 @@ export function isLocalChannel(channel: string): boolean {
   return channel.trim().toLowerCase().startsWith(LOCAL_PREFIX);
 }
 
+// THE SYSTEM CHANNELS: events the parts of this engine raise at each other,
+// never at the outside world. They are `local:` (so they never reach the wire)
+// and they are the ONLY events that CAUSE things - a command publishes one and
+// a handler does the work, rather than the command doing the work and
+// announcing it afterwards. That inversion is the point: the thing that knows
+// WHEN is not the thing that knows HOW.
+export const SYSTEM = {
+  powerTaken: `${LOCAL_PREFIX}power:taken`,
+  powerLost: `${LOCAL_PREFIX}power:lost`,
+  afflictionRequested: `${LOCAL_PREFIX}affliction:requested`,
+  afflictionLiftRequested: `${LOCAL_PREFIX}affliction:lift-requested`,
+} as const;
+
 // A channel can be ANYTHING - that was the owner's point, and it is worth
 // keeping. "character-healed-aggravated-with-a-resource" is a perfectly good
 // channel; so is "rolls". Names are normalized only by case and trimming, so
@@ -66,6 +79,11 @@ export interface BusEvent<T = unknown> {
   // recorded here and the rest of the handlers still run. Same law as a bad
   // lorebook card - surfaced, never fatal.
   errors: string[];
+  // ASYNC WORK A HANDLER STARTED. `emit` is synchronous on purpose - a verdict
+  // has to be readable on the next line - but a handler that must touch storage
+  // cannot be. So it pushes its promise here and the PUBLISHER awaits them all
+  // before returning. Verdicts stay synchronous; effects may take their time.
+  pending: Array<Promise<unknown>>;
 }
 
 // What a handler may say on the way out. Returning nothing is the common case.
@@ -113,7 +131,7 @@ export class EventBus {
       channel: busChannel(channel), data,
       ...(meta.from ? { from: meta.from } : {}),
       at: meta.at ?? Date.now(),
-      cancelled: false, stopped: false, errors: [],
+      cancelled: false, stopped: false, errors: [], pending: [],
     };
     for (const { id } of this.listeners(event.channel)) {
       if (event.stopped) break;

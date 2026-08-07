@@ -1828,9 +1828,9 @@ export interface DisciplineDef {
 
 export const DISCIPLINES: Record<string, DisciplineDef> = {
   potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength.",
-    grants: { afflicts: "potent", note: "the strength is always there, not something you switch on" } },
+    grants: { afflicts: "potent", togglable: true, note: "the strength is always there; a vampire may still hold it back" } },
   fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't.",
-    grants: { afflicts: "fortified", note: "the toughness is always there" } },
+    grants: { afflicts: "fortified", togglable: true, note: "the toughness is always there" } },
   celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
   animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
   auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
@@ -1862,10 +1862,22 @@ export const DISCIPLINES: Record<string, DisciplineDef> = {
 // `afflicts` is that name; `orphan` is what happens when the power goes, and it
 // defaults to `immediately`, because a power you no longer have is not working.
 export interface PassiveGrant {
-  afflicts: string;          // the affliction applied when this is taken
+  afflicts: string;          // the affliction this power deals in
+  // AUTOMATIC: taking the power applies the affliction at once - Potence is
+  // simply on. OFFERED: taking the power gives you the ABILITY to apply it,
+  // when you choose to ([[invoke]]), which is how a power you switch on differs
+  // from a power you have. The distinction is the owner's, and it is data:
+  // "when it is taken, such and such afflictions are applied automatically, or
+  // it grants the ability to apply such and such afflictions".
+  mode?: "automatic" | "offered";
+  // An automatic passive the character may switch off and back on. Toggling
+  // OFF lifts the affliction and remembers that he chose to; it does not lose
+  // him the power.
+  togglable?: boolean;
   orphan?: string;           // what happens when it goes (default: immediately)
   note?: string;
 }
+export function grantIsAutomatic(g: PassiveGrant): boolean { return (g.mode ?? "automatic") === "automatic"; }
 
 export function disciplineDef(name: string): DisciplineDef | undefined {
   return DISCIPLINES[StringUtil.normalize(name)];

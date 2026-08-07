@@ -2137,7 +2137,21 @@ The shared behaviour is that **taking a power turns it on**:
   → "Potent ends with discipline:potence"
 ```
 
-A def carries `grants: {afflicts, orphan?}`; taking it applies that affliction
+**The event does the work.** A command does not apply the affliction — it
+publishes **`local:power:taken`**, and a handler applies it. `local:` channels are
+the engine talking to itself and never reach the wire. (A handler pushes its
+promise onto `event.pending`; the publisher awaits it. Verdicts stay synchronous,
+effects may take their time.)
+
+**Automatic, offered, or togglable** — data, not code:
+
+| `mode` | means |
+|---|---|
+| `automatic` (default) | taking it applies the affliction at once — Potence |
+| `offered` | taking it grants the **ability**; `[[invoke <affliction>]]` uses it |
+| `togglable: true` | an automatic one you may switch off: `[[toggle potent]]` — you keep the power either way |
+
+A def carries `grants: {afflicts, mode?, togglable?, orphan?}`; taking it applies that affliction
 with `from` set and an orphan policy of `immediately`, so **losing the power
 loses what it granted**. Every application is announced on the bus
 (`affliction:applied`), and **every command is announced too** — on `command` and

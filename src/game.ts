@@ -37,6 +37,7 @@ import {
   advancementCostsFrom, CostTable, COST_PURSES,
   BackgroundDef, makeBackgroundDef, backgroundTierAt, TraitGrant,
   CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, clanFamilies, fellowshipByName, ATTRIBUTES,
+  isTraitCategory, singularCategory, ALL_TRAIT_CATEGORIES, ATTRIBUTE_CATEGORIES, ABILITY_CATEGORIES,
   BudgetDef, BudgetEntry, budgetDef, budgetBuyable, NOT_PURCHASABLE,
   GRANT_SOURCES, sourceDrawsOnPurse, grantSourceNote, CreationGrant, describeCreationGrant,
   CAPABILITIES, capabilityNote, affinityDisciplines, AFFINITY_SOURCES,
@@ -81,6 +82,7 @@ import {
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   StoryClock, DateBook, Scene, SceneStore, GenCounter,
   PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry, SHOW_ALL_TOKEN,
+  traitCategoryOf, traitInCategory, traitsInCategory, traitKindsOf, AbilityCategories,
   resolveTraitFromRecord, ownedMeritInstances, ownedArcanumInstances, ownedPowerInstances,
   OwnedPowerInstance, enhancementsFor, SavedRoll, ExtendedSavedConfig,
   OpposedSavedConfig, ProcedureStep, ProcedureCondition,
@@ -738,6 +740,15 @@ function poolTraitsOf(char: PlayableCharacter, pool: string): string[] {
   return [...used];
 }
 
+// Did this pool use the trait an op is gated on? A plain name matches itself; a
+// CATEGORY matches any trait the chronicle files under it, which is what lets a
+// merit say "every Talent" or an arcanum say "pick a Knowledge".
+function poolUsesTrait(poolTraits: string[], gate: string): boolean {
+  const want = StringUtil.normalize(gate);
+  if (poolTraits.includes(want)) return true;
+  return isTraitCategory(want) && poolTraits.some(t => traitInCategory(t, want));
+}
+
 // Fold the character's PASSIVE roll ops (owned merits/arcana - Trait Affinity
 // et al.) into a roll: trait-gated ops fire iff the pool used the trait,
 // actionTag-gated ops iff the roll carries the tag; unmet gates skip SILENTLY
@@ -753,7 +764,9 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
       const patch = (n: number): Partial<RollModifier> => rollOpPatch(kind, n) ?? {};
       if (!rollOpPatch(kind, 0)) continue;
       if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
-      if (op.trait && !poolTraits.includes(StringUtil.normalize(op.trait))) continue;
+      // The trait gate names a TRAIT ("melee") or a CATEGORY ("knowledge",
+      // "talents"): "-1 difficulty on every Knowledge" is one op, not ten.
+      if (op.trait && !poolUsesTrait(poolTraits, op.trait)) continue;
       // A "while I still hold N of this" gate - checked live, so it lapses the
       // moment the pool runs dry.
       if (op.requiresResource && (resourceAt?.(op.requiresResource.resource) ?? 0) < op.requiresResource.atLeast) continue;
@@ -4227,8 +4240,11 @@ function instanceLimitBreaches(
       out.push(`${name} allows ${limit.slots} trait${limit.slots === 1 ? "" : "s"} at ${limit.atRating} `
         + `(have ${at.length}: ${at.map(h => h.label).join(", ")})`);
     }
-    for (const [kind, allowed] of Object.entries(limit.perKind ?? {})) {
-      const ofKind = at.filter(h => traitKindOf(char, h.label) === kind);
+    for (const [rawKind, allowed] of Object.entries(limit.perKind ?? {})) {
+      // "at most one of them an Attribute" counts by KIND; "at most one a
+      // Knowledge" counts by CATEGORY. A limit may be written either way.
+      const kind = singularCategory(rawKind);
+      const ofKind = at.filter(h => traitKindsOf(char, h.label).includes(kind));
       if (ofKind.length > allowed) {
         out.push(`${name} allows ${allowed} ${kind}${allowed === 1 ? "" : "s"} at ${limit.atRating} `
           + `(have ${ofKind.length}: ${ofKind.map(h => h.label).join(", ")})`);
@@ -4530,6 +4546,13 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   }
   const maxFromTrait = (cmd.named["max-from-trait"] ?? "").trim();
   if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
+  const paramFrom = (cmd.named["param-from"] ?? "").trim();
+  if (paramFrom) {
+    if (!isTraitCategory(paramFrom)) {
+      return sys(`param-from names a trait category - one of ${ALL_TRAIT_CATEGORIES.join(", ")} (got "${paramFrom}").`);
+    }
+    def.paramFrom = singularCategory(paramFrom);
+  }
   if (cmd.named["passive"]?.trim()) {
     const raw = cmd.named["passive"];
     // A quoted (not backticked) value came through the boundary normalizer, so
@@ -4545,6 +4568,37 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   const templates = (cmd.named["templates"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(Boolean);
   if (templates.length) def.requires = { templates };
 
+  // WHAT TAKING IT TURNS ON. A built-in merit could declare a PassiveGrant and
+  // a chronicle's could not, which made "simple merits should be able to define
+  // the passive affliction they grant" impossible to say in a command.
+  //   grants=<affliction> [grants-mode=automatic|offered] [grants-togglable]
+  //   [grants-orphan=<policy>]
+  // If the affliction does not exist yet, it is CREATED from this definition -
+  // a simple merit is one command, not two - and the reply says so.
+  let seeded = "";
+  const grantsRaw = (cmd.named["grants"] ?? "").trim();
+  if (grantsRaw) {
+    const afflicts = StringUtil.normalize(grantsRaw);
+    const grant: PassiveGrant = { afflicts };
+    const mode = StringUtil.normalize(cmd.named["grants-mode"] ?? "");
+    if (mode === "offered" || mode === "automatic") grant.mode = mode;
+    if (flagOf(cmd, "grants-togglable") === true) grant.togglable = true;
+    const orphan = (cmd.named["grants-orphan"] ?? "").trim();
+    if (orphan) grant.orphan = orphan;
+    def.grants = grant;
+    if (!AfflictionRegistry.get(afflicts)) {
+      // No `tags`: a tag is a thing a ROLL carries, and one nobody has written
+      // a modifier for is reported as unknown on every roll the character makes.
+      // A merit's passive is a STATE. [[define-affliction]] adds tags if the
+      // chronicle wants them to bite.
+      await AfflictionRegistry.put(makeAfflictionDef({
+        name: afflicts,
+        description: def.description ?? `Applied while ${name} is held.`,
+      }));
+      seeded = ` Affliction "${afflicts}" did not exist, so it was defined too ([[define-affliction]] to flesh it out).`;
+    }
+  }
+
   const key = StringUtil.normalize(name);
   const defs = await customDefs(family);
   const existing = defs.findIndex(d => StringUtil.normalize(d.name) === key);
@@ -4553,9 +4607,10 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   await writeCustomDefs(family, defs);
 
   const bits = [`${def.kind} "${name}"`, `${Array.isArray(points) ? `[${points.join(", ")}]` : points} point${points === 1 ? "" : "s"}`];
-  if (def.param) bits.push(`parameterized by ${def.param}`);
+  if (def.param) bits.push(`parameterized by ${def.param}${def.paramFrom ? ` (must be a ${def.paramFrom})` : ""}`);
   if (def.passive?.length) bits.push(`passive: ${def.passive.map(describePassiveOp).join("; ")}`);
-  return sys(`${existing >= 0 ? "Redefined" : "Defined"} ${bits.join(", ")}${shadows}. `
+  if (def.grants) bits.push(`applies "${def.grants.afflicts}"${grantIsAutomatic(def.grants) ? "" : " when invoked"}${def.grants.togglable ? ", togglable" : ""}`);
+  return sys(`${existing >= 0 ? "Redefined" : "Defined"} ${bits.join(", ")}${shadows}.${seeded} `
     + `Take it with [[${family.verbs.take} ${key}${def.param ? `::<${def.param}>` : ""}${Array.isArray(points) ? ` ${points[0]}` : ""}]].`);
 }
 
@@ -4608,7 +4663,7 @@ async function ownedPowerInfo<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
     bits.push(`${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} ${budgetOfKind(def)} point${def.points === 1 ? "" : "s"}`);
   }
   if (!kindSpends(def.kind)) bits.push(`GRANTS points rather than costing them`);
-  if (def.param) bits.push(`parameterized by ${def.param}`);
+  if (def.param) bits.push(`parameterized by ${def.param}${def.paramFrom ? ` (must be a ${def.paramFrom})` : ""}`);
   for (const l of instanceLimitsOf(def)) {
     const kinds = Object.entries(l.perKind ?? {}).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`);
     bits.push(`at most ${l.slots} at ${l.atRating}${kinds.length ? ` (of those, ${kinds.join(", ")})` : ""} - advisory`);
@@ -4640,6 +4695,14 @@ async function takeOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
     return bare?.param
       ? sys(`"${key}" is parameterized - name its ${bare.param}: [[${family.verbs.take} ${key}::<${bare.param}>]].`)
       : sys(`Unknown ${family.one} "${key}". Custom definitions go in the ${family.category} lorebook category.`);
+  }
+  // "PICK A KNOWLEDGE" - the param's category, checked where the pick is made.
+  if (hit.param && hit.def.paramFrom && !waived && !traitInCategory(hit.param, hit.def.paramFrom)) {
+    const want = singularCategory(hit.def.paramFrom);
+    const options = traitsInCategory(want);
+    return sys(`${hit.def.name} is taken on a ${want}, and "${hit.param}" is not one`
+      + `${traitCategoryOf(hit.param) ? ` (it is a ${traitCategoryOf(hit.param)})` : ""}. `
+      + `${options.length ? `Choose from: ${options.join(", ")}. ` : ""}Add waive=true to override.`);
   }
   // IS THIS LIST OPEN TO HIM AT ALL? Asked before price, because "a vampire has
   // no Arcana" is a truer answer than "that costs 5 arcana points".
@@ -5660,10 +5723,32 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
       });
     return bits.length ? bits.join(", ") : "none";
   };
+  // BY CATEGORY, because that is how a sheet is read and how the creation
+  // budget is allocated: Physical/Social/Mental and Talents/Skills/Knowledges.
+  // A trait the chronicle's lists do not name still shows, under "other" -
+  // nothing is ever hidden because it could not be filed.
+  const byCategory = (bucket: Record<string, number>, categories: readonly string[], skipZeros: boolean): string => {
+    const held = Object.keys(bucket ?? {});
+    const bits: string[] = [];
+    const filed = new Set<string>();
+    for (const category of categories) {
+      const mine = held.filter(n => traitInCategory(n, category));
+      mine.forEach(n => filed.add(n));
+      const shown = Object.fromEntries(mine.map(n => [n, bucket[n]]));
+      const text = fmt(shown, skipZeros);
+      if (text !== "none") bits.push(`${disp(category)}: ${text}`);
+    }
+    const rest = held.filter(n => !filed.has(n));
+    if (rest.length) {
+      const text = fmt(Object.fromEntries(rest.map(n => [n, bucket[n]])), skipZeros);
+      if (text !== "none") bits.push(`Other: ${text}`);
+    }
+    return bits.length ? bits.join(" | ") : "none";
+  };
   const parts = [
     `${disp(char.name)} [${char.templates.join("+")}, ${char.stage}]`,
-    `Attributes: ${fmt(char.attributes, false)}`,
-    `Abilities (nonzero): ${fmt(char.abilities, true)}`,
+    `Attributes - ${byCategory(char.attributes, ATTRIBUTE_CATEGORIES, false)}`,
+    `Abilities (nonzero) - ${byCategory(char.abilities, ABILITY_CATEGORIES, true)}`,
   ];
   const optional: Array<[string, Record<string, number>]> = [
     ["Backgrounds", char.backgrounds], ["Virtues", char.virtues],
@@ -6362,6 +6447,13 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "limit-slots", kind: "named", type: "int", desc: "How many instances may hold that rating (default 1)", example: "2" },
     { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
     { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait (\"no more purchases than his Resolve\")", example: "resolve" },
+    { key: "param-from", kind: "named", type: "enum", options: [...ALL_TRAIT_CATEGORIES],
+      desc: "The param must be a trait of this category (\"pick a Knowledge\")", example: "knowledge" },
+    { key: "grants", kind: "named", desc: "Affliction this applies when taken (defined for you if new)", example: "iron-willed" },
+    { key: "grants-mode", kind: "named", type: "enum", options: ["automatic", "offered"],
+      desc: "automatic = on as soon as it is taken; offered = it grants the ABILITY, [[invoke]] uses it" },
+    { key: "grants-togglable", kind: "named", type: "bool", desc: "The character may switch it off without losing the power" },
+    { key: "grants-orphan", kind: "named", desc: "What happens to the affliction when the power is lost (default: immediately)", example: "immediately" },
     { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
   ],
 });
@@ -6406,6 +6498,13 @@ CommandRouter.register("define-arcanum", cmdDefineArcanum, {
     { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
     { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait", example: "resolve" },
     { key: "passive", kind: "named", type: "literal", desc: 'Always-on ops, ";"-separated - BACKTICKS' },
+    { key: "param-from", kind: "named", type: "enum", options: [...ALL_TRAIT_CATEGORIES],
+      desc: "The param must be a trait of this category (\"pick a Knowledge\")", example: "knowledge" },
+    { key: "grants", kind: "named", desc: "Affliction this applies when taken (defined for you if new)", example: "iron-willed" },
+    { key: "grants-mode", kind: "named", type: "enum", options: ["automatic", "offered"],
+      desc: "automatic = on as soon as it is taken; offered = it grants the ABILITY, [[invoke]] uses it" },
+    { key: "grants-togglable", kind: "named", type: "bool", desc: "The character may switch it off without losing the power" },
+    { key: "grants-orphan", kind: "named", desc: "What happens to the affliction when the power is lost (default: immediately)", example: "immediately" },
     { key: "description", kind: "named", type: "literal", desc: "Description - BACKTICKS" },
   ],
 });

@@ -24,6 +24,52 @@ export const ALL_ATTRIBUTES: readonly string[] = [
   ...ATTRIBUTES.physical, ...ATTRIBUTES.social, ...ATTRIBUTES.mental,
 ];
 
+// =============================================================================
+// CATEGORIES - "pick a Knowledge", "all Talents", "one of them an Attribute"
+// -----------------------------------------------------------------------------
+// A trait has a KIND (attribute, ability, background...) and, for the two that
+// are allocated by priority, a CATEGORY: an Attribute is Physical, Social or
+// Mental; an Ability is a Talent, a Skill or a Knowledge. Both have always been
+// data - ATTRIBUTES above, and the three lorebook lists - but only the creation
+// report could read them, so nothing else could say "pick a Knowledge and take
+// -1 difficulty on it" or "every Talent is at +1".
+//
+// The ability lists are the CHRONICLE's (srd:abilities), so they are looked up
+// through a registry that the lorebook overlays; these are the shipped defaults
+// and the fallback when nothing has been loaded.
+// =============================================================================
+export const ATTRIBUTE_CATEGORIES = ["physical", "social", "mental"] as const;
+export const ABILITY_CATEGORIES = ["talent", "skill", "knowledge"] as const;
+export type AttributeCategory = typeof ATTRIBUTE_CATEGORIES[number];
+export type AbilityCategory = typeof ABILITY_CATEGORIES[number];
+export type TraitCategory = AttributeCategory | AbilityCategory;
+export const ALL_TRAIT_CATEGORIES: readonly TraitCategory[] = [...ATTRIBUTE_CATEGORIES, ...ABILITY_CATEGORIES];
+
+// Written either way ("knowledge" / "knowledges"), because a player and a card
+// both spell a category list in the plural and a single pick in the singular.
+export function singularCategory(raw: string): string {
+  const k = StringUtil.normalize(raw);
+  const singular = k.endsWith("s") ? k.slice(0, -1) : k;
+  return (ALL_TRAIT_CATEGORIES as readonly string[]).includes(singular) ? singular : k;
+}
+export function isTraitCategory(raw: string): boolean {
+  return (ALL_TRAIT_CATEGORIES as readonly string[]).includes(singularCategory(raw));
+}
+
+// Which of the three an Attribute is. Attributes are a fixed nine, so this is a
+// rule rather than a lookup.
+export function attributeCategoryOf(name: string): AttributeCategory | undefined {
+  const key = StringUtil.normalize(name);
+  for (const category of ATTRIBUTE_CATEGORIES) {
+    if (ATTRIBUTES[category].some(a => StringUtil.normalize(a) === key)) return category;
+  }
+  return undefined;
+}
+
+export const DEFAULT_TALENTS = ["Alertness", "Athletics", "Awareness", "Brawl", "Empathy", "Expression", "Intimidation", "Leadership", "Legerdemain", "Subterfuge"];
+export const DEFAULT_SKILLS = ["Animal Ken", "Archery", "Commerce", "Crafts", "Etiquette", "Melee", "Performance", "Ride", "Stealth", "Survival"];
+export const DEFAULT_KNOWLEDGES = ["Academics", "Enigmas", "Hearth Wisdom", "Investigation", "Law", "Medicine", "Occult", "Politics", "Seneschal", "Theology"];
+
 // --- CONFIGURATION ---
 export class RulesetConfig {
   constructor(
@@ -2016,6 +2062,11 @@ export interface OwnedPowerDef {
   // owned as `name::<value>` instances ("trait-affinity::melee"), and any
   // passive-op field equal to "$<param>" substitutes the instance's value.
   param?: string;
+  // WHAT THE PARAM MAY BE. A book says "pick a Knowledge", not "pick a trait",
+  // and until now there was no way to write the difference down. Names a trait
+  // CATEGORY (physical/social/mental/talent/skill/knowledge); the take refuses
+  // a value outside it (waivable, like every other creation-side check).
+  paramFrom?: string;
   // Always-on ops while the merit is owned - no cost, no spend. Amounts SCALE
   // by the points the instance was taken at (trait-affinity at 2 points =
   // -2 difficulty). Roll ops honor the actionTag (`target`) and `trait` gates.
@@ -2241,6 +2292,8 @@ function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[
   if (description) def.description = description;
   const param = asText(body["param"]);
   if (param) def.param = StringUtil.normalize(param);
+  const paramFrom = asText(body["paramFrom"]) ?? asText(body["param-from"]);
+  if (paramFrom && isTraitCategory(paramFrom)) def.paramFrom = singularCategory(paramFrom);
   const passive = effectOpsFromCard(body["passive"]);
   if (passive.length) def.passive = passive;
   const limits: InstanceLimit[] = [];
@@ -2278,6 +2331,23 @@ function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[
     perTemplate[StringUtil.normalize(rawName)] = variant;
   }
   if (Object.keys(perTemplate).length) def.perTemplate = perTemplate;
+  // WHAT TAKING IT TURNS ON. Without this the definition round-trips through
+  // the lorebook and quietly loses its passive - the def is written to the card
+  // and read back from it, so a field the READER does not know does not exist.
+  const grantsRaw = body["grants"];
+  const grantsName = asText(grantsRaw) ?? asText(asMap(grantsRaw)["afflicts"]);
+  if (grantsName) {
+    const g = asMap(grantsRaw);
+    const grant: PassiveGrant = { afflicts: StringUtil.normalize(grantsName) };
+    const mode = StringUtil.normalize(asText(g["mode"]) ?? "");
+    if (mode === "offered" || mode === "automatic") grant.mode = mode;
+    if (asBool(g["togglable"])) grant.togglable = true;
+    const orphan = asText(g["orphan"]);
+    if (orphan) grant.orphan = orphan;
+    const note = asText(g["note"]);
+    if (note) grant.note = note;
+    def.grants = grant;
+  }
   return def;
 }
 // One Merit or Flaw. An `arcanum`/`taint` block in the merits category is NOT
@@ -2911,13 +2981,13 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
     entries: [
       { displayName: "srd:abilities:talents", text: srdEntryText(
         [`Talents your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote, "Everything above the marker is ignored; '#' starts a note."],
-        ["Alertness", "Athletics", "Awareness", "Brawl", "Empathy", "Expression", "Intimidation", "Leadership", "Legerdemain", "Subterfuge"]) },
+        DEFAULT_TALENTS) },
       { displayName: "srd:abilities:skills", text: srdEntryText(
         [`Skills your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
-        ["Animal Ken", "Archery", "Commerce", "Crafts", "Etiquette", "Melee", "Performance", "Ride", "Stealth", "Survival"]) },
+        DEFAULT_SKILLS) },
       { displayName: "srd:abilities:knowledges", text: srdEntryText(
         [`Knowledges your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
-        ["Academics", "Enigmas", "Hearth Wisdom", "Investigation", "Law", "Medicine", "Occult", "Politics", "Seneschal", "Theology"]) },
+        DEFAULT_KNOWLEDGES) },
     ],
   },
   {

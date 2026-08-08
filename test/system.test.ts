@@ -50,6 +50,7 @@ import {
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolvePowerInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
+  AbilityCategories, traitCategoryOf, traitInCategory,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -4526,7 +4527,10 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
     const s = await CommandRouter.route("sheet");
     expect(s).toContain("Kvar [vampire, potential]");
     expect(s).toContain("strength 1");
-    expect(s).toContain("Abilities (nonzero): none");
+    expect(s).toContain("Abilities (nonzero) - none");
+    // Attributes read the way a sheet is laid out, by category.
+    expect(s).toContain("Physical: strength 1, dexterity 1, stamina 1");
+    expect(s).toContain("Mental: perception 1, intelligence 1, wits 1");
     expect(s).toContain("Pool starts: willpower 0");
     expect(s).not.toContain("Arcana/Taints");            // a vampire has none
     await CommandRouter.route("attune arcana");          // ...until he is a thrall
@@ -7765,5 +7769,172 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
     expect(await CommandRouter.route("show-help")).toContain("show-merit");
     expect(await CommandRouter.route("show-help merits")).toContain("merits is now [[show-merit]]");
     expect(await CommandRouter.route("help merits")).toContain("merits is now [[show-merit]]");
+  });
+});
+
+// =============================================================================
+// TRAIT CATEGORIES - "pick a Knowledge", "every Talent" (§7.76)
+// =============================================================================
+describe("categories: Physical/Social/Mental and Talents/Skills/Knowledges", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset(); AbilityCategories.reset();
+    resetAllConfigStores(); await LorebookManager.bootstrap();
+  });
+
+  test("every Attribute and every shipped Ability knows its category", () => {
+    expect(traitCategoryOf("strength")).toBe("physical");
+    expect(traitCategoryOf("manipulation")).toBe("social");
+    expect(traitCategoryOf("wits")).toBe("mental");
+    expect(traitCategoryOf("alertness")).toBe("talent");
+    expect(traitCategoryOf("melee")).toBe("skill");
+    expect(traitCategoryOf("occult")).toBe("knowledge");
+    // A Background is a KIND, not one of these six - it has no category.
+    expect(traitCategoryOf("mentor")).toBeUndefined();
+    // Either spelling: a card says "Knowledges", a pick says "a Knowledge".
+    expect(traitInCategory("occult", "knowledges")).toBe(true);
+    expect(traitInCategory("occult", "knowledge")).toBe(true);
+    expect(traitInCategory("occult", "skill")).toBe(false);
+  });
+
+  test("the chronicle's own lists win, and lookups stay SYNCHRONOUS", async () => {
+    const cat = await LorebookManager.ensureCategory("srd:abilities");
+    await LorebookManager.updateEntryText("srd:abilities", "srd:abilities:knowledges",
+      `h\n${SRD_HEADER_MARKER}\nHedge Lore\nOccult`);
+    await AbilityCategories.loadFromLorebook();
+    expect(cat.id).toBeDefined();
+    expect(traitCategoryOf("hedge-lore")).toBe("knowledge");   // no await here
+    expect(AbilityCategories.namesIn("knowledges")).toEqual(["hedge-lore", "occult"]);
+  });
+
+  test("a passive gated on a CATEGORY fires for every trait in it", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("set-trait occult 3");
+    await CommandRouter.route("set-trait melee 3");
+    await CommandRouter.route('define-merit name=`Scholar` points=2 passive=`difficulty -2 if=knowledge`');
+    await CommandRouter.route("take-merit scholar 2");
+    // Occult is a Knowledge, so the merit applies...
+    // The passive scales by the points taken: -2 per point, taken at 2.
+    const learned = await CommandRouter.route("roll occult", { rng: seqRng([6, 6, 6]) });
+    expect(learned).toContain("vs diff 2");
+    expect(learned).toContain("scholar: difficulty -4");
+    // ...and Melee is a Skill, so it does not.
+    expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+  });
+
+  test("`pick a Knowledge` is enforceable: param-from refuses the wrong category", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const defined = await CommandRouter.route(
+      'define-merit name=`Well Read` points=`1,2,3` param=trait param-from=knowledge passive=`difficulty -1 if=$trait`');
+    expect(defined).toContain("parameterized by trait (must be a knowledge)");
+    const wrong = await CommandRouter.route("take-merit well-read::melee 2");
+    expect(wrong).toContain("is taken on a knowledge");
+    expect(wrong).toContain("it is a skill");
+    expect(wrong).toContain("occult");                      // it lists the choices
+    expect(await CommandRouter.route("take-merit well-read::occult 2")).toContain("takes Well Read::occult");
+    // ...and the Storyteller may still say otherwise.
+    expect(await CommandRouter.route("take-merit well-read::brawl 1 waive=true")).toContain("takes Well Read::brawl");
+    // A category nobody has heard of is refused at DEFINITION time.
+    expect(await CommandRouter.route('define-merit name=`Nope` param=trait param-from=wibble'))
+      .toContain("param-from names a trait category");
+  });
+
+  test("an instance limit may ration by CATEGORY as well as by kind", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('define-merit name=`Favoured` points=`1,2,3` param=trait '
+      + 'limit-at=3 limit-slots=2 limit-per-kind=`knowledge:1`');
+    expect(await CommandRouter.route("take-merit favoured::occult 3")).toContain("takes Favoured::occult");
+    const refused = await CommandRouter.route("take-merit favoured::law 3");
+    expect(refused).toContain("allows 1 knowledge at 3");
+    // A Skill is not a Knowledge, so it takes the other slot happily.
+    expect(await CommandRouter.route("take-merit favoured::melee 3")).toContain("takes Favoured::melee");
+  });
+
+  test("the sheet and the card group by category, and a flat card still loads", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("set-trait melee 3");
+    await CommandRouter.route("set-trait occult 2");
+    const sheet = await CommandRouter.route("show-sheet");
+    expect(sheet).toContain("Physical: strength 1, dexterity 1, stamina 1");
+    expect(sheet).toContain("Skill: melee 3");
+    expect(sheet).toContain("Knowledge: occult 2");
+
+    const char = (await CharacterStore.load("Kvar"))!;
+    const card = characterToCard(char);
+    expect(Object.keys(card["attributes"] as Record<string, unknown>)).toEqual(["Physical", "Social", "Mental"]);
+    const back = characterFromCard(parseCardText(formatCardText(card)))!;
+    expect(back.abilities.melee).toBe(3);
+    expect(back.attributes.strength).toBe(1);
+    expect(Object.keys(back.attributes).length).toBe(9);
+
+    // A card hand-written the OLD flat way must still load - the reader takes
+    // either shape, so nobody's existing sheet breaks.
+    const flat = characterFromCard(parseCardText(
+      "name: Kvar\nid: x\nstage: potential\ntemplates: vampire\n\nattributes:\n  Strength: 4\n  Wits: 3\n\nabilities:\n  Melee: 2"))!;
+    expect(flat.attributes.strength).toBe(4);
+    expect(flat.abilities.melee).toBe(2);
+  });
+
+  test("a trait the chronicle's lists do not name is filed under Other, never dropped", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const char = (await CharacterStore.load("Kvar"))!;
+    char.abilities["hedge-lore"] = 4;                    // not on any SRD list
+    await CharacterStore.save(char);
+    expect(await CommandRouter.route("show-sheet")).toContain("Other: hedge-lore 4");
+    const back = characterFromCard(parseCardText(formatCardText(characterToCard(char))))!;
+    expect(back.abilities["hedge-lore"]).toBe(4);
+  });
+});
+
+// =============================================================================
+// A MERIT CAN NOW DEFINE WHAT IT TURNS ON, AND THERE IS A WINDOW FOR IT
+// =============================================================================
+describe("define-merit grants= (the passive affliction) and the merit windows", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset(); AbilityCategories.reset();
+    resetAllConfigStores(); await LorebookManager.bootstrap();
+  });
+
+  test("a simple merit defines the affliction it grants, in one command", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const defined = await CommandRouter.route(
+      'define-merit name=`Iron Nerve` points=3 grants=unshakable description=`Fear does not take.`');
+    expect(defined).toContain('applies "unshakable"');
+    expect(defined).toContain("did not exist, so it was defined too");
+    expect(AfflictionRegistry.get("unshakable")).toBeDefined();
+    // Taking it turns it ON - the same machinery Potence uses.
+    const took = await CommandRouter.route("take-merit iron-nerve 3");
+    expect(took).toContain("Unshakable is now applied");
+    expect(await CommandRouter.route("show-affliction")).toContain("unshakable");
+    // ...and dropping it takes the affliction away again.
+    await CommandRouter.route("drop-merit iron-nerve");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("unshakable");
+  });
+
+  test("offered and togglable are data, exactly as for a built-in", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('define-merit name=`Second Wind` points=2 grants=surging grants-mode=offered');
+    await CommandRouter.route("take-merit second-wind 2");
+    // OFFERED means it grants the ABILITY; nothing is on until it is invoked.
+    expect(await CommandRouter.route("show-affliction")).not.toContain("surging");
+    expect(await CommandRouter.route("invoke surging")).toContain("invokes Surging");
+    expect(await CommandRouter.route("show-affliction")).toContain("surging");
+    // An existing affliction is reused, not redefined.
+    const again = await CommandRouter.route('define-merit name=`Third Wind` points=1 grants=surging');
+    expect(again).not.toContain("did not exist");
+  });
+
+  test("there are windows for both families, and they are built from the specs", () => {
+    for (const verb of ["win-merit", "win-arcanum"]) {
+      expect(CommandRouter.verbs()).toContain(verb);
+      expect(CommandRouter.specFor(verb)!.inStory).toBe(false);
+    }
+    // The window walks define-merit's spec, so `grants` reaching the form is
+    // exactly the same fact as `grants` existing on the verb.
+    const keys = (CommandRouter.specFor("define-merit")!.params ?? []).map(p => p.key);
+    expect(keys).toContain("grants");
+    expect(keys).toContain("grants-mode");
+    expect(keys).toContain("param-from");
   });
 });

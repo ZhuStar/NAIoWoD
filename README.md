@@ -2046,6 +2046,59 @@ The shipped Devil's Due arcana:
   raised to base 7 later, for an eventual effective 9. `[[arcana]]` shows
   `base → effective` and the advisory ceiling.
 
+### Categories — "pick a Knowledge", "every Talent"
+
+A trait has a **kind** (attribute, ability, background…) and, for the two the
+creation budget allocates by priority, a **category**: an Attribute is
+*Physical*, *Social* or *Mental*; an Ability is a *Talent*, a *Skill* or a
+*Knowledge*. Both were always data — `ATTRIBUTES`, and the three `srd:abilities`
+lists — but only the creation report could read them, so a book's "pick a
+Knowledge and take −1 difficulty on it" had no way to be written down.
+
+```
+[[define-merit name=`Well Read` points=`1,2,3` param=trait param-from=knowledge
+   passive=`difficulty -1 if=$trait`]]
+[[take-merit well-read::melee 2]]
+   → Well Read is taken on a knowledge, and "melee" is not one (it is a skill).
+     Choose from: academics, enigmas, hearth-wisdom, … Add waive=true to override.
+
+[[define-merit name=`Scholar` points=2 passive=`difficulty -2 if=knowledge`]]
+   → −2 on EVERY Knowledge, in one op rather than ten
+```
+
+- **`param-from=<category>`** constrains a parameterized def's pick.
+- **A passive's `if=` may name a category** as well as a trait.
+- **An instance limit rations by category too**: `limit-per-kind="knowledge:1"`
+  beside the older `attribute:1`.
+- The chronicle's own lists win — rename or add a Knowledge in `srd:abilities`
+  and everything above follows. They are cached at `init()`, because a roll
+  cannot await the lorebook.
+- **The sheet and the character card group by category**, which is how a sheet
+  is read. A card hand-written flat still loads, and a trait the chronicle's
+  lists do not name is filed under *Other* rather than dropped.
+
+### A merit can define what it turns on
+
+`grants=` names the affliction a merit applies when taken — the same machinery
+Potence uses. If that affliction does not exist yet it is **defined for you**, so
+a simple merit is one command:
+
+```
+[[define-merit name=`Iron Nerve` points=3 grants=unshakable description=`Fear does not take.`]]
+   → Defined merit "Iron Nerve", 3 points, applies "unshakable".
+     Affliction "unshakable" did not exist, so it was defined too.
+[[take-merit iron-nerve 3]]
+   → Kvar takes Iron Nerve (3 freebie points). Unshakable is now applied.
+```
+
+`grants-mode=offered` grants the *ability* rather than turning it on (use
+`[[invoke]]`), `grants-togglable` lets the character switch it off without losing
+the power, and `grants-orphan=` says what becomes of it when the power goes.
+
+**`[[win-merit]]`** and **`[[win-arcanum]]`** open windows over these verbs, with
+a picker over the afflictions the chronicle already defines — and typing a new
+name there is valid, because the verb will define it.
+
 ### Backgrounds — a bag of their own
 
 Backgrounds used to be the one thing with no definitions: a list of names in the

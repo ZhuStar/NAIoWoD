@@ -28,7 +28,7 @@ import {
   LorebookManager, MeritFlawRegistry, ArcanumRegistry, reloadAllConfigStores,
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER, PostOffice,
 } from "./services";
-import { NamedRollStore, StoryClock } from "./state";
+import { NamedRollStore, StoryClock, AbilityCategories } from "./state";
 import { processAdventureInput, processGeneratedText, processContextBuilt, processGenerationEnd, reconcileLorebook } from "./game";
 // `export * from "./window"` above also runs its top-level [[win-constraint]] registration.
 
@@ -69,10 +69,13 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   // A SECOND registry, because Arcana are a second category - not merits with
   // a different `kind`. Two cards, two lists, two sets of verbs.
   const arcana = await ArcanumRegistry.loadFromLorebook();
+  // The chronicle's own Talents/Skills/Knowledges, cached so every consumer can
+  // ask "is this a Knowledge?" synchronously - a roll cannot await the lorebook.
+  const abilities = await AbilityCategories.loadFromLorebook();
   const configs = await reloadAllConfigStores();
   const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
   const seededClock = await StoryClock.seedDefault();        // the story clock (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; custom arcana/taints: ${arcana}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; custom arcana/taints: ${arcana}; abilities filed: ${abilities}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
   return { setupMessage: boot.message };
 }

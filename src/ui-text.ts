@@ -42,6 +42,20 @@ export const UI_TEXT = {
     opened: "Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).",
   },
 
+  merit: {
+    title: "Define merit / flaw",
+    blurb: "**Define a Merit or Flaw.** `grants` names the affliction it turns on when taken - "
+      + "pick one that exists, or type a new name and it will be defined too.",
+    opened: "Opened the merit window. Fill it in and press Create (it runs [[define-merit]]).",
+  },
+
+  arcanum: {
+    title: "Define arcanum / taint",
+    blurb: "**Define an Arcanum or Taint** (Dark Ages: Devil's Due). Their own category, "
+      + "their own purse - not merits. `per-template` gives the printed \"(7/5)\" price.",
+    opened: "Opened the arcanum window. Fill it in and press Create (it runs [[define-arcanum]]).",
+  },
+
   affliction: {
     title: "Define affliction",
     blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",

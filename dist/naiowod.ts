@@ -3002,6 +3002,52 @@ const ALL_ATTRIBUTES: readonly string[] = [
   ...ATTRIBUTES.physical, ...ATTRIBUTES.social, ...ATTRIBUTES.mental,
 ];
 
+// =============================================================================
+// CATEGORIES - "pick a Knowledge", "all Talents", "one of them an Attribute"
+// -----------------------------------------------------------------------------
+// A trait has a KIND (attribute, ability, background...) and, for the two that
+// are allocated by priority, a CATEGORY: an Attribute is Physical, Social or
+// Mental; an Ability is a Talent, a Skill or a Knowledge. Both have always been
+// data - ATTRIBUTES above, and the three lorebook lists - but only the creation
+// report could read them, so nothing else could say "pick a Knowledge and take
+// -1 difficulty on it" or "every Talent is at +1".
+//
+// The ability lists are the CHRONICLE's (srd:abilities), so they are looked up
+// through a registry that the lorebook overlays; these are the shipped defaults
+// and the fallback when nothing has been loaded.
+// =============================================================================
+const ATTRIBUTE_CATEGORIES = ["physical", "social", "mental"] as const;
+const ABILITY_CATEGORIES = ["talent", "skill", "knowledge"] as const;
+type AttributeCategory = typeof ATTRIBUTE_CATEGORIES[number];
+type AbilityCategory = typeof ABILITY_CATEGORIES[number];
+type TraitCategory = AttributeCategory | AbilityCategory;
+const ALL_TRAIT_CATEGORIES: readonly TraitCategory[] = [...ATTRIBUTE_CATEGORIES, ...ABILITY_CATEGORIES];
+
+// Written either way ("knowledge" / "knowledges"), because a player and a card
+// both spell a category list in the plural and a single pick in the singular.
+function singularCategory(raw: string): string {
+  const k = StringUtil.normalize(raw);
+  const singular = k.endsWith("s") ? k.slice(0, -1) : k;
+  return (ALL_TRAIT_CATEGORIES as readonly string[]).includes(singular) ? singular : k;
+}
+function isTraitCategory(raw: string): boolean {
+  return (ALL_TRAIT_CATEGORIES as readonly string[]).includes(singularCategory(raw));
+}
+
+// Which of the three an Attribute is. Attributes are a fixed nine, so this is a
+// rule rather than a lookup.
+function attributeCategoryOf(name: string): AttributeCategory | undefined {
+  const key = StringUtil.normalize(name);
+  for (const category of ATTRIBUTE_CATEGORIES) {
+    if (ATTRIBUTES[category].some(a => StringUtil.normalize(a) === key)) return category;
+  }
+  return undefined;
+}
+
+const DEFAULT_TALENTS = ["Alertness", "Athletics", "Awareness", "Brawl", "Empathy", "Expression", "Intimidation", "Leadership", "Legerdemain", "Subterfuge"];
+const DEFAULT_SKILLS = ["Animal Ken", "Archery", "Commerce", "Crafts", "Etiquette", "Melee", "Performance", "Ride", "Stealth", "Survival"];
+const DEFAULT_KNOWLEDGES = ["Academics", "Enigmas", "Hearth Wisdom", "Investigation", "Law", "Medicine", "Occult", "Politics", "Seneschal", "Theology"];
+
 // --- CONFIGURATION ---
 class RulesetConfig {
   constructor(
@@ -4994,6 +5040,11 @@ interface OwnedPowerDef {
   // owned as `name::<value>` instances ("trait-affinity::melee"), and any
   // passive-op field equal to "$<param>" substitutes the instance's value.
   param?: string;
+  // WHAT THE PARAM MAY BE. A book says "pick a Knowledge", not "pick a trait",
+  // and until now there was no way to write the difference down. Names a trait
+  // CATEGORY (physical/social/mental/talent/skill/knowledge); the take refuses
+  // a value outside it (waivable, like every other creation-side check).
+  paramFrom?: string;
   // Always-on ops while the merit is owned - no cost, no spend. Amounts SCALE
   // by the points the instance was taken at (trait-affinity at 2 points =
   // -2 difficulty). Roll ops honor the actionTag (`target`) and `trait` gates.
@@ -5219,6 +5270,8 @@ function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[
   if (description) def.description = description;
   const param = asText(body["param"]);
   if (param) def.param = StringUtil.normalize(param);
+  const paramFrom = asText(body["paramFrom"]) ?? asText(body["param-from"]);
+  if (paramFrom && isTraitCategory(paramFrom)) def.paramFrom = singularCategory(paramFrom);
   const passive = effectOpsFromCard(body["passive"]);
   if (passive.length) def.passive = passive;
   const limits: InstanceLimit[] = [];
@@ -5256,6 +5309,23 @@ function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[
     perTemplate[StringUtil.normalize(rawName)] = variant;
   }
   if (Object.keys(perTemplate).length) def.perTemplate = perTemplate;
+  // WHAT TAKING IT TURNS ON. Without this the definition round-trips through
+  // the lorebook and quietly loses its passive - the def is written to the card
+  // and read back from it, so a field the READER does not know does not exist.
+  const grantsRaw = body["grants"];
+  const grantsName = asText(grantsRaw) ?? asText(asMap(grantsRaw)["afflicts"]);
+  if (grantsName) {
+    const g = asMap(grantsRaw);
+    const grant: PassiveGrant = { afflicts: StringUtil.normalize(grantsName) };
+    const mode = StringUtil.normalize(asText(g["mode"]) ?? "");
+    if (mode === "offered" || mode === "automatic") grant.mode = mode;
+    if (asBool(g["togglable"])) grant.togglable = true;
+    const orphan = asText(g["orphan"]);
+    if (orphan) grant.orphan = orphan;
+    const note = asText(g["note"]);
+    if (note) grant.note = note;
+    def.grants = grant;
+  }
   return def;
 }
 // One Merit or Flaw. An `arcanum`/`taint` block in the merits category is NOT
@@ -5889,13 +5959,13 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
     entries: [
       { displayName: "srd:abilities:talents", text: srdEntryText(
         [`Talents your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote, "Everything above the marker is ignored; '#' starts a note."],
-        ["Alertness", "Athletics", "Awareness", "Brawl", "Empathy", "Expression", "Intimidation", "Leadership", "Legerdemain", "Subterfuge"]) },
+        DEFAULT_TALENTS) },
       { displayName: "srd:abilities:skills", text: srdEntryText(
         [`Skills your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
-        ["Animal Ken", "Archery", "Commerce", "Crafts", "Etiquette", "Melee", "Performance", "Ride", "Stealth", "Survival"]) },
+        DEFAULT_SKILLS) },
       { displayName: "srd:abilities:knowledges", text: srdEntryText(
         [`Knowledges your chronicle uses - one per line below the ${SRD_HEADER_MARKER} line.`, __srdEditNote],
-        ["Academics", "Enigmas", "Hearth Wisdom", "Investigation", "Law", "Medicine", "Occult", "Politics", "Seneschal", "Theology"]) },
+        DEFAULT_KNOWLEDGES) },
     ],
   },
   {
@@ -7875,6 +7945,12 @@ function characterToCard(char: PlayableCharacter): CardMap {
     const bucket = (char[field] ?? {}) as Record<string, number>;
     const names = Object.keys(bucket);
     if (!names.length) continue;
+    // Attributes and Abilities are written UNDER THEIR CATEGORY, the way a
+    // sheet is laid out and the way the creation budget allocates them. Every
+    // other bucket is a flat list. The reader takes either shape, so a card
+    // hand-written flat still loads (characterFromCard walks nested blocks).
+    const grouped = field === "attributes" ? ATTRIBUTE_CATEGORIES
+      : field === "abilities" ? ABILITY_CATEGORIES : undefined;
     const block: CardMap = {};
     for (const name of names) {
       const label = displayTraitName(name);
@@ -7901,7 +7977,23 @@ function characterToCard(char: PlayableCharacter): CardMap {
         block[label] = bucket[name];
       }
     }
-    card[key] = block;
+    if (!grouped) { card[key] = block; continue; }
+    // File each entry under its category; anything the chronicle's lists do not
+    // name goes under "other" rather than being dropped.
+    const byCategory: CardMap = {};
+    const filed = new Set<string>();
+    for (const category of grouped) {
+      const mine: CardMap = {};
+      for (const [label, value] of Object.entries(block)) {
+        if (!traitInCategory(label, category)) continue;
+        mine[label] = value; filed.add(label);
+      }
+      if (Object.keys(mine).length) byCategory[StringUtil.toTitleCase(category)] = mine;
+    }
+    const rest: CardMap = {};
+    for (const [label, value] of Object.entries(block)) if (!filed.has(label)) rest[label] = value;
+    if (Object.keys(rest).length) byCategory["Other"] = rest;
+    card[key] = byCategory;
   }
   // A specialty on a trait the sheet doesn't rate would be lost; keep it in its
   // own block rather than dropping the player's text.
@@ -7965,7 +8057,18 @@ function characterFromCard(raw: CardValue | undefined): PlayableCharacter | unde
     const field = (BUCKET_SYNONYMS[rawKey.toLowerCase()] ?? rawKey) as keyof PlayableCharacter;
     if (!CHARACTER_BUCKETS.some(([f]) => f === field)) continue;
     const bucket = char[field] as Record<string, number>;
-    for (const [rawName, value] of Object.entries(asMap(block))) {
+    // EITHER SHAPE. Attributes/Abilities are written under their category, but
+    // a card hand-written flat must still load - and a category is recognised
+    // by NAME, so a trait that happens to be a map (a rating with `paid` or a
+    // `specialty` under it) is never mistaken for one.
+    const entries: Array<[string, CardValue | undefined]> = [];
+    for (const [rawKey, raw] of Object.entries(asMap(block))) {
+      const isCategory = (isTraitCategory(rawKey) || StringUtil.normalize(rawKey) === "other")
+        && asNumber(raw) === undefined && !Array.isArray(raw);
+      if (isCategory) entries.push(...Object.entries(asMap(raw)));
+      else entries.push([rawKey, raw]);
+    }
+    for (const [rawName, value] of entries) {
       const trait = StringUtil.normalize(rawName);
       // The key written more than once = more than one of that Background. The
       // slot takes the highest; every instance is kept with its note.
@@ -8317,6 +8420,83 @@ function numericOn(char: PlayableCharacter, value: Numeric | undefined, fallback
 // chronicle that invents an Ability is believed; ALL_ATTRIBUTES catches an
 // Attribute the sheet has not rated yet. Undefined = the engine cannot say,
 // and the caller reports rather than guesses.
+// =============================================================================
+// WHAT CATEGORY IS THIS TRAIT? - the registry that makes "a Knowledge" sayable
+// -----------------------------------------------------------------------------
+// The Attributes are a fixed nine, so their category is a rule. The ABILITIES
+// are the chronicle's own three lists (srd:abilities), so they are cached here
+// from the lorebook at init - cached, because every consumer is SYNCHRONOUS: a
+// passive op gated on "any Talent" is judged inside a roll, and a roll cannot
+// await the lorebook (docs/invariants.md: count awaits, not milliseconds).
+//
+// Never loaded = the shipped lists, so tests and pure paths answer correctly
+// without a host.
+// =============================================================================
+class AbilityCategories {
+  private static _of: Record<string, string[]> = {
+    talent: DEFAULT_TALENTS.map(n => StringUtil.normalize(n)),
+    skill: DEFAULT_SKILLS.map(n => StringUtil.normalize(n)),
+    knowledge: DEFAULT_KNOWLEDGES.map(n => StringUtil.normalize(n)),
+  };
+
+  static all(): Record<string, string[]> { return { ...AbilityCategories._of }; }
+  static namesIn(category: string): string[] { return [...(AbilityCategories._of[singularCategory(category)] ?? [])]; }
+  static categoryOf(name: string): string | undefined {
+    const key = StringUtil.normalize(name);
+    for (const [category, names] of Object.entries(AbilityCategories._of)) {
+      if (names.includes(key)) return category;
+    }
+    return undefined;
+  }
+  static reset(): void {
+    AbilityCategories._of = {
+      talent: DEFAULT_TALENTS.map(n => StringUtil.normalize(n)),
+      skill: DEFAULT_SKILLS.map(n => StringUtil.normalize(n)),
+      knowledge: DEFAULT_KNOWLEDGES.map(n => StringUtil.normalize(n)),
+    };
+  }
+  // The chronicle's own lists replace the shipped ones. An EMPTY list is kept
+  // empty on purpose: a chronicle with no Knowledges has no Knowledges.
+  static async loadFromLorebook(): Promise<number> {
+    const talents = await LorebookManager.allTalents();
+    const skills = await LorebookManager.allSkills();
+    const knowledges = await LorebookManager.allKnowledges();
+    // Nothing readable at all means the lorebook has not been seeded yet -
+    // keep the defaults rather than blanking every category.
+    if (!talents.length && !skills.length && !knowledges.length) return 0;
+    AbilityCategories._of = {
+      talent: talents.map(n => StringUtil.normalize(n)),
+      skill: skills.map(n => StringUtil.normalize(n)),
+      knowledge: knowledges.map(n => StringUtil.normalize(n)),
+    };
+    return talents.length + skills.length + knowledges.length;
+  }
+}
+
+// A trait's CATEGORY - physical/social/mental for an Attribute, talent/skill/
+// knowledge for an Ability - or undefined for a trait that has none (a
+// Background, a Discipline, a pool). This is what lets a definition say "pick a
+// Knowledge" and a passive say "every Talent".
+function traitCategoryOf(name: string): string | undefined {
+  return attributeCategoryOf(name) ?? AbilityCategories.categoryOf(name);
+}
+
+// Does this trait belong to the named category? Accepts either spelling
+// ("knowledge" / "knowledges") and is false for a trait with no category.
+function traitInCategory(name: string, category: string): boolean {
+  const want = singularCategory(category);
+  return traitCategoryOf(name) === want;
+}
+
+// Every trait the chronicle files under a category, whichever kind it is.
+function traitsInCategory(category: string): string[] {
+  const want = singularCategory(category);
+  if ((ATTRIBUTE_CATEGORIES as readonly string[]).includes(want)) {
+    return ATTRIBUTES[want as AttributeCategory].map(n => StringUtil.normalize(n));
+  }
+  return AbilityCategories.namesIn(want);
+}
+
 function traitKindOf(char: PlayableCharacter, name: string): string | undefined {
   const key = StringUtil.normalize(name);
   const buckets: Array<[string, Record<string, number>]> = [
@@ -8327,6 +8507,19 @@ function traitKindOf(char: PlayableCharacter, name: string): string | undefined 
   for (const [kind, bucket] of buckets) if (key in (bucket ?? {})) return kind;
   if (ALL_ATTRIBUTES.some(a => StringUtil.normalize(a) === key)) return "attribute";
   return undefined;
+}
+
+// The kind AND the category, which is what a `perKind` limit reads: "two
+// favoured traits may reach 3, at most one of them an Attribute" counts by
+// KIND, and "at most one of them a Knowledge" counts by CATEGORY. One walk
+// answers both, so a limit may be written either way.
+function traitKindsOf(char: PlayableCharacter, name: string): string[] {
+  const out: string[] = [];
+  const kind = traitKindOf(char, name);
+  if (kind) out.push(kind);
+  const category = traitCategoryOf(name);
+  if (category) out.push(category);
+  return out;
 }
 
 // Everything this character's Backgrounds CONFER - the Talisman that is a place
@@ -10467,6 +10660,15 @@ function poolTraitsOf(char: PlayableCharacter, pool: string): string[] {
   return [...used];
 }
 
+// Did this pool use the trait an op is gated on? A plain name matches itself; a
+// CATEGORY matches any trait the chronicle files under it, which is what lets a
+// merit say "every Talent" or an arcanum say "pick a Knowledge".
+function poolUsesTrait(poolTraits: string[], gate: string): boolean {
+  const want = StringUtil.normalize(gate);
+  if (poolTraits.includes(want)) return true;
+  return isTraitCategory(want) && poolTraits.some(t => traitInCategory(t, want));
+}
+
 // Fold the character's PASSIVE roll ops (owned merits/arcana - Trait Affinity
 // et al.) into a roll: trait-gated ops fire iff the pool used the trait,
 // actionTag-gated ops iff the roll carries the tag; unmet gates skip SILENTLY
@@ -10482,7 +10684,9 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
       const patch = (n: number): Partial<RollModifier> => rollOpPatch(kind, n) ?? {};
       if (!rollOpPatch(kind, 0)) continue;
       if (op.target && !tags.includes(StringUtil.normalize(op.target))) continue;
-      if (op.trait && !poolTraits.includes(StringUtil.normalize(op.trait))) continue;
+      // The trait gate names a TRAIT ("melee") or a CATEGORY ("knowledge",
+      // "talents"): "-1 difficulty on every Knowledge" is one op, not ten.
+      if (op.trait && !poolUsesTrait(poolTraits, op.trait)) continue;
       // A "while I still hold N of this" gate - checked live, so it lapses the
       // moment the pool runs dry.
       if (op.requiresResource && (resourceAt?.(op.requiresResource.resource) ?? 0) < op.requiresResource.atLeast) continue;
@@ -13956,8 +14160,11 @@ function instanceLimitBreaches(
       out.push(`${name} allows ${limit.slots} trait${limit.slots === 1 ? "" : "s"} at ${limit.atRating} `
         + `(have ${at.length}: ${at.map(h => h.label).join(", ")})`);
     }
-    for (const [kind, allowed] of Object.entries(limit.perKind ?? {})) {
-      const ofKind = at.filter(h => traitKindOf(char, h.label) === kind);
+    for (const [rawKind, allowed] of Object.entries(limit.perKind ?? {})) {
+      // "at most one of them an Attribute" counts by KIND; "at most one a
+      // Knowledge" counts by CATEGORY. A limit may be written either way.
+      const kind = singularCategory(rawKind);
+      const ofKind = at.filter(h => traitKindsOf(char, h.label).includes(kind));
       if (ofKind.length > allowed) {
         out.push(`${name} allows ${allowed} ${kind}${allowed === 1 ? "" : "s"} at ${limit.atRating} `
           + `(have ${ofKind.length}: ${ofKind.map(h => h.label).join(", ")})`);
@@ -14259,6 +14466,13 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   }
   const maxFromTrait = (cmd.named["max-from-trait"] ?? "").trim();
   if (maxFromTrait) def.maxFromTrait = StringUtil.normalize(maxFromTrait);
+  const paramFrom = (cmd.named["param-from"] ?? "").trim();
+  if (paramFrom) {
+    if (!isTraitCategory(paramFrom)) {
+      return sys(`param-from names a trait category - one of ${ALL_TRAIT_CATEGORIES.join(", ")} (got "${paramFrom}").`);
+    }
+    def.paramFrom = singularCategory(paramFrom);
+  }
   if (cmd.named["passive"]?.trim()) {
     const raw = cmd.named["passive"];
     // A quoted (not backticked) value came through the boundary normalizer, so
@@ -14274,6 +14488,37 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   const templates = (cmd.named["templates"] ?? "").split(",").map(t => StringUtil.normalize(t)).filter(Boolean);
   if (templates.length) def.requires = { templates };
 
+  // WHAT TAKING IT TURNS ON. A built-in merit could declare a PassiveGrant and
+  // a chronicle's could not, which made "simple merits should be able to define
+  // the passive affliction they grant" impossible to say in a command.
+  //   grants=<affliction> [grants-mode=automatic|offered] [grants-togglable]
+  //   [grants-orphan=<policy>]
+  // If the affliction does not exist yet, it is CREATED from this definition -
+  // a simple merit is one command, not two - and the reply says so.
+  let seeded = "";
+  const grantsRaw = (cmd.named["grants"] ?? "").trim();
+  if (grantsRaw) {
+    const afflicts = StringUtil.normalize(grantsRaw);
+    const grant: PassiveGrant = { afflicts };
+    const mode = StringUtil.normalize(cmd.named["grants-mode"] ?? "");
+    if (mode === "offered" || mode === "automatic") grant.mode = mode;
+    if (flagOf(cmd, "grants-togglable") === true) grant.togglable = true;
+    const orphan = (cmd.named["grants-orphan"] ?? "").trim();
+    if (orphan) grant.orphan = orphan;
+    def.grants = grant;
+    if (!AfflictionRegistry.get(afflicts)) {
+      // No `tags`: a tag is a thing a ROLL carries, and one nobody has written
+      // a modifier for is reported as unknown on every roll the character makes.
+      // A merit's passive is a STATE. [[define-affliction]] adds tags if the
+      // chronicle wants them to bite.
+      await AfflictionRegistry.put(makeAfflictionDef({
+        name: afflicts,
+        description: def.description ?? `Applied while ${name} is held.`,
+      }));
+      seeded = ` Affliction "${afflicts}" did not exist, so it was defined too ([[define-affliction]] to flesh it out).`;
+    }
+  }
+
   const key = StringUtil.normalize(name);
   const defs = await customDefs(family);
   const existing = defs.findIndex(d => StringUtil.normalize(d.name) === key);
@@ -14282,9 +14527,10 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   await writeCustomDefs(family, defs);
 
   const bits = [`${def.kind} "${name}"`, `${Array.isArray(points) ? `[${points.join(", ")}]` : points} point${points === 1 ? "" : "s"}`];
-  if (def.param) bits.push(`parameterized by ${def.param}`);
+  if (def.param) bits.push(`parameterized by ${def.param}${def.paramFrom ? ` (must be a ${def.paramFrom})` : ""}`);
   if (def.passive?.length) bits.push(`passive: ${def.passive.map(describePassiveOp).join("; ")}`);
-  return sys(`${existing >= 0 ? "Redefined" : "Defined"} ${bits.join(", ")}${shadows}. `
+  if (def.grants) bits.push(`applies "${def.grants.afflicts}"${grantIsAutomatic(def.grants) ? "" : " when invoked"}${def.grants.togglable ? ", togglable" : ""}`);
+  return sys(`${existing >= 0 ? "Redefined" : "Defined"} ${bits.join(", ")}${shadows}.${seeded} `
     + `Take it with [[${family.verbs.take} ${key}${def.param ? `::<${def.param}>` : ""}${Array.isArray(points) ? ` ${points[0]}` : ""}]].`);
 }
 
@@ -14337,7 +14583,7 @@ async function ownedPowerInfo<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
     bits.push(`${Array.isArray(def.points) ? `[${def.points.join(", ")}]` : def.points} ${budgetOfKind(def)} point${def.points === 1 ? "" : "s"}`);
   }
   if (!kindSpends(def.kind)) bits.push(`GRANTS points rather than costing them`);
-  if (def.param) bits.push(`parameterized by ${def.param}`);
+  if (def.param) bits.push(`parameterized by ${def.param}${def.paramFrom ? ` (must be a ${def.paramFrom})` : ""}`);
   for (const l of instanceLimitsOf(def)) {
     const kinds = Object.entries(l.perKind ?? {}).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`);
     bits.push(`at most ${l.slots} at ${l.atRating}${kinds.length ? ` (of those, ${kinds.join(", ")})` : ""} - advisory`);
@@ -14369,6 +14615,14 @@ async function takeOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
     return bare?.param
       ? sys(`"${key}" is parameterized - name its ${bare.param}: [[${family.verbs.take} ${key}::<${bare.param}>]].`)
       : sys(`Unknown ${family.one} "${key}". Custom definitions go in the ${family.category} lorebook category.`);
+  }
+  // "PICK A KNOWLEDGE" - the param's category, checked where the pick is made.
+  if (hit.param && hit.def.paramFrom && !waived && !traitInCategory(hit.param, hit.def.paramFrom)) {
+    const want = singularCategory(hit.def.paramFrom);
+    const options = traitsInCategory(want);
+    return sys(`${hit.def.name} is taken on a ${want}, and "${hit.param}" is not one`
+      + `${traitCategoryOf(hit.param) ? ` (it is a ${traitCategoryOf(hit.param)})` : ""}. `
+      + `${options.length ? `Choose from: ${options.join(", ")}. ` : ""}Add waive=true to override.`);
   }
   // IS THIS LIST OPEN TO HIM AT ALL? Asked before price, because "a vampire has
   // no Arcana" is a truer answer than "that costs 5 arcana points".
@@ -15389,10 +15643,32 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
       });
     return bits.length ? bits.join(", ") : "none";
   };
+  // BY CATEGORY, because that is how a sheet is read and how the creation
+  // budget is allocated: Physical/Social/Mental and Talents/Skills/Knowledges.
+  // A trait the chronicle's lists do not name still shows, under "other" -
+  // nothing is ever hidden because it could not be filed.
+  const byCategory = (bucket: Record<string, number>, categories: readonly string[], skipZeros: boolean): string => {
+    const held = Object.keys(bucket ?? {});
+    const bits: string[] = [];
+    const filed = new Set<string>();
+    for (const category of categories) {
+      const mine = held.filter(n => traitInCategory(n, category));
+      mine.forEach(n => filed.add(n));
+      const shown = Object.fromEntries(mine.map(n => [n, bucket[n]]));
+      const text = fmt(shown, skipZeros);
+      if (text !== "none") bits.push(`${disp(category)}: ${text}`);
+    }
+    const rest = held.filter(n => !filed.has(n));
+    if (rest.length) {
+      const text = fmt(Object.fromEntries(rest.map(n => [n, bucket[n]])), skipZeros);
+      if (text !== "none") bits.push(`Other: ${text}`);
+    }
+    return bits.length ? bits.join(" | ") : "none";
+  };
   const parts = [
     `${disp(char.name)} [${char.templates.join("+")}, ${char.stage}]`,
-    `Attributes: ${fmt(char.attributes, false)}`,
-    `Abilities (nonzero): ${fmt(char.abilities, true)}`,
+    `Attributes - ${byCategory(char.attributes, ATTRIBUTE_CATEGORIES, false)}`,
+    `Abilities (nonzero) - ${byCategory(char.abilities, ABILITY_CATEGORIES, true)}`,
   ];
   const optional: Array<[string, Record<string, number>]> = [
     ["Backgrounds", char.backgrounds], ["Virtues", char.virtues],
@@ -16091,6 +16367,13 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "limit-slots", kind: "named", type: "int", desc: "How many instances may hold that rating (default 1)", example: "2" },
     { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
     { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait (\"no more purchases than his Resolve\")", example: "resolve" },
+    { key: "param-from", kind: "named", type: "enum", options: [...ALL_TRAIT_CATEGORIES],
+      desc: "The param must be a trait of this category (\"pick a Knowledge\")", example: "knowledge" },
+    { key: "grants", kind: "named", desc: "Affliction this applies when taken (defined for you if new)", example: "iron-willed" },
+    { key: "grants-mode", kind: "named", type: "enum", options: ["automatic", "offered"],
+      desc: "automatic = on as soon as it is taken; offered = it grants the ABILITY, [[invoke]] uses it" },
+    { key: "grants-togglable", kind: "named", type: "bool", desc: "The character may switch it off without losing the power" },
+    { key: "grants-orphan", kind: "named", desc: "What happens to the affliction when the power is lost (default: immediately)", example: "immediately" },
     { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
   ],
 });
@@ -16135,6 +16418,13 @@ CommandRouter.register("define-arcanum", cmdDefineArcanum, {
     { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
     { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait", example: "resolve" },
     { key: "passive", kind: "named", type: "literal", desc: 'Always-on ops, ";"-separated - BACKTICKS' },
+    { key: "param-from", kind: "named", type: "enum", options: [...ALL_TRAIT_CATEGORIES],
+      desc: "The param must be a trait of this category (\"pick a Knowledge\")", example: "knowledge" },
+    { key: "grants", kind: "named", desc: "Affliction this applies when taken (defined for you if new)", example: "iron-willed" },
+    { key: "grants-mode", kind: "named", type: "enum", options: ["automatic", "offered"],
+      desc: "automatic = on as soon as it is taken; offered = it grants the ABILITY, [[invoke]] uses it" },
+    { key: "grants-togglable", kind: "named", type: "bool", desc: "The character may switch it off without losing the power" },
+    { key: "grants-orphan", kind: "named", desc: "What happens to the affliction when the power is lost (default: immediately)", example: "immediately" },
     { key: "description", kind: "named", type: "literal", desc: "Description - BACKTICKS" },
   ],
 });
@@ -17116,6 +17406,20 @@ const UI_TEXT = {
     opened: "Opened the success-table window. Fill it in and press Create (it runs [[define-table]]).",
   },
 
+  merit: {
+    title: "Define merit / flaw",
+    blurb: "**Define a Merit or Flaw.** `grants` names the affliction it turns on when taken - "
+      + "pick one that exists, or type a new name and it will be defined too.",
+    opened: "Opened the merit window. Fill it in and press Create (it runs [[define-merit]]).",
+  },
+
+  arcanum: {
+    title: "Define arcanum / taint",
+    blurb: "**Define an Arcanum or Taint** (Dark Ages: Devil's Due). Their own category, "
+      + "their own purse - not merits. `per-template` gives the printed \"(7/5)\" price.",
+    opened: "Opened the arcanum window. Fill it in and press Create (it runs [[define-arcanum]]).",
+  },
+
   affliction: {
     title: "Define affliction",
     blurb: "**Define an affliction** (bindings, chains, mirrors, tags)",
@@ -17369,6 +17673,36 @@ async function cmdWinTable(): Promise<string> {
 
 CommandRouter.register("win-table", cmdWinTable, {
   summary: "open a window to define a success table",
+});
+
+// --- MERIT / ARCANUM WINDOWS --------------------------------------------------
+// Both are define-* specs rendered as forms, so every knob added to the verb
+// appears here for free. The `grants` field gets a picker over the afflictions
+// the chronicle already defines - and typing a NEW name is still valid, because
+// define-merit will define that affliction as it goes.
+async function cmdWinMerit(): Promise<string> {
+  await openCommandWindow("define-merit", {
+    title: UI_TEXT.merit.title,
+    blurb: UI_TEXT.merit.blurb,
+    pickers: { grants: afflictionOptions },
+  });
+  return sys(UI_TEXT.merit.opened);
+}
+async function cmdWinArcanum(): Promise<string> {
+  await openCommandWindow("define-arcanum", {
+    title: UI_TEXT.arcanum.title,
+    blurb: UI_TEXT.arcanum.blurb,
+    pickers: { grants: afflictionOptions },
+  });
+  return sys(UI_TEXT.arcanum.opened);
+}
+CommandRouter.register("win-merit", cmdWinMerit, {
+  summary: "open a window to define a merit or flaw (its passive affliction included)",
+  inStory: false,
+});
+CommandRouter.register("win-arcanum", cmdWinArcanum, {
+  summary: "open a window to define an arcanum or taint",
+  inStory: false,
 });
 
 // --- AFFLICTION WINDOWS --------------------------------------------------------
@@ -17636,11 +17970,14 @@ async function init(): Promise<{ setupMessage: string | null }> {
   // A SECOND registry, because Arcana are a second category - not merits with
   // a different `kind`. Two cards, two lists, two sets of verbs.
   const arcana = await ArcanumRegistry.loadFromLorebook();
+  // The chronicle's own Talents/Skills/Knowledges, cached so every consumer can
+  // ask "is this a Knowledge?" synchronously - a roll cannot await the lorebook.
+  const abilities = await AbilityCategories.loadFromLorebook();
   const configs = await reloadAllConfigStores();
   const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
   const seededClock = await StoryClock.seedDefault();        // the story clock (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; custom arcana/taints: ${arcana}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; custom arcana/taints: ${arcana}; abilities filed: ${abilities}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

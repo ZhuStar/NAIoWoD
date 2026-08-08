@@ -212,6 +212,36 @@ CommandRouter.register("win-table", cmdWinTable, {
   summary: "open a window to define a success table",
 });
 
+// --- MERIT / ARCANUM WINDOWS --------------------------------------------------
+// Both are define-* specs rendered as forms, so every knob added to the verb
+// appears here for free. The `grants` field gets a picker over the afflictions
+// the chronicle already defines - and typing a NEW name is still valid, because
+// define-merit will define that affliction as it goes.
+async function cmdWinMerit(): Promise<string> {
+  await openCommandWindow("define-merit", {
+    title: UI_TEXT.merit.title,
+    blurb: UI_TEXT.merit.blurb,
+    pickers: { grants: afflictionOptions },
+  });
+  return sys(UI_TEXT.merit.opened);
+}
+async function cmdWinArcanum(): Promise<string> {
+  await openCommandWindow("define-arcanum", {
+    title: UI_TEXT.arcanum.title,
+    blurb: UI_TEXT.arcanum.blurb,
+    pickers: { grants: afflictionOptions },
+  });
+  return sys(UI_TEXT.arcanum.opened);
+}
+CommandRouter.register("win-merit", cmdWinMerit, {
+  summary: "open a window to define a merit or flaw (its passive affliction included)",
+  inStory: false,
+});
+CommandRouter.register("win-arcanum", cmdWinArcanum, {
+  summary: "open a window to define an arcanum or taint",
+  inStory: false,
+});
+
 // --- AFFLICTION WINDOWS --------------------------------------------------------
 // The defined afflictions, as picker options (description shown when present).
 const afflictionOptions = async (): Promise<PickerOption[]> =>

@@ -145,7 +145,33 @@ context before generation (`markCtxSkip` / `processContextBuilt`).
 
 ---
 
-## 7. A contest is a FIELD, not two sides
+## 7. A trait has a KIND and a CATEGORY
+
+```
+kind      attribute · ability · background · virtue · discipline · trait · pool
+category  physical/social/mental   (Attributes - a fixed nine, so it is a RULE)
+          talent/skill/knowledge   (Abilities  - the CHRONICLE's lists)
+```
+
+- `traitCategoryOf(name)` is **synchronous**, because its callers are: a passive
+  gated on "any Knowledge" is judged inside a roll, and a roll must not await the
+  lorebook (§9). `AbilityCategories` caches the three lists at `init()` and falls
+  back to the shipped ones when nothing has been loaded.
+- **Both spellings are accepted** — `knowledge` and `knowledges` — because a card
+  writes the plural and a pick reads the singular (`singularCategory`).
+- A trait with **no** category (a Background, a Discipline, a pool) answers
+  `undefined`. That is a real answer, not a miss.
+- **A field the card READER does not know does not exist.** A definition is
+  written to its lorebook card and read back from it, so adding a field to
+  `MeritFlawDef` without teaching `ownedPowerFromCard` silently drops it on the
+  round-trip. `grants` was lost exactly this way.
+- **An auto-created affliction gets no `tags`.** A tag is something a ROLL
+  carries; one nobody wrote a modifier for is reported as `[unknown tag: …]` on
+  every roll the character makes.
+
+---
+
+## 8. A contest is a FIELD, not two sides
 
 `compareField(mode, entrants[])` is the primitive; `compareRolls(mode, a, b)` is
 the case where the field has two, implemented in terms of it so there is ONE
@@ -165,7 +191,7 @@ adjudication.
 
 ---
 
-## 8. What crosses a wire
+## 9. What crosses a wire
 
 `api.v1.messaging` **serializes**. Only plain data survives.
 
@@ -184,7 +210,7 @@ post office relays *afterwards* — a correctness choice, not a performance one.
 
 ---
 
-## 9. Performance — count awaits, not milliseconds
+## 10. Performance — count awaits, not milliseconds
 
 CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
@@ -205,7 +231,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 10. Policies that look like bugs but are not
+## 11. Policies that look like bugs but are not
 
 - **Advisory, not enforced.** Everything creation-side reports and lets the
   Storyteller decide. `[[creation]]`, `[[budget]]`, constraints, instance caps —
@@ -224,7 +250,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 11. The verification battery — run ALL of it before pushing
+## 12. The verification battery — run ALL of it before pushing
 
 ```bash
 bun run build          # dist/naiowod.ts is COMMITTED; the suite checks it is in sync
@@ -245,13 +271,14 @@ Then a live `init()` smoke reproducing whatever the change was about.
 
 ---
 
-## 12. Where to look when something is wrong
+## 13. Where to look when something is wrong
 
 | Symptom | Look at |
 |---|---|
 | "the command doesn't exist" | The pasted `dist/naiowod.ts` is stale. Rebuild. |
 | A knob works but nobody can find it | It is missing from its `CommandSpec`. A knob the parser honours and the spec omits **does not exist** (`bd6bf50`). |
 | A listing is cluttering the AI's context | Its verb is not named `show-*`. §6. |
+| A definition loses a field when reloaded | The card reader does not know it. §7. |
 | A name resolves to 0 | `::` folding, or the hyphen rule, or a bare name not reaching the extension. |
 | A duration is wildly wrong | Seconds vs milliseconds. §1. |
 | An arcanum shows up as a merit (or vice versa) | Something asked the wrong registry, or a report walk used `ownedPowerInstances`. §5. |

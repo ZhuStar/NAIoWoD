@@ -16,7 +16,7 @@ every other read-only verb was renamed `show-*`, but this is the one command
 a player types before they know anything at all. `[[show-help]]` is an alias.
 
 ```
-[SYSTEM: 125 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
+[SYSTEM: 127 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -29,7 +29,7 @@ one reply in the story.
 
 ---
 
-## All 125 commands
+## All 127 commands
 
 | command | what it does |
 |---|---|
@@ -155,7 +155,9 @@ one reply in the story.
 | `turn` | advance the current scene by one turn (moves the clock by its turn length) |
 | `win-afflict` | open a window to apply an affliction (its binding slots appear on pick) |
 | `win-affliction` | open a window to define an affliction (then/mirror have pickers) |
+| `win-arcanum` | open a window to define an arcanum or taint |
 | `win-constraint` | open a window to define a constraint group |
+| `win-merit` | open a window to define a merit or flaw (its passive affliction included) |
 | `win-roll` | open a window to build, roll, and save rolls |
 | `win-table` | open a window to define a success table |
 
@@ -718,7 +720,7 @@ define/replace an affliction (overlay; may shadow a built-in)
 define an arcanum or taint (writes the srd:arcana overlay)
 
 ```
-[[define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."] [in-story]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]]
+[[define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [param-from=physical|social|mental|talent|skill|knowledge] [grants=".."] [grants-mode=automatic|offered] [grants-togglable] [grants-orphan=".."] [description=".."] [in-story]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]]
 ```
 
 > per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list
@@ -737,13 +739,18 @@ define an arcanum or taint (writes the srd:arcana overlay)
 | `limit-per-kind` | named | And at most this many of a trait kind <br>*e.g.* `attribute:1` |
 | `max-from-trait` | named | Rating ceiling is this trait <br>*e.g.* `resolve` |
 | `passive` | named `literal` | Always-on ops, ";"-separated - BACKTICKS |
+| `param-from` | named `enum` | The param must be a trait of this category ("pick a Knowledge") — one of `physical`, `social`, `mental`, `talent`, `skill`, `knowledge` <br>*e.g.* `knowledge` |
+| `grants` | named | Affliction this applies when taken (defined for you if new) <br>*e.g.* `iron-willed` |
+| `grants-mode` | named `enum` | automatic = on as soon as it is taken; offered = it grants the ABILITY, [[invoke]] uses it — one of `automatic`, `offered` |
+| `grants-togglable` | named `bool` | The character may switch it off without losing the power |
+| `grants-orphan` | named | What happens to the affliction when the power is lost (default: immediately) <br>*e.g.* `immediately` |
 | `description` | named `literal` | Description - BACKTICKS |
 | `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
 **`[[help define-arcanum]]`** replies:
 
 ```
-[SYSTEM: define-arcanum - define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."] [in-story]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]
+[SYSTEM: define-arcanum - define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [param-from=physical|social|mental|talent|skill|knowledge] [grants=".."] [grants-mode=automatic|offered] [grants-togglable] [grants-orphan=".."] [description=".."] [in-story]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]
 ```
 
 ### `define-background`
@@ -799,7 +806,7 @@ define/replace a constraint group
 define a merit or flaw (writes the srd:merits-flaws overlay)
 
 ```
-[[define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`] [in-story]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]]
+[[define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [param-from=physical|social|mental|talent|skill|knowledge] [grants=".."] [grants-mode=automatic|offered] [grants-togglable] [grants-orphan=".."] [description=`<text>`] [in-story]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]]
 ```
 
 > kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]]
@@ -818,13 +825,18 @@ define a merit or flaw (writes the srd:merits-flaws overlay)
 | `limit-slots` | named `int` | How many instances may hold that rating (default 1) <br>*e.g.* `2` |
 | `limit-per-kind` | named | And at most this many of a trait kind <br>*e.g.* `attribute:1` |
 | `max-from-trait` | named | Rating ceiling is this trait ("no more purchases than his Resolve") <br>*e.g.* `resolve` |
+| `param-from` | named `enum` | The param must be a trait of this category ("pick a Knowledge") — one of `physical`, `social`, `mental`, `talent`, `skill`, `knowledge` <br>*e.g.* `knowledge` |
+| `grants` | named | Affliction this applies when taken (defined for you if new) <br>*e.g.* `iron-willed` |
+| `grants-mode` | named `enum` | automatic = on as soon as it is taken; offered = it grants the ABILITY, [[invoke]] uses it — one of `automatic`, `offered` |
+| `grants-togglable` | named `bool` | The character may switch it off without losing the power |
+| `grants-orphan` | named | What happens to the affliction when the power is lost (default: immediately) <br>*e.g.* `immediately` |
 | `description` | named `literal` | Rules text |
 | `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
 **`[[help define-merit]]`** replies:
 
 ```
-[SYSTEM: define-merit - define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`] [in-story]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]
+[SYSTEM: define-merit - define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [param-from=physical|social|mental|talent|skill|knowledge] [grants=".."] [grants-mode=automatic|offered] [grants-togglable] [grants-orphan=".."] [description=`<text>`] [in-story]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]
 ```
 
 ### `define-resource`
@@ -2816,6 +2828,24 @@ open a window to define an affliction (then/mirror have pickers)
 [SYSTEM: win-affliction - win-affliction [in-story]  (open a window to define an affliction (then/mirror have pickers))]
 ```
 
+### `win-arcanum`
+
+open a window to define an arcanum or taint
+
+```
+[[win-arcanum [in-story]]]
+```
+
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help win-arcanum]]`** replies:
+
+```
+[SYSTEM: win-arcanum - win-arcanum [in-story]  (open a window to define an arcanum or taint)]
+```
+
 ### `win-constraint`
 
 open a window to define a constraint group
@@ -2832,6 +2862,24 @@ open a window to define a constraint group
 
 ```
 [SYSTEM: win-constraint - win-constraint [in-story]  (open a window to define a constraint group)]
+```
+
+### `win-merit`
+
+open a window to define a merit or flaw (its passive affliction included)
+
+```
+[[win-merit [in-story]  (open a window to define a merit or flaw (its passive affliction included))]]
+```
+
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help win-merit]]`** replies:
+
+```
+[SYSTEM: win-merit - win-merit [in-story]  (open a window to define a merit or flaw (its passive affliction included))]
 ```
 
 ### `win-roll`

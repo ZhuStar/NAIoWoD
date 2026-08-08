@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `06bf156`** ("A contest is a
-> field, and writing the rulebook is not a story beat").
+> **Last synced with the code as of commit `49a4c57`** ("A trait knows what
+> kind of trait it is, and a merit can say what it turns on").
+> Prior: `06bf156` ("A contest is a field, and writing the rulebook is not a
+> story beat").
 > Prior: `147a55f` ("A flag with no value means yes, and in-story belongs to
 > every command").
 > Prior: `e63dec7` ("One way to look at anything: show-* verbs, seven scopes,
@@ -3783,6 +3785,63 @@ and `prefill` are mocked/available but not yet written.
     - The reply now NAMES the winner ("The Opposition wins by 2") rather than
       phrasing it from the actor's view ("loses by 2"), because with three in the
       field the actor's view is not enough to say who took it.
+
+
+76. **A trait knows what KIND of trait it is** (owner: *"Do we have a window to
+    define a merit? Simple merits should be able to define the passive affliction
+    they grant. Also, do we have Talents, Skills, and Knowledges separate in
+    character? Physical, Social, and Mental Attributes? We should. For one
+    because of the primary, secondary, and tertiary thing in budgets, but also
+    because an arcanum, merit or flaw, or something else entirely might say
+    something like 'pick a knowledge. You have so and so bonus in that
+    knowledge,' or 'All talents are blah blah.'"*).
+
+    Answers first: **no window** (win-constraint/table/affliction/afflict/roll
+    existed, no win-merit), **no `grants=`** (only the shipped built-ins could
+    apply an affliction), and the categories **existed as data but nothing could
+    ask**: `ATTRIBUTES` groups the nine, `Category` in core/traits.ts names all
+    six, `srd:abilities` holds three lists, and `categoryTraits()` in game.ts
+    used them - but only for the creation report, and only ASYNC.
+
+    - **`AbilityCategories`** caches the chronicle's three lists at `init()`,
+      because every consumer is SYNCHRONOUS: a passive gated on "any Knowledge"
+      is judged inside a roll and a roll must not await the lorebook.
+      Never-loaded falls back to the shipped lists (now `DEFAULT_TALENTS` etc.,
+      which the SRD seed itself is built from, so card and fallback cannot
+      drift). `traitCategoryOf(name)` is the one answer; `singularCategory`
+      accepts both spellings because a card writes "Knowledges" and a pick reads
+      "a Knowledge".
+    - **Three things can now name a category**, which is the whole ask:
+      `EffectOp.trait` (via `poolUsesTrait` - "-2 on every Knowledge" is ONE op,
+      not ten), `InstanceLimit.perKind` (via `traitKindsOf`, which returns kind
+      AND category, so `attribute:1` and `knowledge:1` both work), and the new
+      **`MeritFlawDef.paramFrom`** - "pick a Knowledge" refuses a Skill at take
+      time, names what the value actually is, LISTS the valid choices, and is
+      waivable like every creation-side check.
+    - **The sheet and the card group by category.** `[[show-sheet]]` reads
+      "Physical: … | Social: … | Mental: …" and "Talent: … | Skill: … |
+      Knowledge: …"; `characterToCard` nests Attributes and Abilities under their
+      category. **The reader takes EITHER shape** (a category is recognised by
+      name, and only when the value is a block, so a rating carrying `paid` or a
+      `specialty` is never mistaken for one), so a hand-written flat card still
+      loads. A trait no list names goes under **Other** rather than being
+      dropped.
+    - **`grants=` on define-merit / define-arcanum**, with `grants-mode`,
+      `grants-togglable`, `grants-orphan`. If the affliction does not exist it is
+      DEFINED as part of the same command - "a simple merit is one command, not
+      two" - and the reply says so. It gets **no tags**: a tag is something a
+      roll carries, and one nobody wrote a modifier for is reported as
+      `[unknown tag: …]` on every subsequent roll (caught in the live smoke).
+    - **`[[win-merit]]` and `[[win-arcanum]]`**, both `openCommandWindow` over
+      the define specs with a picker over the defined afflictions - so every knob
+      added to the verb appears in the form for free.
+
+    **THE BUG THIS PASS FOUND, worth an invariant:** `grants` was set on the def,
+    written to the lorebook card, and LOST on the way back, because
+    `ownedPowerFromCard` had never been taught to read it. A definition
+    round-trips through its card, so **a field the reader does not know does not
+    exist** - the same class of mistake as a knob missing from its CommandSpec.
+    Now in docs/invariants.md §7.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

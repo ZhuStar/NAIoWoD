@@ -25,7 +25,9 @@ import {
 import {
   RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, roadByName, ResourceDef,
   bloodForGeneration, MeritFlawDef, ArcanumDef, OwnedPowerDef, MeritFlawRequirements,
-  SRD_HEADER_MARKER, ALL_ATTRIBUTES,
+  SRD_HEADER_MARKER, ALL_ATTRIBUTES, ATTRIBUTE_CATEGORIES, ABILITY_CATEGORIES, AttributeCategory,
+  attributeCategoryOf, singularCategory, isTraitCategory,
+  DEFAULT_TALENTS, DEFAULT_SKILLS, DEFAULT_KNOWLEDGES,
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
   BackgroundDef, makeBackgroundDef, DEFAULT_BACKGROUNDS, grantsFromBackgrounds,
@@ -781,6 +783,12 @@ export function characterToCard(char: PlayableCharacter): CardMap {
     const bucket = (char[field] ?? {}) as Record<string, number>;
     const names = Object.keys(bucket);
     if (!names.length) continue;
+    // Attributes and Abilities are written UNDER THEIR CATEGORY, the way a
+    // sheet is laid out and the way the creation budget allocates them. Every
+    // other bucket is a flat list. The reader takes either shape, so a card
+    // hand-written flat still loads (characterFromCard walks nested blocks).
+    const grouped = field === "attributes" ? ATTRIBUTE_CATEGORIES
+      : field === "abilities" ? ABILITY_CATEGORIES : undefined;
     const block: CardMap = {};
     for (const name of names) {
       const label = displayTraitName(name);
@@ -807,7 +815,23 @@ export function characterToCard(char: PlayableCharacter): CardMap {
         block[label] = bucket[name];
       }
     }
-    card[key] = block;
+    if (!grouped) { card[key] = block; continue; }
+    // File each entry under its category; anything the chronicle's lists do not
+    // name goes under "other" rather than being dropped.
+    const byCategory: CardMap = {};
+    const filed = new Set<string>();
+    for (const category of grouped) {
+      const mine: CardMap = {};
+      for (const [label, value] of Object.entries(block)) {
+        if (!traitInCategory(label, category)) continue;
+        mine[label] = value; filed.add(label);
+      }
+      if (Object.keys(mine).length) byCategory[StringUtil.toTitleCase(category)] = mine;
+    }
+    const rest: CardMap = {};
+    for (const [label, value] of Object.entries(block)) if (!filed.has(label)) rest[label] = value;
+    if (Object.keys(rest).length) byCategory["Other"] = rest;
+    card[key] = byCategory;
   }
   // A specialty on a trait the sheet doesn't rate would be lost; keep it in its
   // own block rather than dropping the player's text.
@@ -871,7 +895,18 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
     const field = (BUCKET_SYNONYMS[rawKey.toLowerCase()] ?? rawKey) as keyof PlayableCharacter;
     if (!CHARACTER_BUCKETS.some(([f]) => f === field)) continue;
     const bucket = char[field] as Record<string, number>;
-    for (const [rawName, value] of Object.entries(asMap(block))) {
+    // EITHER SHAPE. Attributes/Abilities are written under their category, but
+    // a card hand-written flat must still load - and a category is recognised
+    // by NAME, so a trait that happens to be a map (a rating with `paid` or a
+    // `specialty` under it) is never mistaken for one.
+    const entries: Array<[string, CardValue | undefined]> = [];
+    for (const [rawKey, raw] of Object.entries(asMap(block))) {
+      const isCategory = (isTraitCategory(rawKey) || StringUtil.normalize(rawKey) === "other")
+        && asNumber(raw) === undefined && !Array.isArray(raw);
+      if (isCategory) entries.push(...Object.entries(asMap(raw)));
+      else entries.push([rawKey, raw]);
+    }
+    for (const [rawName, value] of entries) {
       const trait = StringUtil.normalize(rawName);
       // The key written more than once = more than one of that Background. The
       // slot takes the highest; every instance is kept with its note.
@@ -1223,6 +1258,83 @@ export function numericOn(char: PlayableCharacter, value: Numeric | undefined, f
 // chronicle that invents an Ability is believed; ALL_ATTRIBUTES catches an
 // Attribute the sheet has not rated yet. Undefined = the engine cannot say,
 // and the caller reports rather than guesses.
+// =============================================================================
+// WHAT CATEGORY IS THIS TRAIT? - the registry that makes "a Knowledge" sayable
+// -----------------------------------------------------------------------------
+// The Attributes are a fixed nine, so their category is a rule. The ABILITIES
+// are the chronicle's own three lists (srd:abilities), so they are cached here
+// from the lorebook at init - cached, because every consumer is SYNCHRONOUS: a
+// passive op gated on "any Talent" is judged inside a roll, and a roll cannot
+// await the lorebook (docs/invariants.md: count awaits, not milliseconds).
+//
+// Never loaded = the shipped lists, so tests and pure paths answer correctly
+// without a host.
+// =============================================================================
+export class AbilityCategories {
+  private static _of: Record<string, string[]> = {
+    talent: DEFAULT_TALENTS.map(n => StringUtil.normalize(n)),
+    skill: DEFAULT_SKILLS.map(n => StringUtil.normalize(n)),
+    knowledge: DEFAULT_KNOWLEDGES.map(n => StringUtil.normalize(n)),
+  };
+
+  static all(): Record<string, string[]> { return { ...AbilityCategories._of }; }
+  static namesIn(category: string): string[] { return [...(AbilityCategories._of[singularCategory(category)] ?? [])]; }
+  static categoryOf(name: string): string | undefined {
+    const key = StringUtil.normalize(name);
+    for (const [category, names] of Object.entries(AbilityCategories._of)) {
+      if (names.includes(key)) return category;
+    }
+    return undefined;
+  }
+  static reset(): void {
+    AbilityCategories._of = {
+      talent: DEFAULT_TALENTS.map(n => StringUtil.normalize(n)),
+      skill: DEFAULT_SKILLS.map(n => StringUtil.normalize(n)),
+      knowledge: DEFAULT_KNOWLEDGES.map(n => StringUtil.normalize(n)),
+    };
+  }
+  // The chronicle's own lists replace the shipped ones. An EMPTY list is kept
+  // empty on purpose: a chronicle with no Knowledges has no Knowledges.
+  static async loadFromLorebook(): Promise<number> {
+    const talents = await LorebookManager.allTalents();
+    const skills = await LorebookManager.allSkills();
+    const knowledges = await LorebookManager.allKnowledges();
+    // Nothing readable at all means the lorebook has not been seeded yet -
+    // keep the defaults rather than blanking every category.
+    if (!talents.length && !skills.length && !knowledges.length) return 0;
+    AbilityCategories._of = {
+      talent: talents.map(n => StringUtil.normalize(n)),
+      skill: skills.map(n => StringUtil.normalize(n)),
+      knowledge: knowledges.map(n => StringUtil.normalize(n)),
+    };
+    return talents.length + skills.length + knowledges.length;
+  }
+}
+
+// A trait's CATEGORY - physical/social/mental for an Attribute, talent/skill/
+// knowledge for an Ability - or undefined for a trait that has none (a
+// Background, a Discipline, a pool). This is what lets a definition say "pick a
+// Knowledge" and a passive say "every Talent".
+export function traitCategoryOf(name: string): string | undefined {
+  return attributeCategoryOf(name) ?? AbilityCategories.categoryOf(name);
+}
+
+// Does this trait belong to the named category? Accepts either spelling
+// ("knowledge" / "knowledges") and is false for a trait with no category.
+export function traitInCategory(name: string, category: string): boolean {
+  const want = singularCategory(category);
+  return traitCategoryOf(name) === want;
+}
+
+// Every trait the chronicle files under a category, whichever kind it is.
+export function traitsInCategory(category: string): string[] {
+  const want = singularCategory(category);
+  if ((ATTRIBUTE_CATEGORIES as readonly string[]).includes(want)) {
+    return ATTRIBUTES[want as AttributeCategory].map(n => StringUtil.normalize(n));
+  }
+  return AbilityCategories.namesIn(want);
+}
+
 export function traitKindOf(char: PlayableCharacter, name: string): string | undefined {
   const key = StringUtil.normalize(name);
   const buckets: Array<[string, Record<string, number>]> = [
@@ -1233,6 +1345,19 @@ export function traitKindOf(char: PlayableCharacter, name: string): string | und
   for (const [kind, bucket] of buckets) if (key in (bucket ?? {})) return kind;
   if (ALL_ATTRIBUTES.some(a => StringUtil.normalize(a) === key)) return "attribute";
   return undefined;
+}
+
+// The kind AND the category, which is what a `perKind` limit reads: "two
+// favoured traits may reach 3, at most one of them an Attribute" counts by
+// KIND, and "at most one of them a Knowledge" counts by CATEGORY. One walk
+// answers both, so a limit may be written either way.
+export function traitKindsOf(char: PlayableCharacter, name: string): string[] {
+  const out: string[] = [];
+  const kind = traitKindOf(char, name);
+  if (kind) out.push(kind);
+  const category = traitCategoryOf(name);
+  if (category) out.push(category);
+  return out;
 }
 
 // Everything this character's Backgrounds CONFER - the Talisman that is a place

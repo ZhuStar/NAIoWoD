@@ -169,4 +169,4 @@ for a chronicle that says otherwise.
 | a new persistent thing | a store class in `state.ts` over `ScopedStorage` |
 
 Then: tests in `test/system.test.ts`, update **`docs/memory.md` in the same
-commit**, and run the whole battery in `docs/invariants.md` §11.
+commit**, and run the whole battery in `docs/invariants.md` §12.

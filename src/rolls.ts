@@ -171,7 +171,10 @@ export interface ResolvedRoll {
   notes: string[];
 }
 
-export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}): ResolvedRoll {
+// `usedTags` are tags something OUTSIDE the modifier registry already acted on -
+// an affliction or a passive gated on them. They are not "unknown": reporting
+// them as such tells a player their tag did nothing when it did the whole job.
+export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier>; usedTags?: string[] } = {}): ResolvedRoll {
   const breakdown = parsePoolExpression(spec.pool, resolve);
   // Difficulty may be a plain number or an expression (a trait/calculation)
   // evaluated against the SAME resolver as the pool - e.g. "stamina+3".
@@ -185,7 +188,10 @@ export function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { over
   const unknownTags: string[] = [];
   for (const tag of spec.tags) {
     const mod = RollModifierRegistry.get(tag);
-    if (!mod) { unknownTags.push(tag); continue; }
+    if (!mod) {
+      if (!(opts.usedTags ?? []).includes(tag)) unknownTags.push(tag);
+      continue;
+    }
     appliedTags.push(tag);
     difficulty += mod.difficultyMod ?? 0;
     dice += mod.diceMod ?? 0;
@@ -243,7 +249,7 @@ export interface RollExecution {
 
 export function executeRoll(
   spec: RollSpec, resolve: TraitResolver,
-  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}
+  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier>; usedTags?: string[] } = {}
 ): RollExecution {
   const resolved = resolveSpec(spec, resolve, opts);
   if (resolved.impossible) return { resolved, result: null, met: false, outcome: "impossible" };

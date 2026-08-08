@@ -1949,6 +1949,35 @@ export interface PassiveGrant {
   togglable?: boolean;
   orphan?: string;           // what happens when it goes (default: immediately)
   note?: string;
+  // WHAT TO FILL THE AFFLICTION'S BINDINGS WITH. A shared affliction only earns
+  // its keep if the power granting it can say what it is ABOUT: Trait Affinity
+  // applies difficulty-modifier, and the trait it modifies is the instance's
+  // own parameter. Values may be literals or one of two references:
+  //   $param   - the owning instance's parameter (trait-affinity::melee -> melee)
+  //   $rating  - the rating/points it was taken at
+  // Absent bindings are simply not filled, which for an optional gate means
+  // "no gate" (see afflictionOpsOf).
+  binds?: Record<string, string>;
+  // The affliction's LEVEL - its magnitude. `$rating` is the usual answer: a
+  // Merit taken at 2 applies its affliction at 2.
+  level?: string;
+}
+// Resolve a grant's binds/level against the instance that carries it. Pure.
+export function grantBindings(grant: PassiveGrant, ctx: { param?: string; rating?: number }): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [slot, raw] of Object.entries(grant.binds ?? {})) {
+    const v = raw === "$param" ? ctx.param
+      : raw === "$rating" ? (ctx.rating === undefined ? undefined : String(ctx.rating))
+        : raw;
+    if (v !== undefined && v !== "") out[StringUtil.normalize(slot)] = v;
+  }
+  return out;
+}
+export function grantLevel(grant: PassiveGrant, ctx: { rating?: number }): number | undefined {
+  if (!grant.level) return undefined;
+  if (grant.level === "$rating") return ctx.rating;
+  const n = parseInt(grant.level, 10);
+  return Number.isNaN(n) ? undefined : n;
 }
 export function grantIsAutomatic(g: PassiveGrant): boolean { return (g.mode ?? "automatic") === "automatic"; }
 
@@ -2390,10 +2419,37 @@ export const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
   ...Object.entries(FELLOWSHIPS).flatMap(([id, f]) => exclusiveDefs("fellowship", id, f.name)),
 ];
 
+// THE ONE EVERY RATED MERIT WANTS. A book writes "-2 difficulty on Drive, but
+// only for a dangerous manoeuvre" and "-1 per level on the trait you chose" and
+// "-1 on all Talents" - three sentences that are one rule with different gates.
+//
+// ONE affliction, SIGNED. Not a bonus/penalty pair: in this system a LOWER
+// difficulty is better, so a "difficulty bonus" would carry a negative number
+// and the name would fight the sign at every reading. `-2` means two easier and
+// `+2` means two harder, and the reports say "easier"/"harder" so nobody has to
+// hold the convention in their head.
+//
+// The tag gate is a FIELD, not a second affliction: `trait` and `tags` are two
+// independent optional conditions on the same op, and splitting them would
+// double the surface to say the same thing.
+export const DIFFICULTY_MODIFIER = "difficulty-modifier";
+export const DIFFICULTY_MODIFIER_AFFLICTION: AfflictionDef = {
+  name: DIFFICULTY_MODIFIER,
+  description: "Rolls using a named trait are easier or harder. `trait` is the trait or CATEGORY it "
+    + "applies to (melee, knowledge, all); `tags` narrows it to rolls carrying a tag (reckless); "
+    + "the level is how many steps, negative for easier.",
+  bindings: ["trait"],
+  apply: [{ op: "difficulty", amount: -1, trait: "$trait", target: "$tags" }],
+};
+
 export const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
+  DIFFICULTY_MODIFIER_AFFLICTION,
   { name: "potent", description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it).", tags: ["potent"] },
   { name: "fortified", description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can.", tags: ["fortified"] },
-  { name: "trait-aptitude", description: "An arcanum sharpens one trait: -1 difficulty per level on rolls whose pool uses it.", tags: ["trait-aptitude"] },
+  // @deprecated The label Trait Affinity used to apply. Kept so a character
+  // afflicted with it before difficulty-modifier existed still reads; nothing
+  // grants it any more.
+  { name: "trait-aptitude", description: "@deprecated - superseded by difficulty-modifier, which does the same thing for any merit.", tags: ["trait-aptitude"] },
   { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
 ];
 
@@ -2410,8 +2466,14 @@ export const DEFAULT_ARCANA: ArcanumDef[] = [
   {
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
-    passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
-    grants: { afflicts: "trait-aptitude" },
+    // NO `passive` OF ITS OWN. "Rolls using this trait are easier by so much"
+    // is not Trait Affinity's rule - it is a rule Trait Affinity USES, and so
+    // can any other merit, flaw, spell or botched roll. The effect lives in the
+    // affliction it applies; keeping a passive here too would double it.
+    //
+    // It also buys something a passive cannot have: the state can be lifted,
+    // toggled, given an expiry, or inflicted by something that is not a merit.
+    grants: { afflicts: DIFFICULTY_MODIFIER, binds: { trait: "$param" }, level: "$rating" },
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
       + "([[take-arcanum trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
       + "Abilities; every other trait caps at 2.",
@@ -2621,6 +2683,20 @@ export interface AfflictionDef {
   scalesWith?: string;          // the trait/Background whose rating selects tiers
   tiers?: AfflictionTier[];     // cumulative benefits by rating
   requiresAwakened?: boolean;   // tiers apply only to Awakened characters
+  // WHAT IT DOES WHILE IT IS ON. Until now an affliction could only carry ops
+  // through `tiers`, which need a rating to scale against - so an affliction
+  // was a LABEL, and the mechanism lived on whatever granted it. A Merit's
+  // "-1 difficulty" was written on the Merit, so no second Merit could reuse it.
+  //
+  // These are the same EffectOps a passive uses, with the same two gates
+  // (`trait` names a trait OR a category; `target` names a roll tag), plus one
+  // thing a passive cannot have: **`$binding` substitution**. `trait: "$trait"`
+  // reads the instance's own binding, so ONE definition serves "-1 on Melee",
+  // "-2 on Drive when reckless" and "-1 on every Knowledge".
+  //
+  // Amounts scale by the instance's `level`, so one definition also serves the
+  // 1/2/3 ladder every rated Merit is written on.
+  apply?: EffectOp[];
 }
 
 // What a scaled affliction grants at `rating`: every tier at or below it, with
@@ -2654,7 +2730,38 @@ export function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string
   if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
   if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
   if (parts.requiresAwakened) def.requiresAwakened = true;
+  // A field the card reader does not know does not exist (docs/invariants.md
+  // §7): definitions round-trip through their lorebook card.
+  const apply = Array.isArray(parts.apply) ? parts.apply : effectOpsFromCard(parts.apply as CardValue | undefined);
+  if (apply.length) def.apply = apply;
   return def;
+}
+
+// An affliction INSTANCE's ops: `$binding` substituted from what it was applied
+// with, amounts scaled by its level. The twin of passiveOpsOf - same idea, and
+// the reason ONE definition can serve every rated Merit in the book.
+//
+// A `$binding` nobody filled DROPS the gate rather than the op: an instance
+// applied with no `tags` is "on every roll using that trait", which is what
+// leaving it out means.
+export function afflictionOpsOf(def: AfflictionDef, bindings: Record<string, string>, level: number): EffectOp[] {
+  const sub = (v: string | undefined): string | undefined => {
+    if (!v?.startsWith("$")) return v;
+    const bound = bindings[StringUtil.normalize(v.slice(1))];
+    return bound && bound.trim() ? bound : undefined;
+  };
+  return (def.apply ?? []).map(op => {
+    const out: EffectOp = { ...op };
+    const trait = sub(op.trait);
+    const target = sub(op.target);
+    if (trait === undefined) delete out.trait; else out.trait = trait;
+    if (target === undefined) delete out.target; else out.target = target;
+    // "all" is how an instance says "no trait gate at all" without leaving the
+    // binding empty - a def may REQUIRE the binding and still mean everything.
+    if (out.trait && StringUtil.normalize(out.trait) === "all") delete out.trait;
+    if (op.amount !== undefined) out.amount = op.amount * Math.max(1, level);
+    return out;
+  });
 }
 
 // "1 turn" / "2 scenes" / "until eye-contact-breaks" / "instant" -> the effect

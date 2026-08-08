@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `49a4c57`** ("A trait knows what
-> kind of trait it is, and a merit can say what it turns on").
+> **Last synced with the code as of commit `281ea88`** ("One affliction most
+> merits want, and it is signed").
+> Prior: `49a4c57` ("A trait knows what kind of trait it is, and a merit can say
+> what it turns on").
 > Prior: `06bf156` ("A contest is a field, and writing the rulebook is not a
 > story beat").
 > Prior: `147a55f` ("A flag with no value means yes, and in-story belongs to
@@ -3842,6 +3844,59 @@ and `prefill` are mocked/available but not yet written.
     round-trips through its card, so **a field the reader does not know does not
     exist** - the same class of mistake as a knob missing from its CommandSpec.
     Now in docs/invariants.md §7.
+
+
+77. **One affliction most merits want** (owner: *"Do we have the affliction that
+    Trait Affinity grants? It could be reused for so many merits and flaws. ...
+    This should be called 'difficulty-bonus' (is that a good name? The opposite
+    would be 'difficulty-penalty'. We could perhaps have a 'difficulty-modifier'
+    and mean both?) ... I think it would be another affliction if it requires a
+    tag, right? ... Maybe this could be a difficulty-bonus-tags? I don't know.
+    I'm making this distinction because I'm thinking about how we might cache all
+    of this, but maybe it's not necessary. Maybe it could just be a field in
+    difficulty-bonus/modifier. Yes, it would work the same way."*).
+
+    **The affliction existed and was WORTHLESS to reuse.** `trait-aptitude` was a
+    name, a description and a tag - nothing else. The actual "-1 per level" lived
+    in Trait Affinity's own `passive` EffectOp, so a second merit reusing the
+    affliction would have inherited a label and no rule. `AfflictionDef` could
+    only carry ops through `tiers`, which need a rating to scale against.
+
+    - **`AfflictionDef.apply: EffectOp[]`** - what it DOES while it is on, judged
+      by the same two gates a passive uses. Plus the two things a passive cannot
+      have: **`$binding` substitution** (`trait: "$trait"` reads the instance's
+      own binding) and **`ActiveAffliction.level`** scaling. Those two are the
+      whole reason ONE definition serves every rated merit in the book.
+    - **HIS NAMING QUESTION, answered: ONE signed thing.** Not a
+      bonus/penalty pair. In this system a LOWER difficulty is better, so
+      "difficulty-bonus" would carry a NEGATIVE number and the name would fight
+      the sign at every reading. `difficulty-modifier`, signed, and the reports
+      say "(easier)"/"(harder)" so nobody holds the convention in their head.
+    - **HIS TAG QUESTION, answered as he guessed: a FIELD.** `trait` and `tags`
+      are two independent optional conditions on the same op; a second affliction
+      would double the surface to say the same thing. And it is not a caching
+      concern - the gates are evaluated per roll from data already in hand.
+      Crack Driver is `trait=ride tags=reckless level=2`, and it works.
+    - **A CATEGORY in the trait gate** (§7.76) means "-1 on all Talents" is one
+      instance; `trait=all` is how an instance says "no trait gate at all".
+    - **Trait Affinity now USES the rule instead of owning one.** Its `passive`
+      is GONE - keeping both would apply the effect twice, which the suite caught
+      immediately - and `PassiveGrant` gained **`binds`/`level`** (`$param`,
+      `$rating`) so the grant fills the affliction from the instance that carries
+      it. It buys what a passive never had: the effect is a STATE, so it can be
+      lifted, toggled, given an expiry, or inflicted by a spell or a botch.
+    - **INSTANCE IDENTITY had to change.** `CharacterAfflictions.afflict`
+      replaced by def NAME, which for a shared affliction means the second merit
+      to apply it silently deletes the first one's effect. An instance is now
+      def + bindings + `from` (`instanceKey`); an affliction with neither
+      binding nor source is still one-of, exactly as before.
+    - **A consumed tag is not "unknown".** `resolveSpec` gained `usedTags`:
+      reporting `[unknown tag: reckless]` on the very roll where an affliction
+      gated on `reckless` tells the player their tag did nothing when it did the
+      whole job.
+    - `[[define-affliction apply=...]]` (same shorthand as a merit passive) and
+      `[[afflict ... level=N]]` make all of it authorable; the card reader learned
+      `apply` too, per §7's invariant.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

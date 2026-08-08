@@ -46,7 +46,7 @@ import {
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
   GRANT_SOURCES, sourceDrawsOnPurse, describeCreationGrant,
   makeOrphanPolicy, describeOrphanPolicy, ORPHAN_IMMEDIATELY, ORPHAN_KEEP,
-  PASSIVE_AFFLICTIONS, budgetOfKind, SYSTEM, grantIsAutomatic, registerSystemHandlers,
+  PASSIVE_AFFLICTIONS, budgetOfKind, SYSTEM, grantIsAutomatic, registerSystemHandlers, afflictionOpsOf,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolvePowerInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -4675,10 +4675,23 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(resolvePowerInstance("nope:melee", lookup)).toBeUndefined();       // unknown base
   });
 
-  test("passiveOpsOf: $param substitution + points scaling", () => {
-    const def = ArcanumRegistry.get("trait-affinity")!;
-    const ops = passiveOpsOf(def, "melee", 2);
-    expect(ops).toEqual([{ op: "difficulty", trait: "melee", amount: -2 }]);
+  test("afflictionOpsOf: $binding substitution + level scaling (the shared mechanism)", () => {
+    // Trait Affinity no longer carries an op of its own: it APPLIES
+    // difficulty-modifier, and that is what any other merit can do too.
+    const affinity = ArcanumRegistry.get("trait-affinity")!;
+    expect(affinity.passive).toBeUndefined();
+    expect(affinity.grants).toEqual({
+      afflicts: "difficulty-modifier", binds: { trait: "$param" }, level: "$rating",
+    });
+    const def = AfflictionRegistry.get("difficulty-modifier")!;
+    expect(afflictionOpsOf(def, { trait: "melee" }, 2))
+      .toEqual([{ op: "difficulty", trait: "melee", amount: -2 }]);
+    // An unfilled $binding DROPS the gate rather than the op: no tags given
+    // means "on every roll using that trait".
+    expect(afflictionOpsOf(def, { trait: "drive", tags: "reckless" }, 2))
+      .toEqual([{ op: "difficulty", trait: "drive", target: "reckless", amount: -2 }]);
+    // ...and "all" is how an instance says "no trait gate at all".
+    expect(afflictionOpsOf(def, { trait: "all" }, 1)).toEqual([{ op: "difficulty", amount: -1 }]);
   });
 
   test("Trait Affinity lowers difficulty when the POOL uses the trait - and only then", async () => {
@@ -4689,7 +4702,9 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     await CommandRouter.route("take-arcanum trait-affinity::melee 2");
     const hit = await CommandRouter.route("roll dexterity+melee", { rng: seqRng([6]) });
     expect(hit).toContain("vs diff 4");
-    expect(hit).toContain("trait-affinity (melee): difficulty -2");
+    // The note names the SOURCE, not the shared affliction, and says which way
+    // difficulty runs - a minus is EASIER.
+    expect(hit).toContain("trait-affinity:melee: difficulty -2 (easier)");
     const miss = await CommandRouter.route("roll strength+brawl", { rng: seqRng([6, 6]) });
     expect(miss).toContain("vs diff 6");
     // The seam: melee ONLY in the difficulty expression is NOT "using" it.
@@ -7443,12 +7458,14 @@ describe("passive powers apply themselves", () => {
     expect(ArcanumRegistry.all().every(d => d.kind === "arcanum" || d.kind === "taint")).toBe(true);
     expect(aptitude.kind).toBe("arcanum");
     expect(budgetOfKind(aptitude)).toBe("arcana");
-    expect(aptitude.grants?.afflicts).toBe("trait-aptitude");
+    // It grants the SHARED affliction - the effect is a rule it uses, not a
+    // rule it owns, so any other merit or flaw can apply the same one.
+    expect(aptitude.grants?.afflicts).toBe("difficulty-modifier");
     // A Discipline carries the same field, for the same reason.
     expect(disciplineDef("potence")!.grants?.afflicts).toBe("potent");
     expect(disciplineDef("fortitude")!.grants?.afflicts).toBe("fortified");
     expect(PASSIVE_AFFLICTIONS.map(a => a.name))
-      .toEqual(["potent", "fortified", "trait-aptitude", "trait-expansion"]);
+      .toEqual(["difficulty-modifier", "potent", "fortified", "trait-aptitude", "trait-expansion"]);
   });
 
   test("rating Potence applies its affliction, and the reply says so", async () => {
@@ -7468,11 +7485,17 @@ describe("passive powers apply themselves", () => {
   test("taking an arcanum applies its passive; dropping it takes it back", async () => {
     await CommandRouter.route('create-playable name="Duke" templates=demon');
     const took = await CommandRouter.route("take-arcanum trait-affinity::melee 2");
-    expect(took).toContain("Trait Aptitude is now applied");
+    // The grant fills the affliction's bindings from the INSTANCE: which trait,
+    // and at what level - so one shared definition serves every rating.
+    expect(took).toContain("Difficulty Modifier is now applied (melee)");
     expect(took).toContain("from arcanum:trait-affinity:melee");
-    expect(await CommandRouter.route("afflictions")).toContain("trait-aptitude");
+    const active = (await CharacterAfflictions.list("Duke"))
+      .find(a => a.def === "difficulty-modifier")!;
+    expect(active.bindings["trait"]).toBe("melee");
+    expect(active.level).toBe(2);
+    expect(await CommandRouter.route("show-affliction")).toContain("difficulty-modifier");
     expect(await CommandRouter.route("drop-arcanum trait-affinity::melee"))
-      .toContain("Trait Aptitude ends with");
+      .toContain("Difficulty Modifier ends with");
   });
 
   test("an application is ANNOUNCED on the bus", async () => {
@@ -7936,5 +7959,97 @@ describe("define-merit grants= (the passive affliction) and the merit windows", 
     expect(keys).toContain("grants");
     expect(keys).toContain("grants-mode");
     expect(keys).toContain("param-from");
+  });
+});
+
+// =============================================================================
+// difficulty-modifier: ONE affliction every rated merit can reuse (§7.77)
+// =============================================================================
+describe("difficulty-modifier - the shared affliction", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset(); AbilityCategories.reset();
+    resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("set-trait ride 3");
+    await CommandRouter.route("set-trait occult 3");
+    await CommandRouter.route("set-trait melee 3");
+  });
+
+  test("ONE signed thing, not a bonus/penalty pair - and the note says which way", async () => {
+    await CommandRouter.route("afflict difficulty-modifier trait=melee level=2");
+    const easier = await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) });
+    expect(easier).toContain("vs diff 4");                 // 6 - 2
+    expect(easier).toContain("difficulty -2 (easier)");
+    // The SAME affliction, the other way: a signed level, no second definition.
+    await CommandRouter.route("lift difficulty-modifier");
+    await CommandRouter.route("define-affliction name=`cursed` apply=`difficulty +1 if=$trait` bindings=trait");
+    await CommandRouter.route("afflict cursed trait=melee level=2");
+    const harder = await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) });
+    expect(harder).toContain("vs diff 8");                 // 6 + 2
+    expect(harder).toContain("difficulty +2 (harder)");
+  });
+
+  test("the tag gate is a FIELD, not a second affliction (the Crack Driver case)", async () => {
+    await CommandRouter.route("afflict difficulty-modifier trait=ride tags=reckless level=2 from=`merit:crack-rider`");
+    // Only when the manoeuvre is reckless.
+    expect(await CommandRouter.route("roll ride", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+    const reckless = await CommandRouter.route("roll ride tags=reckless", { rng: seqRng([6, 6, 6]) });
+    expect(reckless).toContain("vs diff 4");
+    expect(reckless).toContain("crack-rider: difficulty -2 (easier)");
+    // A tag an affliction CONSUMED is not "unknown" - saying so would tell the
+    // player their tag did nothing when it did the whole job.
+    expect(reckless).not.toContain("unknown tag");
+    expect(await CommandRouter.route("roll ride tags=nonsense", { rng: seqRng([6, 6, 6]) }))
+      .toContain("unknown tag: nonsense");
+  });
+
+  test("the trait gate takes a CATEGORY, so `all Talents` is one instance", async () => {
+    await CommandRouter.route("afflict difficulty-modifier trait=knowledge level=1 from=`merit:scholar`");
+    expect(await CommandRouter.route("roll occult", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
+    expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+    // ...and `all` means no trait gate at all.
+    await CommandRouter.route("lift difficulty-modifier");
+    await CommandRouter.route("afflict difficulty-modifier trait=all level=1 from=`merit:blessed`");
+    expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
+  });
+
+  test("a SHARED affliction is held once per source - one merit cannot delete another's", async () => {
+    await CommandRouter.route("afflict difficulty-modifier trait=ride tags=reckless level=2 from=`merit:crack-rider`");
+    await CommandRouter.route("afflict difficulty-modifier trait=knowledge level=1 from=`merit:scholar`");
+    const active = await CharacterAfflictions.list("Rok");
+    expect(active.filter(a => a.def === "difficulty-modifier").length).toBe(2);
+    // Both still bite, each through its own gate.
+    expect(await CommandRouter.route("roll occult", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
+    expect(await CommandRouter.route("roll ride tags=reckless", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
+    // An affliction with no bindings and no source is still one-of, as before.
+    await CommandRouter.route("afflict potent");
+    await CommandRouter.route("afflict potent");
+    expect((await CharacterAfflictions.list("Rok")).filter(a => a.def === "potent").length).toBe(1);
+  });
+
+  test("Trait Affinity USES the shared rule rather than owning one of its own", async () => {
+    await CommandRouter.route('create-playable name="Duke" templates=demon');
+    await CommandRouter.route('play name="Duke"');       // Rok already exists
+    await CommandRouter.route("set-trait melee 3");
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    // The grant fills the affliction from the instance: which trait, what level.
+    const active = (await CharacterAfflictions.list("Duke")).find(a => a.def === "difficulty-modifier")!;
+    expect(active.bindings["trait"]).toBe("melee");
+    expect(active.level).toBe(2);
+    expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
+    // ...and because the effect is a STATE, it can be switched off - which a
+    // passive op could never be.
+    await CommandRouter.route("lift difficulty-modifier");
+    expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+  });
+
+  test("any merit can reuse it - that is the whole point", async () => {
+    await CommandRouter.route(
+      'define-merit name=`Duellist` points=`1,2,3` param=trait param-from=skill grants=difficulty-modifier');
+    // The definition reads as doing something, because it says what the
+    // affliction it applies DOES.
+    expect(await CommandRouter.route("show-merit duellist")).toContain('applies "difficulty-modifier"');
+    expect(MeritFlawRegistry.get("duellist")!.grants!.afflicts).toBe("difficulty-modifier");
   });
 });

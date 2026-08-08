@@ -2394,7 +2394,10 @@ interface ResolvedRoll {
   notes: string[];
 }
 
-function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}): ResolvedRoll {
+// `usedTags` are tags something OUTSIDE the modifier registry already acted on -
+// an affliction or a passive gated on them. They are not "unknown": reporting
+// them as such tells a player their tag did nothing when it did the whole job.
+function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier>; usedTags?: string[] } = {}): ResolvedRoll {
   const breakdown = parsePoolExpression(spec.pool, resolve);
   // Difficulty may be a plain number or an expression (a trait/calculation)
   // evaluated against the SAME resolver as the pool - e.g. "stamina+3".
@@ -2408,7 +2411,10 @@ function resolveSpec(spec: RollSpec, resolve: TraitResolver, opts: { overDifficu
   const unknownTags: string[] = [];
   for (const tag of spec.tags) {
     const mod = RollModifierRegistry.get(tag);
-    if (!mod) { unknownTags.push(tag); continue; }
+    if (!mod) {
+      if (!(opts.usedTags ?? []).includes(tag)) unknownTags.push(tag);
+      continue;
+    }
     appliedTags.push(tag);
     difficulty += mod.difficultyMod ?? 0;
     dice += mod.diceMod ?? 0;
@@ -2466,7 +2472,7 @@ interface RollExecution {
 
 function executeRoll(
   spec: RollSpec, resolve: TraitResolver,
-  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier> } = {}
+  opts: { rng?: Rng; overDifficulty?: OverDifficultyPolicy; extra?: Partial<RollModifier>; usedTags?: string[] } = {}
 ): RollExecution {
   const resolved = resolveSpec(spec, resolve, opts);
   if (resolved.impossible) return { resolved, result: null, met: false, outcome: "impossible" };
@@ -4927,6 +4933,35 @@ interface PassiveGrant {
   togglable?: boolean;
   orphan?: string;           // what happens when it goes (default: immediately)
   note?: string;
+  // WHAT TO FILL THE AFFLICTION'S BINDINGS WITH. A shared affliction only earns
+  // its keep if the power granting it can say what it is ABOUT: Trait Affinity
+  // applies difficulty-modifier, and the trait it modifies is the instance's
+  // own parameter. Values may be literals or one of two references:
+  //   $param   - the owning instance's parameter (trait-affinity::melee -> melee)
+  //   $rating  - the rating/points it was taken at
+  // Absent bindings are simply not filled, which for an optional gate means
+  // "no gate" (see afflictionOpsOf).
+  binds?: Record<string, string>;
+  // The affliction's LEVEL - its magnitude. `$rating` is the usual answer: a
+  // Merit taken at 2 applies its affliction at 2.
+  level?: string;
+}
+// Resolve a grant's binds/level against the instance that carries it. Pure.
+function grantBindings(grant: PassiveGrant, ctx: { param?: string; rating?: number }): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [slot, raw] of Object.entries(grant.binds ?? {})) {
+    const v = raw === "$param" ? ctx.param
+      : raw === "$rating" ? (ctx.rating === undefined ? undefined : String(ctx.rating))
+        : raw;
+    if (v !== undefined && v !== "") out[StringUtil.normalize(slot)] = v;
+  }
+  return out;
+}
+function grantLevel(grant: PassiveGrant, ctx: { rating?: number }): number | undefined {
+  if (!grant.level) return undefined;
+  if (grant.level === "$rating") return ctx.rating;
+  const n = parseInt(grant.level, 10);
+  return Number.isNaN(n) ? undefined : n;
 }
 function grantIsAutomatic(g: PassiveGrant): boolean { return (g.mode ?? "automatic") === "automatic"; }
 
@@ -5368,10 +5403,37 @@ const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
   ...Object.entries(FELLOWSHIPS).flatMap(([id, f]) => exclusiveDefs("fellowship", id, f.name)),
 ];
 
+// THE ONE EVERY RATED MERIT WANTS. A book writes "-2 difficulty on Drive, but
+// only for a dangerous manoeuvre" and "-1 per level on the trait you chose" and
+// "-1 on all Talents" - three sentences that are one rule with different gates.
+//
+// ONE affliction, SIGNED. Not a bonus/penalty pair: in this system a LOWER
+// difficulty is better, so a "difficulty bonus" would carry a negative number
+// and the name would fight the sign at every reading. `-2` means two easier and
+// `+2` means two harder, and the reports say "easier"/"harder" so nobody has to
+// hold the convention in their head.
+//
+// The tag gate is a FIELD, not a second affliction: `trait` and `tags` are two
+// independent optional conditions on the same op, and splitting them would
+// double the surface to say the same thing.
+const DIFFICULTY_MODIFIER = "difficulty-modifier";
+const DIFFICULTY_MODIFIER_AFFLICTION: AfflictionDef = {
+  name: DIFFICULTY_MODIFIER,
+  description: "Rolls using a named trait are easier or harder. `trait` is the trait or CATEGORY it "
+    + "applies to (melee, knowledge, all); `tags` narrows it to rolls carrying a tag (reckless); "
+    + "the level is how many steps, negative for easier.",
+  bindings: ["trait"],
+  apply: [{ op: "difficulty", amount: -1, trait: "$trait", target: "$tags" }],
+};
+
 const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
+  DIFFICULTY_MODIFIER_AFFLICTION,
   { name: "potent", description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it).", tags: ["potent"] },
   { name: "fortified", description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can.", tags: ["fortified"] },
-  { name: "trait-aptitude", description: "An arcanum sharpens one trait: -1 difficulty per level on rolls whose pool uses it.", tags: ["trait-aptitude"] },
+  // @deprecated The label Trait Affinity used to apply. Kept so a character
+  // afflicted with it before difficulty-modifier existed still reads; nothing
+  // grants it any more.
+  { name: "trait-aptitude", description: "@deprecated - superseded by difficulty-modifier, which does the same thing for any merit.", tags: ["trait-aptitude"] },
   { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
 ];
 
@@ -5388,8 +5450,14 @@ const DEFAULT_ARCANA: ArcanumDef[] = [
   {
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
-    passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
-    grants: { afflicts: "trait-aptitude" },
+    // NO `passive` OF ITS OWN. "Rolls using this trait are easier by so much"
+    // is not Trait Affinity's rule - it is a rule Trait Affinity USES, and so
+    // can any other merit, flaw, spell or botched roll. The effect lives in the
+    // affliction it applies; keeping a passive here too would double it.
+    //
+    // It also buys something a passive cannot have: the state can be lifted,
+    // toggled, given an expiry, or inflicted by something that is not a merit.
+    grants: { afflicts: DIFFICULTY_MODIFIER, binds: { trait: "$param" }, level: "$rating" },
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
       + "([[take-arcanum trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
       + "Abilities; every other trait caps at 2.",
@@ -5599,6 +5667,20 @@ interface AfflictionDef {
   scalesWith?: string;          // the trait/Background whose rating selects tiers
   tiers?: AfflictionTier[];     // cumulative benefits by rating
   requiresAwakened?: boolean;   // tiers apply only to Awakened characters
+  // WHAT IT DOES WHILE IT IS ON. Until now an affliction could only carry ops
+  // through `tiers`, which need a rating to scale against - so an affliction
+  // was a LABEL, and the mechanism lived on whatever granted it. A Merit's
+  // "-1 difficulty" was written on the Merit, so no second Merit could reuse it.
+  //
+  // These are the same EffectOps a passive uses, with the same two gates
+  // (`trait` names a trait OR a category; `target` names a roll tag), plus one
+  // thing a passive cannot have: **`$binding` substitution**. `trait: "$trait"`
+  // reads the instance's own binding, so ONE definition serves "-1 on Melee",
+  // "-2 on Drive when reckless" and "-1 on every Knowledge".
+  //
+  // Amounts scale by the instance's `level`, so one definition also serves the
+  // 1/2/3 ladder every rated Merit is written on.
+  apply?: EffectOp[];
 }
 
 // What a scaled affliction grants at `rating`: every tier at or below it, with
@@ -5632,7 +5714,38 @@ function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): Af
   if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
   if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
   if (parts.requiresAwakened) def.requiresAwakened = true;
+  // A field the card reader does not know does not exist (docs/invariants.md
+  // §7): definitions round-trip through their lorebook card.
+  const apply = Array.isArray(parts.apply) ? parts.apply : effectOpsFromCard(parts.apply as CardValue | undefined);
+  if (apply.length) def.apply = apply;
   return def;
+}
+
+// An affliction INSTANCE's ops: `$binding` substituted from what it was applied
+// with, amounts scaled by its level. The twin of passiveOpsOf - same idea, and
+// the reason ONE definition can serve every rated Merit in the book.
+//
+// A `$binding` nobody filled DROPS the gate rather than the op: an instance
+// applied with no `tags` is "on every roll using that trait", which is what
+// leaving it out means.
+function afflictionOpsOf(def: AfflictionDef, bindings: Record<string, string>, level: number): EffectOp[] {
+  const sub = (v: string | undefined): string | undefined => {
+    if (!v?.startsWith("$")) return v;
+    const bound = bindings[StringUtil.normalize(v.slice(1))];
+    return bound && bound.trim() ? bound : undefined;
+  };
+  return (def.apply ?? []).map(op => {
+    const out: EffectOp = { ...op };
+    const trait = sub(op.trait);
+    const target = sub(op.target);
+    if (trait === undefined) delete out.trait; else out.trait = trait;
+    if (target === undefined) delete out.target; else out.target = target;
+    // "all" is how an instance says "no trait gate at all" without leaving the
+    // binding empty - a def may REQUIRE the binding and still mean everything.
+    if (out.trait && StringUtil.normalize(out.trait) === "all") delete out.trait;
+    if (op.amount !== undefined) out.amount = op.amount * Math.max(1, level);
+    return out;
+  });
 }
 
 // "1 turn" / "2 scenes" / "until eye-contact-breaks" / "instant" -> the effect
@@ -9546,6 +9659,11 @@ interface ActiveAffliction {
   // The story epoch it began, which is what an "until X" condition measures
   // against (`full-moons`, `elapsed-days` are counted from here).
   at?: number;
+  // HOW MUCH of it. Every rated Merit in the book is written on a 1/2/3 ladder,
+  // so the magnitude belongs to the INSTANCE, not the definition: one
+  // `difficulty-modifier` serves "-1 per level on the trait you chose" at any
+  // level. Absent = 1.
+  level?: number;
 }
 
 // A COOLDOWN is an expiry pointed the other way: not "when does this end" but
@@ -9581,15 +9699,48 @@ class CharacterCooldowns {
 }
 
 class CharacterAfflictions {
+  // Every op the character's ACTIVE afflictions contribute, substituted and
+  // scaled. The twin of passiveOpsFor: a merit's passive and an affliction's
+  // ops are the same currency and fold into a roll through the same gates.
+  static async ops(subject: string): Promise<Array<{ from: string; ops: EffectOp[] }>> {
+    const out: Array<{ from: string; ops: EffectOp[] }> = [];
+    for (const active of await CharacterAfflictions.list(subject)) {
+      const def = AfflictionRegistry.get(active.def);
+      if (!def?.apply?.length) continue;
+      const ops = afflictionOpsOf(def, active.bindings ?? {}, active.level ?? 1);
+      // Name the SOURCE when there is one: a roll note saying
+      // "difficulty-modifier" tells a player nothing, and "trait-affinity:melee"
+      // tells them everything. The `<kind>:` prefix is engine bookkeeping.
+      if (!ops.length) continue;
+      const source = active.from ? active.from.replace(/^(merit|flaw|arcanum|taint|discipline):/, "") : "";
+      out.push({ from: source || active.def, ops });
+    }
+    return out;
+  }
+
   private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `affl:${StringUtil.normalize(name)}`; }
 
   static async list(name: string): Promise<ActiveAffliction[]> {
     return ((await CharacterAfflictions._storage.get(CharacterAfflictions._key(name))) as ActiveAffliction[] | undefined) ?? [];
   }
-  // Add or replace (same def) one affliction.
+  // WHAT MAKES TWO INSTANCES THE SAME ONE. Not the definition alone: a SHARED
+  // affliction is held several times over - difficulty-modifier once per merit
+  // that applies it - and replacing by name would let a second merit silently
+  // delete the first one's effect. An instance is the definition, what it is
+  // ABOUT (its bindings) and where it came FROM.
+  //
+  // For an affliction with no bindings and no source (potent, in-sanctum) this
+  // is exactly the old behaviour: one of it, replaced in place.
+  static instanceKey(affl: ActiveAffliction): string {
+    const bindings = Object.entries(affl.bindings ?? {})
+      .map(([k, v]) => `${k}=${v}`).sort().join(",");
+    return `${affl.def}|${affl.from ?? ""}|${bindings}`;
+  }
+  // Add or replace (the same instance) one affliction.
   static async afflict(name: string, affl: ActiveAffliction): Promise<void> {
-    const rest = (await CharacterAfflictions.list(name)).filter(c => c.def !== affl.def);
+    const key = CharacterAfflictions.instanceKey(affl);
+    const rest = (await CharacterAfflictions.list(name)).filter(c => CharacterAfflictions.instanceKey(c) !== key);
     await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), [...rest, affl]);
   }
   // Replace the whole list (the tick writes once rather than per affliction).
@@ -10359,7 +10510,7 @@ function extractRollArgs(cmd: ParsedCommand, offset: number): Partial<RollSpec> 
 // (wod:config:rolls -> min-difficulty) reaches all of them. A spec that names
 // its own floor keeps it; when neither is set there is no floor at all beyond
 // the engine's hard minimum of 2.
-function runRoll(spec: RollSpec, resolve: TraitResolver, opts: { rng?: Rng; extra?: Partial<RollModifier> } = {}): RollExecution {
+function runRoll(spec: RollSpec, resolve: TraitResolver, opts: { rng?: Rng; extra?: Partial<RollModifier>; usedTags?: string[] } = {}): RollExecution {
   const floor = spec.minDifficulty ?? rollFloorFrom(RollRulesConfig.current());
   return executeRoll(floor === undefined ? spec : { ...spec, minDifficulty: floor }, resolve, opts);
 }
@@ -10674,12 +10825,24 @@ function poolUsesTrait(poolTraits: string[], gate: string): boolean {
 // actionTag-gated ops iff the roll carries the tag; unmet gates skip SILENTLY
 // (passives must not spam every unrelated roll). "enhance" is env-level and
 // ignored here.
-function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: string[], resourceAt?: (n: string) => number): { extra: Partial<RollModifier>; notes: string[] } {
+function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: string[], resourceAt?: (n: string) => number, afflicted: Array<{ from: string; ops: EffectOp[] }> = []): { extra: Partial<RollModifier>; notes: string[]; usedTags: string[] } {
   const extra: Partial<RollModifier> = {};
   const notes: string[] = [];
-  // Both categories - a die is a die, and Trait Affinity is an arcanum.
-  for (const inst of ownedPowerInstances(char)) {
-    for (const op of passiveOpsOf(inst.def, inst.param, inst.points)) {
+  // Tags these ops gated on: they DID something, so the roll must not go on to
+  // call them unknown.
+  const usedTags: string[] = [];
+  // Both categories - a die is a die, and Trait Affinity is an arcanum - plus
+  // whatever is currently ON him: a merit's passive and an affliction's ops are
+  // the same currency, judged by the same two gates.
+  const sources: Array<{ label: string; ops: EffectOp[] }> = [
+    ...ownedPowerInstances(char).map(inst => ({
+      label: `${StringUtil.normalize(inst.def.name)}${inst.param ? ` (${inst.param})` : ""}`,
+      ops: passiveOpsOf(inst.def, inst.param, inst.points),
+    })),
+    ...afflicted.map(a => ({ label: a.from, ops: a.ops })),
+  ];
+  for (const inst of sources) {
+    for (const op of inst.ops) {
       const kind = op.op.toLowerCase();
       const patch = (n: number): Partial<RollModifier> => rollOpPatch(kind, n) ?? {};
       if (!rollOpPatch(kind, 0)) continue;
@@ -10692,11 +10855,14 @@ function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: s
       if (op.requiresResource && (resourceAt?.(op.requiresResource.resource) ?? 0) < op.requiresResource.atLeast) continue;
       const amount = op.amount ?? 1;
       mergeRollExtra(extra, patch(amount));
-      const who = `${StringUtil.normalize(inst.def.name)}${inst.param ? ` (${inst.param})` : ""}`;
-      notes.push(`${who}: ${kind} ${amount > 0 ? "+" : ""}${amount}`);
+      // Difficulty runs backwards - a MINUS is easier - so the note says which,
+      // and nobody has to hold the convention in their head.
+      const sense = kind === "difficulty" ? ` (${amount < 0 ? "easier" : "harder"})` : "";
+      notes.push(`${inst.label}: ${kind} ${amount > 0 ? "+" : ""}${amount}${sense}`);
+      if (op.target) usedTags.push(StringUtil.normalize(op.target));
     }
   }
-  return { extra, notes };
+  return { extra, notes, usedTags };
 }
 
 // Fold the character's ACTIVE afflictions' rating-scaled tiers into a roll -
@@ -10834,12 +11000,12 @@ async function execCharacterRoll(char: PlayableCharacter, spec: RollSpec, ctx: C
   const tagged = await withAfflictionTags(char.name, spec);
   const poolTraits = poolTraitsOf(char, tagged.pool);
   const env = await characterRollEnv(char);
-  const passive = passiveRollExtra(char, poolTraits, tagged.tags, env.resourceAt);
+  const passive = passiveRollExtra(char, poolTraits, tagged.tags, env.resourceAt, await CharacterAfflictions.ops(char.name));
   const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, tagged.tags);
   const extra = mergeRollExtra({ ...(seed ?? {}) }, passive.extra, place.extra);
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, tagged.diceMod, extra);
-  const exec = runRoll(tagged, env.resolver, { rng: ctx.rng, extra });
+  const exec = runRoll(tagged, env.resolver, { rng: ctx.rng, extra, usedTags: passive.usedTags });
   const notes = [...passive.notes, ...place.notes, env.penalty !== 0 ? `wound penalty ${env.penalty}` : "", shieldNote].filter(Boolean);
   return { exec, notes };
 }
@@ -10925,14 +11091,14 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
   // wound penalty (negative) comes off the dice pool, owned passives (Trait
   // Affinity et al.) fold in, and at most one specialty grants its die.
   const env = await characterRollEnv(char);
-  const passive = passiveRollExtra(char, poolTraits, spec.tags, env.resourceAt);
+  const passive = passiveRollExtra(char, poolTraits, spec.tags, env.resourceAt, await CharacterAfflictions.ops(char.name));
   const place = afflictionRollExtra(char, await CharacterAfflictions.list(char.name), poolTraits, spec.tags);
   const specialtyRef = cmd.named["specialty"] ?? savedSpecialty;
   const specialty = specialtyRef ? resolveSpecialty(char, specialtyRef, poolTraits) : { note: "" };
   const extra = mergeRollExtra({ ...(spend.extra ?? {}) }, passive.extra, place.extra, specialty.extra ?? {});
   if (env.penalty !== 0) extra.diceMod = (extra.diceMod ?? 0) + env.penalty;
   const shieldNote = applyPenaltyShield(env.rollAs, poolTraits, spec.diceMod, extra);
-  const exec = runRoll(spec, env.resolver, { rng: ctx.rng, extra });
+  const exec = runRoll(spec, env.resolver, { rng: ctx.rng, extra, usedTags: passive.usedTags });
   // The roll HAPPENED, so anything counting rolls counts this one - after the
   // dice, because a charge buys the roll it was spent on.
   const charges = await spendAfflictionCharges(char.name, spec.tags, poolTraits);
@@ -12988,14 +13154,14 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
       const env = await characterRollEnv(c);
       const spec = await withAfflictionTags(c.name, base);
       // Owned passives (Trait Affinity et al.) apply to contest sides too.
-      const passive = passiveRollExtra(c, poolTraitsOf(c, spec.pool), spec.tags);
+      const passive = passiveRollExtra(c, poolTraitsOf(c, spec.pool), spec.tags, undefined, await CharacterAfflictions.ops(c.name));
       const merged: Partial<RollModifier> = { ...(extra ?? {}) };
       if (passive.extra.difficultyMod) merged.difficultyMod = (merged.difficultyMod ?? 0) + passive.extra.difficultyMod;
       if (passive.extra.diceMod) merged.diceMod = (merged.diceMod ?? 0) + passive.extra.diceMod;
       if (passive.extra.autoSuccesses) merged.autoSuccesses = (merged.autoSuccesses ?? 0) + passive.extra.autoSuccesses;
       if (passive.extra.nAgain !== undefined) merged.nAgain = Math.min(merged.nAgain ?? 10, passive.extra.nAgain);
       if (env.penalty !== 0) merged.diceMod = (merged.diceMod ?? 0) + env.penalty;
-      return runRoll(spec, env.resolver, { rng, extra: merged });
+      return runRoll(spec, env.resolver, { rng, extra: merged, usedTags: passive.usedTags });
     }
   }
   return runRoll(base, () => 0, { rng, extra });
@@ -14592,6 +14758,14 @@ async function ownedPowerInfo<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
   if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
   if (family.requires) bits.push(`needs the "${family.requires}" capability ([[attune]])`);
   if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
+  if (def.grants) {
+    // Its effect may live in the affliction it applies rather than in a passive
+    // of its own - say what that affliction DOES, or the definition reads empty.
+    const applied = AfflictionRegistry.get(def.grants.afflicts);
+    const does = (applied?.apply ?? []).map(describePassiveOp).join("; ");
+    bits.push(`applies "${def.grants.afflicts}"${does ? ` - ${does}` : ""}`
+      + `${grantIsAutomatic(def.grants) ? "" : " when invoked"}${def.grants.togglable ? ", togglable" : ""}`);
+  }
   const note = def.passive?.some(o => !isRollOp(o))
     ? " Ops the engine has no interpreter for are recorded and surfaced for the Storyteller (immunities have no system to enforce them yet)."
     : "";
@@ -14669,7 +14843,8 @@ async function takeOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
   // Taking it turns it ON: the passive affliction is applied here, not by the
   // player remembering to. The reply says so.
   const granted = hit.def.grants
-    ? await applyPassiveGrant(StringUtil.normalize(char.name), hit.def.kind, key, hit.def.grants)
+    ? await applyPassiveGrant(StringUtil.normalize(char.name), hit.def.kind, key, hit.def.grants,
+        { param: hit.param, rating: points })
     : "";
   const passiveBits = passiveOpsOf(hit.def, hit.param, points).map(describePassiveOp);
   const purse = budgetOfKind(hit.def);
@@ -14868,7 +15043,7 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
 // Apply one definition to a subject: validate + resolve bindings, write the
 // instance, then fire the def's mirror onto the bound target. Shared by
 // afflict and advance. Returns the reply fragments or an error.
-async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string, cooldown?: AfflictionExpiry, orphan?: OrphanPolicy): Promise<{ lines?: string[]; error?: string }> {
+async function applyAffliction(subject: string, def: AfflictionDef, rawBindings: Record<string, string>, note?: string, expiry?: AfflictionExpiry, from?: string, cooldown?: AfflictionExpiry, orphan?: OrphanPolicy, level?: number): Promise<{ lines?: string[]; error?: string }> {
   const bindings: Record<string, string> = {};
   for (const slot of def.bindings ?? []) {
     const raw = rawBindings[slot];
@@ -14877,7 +15052,23 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
     if (r.error) return { error: r.error };
     bindings[slot] = r.value!;
   }
+  // A `$binding` an op reads but the def does not REQUIRE is optional: the tag
+  // gate on difficulty-modifier is exactly this - give `tags=` and the op only
+  // fires on rolls carrying it, leave it off and it fires on every roll using
+  // the trait. Taken verbatim: these are tags and traits, not character names.
+  for (const op of def.apply ?? []) {
+    for (const raw of [op.trait, op.target]) {
+      if (!raw?.startsWith("$")) continue;
+      const slot = StringUtil.normalize(raw.slice(1));
+      if (bindings[slot] !== undefined) continue;
+      const given = rawBindings[slot];
+      if (given?.trim()) bindings[slot] = StringUtil.normalize(given);
+    }
+  }
   const inst: ActiveAffliction = { def: def.name, bindings };
+  // The MAGNITUDE rides on the instance, so one definition serves the 1/2/3
+  // ladder every rated Merit is written on.
+  if (level !== undefined && level !== 1) inst.level = level;
   if (note) inst.note = note;
   // The expiry rides on the INSTANCE, not the def: the same affliction may be
   // three rolls long on one man and an hour long on another.
@@ -14986,12 +15177,14 @@ async function orphanAfflictions(subject: string, sourceKey: string): Promise<st
 //
 // Every application is ANNOUNCED on the bus (channel `affliction:applied`), so
 // a distributed engine's other scripts learn about it without being asked.
-async function applyPassiveGrant(subject: string, kind: string, key: string, grant: PassiveGrant): Promise<string> {
+async function applyPassiveGrant(subject: string, kind: string, key: string, grant: PassiveGrant, ctx: { param?: string; rating?: number } = {}): Promise<string> {
   // The command does NOT apply the affliction. It says a power was taken, and
   // the handler registered below decides what that means - which is the whole
   // difference between an event that announces and an event that causes.
+  // `ctx` is what the instance knows and the affliction needs: its parameter
+  // and the rating it was taken at.
   const event = await PostOffice.publish(SYSTEM.powerTaken, {
-    character: subject, kind, key: StringUtil.normalize(key), grant,
+    character: subject, kind, key: StringUtil.normalize(key), grant, ctx,
   });
   const said = (event.data as { said?: string }).said;
   return event.errors.length ? `⚠ ${event.errors.join("; ")}` : (said ?? "");
@@ -15019,7 +15212,7 @@ function registerSystemHandlers(): void {
 }
 
 const onPowerTaken: BusHandler = (event) => {
-  const d = event.data as { character: string; kind: string; key: string; grant: PassiveGrant; said?: string };
+  const d = event.data as { character: string; kind: string; key: string; grant: PassiveGrant; said?: string; ctx?: { param?: string; rating?: number } };
   event.pending.push((async () => {
     const def = AfflictionRegistry.get(d.grant.afflicts);
     if (!def) { event.errors.push(`"${d.grant.afflicts}" is not a defined affliction`); return; }
@@ -15030,10 +15223,13 @@ const onPowerTaken: BusHandler = (event) => {
       d.said = `${disp(def.name)} is now available - [[invoke ${def.name}]] to use it`;
       return;
     }
-    const r = await applyAffliction(d.character, def, {}, d.grant.note, undefined, from,
-      undefined, makeOrphanPolicy(d.grant.orphan ?? "immediately"));
+    const bindings = grantBindings(d.grant, d.ctx ?? {});
+    const level = grantLevel(d.grant, d.ctx ?? {});
+    const r = await applyAffliction(d.character, def, bindings, d.grant.note, undefined, from,
+      undefined, makeOrphanPolicy(d.grant.orphan ?? "immediately"), level);
     if (r.error) { event.errors.push(r.error); return; }
-    d.said = `${disp(def.name)} is now applied (from ${from}${d.grant.note ? ` - ${d.grant.note}` : ""})`
+    const about = Object.values(bindings).filter(Boolean);
+    d.said = `${disp(def.name)} is now applied${about.length ? ` (${about.join(", ")})` : ""} (from ${from}${d.grant.note ? ` - ${d.grant.note}` : ""})`
       + `${d.grant.togglable ? ` - [[toggle ${def.name}]] switches it off` : ""}`;
     // ...and the OUTSIDE world hears about it on a channel that does leave.
     await PostOffice.publish("affliction:applied", {
@@ -15106,6 +15302,14 @@ async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
   const durationRaw = cmd.named["duration"];
   const duration = parseAfflictionDuration(durationRaw);
   if (durationRaw && !duration) return sys(`Can't read duration "${durationRaw}" - use "1 turn", "2 scenes", "until <x>" or "instant".`);
+  // WHAT IT DOES WHILE IT IS ON - the same shorthand a merit's passive uses, so
+  // there is one grammar for "-2 difficulty when the pool uses drive".
+  let apply: EffectOp[] | undefined;
+  if (cmd.named["apply"]?.trim()) {
+    const ops = parsePassiveOps(cmd.named["apply"]);
+    if ("error" in ops) return sys(ops.error);
+    apply = ops;
+  }
   const def = makeAfflictionDef({
     name,
     description: cmd.named["description"],
@@ -15115,6 +15319,7 @@ async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
     mirror: cmd.named["mirror"],
     tags: (cmd.named["tags"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
     note: cmd.named["note"],
+    apply,
   });
   await AfflictionRegistry.put(def);
   return sys(`Defined affliction ${describeAfflictionDef(def)}.`);
@@ -15169,7 +15374,8 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
     const dur = parseDuration(orphan.seconds);
     if (!("error" in dur)) orphan = { ...orphan, seconds: String(dur.seconds + dur.months * 2_592_000) };
   }
-  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"], cooldown.value, orphan);
+  const level = intOrUndef(cmd.named["level"] ?? "");
+  const r = await applyAffliction(subject.name!, def, cmd.named, undefined, expiry.value, cmd.named["from"], cooldown.value, orphan, level);
   if (r.error) return sys(`${r.error}`);
   return sys(`${r.lines!.join("; ")}.`);
 }
@@ -15230,7 +15436,7 @@ async function cmdToggle(cmd: ParsedCommand): Promise<string> {
     return sys(`${disp(char.name)} switches ${disp(name)} OFF${r.alsoLifted ? ` (${r.alsoLifted})` : ""}. `
       + `${source ? `[[toggle ${name}]] switches it back on.` : ""}`);
   }
-  const said = await applyPassiveGrant(subject.name!, source!.kind, source!.key, source!.grant);
+  const said = await applyPassiveGrant(subject.name!, source!.kind, source!.key, source!.grant, source!.ctx);
   return sys(`${disp(char.name)} switches ${disp(name)} ON. ${said}`);
 }
 
@@ -15246,7 +15452,7 @@ async function cmdInvoke(cmd: ParsedCommand): Promise<string> {
     return sys(`Nothing ${disp(char.name)} has offers "${name}". [[show-merit]], [[show-arcanum]] and [[show-sheet]] show what he holds.`);
   }
   const said = await applyPassiveGrant(StringUtil.normalize(char.name), source.kind, source.key,
-    { ...source.grant, mode: "automatic" });
+    { ...source.grant, mode: "automatic" }, source.ctx);
   return sys(`${disp(char.name)} invokes ${disp(name)}. ${said}`);
 }
 
@@ -15255,15 +15461,19 @@ async function cmdInvoke(cmd: ParsedCommand): Promise<string> {
 // reports is the def's own, which is what makes the source key (`<kind>:<key>`)
 // match again when the power is dropped.
 function passiveSourceFor(char: PlayableCharacter, affliction: string):
-    { kind: string; key: string; grant: PassiveGrant } | undefined {
+    { kind: string; key: string; grant: PassiveGrant; ctx: { param?: string; rating?: number } } | undefined {
   for (const inst of ownedPowerInstances(char)) {
     if (inst.def.grants?.afflicts === affliction) {
-      return { kind: inst.def.kind, key: inst.key, grant: inst.def.grants };
+      // The instance's own parameter and rating go with it, so switching a
+      // passive back on restores THE SAME one - the right trait, at the right
+      // level - and not a bare copy of the definition.
+      return { kind: inst.def.kind, key: inst.key, grant: inst.def.grants,
+        ctx: { param: inst.param, rating: inst.points } };
     }
   }
   for (const [trait, rating] of Object.entries(char.disciplines ?? {})) {
     const d = rating > 0 ? disciplineDef(trait) : undefined;
-    if (d?.grants?.afflicts === affliction) return { kind: "discipline", key: trait, grant: d.grants };
+    if (d?.grants?.afflicts === affliction) return { kind: "discipline", key: trait, grant: d.grants, ctx: { rating } };
   }
   return undefined;
 }
@@ -15547,7 +15757,7 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
   const disc = group === "disciplines" ? disciplineDef(trait) : undefined;
   if (disc?.grants) {
     const who = StringUtil.normalize(char.name);
-    if (rating > 0 && (had ?? 0) <= 0) passiveNote = ` ${await applyPassiveGrant(who, "discipline", trait, disc.grants)}.`;
+    if (rating > 0 && (had ?? 0) <= 0) passiveNote = ` ${await applyPassiveGrant(who, "discipline", trait, disc.grants, { rating })}.`;
     else if (rating <= 0 && (had ?? 0) > 0) {
       const lost = await PostOffice.publish(SYSTEM.powerLost, { character: who, kind: "discipline", key: trait });
       const said = (lost.data as { said?: string }).said;
@@ -16472,6 +16682,9 @@ CommandRouter.register("define-affliction", cmdDefineAffliction, {
     { key: "duration", kind: "named", hint: '"1 turn|until x|instant"', desc: "Advisory duration" },
     { key: "then", kind: "named", desc: "Successor affliction ([[advance]] applies it)" },
     { key: "mirror", kind: "named", desc: "Affliction the bound target gains, bound back" },
+    { key: "apply", kind: "named", type: "literal",
+      hint: "`<op>[:<tag>] [+N|-N] [if=<trait|category>]`", example: "difficulty -2 if=drive on=reckless",
+      desc: 'What it DOES while it is on - the same shorthand a merit passive uses; "$slot" reads a binding' },
     { key: "tags", kind: "named", hint: '"a,b"', desc: "Tags joined to the afflicted character's rolls" },
     { key: "description", kind: "named", type: "literal", desc: "Description" },
     { key: "note", kind: "named", desc: "Note (optional)" },
@@ -16523,6 +16736,8 @@ CommandRouter.register("afflict", cmdAfflict, {
   params: [
     { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
+    { key: "level", kind: "named", type: "int", example: "2",
+      desc: "How MANY steps - its ops scale by this (the 1/2/3 ladder every rated merit is written on)" },
     ...EXPIRY_PARAMS,
   ],
 });

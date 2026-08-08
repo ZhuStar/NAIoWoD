@@ -2077,6 +2077,50 @@ Knowledge and take −1 difficulty on it" had no way to be written down.
   is read. A card hand-written flat still loads, and a trait the chronicle's
   lists do not name is filed under *Other* rather than dropped.
 
+### `difficulty-modifier` — the one affliction most merits want
+
+A book writes *"−1 per level on the trait you chose"*, *"−2 on Drive, but only
+for a dangerous manoeuvre"* and *"−1 on all Talents"*. Three sentences, one rule
+with different gates — so there is **one** affliction, and merits *use* it rather
+than each carrying a copy:
+
+```
+[[afflict difficulty-modifier trait=melee level=2]]           −2 on Melee
+[[afflict difficulty-modifier trait=ride tags=reckless level=2]]   …only when reckless
+[[afflict difficulty-modifier trait=knowledge level=1]]       −1 on every Knowledge
+[[afflict difficulty-modifier trait=all level=1]]             −1 on everything
+```
+
+**One signed thing, not a bonus/penalty pair.** In this system a *lower*
+difficulty is better, so a "difficulty bonus" would carry a negative number and
+the name would fight the sign at every reading. `-2` is two easier, `+2` is two
+harder, and the roll says which so nobody has to hold the convention in their
+head:
+
+```
+Rok — Ride (3) vs diff 4 … — crack-rider: difficulty -2 (easier)
+```
+
+**The tag gate is a field, not a second affliction** — `trait` and `tags` are two
+independent optional conditions on the same op, so splitting them would double
+the surface to say the same thing. Leave `tags` off and it applies to every roll
+using the trait.
+
+**A shared affliction is held once per source.** An instance is its definition +
+what it is *about* + where it came *from*, so one merit can never silently
+delete another's. (An affliction with no bindings and no source — `potent`,
+`in-sanctum` — is still one-of, exactly as before.)
+
+**Trait Affinity now *uses* this rule instead of owning one.** It carries no
+passive of its own; it applies `difficulty-modifier`, binding the trait from its
+own parameter and the level from its rating. That buys something a passive never
+had: the effect is a **state**, so it can be lifted, toggled, given an expiry, or
+inflicted by a spell or a botched roll.
+
+Any affliction can now carry ops (`[[define-affliction apply=…]]`), and
+`$binding` in an op reads the instance's own binding — which is what lets one
+definition serve every rated merit in the book.
+
 ### A merit can define what it turns on
 
 `grants=` names the affliction a merit applies when taken — the same machinery

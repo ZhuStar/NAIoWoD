@@ -34,7 +34,7 @@ import {
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
   EffectOp, resolvePowerInstance, passiveOpsOf,
   Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
-  AfflictionExpiry, rollSpendsCharge, expiryElapsed, OrphanPolicy,
+  AfflictionExpiry, rollSpendsCharge, expiryElapsed, OrphanPolicy, afflictionOpsOf,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, applyTemplateDefs,
   BudgetEntry, BudgetDef,
 } from "./rules";
@@ -2384,6 +2384,11 @@ export interface ActiveAffliction {
   // The story epoch it began, which is what an "until X" condition measures
   // against (`full-moons`, `elapsed-days` are counted from here).
   at?: number;
+  // HOW MUCH of it. Every rated Merit in the book is written on a 1/2/3 ladder,
+  // so the magnitude belongs to the INSTANCE, not the definition: one
+  // `difficulty-modifier` serves "-1 per level on the trait you chose" at any
+  // level. Absent = 1.
+  level?: number;
 }
 
 // A COOLDOWN is an expiry pointed the other way: not "when does this end" but
@@ -2419,15 +2424,48 @@ export class CharacterCooldowns {
 }
 
 export class CharacterAfflictions {
+  // Every op the character's ACTIVE afflictions contribute, substituted and
+  // scaled. The twin of passiveOpsFor: a merit's passive and an affliction's
+  // ops are the same currency and fold into a roll through the same gates.
+  static async ops(subject: string): Promise<Array<{ from: string; ops: EffectOp[] }>> {
+    const out: Array<{ from: string; ops: EffectOp[] }> = [];
+    for (const active of await CharacterAfflictions.list(subject)) {
+      const def = AfflictionRegistry.get(active.def);
+      if (!def?.apply?.length) continue;
+      const ops = afflictionOpsOf(def, active.bindings ?? {}, active.level ?? 1);
+      // Name the SOURCE when there is one: a roll note saying
+      // "difficulty-modifier" tells a player nothing, and "trait-affinity:melee"
+      // tells them everything. The `<kind>:` prefix is engine bookkeeping.
+      if (!ops.length) continue;
+      const source = active.from ? active.from.replace(/^(merit|flaw|arcanum|taint|discipline):/, "") : "";
+      out.push({ from: source || active.def, ops });
+    }
+    return out;
+  }
+
   private static _storage = new ScopedStorage();
   private static _key(name: string): string { return `affl:${StringUtil.normalize(name)}`; }
 
   static async list(name: string): Promise<ActiveAffliction[]> {
     return ((await CharacterAfflictions._storage.get(CharacterAfflictions._key(name))) as ActiveAffliction[] | undefined) ?? [];
   }
-  // Add or replace (same def) one affliction.
+  // WHAT MAKES TWO INSTANCES THE SAME ONE. Not the definition alone: a SHARED
+  // affliction is held several times over - difficulty-modifier once per merit
+  // that applies it - and replacing by name would let a second merit silently
+  // delete the first one's effect. An instance is the definition, what it is
+  // ABOUT (its bindings) and where it came FROM.
+  //
+  // For an affliction with no bindings and no source (potent, in-sanctum) this
+  // is exactly the old behaviour: one of it, replaced in place.
+  static instanceKey(affl: ActiveAffliction): string {
+    const bindings = Object.entries(affl.bindings ?? {})
+      .map(([k, v]) => `${k}=${v}`).sort().join(",");
+    return `${affl.def}|${affl.from ?? ""}|${bindings}`;
+  }
+  // Add or replace (the same instance) one affliction.
   static async afflict(name: string, affl: ActiveAffliction): Promise<void> {
-    const rest = (await CharacterAfflictions.list(name)).filter(c => c.def !== affl.def);
+    const key = CharacterAfflictions.instanceKey(affl);
+    const rest = (await CharacterAfflictions.list(name)).filter(c => CharacterAfflictions.instanceKey(c) !== key);
     await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), [...rest, affl]);
   }
   // Replace the whole list (the tick writes once rather than per affliction).

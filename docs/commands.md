@@ -299,7 +299,7 @@ move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons app
 apply an affliction; extra <slot>=<name|@alias> args fill its bindings
 
 ```
-[[afflict <affliction> [on=<name|@alias>] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story] [<key>=<value> ...]]]
+[[afflict <affliction> [on=<name|@alias>] [level=N] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story] [<key>=<value> ...]]]
 ```
 
 > mirror defs also afflict the bound target
@@ -308,6 +308,7 @@ apply an affliction; extra <slot>=<name|@alias> args fill its bindings
 |---|---|---|
 | `affliction` | positional **required** | `<affliction>` |
 | `on` | named | Who (default: the current character) |
+| `level` | named `int` | How MANY steps - its ops scale by this (the 1/2/3 ladder every rated merit is written on) <br>*e.g.* `2` |
 | `rolls` | named `int` | Ends after this many MATCHING rolls |
 | `with-tags` | named | Only rolls carrying all of these count |
 | `without-tags` | named | Rolls carrying any of these do not count |
@@ -331,7 +332,7 @@ apply an affliction; extra <slot>=<name|@alias> args fill its bindings
 **`[[help afflict]]`** replies:
 
 ```
-[SYSTEM: afflict - afflict <affliction> [on=<name|@alias>] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story] [<key>=<value> ...]  (apply an affliction; extra <slot>=<name|@alias> args fill its bindings; mirror defs also afflict the bound target)]
+[SYSTEM: afflict - afflict <affliction> [on=<name|@alias>] [level=N] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story] [<key>=<value> ...]  (apply an affliction; extra <slot>=<name|@alias> args fill its bindings; mirror defs also afflict the bound target)]
 ```
 
 ### `alias`
@@ -694,7 +695,7 @@ mark damage on the current character
 define/replace an affliction (overlay; may shadow a built-in)
 
 ```
-[[define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]]
+[[define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [apply=`<op>[:<tag>] [+N|-N] [if=<trait|category>]`] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]]
 ```
 
 | argument | kind | meaning |
@@ -704,6 +705,7 @@ define/replace an affliction (overlay; may shadow a built-in)
 | `duration` | named | Advisory duration |
 | `then` | named | Successor affliction ([[advance]] applies it) |
 | `mirror` | named | Affliction the bound target gains, bound back |
+| `apply` | named `literal` | What it DOES while it is on - the same shorthand a merit passive uses; "$slot" reads a binding <br>*e.g.* `difficulty -2 if=drive on=reckless` |
 | `tags` | named | Tags joined to the afflicted character's rolls |
 | `description` | named `literal` | Description |
 | `note` | named | Note (optional) |
@@ -712,7 +714,7 @@ define/replace an affliction (overlay; may shadow a built-in)
 **`[[help define-affliction]]`** replies:
 
 ```
-[SYSTEM: define-affliction - define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]
+[SYSTEM: define-affliction - define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [apply=`<op>[:<tag>] [+N|-N] [if=<trait|category>]`] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]
 ```
 
 ### `define-arcanum`

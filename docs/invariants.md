@@ -171,7 +171,33 @@ category  physical/social/mental   (Attributes - a fixed nine, so it is a RULE)
 
 ---
 
-## 8. A contest is a FIELD, not two sides
+## 8. An affliction is a MECHANISM, not a label
+
+`AfflictionDef.apply` holds EffectOps that run while it is on — the same ops and
+the same two gates a merit's passive uses (`trait` names a trait OR a category,
+`target` names a roll tag), plus **`$binding` substitution** and **instance
+`level` scaling**. That is what makes one definition reusable by every merit.
+
+- **Difficulty is SIGNED and there is ONE of it.** `-2` is two *easier*. Never
+  add a "difficulty-bonus"/"difficulty-penalty" pair: lower is better here, so a
+  "bonus" would carry a negative number and every reader would have to remember
+  it. Reports say "(easier)"/"(harder)".
+- **An instance's identity is def + bindings + `from`**, not the def alone
+  (`CharacterAfflictions.instanceKey`). A SHARED affliction is held once per
+  source; replacing by name alone let one merit delete another's effect.
+- **A `$binding` nobody filled DROPS its gate, not the op.** No `tags` given
+  means "every roll using that trait" — which is what leaving it out means.
+  `trait=all` is how an instance says "no trait gate at all".
+- **Do not put the same effect in a passive AND its granted affliction** — it
+  applies twice. If a def grants an affliction that does the work, the def
+  carries no passive of its own (Trait Affinity).
+- **A tag something else consumed is not `unknown`.** `resolveSpec`'s `usedTags`
+  exists so a roll does not tell a player their tag did nothing when an
+  affliction gated on it.
+
+---
+
+## 9. A contest is a FIELD, not two sides
 
 `compareField(mode, entrants[])` is the primitive; `compareRolls(mode, a, b)` is
 the case where the field has two, implemented in terms of it so there is ONE
@@ -191,7 +217,7 @@ adjudication.
 
 ---
 
-## 9. What crosses a wire
+## 10. What crosses a wire
 
 `api.v1.messaging` **serializes**. Only plain data survives.
 
@@ -210,7 +236,7 @@ post office relays *afterwards* — a correctness choice, not a performance one.
 
 ---
 
-## 10. Performance — count awaits, not milliseconds
+## 11. Performance — count awaits, not milliseconds
 
 CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
@@ -231,7 +257,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 11. Policies that look like bugs but are not
+## 12. Policies that look like bugs but are not
 
 - **Advisory, not enforced.** Everything creation-side reports and lets the
   Storyteller decide. `[[creation]]`, `[[budget]]`, constraints, instance caps —
@@ -250,7 +276,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 12. The verification battery — run ALL of it before pushing
+## 13. The verification battery — run ALL of it before pushing
 
 ```bash
 bun run build          # dist/naiowod.ts is COMMITTED; the suite checks it is in sync
@@ -271,7 +297,7 @@ Then a live `init()` smoke reproducing whatever the change was about.
 
 ---
 
-## 13. Where to look when something is wrong
+## 14. Where to look when something is wrong
 
 | Symptom | Look at |
 |---|---|
@@ -279,6 +305,7 @@ Then a live `init()` smoke reproducing whatever the change was about.
 | A knob works but nobody can find it | It is missing from its `CommandSpec`. A knob the parser honours and the spec omits **does not exist** (`bd6bf50`). |
 | A listing is cluttering the AI's context | Its verb is not named `show-*`. §6. |
 | A definition loses a field when reloaded | The card reader does not know it. §7. |
+| An effect applies twice | It is in a passive AND in the affliction that passive grants. §8. |
 | A name resolves to 0 | `::` folding, or the hyphen rule, or a bare name not reaching the extension. |
 | A duration is wildly wrong | Seconds vs milliseconds. §1. |
 | An arcanum shows up as a merit (or vice versa) | Something asked the wrong registry, or a report walk used `ownedPowerInstances`. §5. |

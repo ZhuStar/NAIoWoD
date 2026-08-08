@@ -34,6 +34,36 @@ import {
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
+// --- WHERE A FORM FIELD ACTUALLY LIVES ---------------------------------------
+// One place, because getting this wrong is INVISIBLE. The host syncs an input's
+// value to the store its `storageKey` NAMES: unprefixed goes to the host's own
+// default, `"story:"` to storyStorage, `"history:"` to historyStorage - stated
+// on every *Input part in script-types.d.ts. This engine wrote UNPREFIXED keys
+// and then read them back out of `tempStorage`, so the read never saw the
+// write and EVERY window field was permanently empty. [[win-roll]]'s Roll
+// button read an empty pool and refused; the other windows composed their
+// command with every knob blank. That is the "clicking Roll does nothing" bug.
+//
+// The prefix is EXPLICIT now, and the reader uses the matching store. The
+// fallbacks are insurance rather than decoration: which store the host treats
+// as default cannot be determined off-host (the probe asks), and a silently
+// empty field is precisely the failure being fixed here. They test for PRESENCE
+// rather than truthiness, so a field the player deliberately cleared reads as
+// cleared instead of falling through to a stale value in another store.
+const UI_FIELD_STORE = "story:";
+const fieldKey = (key: string): string => `${UI_FIELD_STORE}${key}`;
+
+async function readField(key: string): Promise<string> {
+  for (const store of [api.v1.storyStorage, api.v1.tempStorage, api.v1.storage]) {
+    const raw = await store.get(key);
+    if (raw !== undefined && raw !== null) return String(raw).trim();
+  }
+  return "";
+}
+async function writeField(key: string, value: string): Promise<void> {
+  await api.v1.storyStorage.set(key, value);
+}
+
 // Every window ends the same two ways: a Close beside whatever buttons it owns,
 // and the last reply shown beneath. One definition, so all three agree on what
 // a dismissed window and a shown result look like.
@@ -59,7 +89,7 @@ const BOOL_OPTIONS = ["true", "false", ""];
 function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: string, rerender: () => Promise<void>): UIPart {
   const buttons = (p.options ?? []).map(o => part.button({
     text: `${o === current ? "• " : ""}${o === "" ? "(default)" : o}`,
-    callback: async () => { await api.v1.tempStorage.set(WKEY(verb, p.key), o); await rerender(); },
+    callback: async () => { await writeField(WKEY(verb, p.key), o); await rerender(); },
   }));
   return part.row({ content: [part.text({ text: `${p.desc ?? p.key}:` }), ...buttons] });
 }
@@ -75,12 +105,14 @@ export interface PickerOption { value: string; label?: string }
 
 async function openPickerModal(key: string, storageKey: string, options: () => Promise<PickerOption[]>, rerender: () => Promise<void>): Promise<void> {
   const part = api.v1.ui.part;
-  const temp = api.v1.tempStorage;
-  const current = String((await temp.get(storageKey)) ?? "").trim();
+  // `storageKey` is the RAW key here; pickerField adds the store prefix for the
+  // input it renders, and the modal reads/writes the same field through the
+  // same pair of helpers, so the two halves cannot drift apart again.
+  const current = await readField(storageKey);
   const opts = await options();
   const handle = await api.v1.ui.modal.open({ title: UI_TEXT.common.chooseTitle(key), size: "small", content: [] });
   const pick = (value: string) => async (): Promise<void> => {
-    await temp.set(storageKey, value);
+    await writeField(storageKey, value);
     await handle.close();
     await rerender();
   };
@@ -102,7 +134,7 @@ export function pickerField(part: UiPartHelpers, opts: {
   return part.column({ content: [
     part.text({ text: opts.label }),
     part.row({ content: [
-      part.textInput({ storageKey: opts.storageKey, placeholder: opts.placeholder }),
+      part.textInput({ storageKey: fieldKey(opts.storageKey), placeholder: opts.placeholder }),
       part.button({ text: UI_TEXT.common.chooseButton(opts.key), callback: () => openPickerModal(opts.key, opts.storageKey, opts.options, opts.rerender) }),
     ] }),
   ] });
@@ -113,7 +145,7 @@ export function pickerField(part: UiPartHelpers, opts: {
 async function submitCommand(verb: string, spec: CommandSpec, rerender: (result?: string) => Promise<void>): Promise<void> {
   const values: Record<string, string> = {};
   for (const p of spec.params ?? []) {
-    values[p.key] = String((await api.v1.tempStorage.get(WKEY(verb, p.key))) ?? "").trim();
+    values[p.key] = await readField(WKEY(verb, p.key));
   }
   const required = (spec.params ?? []).find(p => p.required && !values[p.key] && !p.default);
   if (required) { await rerender(UI_TEXT.common.needs(required.desc ?? required.key)); return; }
@@ -133,12 +165,11 @@ export async function openCommandWindow(verb: string, opts?: {
   const spec = CommandRouter.specFor(verb);
   if (!spec) return false;
   const part = api.v1.ui.part;
-  const temp = api.v1.tempStorage;
 
   // Pre-seed enum defaults so the selector rows show a selection immediately.
   for (const p of spec.params ?? []) {
-    if (p.default !== undefined && (await temp.get(WKEY(verb, p.key))) == null) {
-      await temp.set(WKEY(verb, p.key), p.default);
+    if (p.default !== undefined && !(await readField(WKEY(verb, p.key)))) {
+      await writeField(WKEY(verb, p.key), p.default);
     }
   }
 
@@ -151,14 +182,14 @@ export async function openCommandWindow(verb: string, opts?: {
       if (p.type === "bool") {
         // A flag has one vocabulary, so the spec does not restate it: the
         // window offers both answers and "unset" (leave it to the verb).
-        const current = String((await temp.get(WKEY(verb, p.key))) ?? p.default ?? "");
+        const current = (await readField(WKEY(verb, p.key))) || p.default || "";
         content.push(selectorRow(part, verb, { ...p, options: BOOL_OPTIONS }, current, () => render()));
       } else if (p.type === "enum" && p.options?.length) {
-        const current = String((await temp.get(WKEY(verb, p.key))) ?? p.default ?? "");
+        const current = (await readField(WKEY(verb, p.key))) || p.default || "";
         content.push(selectorRow(part, verb, p, current, () => render()));
       } else if (p.type === "int") {
         content.push(part.text({ text: p.desc ?? p.key }));
-        content.push(part.numberInput({ storageKey: WKEY(verb, p.key) }));
+        content.push(part.numberInput({ storageKey: fieldKey(WKEY(verb, p.key)) }));
       } else if (opts?.pickers?.[p.key]) {
         content.push(pickerField(part, {
           key: p.key, label: p.desc ?? p.key, storageKey: WKEY(verb, p.key),
@@ -166,7 +197,7 @@ export async function openCommandWindow(verb: string, opts?: {
         }));
       } else {
         content.push(part.text({ text: p.desc ?? p.key }));
-        content.push(part.textInput({ storageKey: WKEY(verb, p.key), placeholder: p.example }));
+        content.push(part.textInput({ storageKey: fieldKey(WKEY(verb, p.key)), placeholder: p.example }));
       }
     }
     content.push(part.row({ content: [
@@ -266,12 +297,11 @@ const AKEY = (k: string): string => `win:afflict:${k}`;
 
 export async function openAfflictWindow(): Promise<void> {
   const part = api.v1.ui.part;
-  const temp = api.v1.tempStorage;
   const spec = CommandRouter.specFor("afflict")!;
   const handle = await api.v1.ui.window.open({ title: UI_TEXT.afflict.title, content: [], defaultWidth: 480, defaultHeight: 480 });
 
   const render = async (result?: string): Promise<void> => {
-    const chosen = String((await temp.get(AKEY("affliction"))) ?? "").trim();
+    const chosen = await readField(AKEY("affliction"));
     const def = chosen ? AfflictionRegistry.get(chosen) : undefined;
     const content: UIPart[] = [
       part.text({ text: UI_TEXT.afflict.blurb, markdown: true }),
@@ -281,24 +311,24 @@ export async function openAfflictWindow(): Promise<void> {
       }),
       // `on` is [[afflict]]'s own param, so its label is the spec's.
       part.text({ text: labelOf(spec, "on") }),
-      part.textInput({ storageKey: AKEY("on"), placeholder: UI_TEXT.afflict.targetPlaceholder }),
+      part.textInput({ storageKey: fieldKey(AKEY("on")), placeholder: UI_TEXT.afflict.targetPlaceholder }),
     ];
     for (const slot of def?.bindings ?? []) {
       content.push(part.text({ text: UI_TEXT.afflict.bindingLabel(slot) }));
-      content.push(part.textInput({ storageKey: AKEY(`bind:${slot}`), placeholder: UI_TEXT.afflict.targetPlaceholder }));
+      content.push(part.textInput({ storageKey: fieldKey(AKEY(`bind:${slot}`)), placeholder: UI_TEXT.afflict.targetPlaceholder }));
     }
     content.push(part.row({ content: [
       part.button({ text: UI_TEXT.afflict.afflictButton, callback: async () => {
-        const affliction = String((await temp.get(AKEY("affliction"))) ?? "").trim();
+        const affliction = await readField(AKEY("affliction"));
         if (!affliction) { await render(UI_TEXT.afflict.needsAffliction); return; }
         const values: Record<string, string> = {
           affliction,
-          on: String((await temp.get(AKEY("on"))) ?? "").trim(),
+          on: await readField(AKEY("on")),
         };
         // A slot named like a declared param would be skipped by compose; the
         // def vocabulary is the ST's, so just read what the def declares.
         for (const slot of AfflictionRegistry.get(affliction)?.bindings ?? []) {
-          values[slot] = String((await temp.get(AKEY(`bind:${slot}`))) ?? "").trim();
+          values[slot] = await readField(AKEY(`bind:${slot}`));
         }
         const reply = await CommandRouter.route(composeCommand("afflict", values, spec));
         await render(reply);
@@ -338,7 +368,7 @@ const RKEY = (k: string): string => `win:roll:${k}`;
 // else the current character. An unknown name just yields empty picker lists -
 // the options are a convenience, never a gate (typing stays live).
 async function rollWindowChar(): Promise<PlayableCharacter | undefined> {
-  const forName = String((await api.v1.tempStorage.get(RKEY("for"))) ?? "").trim();
+  const forName = await readField(RKEY("for"));
   return forName ? CharacterStore.load(forName) : CharacterStore.getCurrent();
 }
 
@@ -362,8 +392,7 @@ const tableOptions = async (): Promise<PickerOption[]> => [
 
 export async function openRollWindow(): Promise<void> {
   const part = api.v1.ui.part;
-  const temp = api.v1.tempStorage;
-  const field = async (k: string): Promise<string> => String((await temp.get(RKEY(k))) ?? "").trim();
+  const field = async (k: string): Promise<string> => readField(RKEY(k));
   const pickers: Record<string, () => Promise<PickerOption[]>> = {
     spend: spendOptions, specialty: specialtyOptions, table: tableOptions,
   };
@@ -395,7 +424,7 @@ export async function openRollWindow(): Promise<void> {
     for (const p of knobs) {
       if (p.type === "int") {
         content.push(part.text({ text: p.desc ?? p.key }));
-        content.push(part.numberInput({ storageKey: RKEY(p.key) }));
+        content.push(part.numberInput({ storageKey: fieldKey(RKEY(p.key)) }));
       } else if (pickers[p.key]) {
         content.push(pickerField(part, {
           key: p.key, label: p.desc ?? p.key, storageKey: RKEY(p.key),
@@ -403,7 +432,7 @@ export async function openRollWindow(): Promise<void> {
         }));
       } else {
         content.push(part.text({ text: p.desc ?? p.key }));
-        content.push(part.textInput({ storageKey: RKEY(p.key), placeholder: p.example ?? p.hint }));
+        content.push(part.textInput({ storageKey: fieldKey(RKEY(p.key)), placeholder: p.example ?? p.hint }));
       }
     }
     // Contest knobs - Save bakes these into [[name-roll]] as an OPPOSED saved roll
@@ -415,19 +444,19 @@ export async function openRollWindow(): Promise<void> {
     content.push(part.row({ content: (["", "resisted", "contested"] as const).map(o => part.button({
       text: `${o === opposedNow ? "• " : ""}${o === "" ? UI_TEXT.roll.opposedNone : o}`,
       callback: async () => {
-        await temp.set(RKEY("opposed"), o);
-        if (o === "") { await temp.set(RKEY("vs-pool"), ""); await temp.set(RKEY("vs-difficulty"), ""); }
+        await writeField(RKEY("opposed"), o);
+        if (o === "") { await writeField(RKEY("vs-pool"), ""); await writeField(RKEY("vs-difficulty"), ""); }
         await render();
       },
     })) }));
     if (opposedNow === "resisted" || opposedNow === "contested") {
       content.push(part.text({ text: UI_TEXT.roll.vsPoolLabel }));
-      content.push(part.textInput({ storageKey: RKEY("vs-pool"), placeholder: UI_TEXT.roll.vsPoolPlaceholder }));
+      content.push(part.textInput({ storageKey: fieldKey(RKEY("vs-pool")), placeholder: UI_TEXT.roll.vsPoolPlaceholder }));
       content.push(part.text({ text: UI_TEXT.roll.vsDifficultyLabel }));
-      content.push(part.numberInput({ storageKey: RKEY("vs-difficulty") }));
+      content.push(part.numberInput({ storageKey: fieldKey(RKEY("vs-difficulty")) }));
     }
     content.push(part.text({ text: UI_TEXT.roll.saveAsLabel }));
-    content.push(part.textInput({ storageKey: RKEY("save-as"), placeholder: UI_TEXT.roll.saveAsPlaceholder }));
+    content.push(part.textInput({ storageKey: fieldKey(RKEY("save-as")), placeholder: UI_TEXT.roll.saveAsPlaceholder }));
     content.push(part.row({ content: [
       part.button({ text: UI_TEXT.roll.rollButton, callback: async () => {
         const pool = await field("pool");

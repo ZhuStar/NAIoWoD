@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage, __uiTypeInto, __uiFieldValue, __uiFields } from "../src/host-mock";
 
 // What actually left this script as an EVENT. The hello handshake is directory
 // traffic - it says who wants what - so a test asking "did this reach the wire"
@@ -2570,11 +2570,11 @@ describe("constraint window ([[win-constraint]] emits define-constraint)", () =>
 
     // The real host binds storageKey <-> tempStorage; off-host we set the temp
     // fields directly, then fire the Create button the window rendered.
-    await api.v1.tempStorage.set("win:define-constraint:name", "vip-backgrounds");
-    await api.v1.tempStorage.set("win:define-constraint:relation", "exclusive");
-    await api.v1.tempStorage.set("win:define-constraint:domain", "background");
-    await api.v1.tempStorage.set("win:define-constraint:members", "status, anonymity");
-    await api.v1.tempStorage.set("win:define-constraint:max", "1");
+    await __uiTypeInto("story:win:define-constraint:name", "vip-backgrounds");
+    await __uiTypeInto("story:win:define-constraint:relation", "exclusive");
+    await __uiTypeInto("story:win:define-constraint:domain", "background");
+    await __uiTypeInto("story:win:define-constraint:members", "status, anonymity");
+    await __uiTypeInto("story:win:define-constraint:max", "1");
 
     expect(await __uiClickButton("Create")).toBe(true);
     // The emitted command ran through the same CommandRouter -> the group exists.
@@ -2590,8 +2590,8 @@ describe("constraint window ([[win-constraint]] emits define-constraint)", () =>
 
   test("openConstraintWindow can be called directly and seeds selector defaults", async () => {
     await openConstraintWindow();
-    expect(await api.v1.tempStorage.get("win:define-constraint:relation")).toBe("exclusive");
-    expect(await api.v1.tempStorage.get("win:define-constraint:domain")).toBe("background");
+    expect(__uiFieldValue("story:win:define-constraint:relation")).toBe("exclusive");
+    expect(__uiFieldValue("story:win:define-constraint:domain")).toBe("background");
   });
 
   test("the form is DERIVED from the spec: selector rows render the rules vocabularies", async () => {
@@ -3116,9 +3116,9 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
   test("win-table renders define-table's spec; Create defines through composeCommand", async () => {
     await CommandRouter.route("win-table");
     expect(__uiWindows().length).toBe(1);
-    await api.v1.tempStorage.set("win:define-table:name", "fear");
-    await api.v1.tempStorage.set("win:define-table:rows", "1:Uneasy, 4:Panicked");
-    await api.v1.tempStorage.set("win:define-table:cap", "5");
+    await __uiTypeInto("story:win:define-table:name", "fear");
+    await __uiTypeInto("story:win:define-table:rows", "1:Uneasy, 4:Panicked");
+    await __uiTypeInto("story:win:define-table:cap", "5");
     expect(await __uiClickButton("Create")).toBe(true);
     const t = SuccessTableRegistry.get("fear")!;
     expect(t.rows![1]).toEqual({ at: 4, label: "Panicked" });   // literal composition kept the case
@@ -3916,20 +3916,20 @@ describe("affliction windows: picker modal, win-affliction, win-afflict", () => 
 
   test("the mirror picker lists afflictions, marks the current value, writes the field, and closes", async () => {
     await CommandRouter.route("win-affliction");
-    await api.v1.tempStorage.set("win:define-affliction:mirror", "feral-whispers");
+    await __uiTypeInto("story:win:define-affliction:mirror", "feral-whispers");
     expect(await __uiClickButton("Choose mirror…")).toBe(true);
     expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(1);
     const labels = texts();
     expect(labels.some(t => t.startsWith("✅ feral-whispers"))).toBe(true);          // current, marked
     expect(await __uiClickButton("concentrating-on - Locked eyes with the target; nothing else exists this turn")).toBe(true);
-    expect(await api.v1.tempStorage.get("win:define-affliction:mirror")).toBe("concentrating-on");
+    expect(__uiFieldValue("story:win:define-affliction:mirror")).toBe("concentrating-on");
     expect(__uiWindows().filter(w => w.kind === "modal").length).toBe(0);            // picker closed itself
   });
 
   test("win-affliction Create defines the affliction with the picked mirror", async () => {
     await CommandRouter.route("win-affliction");
-    await api.v1.tempStorage.set("win:define-affliction:name", "beast-bond");
-    await api.v1.tempStorage.set("win:define-affliction:bindings", "target");
+    await __uiTypeInto("story:win:define-affliction:name", "beast-bond");
+    await __uiTypeInto("story:win:define-affliction:bindings", "target");
     expect(await __uiClickButton("Choose mirror…")).toBe(true);
     expect(await __uiClickButton("feral-whispers - Conversing in the target animal's tongue (Feral Speech)")).toBe(true);
     expect(await __uiClickButton("Create")).toBe(true);
@@ -3945,7 +3945,7 @@ describe("affliction windows: picker modal, win-affliction, win-afflict", () => 
     expect(await __uiClickButton("Choose affliction…")).toBe(true);
     expect(await __uiClickButton("concentrating-on - Locked eyes with the target; nothing else exists this turn")).toBe(true);
     expect(texts().some(t => t === "Binding: target")).toBe(true);                   // the def drove the form
-    await api.v1.tempStorage.set("win:afflict:bind:target", "grey wolf");
+    await __uiTypeInto("story:win:afflict:bind:target", "grey wolf");
     expect(await __uiClickButton("Afflict")).toBe(true);
     expect(await CommandRouter.route("afflictions")).toContain("concentrating-on (target: Grey Wolf)");
   });
@@ -3955,7 +3955,7 @@ describe("affliction windows: picker modal, win-affliction, win-afflict", () => 
     await CommandRouter.route("win-afflict");
     expect(await __uiClickButton("Afflict")).toBe(true);
     expect(texts().some(t => t === "Pick an affliction first.")).toBe(true);
-    await api.v1.tempStorage.set("win:afflict:affliction", "concentrating-on");
+    await __uiTypeInto("story:win:afflict:affliction", "concentrating-on");
     expect(await __uiClickButton("Afflict")).toBe(true);                             // target left blank
     expect(texts().some(t => t.includes("needs target="))).toBe(true);               // the handler's refusal, in-window
   });
@@ -4043,7 +4043,7 @@ describe("roll window: win-roll + the table sidecar", () => {
     await CommandRouter.route("win-roll");
     expect(await __uiClickButton("Choose pool…")).toBe(true);
     expect(await __uiClickButton("@dodge")).toBe(true);
-    expect(await api.v1.tempStorage.get("win:roll:pool")).toBe("@dodge");
+    expect(__uiFieldValue("story:win:roll:pool")).toBe("@dodge");
   });
 
   test("the specialty picker follows the For field's character", async () => {
@@ -4104,6 +4104,48 @@ describe("roll window: win-roll + the table sidecar", () => {
     expect(out).toContain("contested -");
   });
 
+  test("THE ROLL BUTTON ROLLS: a field the host wrote is a field the window reads", async () => {
+    // The bug this pins: an input's `storageKey` names the store the host syncs
+    // it to (unprefixed = the script's own storage, "story:" = storyStorage -
+    // script-types.d.ts). The engine wrote UNPREFIXED keys and read them back
+    // out of tempStorage, so every window field was permanently empty and
+    // clicking Roll only ever answered "Needs a pool". Nothing caught it because
+    // the mock did not model the sync either; __uiTypeInto now does.
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("set-trait strength 3");
+    await CommandRouter.route("set-trait brawl 2");
+    await CommandRouter.route("win-roll");
+
+    // Every field the window binds must name a store explicitly - an
+    // unprefixed key is the bug.
+    const bound = Object.keys(__uiFields()).filter(k => k.includes("win:roll:"));
+    expect(bound.length).toBeGreaterThan(3);
+    expect(bound.every(k => k.startsWith("story:"))).toBe(true);
+
+    // Type the way the host does, then click.
+    await __uiTypeInto("story:win:roll:pool", "strength+brawl");
+    expect(await __uiClickButton("Roll")).toBe(true);
+    const shown = texts().join(" | ");
+    expect(shown).toContain("Strength + Brawl");
+    expect(shown).not.toContain("Needs a pool");
+  });
+
+  test("the For field routes to roll-for, and the knobs reach the command", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("set-trait dexterity 4");
+    await CommandRouter.route("set-trait dodge 2");
+    await CommandRouter.route('create-playable name="Erik" templates=mortal');
+    await CommandRouter.route('play name="Erik"');
+    await CommandRouter.route("win-roll");
+    await __uiTypeInto("story:win:roll:pool", "dexterity+dodge");
+    await __uiTypeInto("story:win:roll:for", "Kvar");
+    await __uiTypeInto("story:win:roll:difficulty", "9");
+    expect(await __uiClickButton("Roll")).toBe(true);
+    const shown = texts().join(" | ");
+    expect(shown).toContain("Kvar");          // rolled for the named character...
+    expect(shown).toContain("diff 9");        // ...and the knob was carried
+  });
+
   test("choosing 'none' collapses the contest knobs and clears vs-pool/vs-difficulty", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route("win-roll");
@@ -4111,7 +4153,7 @@ describe("roll window: win-roll + the table sidecar", () => {
     await set("vs-pool", "perception+alertness");
     expect(texts().some(t => t.includes("vs-pool"))).toBe(true);        // the field is shown while opposed
     expect(await __uiClickButton("none")).toBe(true);                   // collapse back to a plain roll
-    expect(await api.v1.tempStorage.get("win:roll:vs-pool")).toBe("");  // its value is cleared
+    expect(__uiFieldValue("story:win:roll:vs-pool")).toBe("");          // its value is cleared
     expect(texts().some(t => t.includes("vs-pool"))).toBe(false);       // and the field is hidden again
   });
 });

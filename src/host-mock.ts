@@ -18,6 +18,10 @@ import { log } from "./host";
 const __mockStore = new Map<string, unknown>();
 const __mockHistoryStore = new Map<string, unknown>();
 const __mockTempStore = new Map<string, unknown>();
+// api.v1.storage - the script's OWN store, separate from the story's. It was
+// missing here entirely, which is part of why the window-field bug was
+// invisible off-host: nothing modelled the store the host actually syncs to.
+const __mockScriptStore = new Map<string, unknown>();
 let __mockCategories: { id: string; name?: string; enabled?: boolean; settings?: { entryHeader?: string } }[] = [];
 let __mockEntries: Record<string, unknown>[] = [];
 let __mockUuidCounter = 0;
@@ -37,7 +41,7 @@ export function __resetLorebookMock(): void { __mockCategories = []; __mockEntri
 // Test/off-host helper: wipe the mock storage stores (story, history, temp) and
 // the generation-side story fields (author's note, system prompt, prefill).
 export function __resetStorageMock(): void {
-  __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear();
+  __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); __mockScriptStore.clear();
   __mockAuthorNote = ""; __mockSystemPrompt = ""; __mockPrefill = ""; __mockSections = [];
 }
 
@@ -127,6 +131,43 @@ export function __resetUiMock(): void { __mockWindows = []; }
 export function __uiWindows(): { kind: string; options: { content?: UIPart[] } & Record<string, unknown> }[] {
   return __mockWindows.filter(w => !w.closed).map(w => ({ kind: w.kind, options: w.options }));
 }
+// Type into a form field the way the HOST does, which is the whole point of
+// having it here: an input's `storageKey` names the store its value is synced
+// to - unprefixed goes to the script's own `storage`, "story:" to storyStorage,
+// "history:" to historyStorage (script-types.d.ts, every *Input part). The mock
+// modelled none of that, so a window could read its fields out of a store the
+// host never wrote to and every test still passed. Route test input through
+// here and that mismatch fails loudly instead.
+export async function __uiTypeInto(storageKey: string, value: string): Promise<void> {
+  const [store, key] = storageKey.startsWith("story:") ? [__mockStore, storageKey.slice(6)]
+    : storageKey.startsWith("history:") ? [__mockHistoryStore, storageKey.slice(8)]
+    : [__mockScriptStore, storageKey];
+  store.set(key, value);
+}
+
+// Every field the open windows expose, as `storageKey -> current value`. Lets a
+// test discover what a window actually binds rather than guessing its keys.
+export function __uiFields(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const w of __mockWindows) {
+    if (w.closed) continue;
+    for (const p of __flattenParts((w.options.content ?? []) as UIPart[])) {
+      const sk = (p as { storageKey?: string }).storageKey;
+      if (sk) out[sk] = String(__uiReadField(sk) ?? "");
+    }
+  }
+  return out;
+}
+// Read one field the way the host stores it (prefix selects the store).
+export function __uiFieldValue(storageKey: string): string {
+  return String(__uiReadField(storageKey) ?? "");
+}
+function __uiReadField(storageKey: string): unknown {
+  if (storageKey.startsWith("story:")) return __mockStore.get(storageKey.slice(6));
+  if (storageKey.startsWith("history:")) return __mockHistoryStore.get(storageKey.slice(8));
+  return __mockScriptStore.get(storageKey);
+}
+
 // Find a button by its text across all open windows and run its callback.
 export async function __uiClickButton(text: string): Promise<boolean> {
   for (const w of __mockWindows) {
@@ -200,6 +241,7 @@ if (!__g.api) {
       uuid: __mockUuid,
       log: (...args: unknown[]) => console.log(...args),
       error: (...args: unknown[]) => console.error(...args),
+      storage: __makeMockStore(__mockScriptStore),   // per-script (docs/storage-api.md)
       storyStorage: __makeMockStore(__mockStore),
       // The mock is not history-aware (no document history off-host); it just
       // gives historyStorage its own bucket with the same surface.

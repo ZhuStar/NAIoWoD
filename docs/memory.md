@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `e7a7bdc`** ("A card must carry
-> a def all the way home").
+> **Last synced with the code as of commit `abd2179`** ("The Roll button
+> never rolled").
+> Prior: `e7a7bdc` ("A card must carry a def all the way home").
 > Prior: `1216053` ("Nobody is listening, so nobody is told").
 > Prior: `bd60c4f` ("The moon has phases and the week has days").
 > Prior: `a62c201` ("Afflictions are named role first, and Majesty is the
@@ -1383,8 +1384,10 @@ up `CommandRouter.specFor(verb)` and renders per param — enum →
 `selectorRow` (button-row single-select, bullet marks current, `default`
 pre-seeded into tempStorage; no native select part exists), int →
 `numberInput`, else `textInput` (label = `desc ?? key`, placeholder =
-`example`); temp keys **`win:<verb>:<param>`**; the submit button collects the
-temp values, refuses on a missing required param, then routes
+`example`); field keys **`story:win:<verb>:<param>`** (the `story:` prefix is
+LOAD-BEARING - §7.83 - and only `fieldKey`/`readField`/`writeField` may touch
+them); the submit button collects the field values, refuses on a missing
+required param, then routes
 `composeCommand(verb, values, spec)` through the SAME `CommandRouter` and
 shows the `[SYSTEM: ...]` reply in-window. `openConstraintWindow()` =
 `openCommandWindow("define-constraint", …)`; `[[win-constraint]]` and
@@ -1475,10 +1478,12 @@ key = cast label else the pillar signature; success deletes its entry) ·
 **`cray:<char>`** (the cray SITE's live state `{points, status: active|dormant|
 dead, lastTapDay}`, §7.35 - the RATING is a Background on the sheet) ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
-(session-scoped, cleared on close): `win:<verb>:<param>` (a command window's
-live form fields, e.g. `win:define-constraint:relation` - the documented home
-for UI storageKey state) · `recon:<category>/<entry>:<kind>:<hash>` (the
-once-per-session reconciliation-modal guard).
+(session-scoped, cleared on close): `recon:<category>/<entry>:<kind>:<hash>`
+(the once-per-session reconciliation-modal guard).
+**Window form fields are NOT here** - they live in `storyStorage` under
+`win:<verb>:<param>`, bound by a `storageKey` of `story:win:<verb>:<param>`.
+The host syncs an input to the store its storageKey NAMES, and believing
+otherwise is what broke every window (§7.83).
 
 **Lorebook** (all data entries = instructions above `=====`, data below):
 `srd:abilities` (talents/skills/knowledges lists) · `srd:backgrounds` ·
@@ -4209,6 +4214,48 @@ and `prefill` are mocked/available but not yet written.
     positives (`paramFrom: "ability"` is not a trait category, so the reader was
     right to drop it). Real defs are valid by construction and cover the field
     surface actually in use. Failures name the missing FIELD, not a count.
+
+
+83. **The Roll button never rolled** (owner, while playing: *"The Roll window
+    either doesn't roll when you click Roll or fails silently."* — and it was
+    every window, not just Roll).
+
+    `script-types.d.ts` says on every `*Input` part: *"Storage key for
+    persisting the value… For historyStorage, prefix with `history:`. For
+    storyStorage, prefix with `story:`"*. Unprefixed goes to the host's own
+    default store. This engine wrote **unprefixed** storageKeys and read them
+    back out of **tempStorage**, so the read never saw the write and EVERY
+    window field was permanently empty: Roll read an empty pool and answered
+    "Needs a pool", and the rest composed their command with every knob blank.
+
+    The mistaken belief is recorded in §6 ("tempStorage `win:<verb>:<param>` —
+    the documented home for UI storageKey state"). It came from the PROSE doc,
+    which says tempStorage is the home for `{{temp:key}}` **text templating** —
+    a different mechanism from input binding, and the d.ts is explicit about
+    which prefixes an input actually supports.
+
+    - `fieldKey` / `readField` / `writeField` in window.ts are now the ONLY way
+      a form field is touched, because the picker modal and the input it belongs
+      to have to agree and one pair of helpers is what keeps them agreeing.
+      `readField` falls back storyStorage → tempStorage → storage **by
+      presence, not truthiness**, so a field the player cleared reads as
+      cleared. The fallbacks are insurance: which store the host defaults to
+      cannot be settled off-host, and a silently empty field is the failure
+      being fixed.
+    - **`api.v1.storage` was not in the host mock at all** — the store the host
+      most likely defaults to was the one thing nothing modelled.
+    - **WHY NO TEST CAUGHT IT, which is the reusable part:** the mock did not
+      model storageKey syncing either, so every test wrote the field with
+      `tempStorage.set` and read it back from the same place. The test agreed
+      with the bug. `__uiTypeInto` now models the host's rule (prefix selects
+      the store) and `__uiFieldValue`/`__uiFields` read it back the same way;
+      all 14 window tests were migrated onto them. Verified by reverting the
+      prefix: the new test fails on the old behaviour and passes on the new.
+
+    Two answers the same session, both already supported: Sanctum, Library,
+    Cray and Talisman are **Backgrounds** — `[[set-trait sanctum 5]]` — and a
+    second Mentor is `` [[set-trait mentor 2 note=`Belial` add=true]] `` (`add`
+    holds another rather than replacing, `note` keeps them distinct).
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

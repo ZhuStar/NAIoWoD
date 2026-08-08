@@ -291,6 +291,31 @@ synchronous, cancellable bus. Messaging carries fire-and-forget events only.
 
 ---
 
+## 10b. A window field lives in the store its `storageKey` NAMES
+
+`script-types.d.ts`, on every `*Input` part: *"Storage key for persisting the
+value… For historyStorage, prefix with `"history:"`. For storyStorage, prefix
+with `"story:"`"*. An unprefixed key goes to the host's own default.
+
+The engine wrote **unprefixed** keys and read them back out of `tempStorage`, so
+the read never saw the write: **every window field was permanently empty**,
+`[[win-roll]]`'s Roll button answered "Needs a pool" forever, and the other
+windows submitted their command with every knob blank.
+
+- The prefix is now explicit (`fieldKey`) and reads go through `readField`,
+  which tries storyStorage → tempStorage → storage **by presence, not
+  truthiness** — so a field the player cleared reads as cleared rather than
+  falling through to a stale value somewhere else.
+- **Never touch `api.v1.tempStorage` directly for a form field.** Use
+  `fieldKey` / `readField` / `writeField`; the picker modal and the input it
+  belongs to must agree, and one pair of helpers is what keeps them agreeing.
+- **The mock now models the sync** (`__uiTypeInto`, `__uiFieldValue`,
+  `__uiFields`). A test that writes a field with `tempStorage.set` is testing a
+  store the host never writes to and proves nothing — which is exactly why this
+  shipped. Type through `__uiTypeInto`.
+
+---
+
 ## 11. Performance — count awaits, not milliseconds
 
 CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):

@@ -15,7 +15,7 @@
 // Modules in dependency order: each references only names declared above it.
 // (host -> core -> rules -> command -> services -> state -> game ->
 //  window -> index/init -> main/bootstrap.)
-const MODULES = [
+export const MODULES = [
   "src/host.ts",
   "src/core/traits.ts",
   "src/core/cardtext.ts",

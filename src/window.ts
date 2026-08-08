@@ -32,6 +32,7 @@ import {
   AfflictionRegistry, CharacterStore, NamedRollStore, CharacterResources,
   TableAliases, PlayableCharacter,
 } from "./state";
+import { StorageDesk, STORE } from "./services";
 
 const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
@@ -65,12 +66,16 @@ const fieldKey = (key: string): string => `${UI_FIELD_STORE}${key}`;
 
 // PRESENCE, not truthiness - a field the player deliberately cleared reads as
 // cleared rather than as absent.
+// Through the counter like everything else. These are the keys the HOST writes
+// on our behalf when a field has a `storageKey`, so they are bare rather than
+// prefixed - but a bare key is still somebody's key, and the rule is that no
+// code outside StorageDesk names api.v1.*Storage.
 async function readField(key: string): Promise<string> {
-  const raw = await api.v1.storyStorage.get(key);
+  const raw = await StorageDesk.request("get", STORE.story, key);
   return raw === undefined || raw === null ? "" : String(raw).trim();
 }
 async function writeField(key: string, value: string): Promise<void> {
-  await api.v1.storyStorage.set(key, value);
+  await StorageDesk.request("set", STORE.story, key, value);
 }
 
 // Every window ends the same two ways: a Close beside whatever buttons it owns,

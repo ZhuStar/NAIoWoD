@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `5e584e4`** ("Addresses persist,
-> interest does not").
+> **Last synced with the code as of commit `08351c6`** ("One counter, and
+> nobody reaches past it").
+> Prior: `5e584e4` ("Addresses persist, interest does not").
 > Prior: `af756c8` ("Every key in one place").
 > Prior: `0523e2d` ("A form belongs to the story").
 > Prior: `55c05b7` ("Measured, so the fallback comes out").
@@ -4451,6 +4452,63 @@ and `prefill` are mocked/available but not yet written.
     is not design but data: **there is no unit list yet** (Phase 4's manifests),
     so there is nothing concrete to orchestrate. Building the orchestrator
     before the units exist would be inventing its participants.
+
+88. **One counter, and nobody reaches past it** (owner: *"nobody gets to access
+    `api.v1.storyStorage` without going through their post office... the post
+    office asks the event bus, who then communicates with the storage script (or
+    the storage script might live in the same script as the event bus, the
+    'main' script) and then the post office gets a reply"*).
+
+    **`StorageDesk` is now the only code in the engine that names
+    `api.v1.*Storage`.** Everything — `ScopedStorage`, every store class, the
+    window fields — asks for a key and is handed the answer.
+
+    - **`src/window.ts` was bypassing storage entirely**: three direct
+      `api.v1.storyStorage` calls that never went through `ScopedStorage` at
+      all. Found by writing the invariant, which is the argument for writing it.
+    - **The rule is GUARDED, in `build.test.ts`**, scanning exactly the modules
+      the artifact is built from (`MODULES` is now exported), so a new file
+      cannot bypass the counter by not being looked at. Comments are stripped
+      first — the window doc block deliberately names those APIs to explain
+      where the host files a field, and documenting a rule must not count as
+      breaking it. Verified by reintroducing the bypass and watching it fail.
+    - **The channel is WIRE-CAPABLE (`naiowod:storage`), not `local:`**, because
+      the destination is meant to become the storage script. Today nothing
+      declares interest, so §7.84's rule means the publish never touches the
+      wire at all and falls through to the local handler.
+    - **That handler is priority `last`, and `served` is a FLAG ON THE REQUEST
+      rather than a return value.** Together they are the seam: the first
+      handler to claim a request wins, and the local fallback runs only when
+      nothing nearer answered. A storage script slots in above it with nothing
+      here to change.
+    - **`*` no longer matches the storage channel.** A monitor asking for
+      everything would otherwise put every sheet read on the wire, reinstating
+      the exact cost §7.84 removed. `*` means every EVENT; storage is the
+      plumbing underneath. Likewise `ourChannels()` excludes it — we serve it
+      for OURSELVES, and announcing it would invite other scripts to route their
+      reads through us, which is the storage script's job, not ours.
+    - **Two ordering bugs the e2e caught.** `PostOffice.open()` read the
+      directory *after* wiring, and that read is itself a storage publish, so a
+      wired post office thought its picture was stale and sent a spurious second
+      hello on every open. And `_announcedAt` tracked the Bus *version*, so
+      subscribing to a channel we never announce (the desk's own) re-announced
+      an identical list; it now compares the list itself.
+    - **A failure must not read as an absence.** A handler that throws leaves
+      `served` false exactly like nobody-listening does; flattening the two told
+      the caller "nobody served this" when the truth was "refused, here is why".
+      The recorded cause now wins — which is also what makes `STORE.account`'s
+      refusal reach the caller as a refusal.
+
+    **THE BLOCKER, unchanged and now load-bearing.** This is §63's plan B
+    (kernel plus satellites) applied to the most latency-critical path in the
+    engine — nearly every command reads a sheet. It needs a reply to arrive
+    **while `onTextAdventureInput` is still awaiting**, which is undocumented.
+    §63 already recorded the ruling: *"Nothing further should be built on B until
+    it has been run on-host."* **Probe Q5 is that exact test and has still never
+    been run.** If it fails, the remote transport cannot be request/reply and
+    has to become a local mirror kept fresh by write-through. The counter was
+    built first precisely because it is correct under EITHER answer: callers
+    never change, only what serves them does.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

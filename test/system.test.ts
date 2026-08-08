@@ -19,7 +19,7 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  ScopedStorage, KEY, STORE, REGISTRY_PREFIX, DIRECTORY_KEY, LorebookManager,
+  ScopedStorage, KEY, STORE, REGISTRY_PREFIX, DIRECTORY_KEY, StorageDesk, STORAGE_CHANNEL, StorageRequest, LorebookManager,
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, ArcanumRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
@@ -8873,5 +8873,34 @@ describe("the script directory", () => {
     const stale = Date.now() - 31 * 24 * 60 * 60 * 1000;
     await new ScopedStorage(REGISTRY_PREFIX).set(DIRECTORY_KEY, { [OTHER]: stale, fresh: Date.now() });
     expect(await PostOffice.remembered()).toEqual(["fresh"]);
+  });
+});
+
+
+// =============================================================================
+// ONE COUNTER, AND NOBODY REACHES PAST IT
+// -----------------------------------------------------------------------------
+// Owner's rule: "nobody gets to access api.v1.storyStorage without going through
+// their post office". The first test is the one that matters - the other two
+// only prove the counter works, while that one proves nothing bypasses it.
+// =============================================================================
+describe("the storage counter", () => {
+  test("a read is a request somebody serves, and an unserved one is an error not a silent undefined", async () => {
+    __resetStorageMock();
+    const store = new ScopedStorage("test");
+    await store.set("k", { v: 1 });
+    expect(await store.get("k")).toEqual({ v: 1 });
+    // A handler that claims the request first wins; the local desk stands down.
+    const claim = Bus.on(STORAGE_CHANNEL, (e) => {
+      const req = e.data as StorageRequest;
+      if (req.key === "test_k") { req.result = { v: 99 }; req.served = true; }
+    }, { priority: "first" });
+    expect(await store.get("k")).toEqual({ v: 99 });     // served by the interloper
+    Bus.off(claim);
+    expect(await store.get("k")).toEqual({ v: 1 });      // desk again
+  });
+
+  test("the account store is refused BY NAME, not merely unused", async () => {
+    await expect(StorageDesk.request("get", STORE.account, "anything")).rejects.toThrow(/account store/);
   });
 });

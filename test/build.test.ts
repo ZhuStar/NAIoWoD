@@ -3,7 +3,7 @@
 // forget to rebuild, this test fails - so the readable single file can never
 // silently drift from the modules it is generated from.
 import { test, expect } from "bun:test";
-import { buildSingleFile, OUTPUT_PATH } from "../scripts/build-single";
+import { buildSingleFile, OUTPUT_PATH, MODULES } from "../scripts/build-single";
 import { renderCommandReference, COMMANDS_DOC_PATH } from "../scripts/command-reference";
 
 test("dist/naiowod.ts is in sync with src/ (run `bun run build`)", async () => {
@@ -60,4 +60,33 @@ test("docs/commands.md is in sync with the registry (run `bun run docs:commands`
   const committed = await Bun.file(COMMANDS_DOC_PATH).text();
   const fresh = await renderCommandReference();
   expect(committed).toBe(fresh);
+});
+
+
+// The rule the storage counter exists to enforce (§7.88). Everything else in the
+// engine asks StorageDesk for a key; if any other module reaches straight for
+// api.v1.*Storage, the counter is decoration. A rule nothing checks is a wish,
+// and this is the check - scanning exactly the modules the artifact is built
+// from, so a new file cannot bypass the counter by not being looked at.
+test("nothing but StorageDesk names api.v1.*Storage", async () => {
+  const NAMES = /api\.v1\.(story|temp|history)Storage/g;
+  const offenders: string[] = [];
+  for (const rel of MODULES) {
+    const raw = await Bun.file(new URL(`../${rel}`, import.meta.url).pathname).text();
+    // CODE, not prose: the comments deliberately NAME these APIs to explain
+    // which store the host files a window field under, and documenting the rule
+    // must not count as breaking it.
+    const body = raw.split("\n").map(l => l.replace(/\/\/.*$/, "")).join("\n");
+    const hits = body.match(NAMES)?.length ?? 0;
+    if (!hits) continue;
+    if (rel === "src/services.ts") {
+      // Even here, only StorageDesk.fulfil may name them.
+      const fulfil = body.slice(body.indexOf("private static async fulfil"), body.indexOf("static open()"));
+      const inside = fulfil.match(NAMES)?.length ?? 0;
+      if (inside !== hits) offenders.push(`${rel}: ${hits - inside} outside StorageDesk.fulfil`);
+      continue;
+    }
+    offenders.push(`${rel}: ${hits}`);
+  }
+  expect(offenders).toEqual([]);
 });

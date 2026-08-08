@@ -7029,6 +7029,100 @@ const DIRECTORY_KEY = "scripts";
 // script that was deleted stops being written to to eventually.
 const DIRECTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+// --- THE COUNTER ------------------------------------------------------------
+// THE ONLY CODE IN THE ENGINE THAT TOUCHES api.v1.*Storage. Everything else -
+// ScopedStorage, the window fields, every store class - asks for a key and is
+// handed the answer. Owner's rule: "nobody gets to access api.v1.storyStorage
+// without going through their post office".
+//
+// WHY A CHANNEL AND NOT A METHOD CALL. The request goes out on a WIRE-CAPABLE
+// channel, not a `local:` one, because the destination is meant to become the
+// storage script. Today no such script exists, so §7.84's rule applies and the
+// publish never touches the wire at all - nobody has declared interest, so
+// nobody is told, and the request falls through to the local handler below.
+// The day a storage unit announces `naiowod:storage`, the relay starts carrying
+// it with nothing here to change.
+//
+// THE LOCAL HANDLER IS DELIBERATELY `last`. A request is served by the FIRST
+// handler to claim it; the fallback that reads this script's own storage runs
+// only when nothing nearer answered. That is the seam the storage script slots
+// into, and it is why `served` is a flag on the request rather than a return.
+//
+// WHAT IS NOT DECIDED HERE: whether a cross-script read can answer INSIDE an
+// awaiting input hook. That is probe Q5, still never run (§63), and it decides
+// whether the remote transport can be request/reply at all or has to be a local
+// mirror kept fresh by write-through. Either way callers do not change, which
+// is the point of putting the counter here first.
+const STORAGE_CHANNEL = "naiowod:storage";
+
+interface StorageRequest {
+  op: "get" | "set" | "delete" | "has" | "list";
+  store: StoreName;
+  key: string;
+  value?: unknown;
+  /** Filled in by whoever serves it. */
+  result?: unknown;
+  /** Set once somebody has answered, so no second handler answers again. */
+  served?: boolean;
+}
+
+class StorageDesk {
+  private static _open = false;
+
+  // The one place. Nothing else in src/ may name api.v1.*Storage - guarded by a
+  // source-level test, because an invariant nothing checks is a wish.
+  private static async fulfil(req: StorageRequest): Promise<unknown> {
+    // `account` is api.v1.storage - shared across every story the user owns, so
+    // one story's sheet would overwrite another's (§7.85). It is in the STORE
+    // enum precisely so it can be REFUSED BY NAME here instead of being an
+    // absence somebody fills in later.
+    if (req.store === STORE.account) {
+      throw new Error("storage: the account store is never written by this engine");
+    }
+    const store = req.store === STORE.temp ? api.v1.tempStorage
+      : req.store === STORE.history ? api.v1.historyStorage
+      : api.v1.storyStorage;
+    switch (req.op) {
+      case "get":    return store.get(req.key);
+      case "set":    return store.set(req.key, req.value);
+      case "delete": return store.remove(req.key);
+      case "list":   return store.list();
+      case "has":    return (await store.get(req.key)) !== undefined;
+    }
+  }
+
+  /** Idempotent; `request` calls it, so nothing has to remember to. */
+  static open(): void {
+    if (StorageDesk._open) return;
+    StorageDesk._open = true;
+    Bus.on(STORAGE_CHANNEL, (event: BusEvent<unknown>) => {
+      const req = event.data as StorageRequest;
+      if (req.served) return;                       // somebody nearer answered
+      event.pending.push((async () => {
+        req.result = await StorageDesk.fulfil(req);
+        req.served = true;
+      })());
+    }, { priority: "last" });
+  }
+
+  static async request(op: StorageRequest["op"], store: StoreName, key: string, value?: unknown): Promise<unknown> {
+    StorageDesk.open();
+    const req: StorageRequest = { op, store, key, value };
+    const event = await PostOffice.publish(STORAGE_CHANNEL, req);
+    if (!req.served) {
+      // A REAL failure must not be reported as an absence. A handler that threw
+      // (quota, a refused store, a host error) leaves `served` false exactly
+      // like nobody-was-listening does, and flattening the two would tell the
+      // caller "nobody served this" when the truth is "it was refused, here is
+      // why". So the recorded cause wins whenever there is one.
+      throw new Error(event.errors.length
+        ? `storage: ${event.errors.join("; ")}`
+        : `storage: nobody served ${op} ${key}`);
+    }
+    return req.result;
+  }
+}
+
 class ScopedStorage {
   // THE PREFIX IS ONE PLACE ON PURPOSE. Today it is this script's own id, which
   // is what keeps two unrelated scripts from colliding in a storyStorage they
@@ -7041,14 +7135,14 @@ class ScopedStorage {
   private _key(key: string): string { return `${this.StoragePrefix}_${key}`; }
 
   async get(key: string): Promise<unknown> {
-    return api.v1.storyStorage.get(this._key(key));
+    return StorageDesk.request("get", STORE.story, this._key(key));
   }
   async getOrDefault<T>(key: string, fallback: T): Promise<T> {
     const v = await this.get(key);
     return v === undefined ? fallback : v as T;
   }
   async set(key: string, value: unknown): Promise<void> {
-    await api.v1.storyStorage.set(this._key(key), value);
+    await StorageDesk.request("set", STORE.story, this._key(key), value);
   }
   // Writes only when the key is missing; returns whether it wrote.
   async setIfAbsent(key: string, value: unknown): Promise<boolean> {
@@ -7062,13 +7156,13 @@ class ScopedStorage {
   // Returns whether the key existed before removal.
   async delete(key: string): Promise<boolean> {
     const existed = await this.has(key);
-    await api.v1.storyStorage.remove(this._key(key));
+    await StorageDesk.request("delete", STORE.story, this._key(key));
     return existed;
   }
   // Keys this manager has set, with the storage prefix stripped back off.
   async list(): Promise<string[]> {
     const prefix = `${this.StoragePrefix}_`;
-    return (await api.v1.storyStorage.list())
+    return (await StorageDesk.request("list", STORE.story, "") as string[])
       .filter(k => k.startsWith(prefix))
       .map(k => k.slice(prefix.length));
   }
@@ -7076,14 +7170,14 @@ class ScopedStorage {
   // temp*: same API against api.v1.tempStorage - scratch state the host clears
   // whenever the script unloads (refresh, session end, toggling it off/on).
   async tempGet(key: string): Promise<unknown> {
-    return api.v1.tempStorage.get(this._key(key));
+    return StorageDesk.request("get", STORE.temp, this._key(key));
   }
   async tempGetOrDefault<T>(key: string, fallback: T): Promise<T> {
     const v = await this.tempGet(key);
     return v === undefined ? fallback : v as T;
   }
   async tempSet(key: string, value: unknown): Promise<void> {
-    await api.v1.tempStorage.set(this._key(key), value);
+    await StorageDesk.request("set", STORE.temp, this._key(key), value);
   }
   async tempSetIfAbsent(key: string, value: unknown): Promise<boolean> {
     if (await this.tempHas(key)) return false;
@@ -7095,7 +7189,7 @@ class ScopedStorage {
   }
   async tempDelete(key: string): Promise<boolean> {
     const existed = await this.tempHas(key);
-    await api.v1.tempStorage.remove(this._key(key));
+    await StorageDesk.request("delete", STORE.temp, this._key(key));
     return existed;
   }
 }
@@ -7732,9 +7826,13 @@ class PostOffice {
   private static _wired: number | undefined;
   // scriptId -> the channels that script says it listens on.
   private static _remote = new Map<string, Set<string>>();
-  // The Bus version our last announcement described, so a newly-subscribed
-  // channel re-announces itself and a quiet turn costs nothing.
-  private static _announcedAt = -1;
+  // WHAT our last announcement described, not WHEN. It used to be the Bus
+  // version, which meant any new subscription re-announced - including one on a
+  // channel we deliberately never announce (`local:`, hello, storage), so the
+  // desk opening cost a hello that described an identical list. Comparing the
+  // list itself means a re-announcement happens exactly when what we tell the
+  // others has actually changed.
+  private static _announced = "";
 
   /** Channels some OTHER script has declared. Exposed for tests and [[show-*]]. */
   static remoteInterest(): Record<string, string[]> {
@@ -7745,14 +7843,20 @@ class PostOffice {
 
   private static wanted(channel: string): boolean {
     for (const set of PostOffice._remote.values()) {
-      if (set.has(INTEREST_ALL) || set.has(channel)) return true;
+      if (set.has(channel)) return true;
+      // `*` means EVERY EVENT, not every message. Storage is the plumbing
+      // underneath events, and a monitor that matched it would put every sheet
+      // read on the wire - reinstating exactly the cost §7.84 removed. A script
+      // that genuinely serves storage says so by name.
+      if (set.has(INTEREST_ALL) && channel !== STORAGE_CHANNEL) return true;
     }
     return false;
   }
 
   // What we tell the others: every channel we listen on that could ever cross.
   private static ourChannels(): string[] {
-    return Bus.channels().filter(c => !isLocalChannel(c) && c !== HELLO_CHANNEL);
+    return Bus.channels().filter(c =>
+      !isLocalChannel(c) && c !== HELLO_CHANNEL && c !== STORAGE_CHANNEL);
   }
 
   // Say hello. `to` targets one script, `isReply` marks it as the answer that
@@ -7804,7 +7908,7 @@ class PostOffice {
       scriptId: api.v1.script.id, channels: PostOffice.ourChannels(),
       ...(isReply ? { reply: true } : {}),
     };
-    PostOffice._announcedAt = Bus.version;
+    PostOffice._announced = PostOffice.ourChannels().join(",");
     try {
       if (to) await messaging.send?.(to, hello, HELLO_CHANNEL);
       else await messaging.broadcast?.(hello, HELLO_CHANNEL);
@@ -7819,6 +7923,13 @@ class PostOffice {
       onMessage?: (cb: (m: unknown) => unknown, filter?: unknown) => Promise<number>;
     } } }).v1?.messaging;
     if (!messaging?.onMessage) return;   // a host without messaging is not an error
+    // ORDER MATTERS TWICE HERE. The desk is opened first so its subscription
+    // exists before we ever describe ourselves, and the directory is read while
+    // `_wired` is still undefined - because that read is itself a storage
+    // publish, and a publish from a wired post office re-announces. Reading it
+    // after wiring cost us a spurious second hello on every open.
+    StorageDesk.open();
+    const known = await PostOffice.remembered();
     PostOffice._wired = await messaging.onMessage((raw: unknown) => {
       const m = (raw ?? {}) as { fromScriptId?: string; channel?: string; data?: unknown; timestamp?: number };
       if (!m.channel) return;
@@ -7846,7 +7957,6 @@ class PostOffice {
     // Either way the answers arrive on a LATER tick, so this is where init
     // waits, and it is safe to wait here precisely because init runs on ENABLE
     // rather than on a command that owes somebody a reply this turn.
-    const known = await PostOffice.remembered();
     if (known.length) for (const id of known) await PostOffice.announce(id);
     else await PostOffice.announce();
   }
@@ -7864,7 +7974,7 @@ class PostOffice {
     // close would let a stale entry keep the wire alive for a script that is no
     // longer there.
     PostOffice._remote.clear();
-    PostOffice._announcedAt = -1;
+    PostOffice._announced = "";
     // The stored directory deliberately SURVIVES a close. `_remote` is "who is
     // listening right now" and is only true while we are; the directory is "who
     // has ever been here", which is what saves the next load a round-trip.
@@ -7886,7 +7996,7 @@ class PostOffice {
     // We only ever announced the channels we had at the time. Picking up a new
     // subscription since then means the others' picture of us is stale, so say
     // hello again - guarded by the Bus version, so a quiet turn costs nothing.
-    if (PostOffice._wired !== undefined && Bus.version !== PostOffice._announcedAt) {
+    if (PostOffice._wired !== undefined && PostOffice.ourChannels().join(",") !== PostOffice._announced) {
       await PostOffice.announce();
     }
     // NOBODY IS LISTENING, SO NOBODY IS TOLD. The whole point: alone, this
@@ -18872,12 +18982,16 @@ const fieldKey = (key: string): string => `${UI_FIELD_STORE}${key}`;
 
 // PRESENCE, not truthiness - a field the player deliberately cleared reads as
 // cleared rather than as absent.
+// Through the counter like everything else. These are the keys the HOST writes
+// on our behalf when a field has a `storageKey`, so they are bare rather than
+// prefixed - but a bare key is still somebody's key, and the rule is that no
+// code outside StorageDesk names api.v1.*Storage.
 async function readField(key: string): Promise<string> {
-  const raw = await api.v1.storyStorage.get(key);
+  const raw = await StorageDesk.request("get", STORE.story, key);
   return raw === undefined || raw === null ? "" : String(raw).trim();
 }
 async function writeField(key: string, value: string): Promise<void> {
-  await api.v1.storyStorage.set(key, value);
+  await StorageDesk.request("set", STORE.story, key, value);
 }
 
 // Every window ends the same two ways: a Close beside whatever buttons it owns,

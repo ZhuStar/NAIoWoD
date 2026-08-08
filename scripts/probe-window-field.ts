@@ -1,6 +1,19 @@
 // =============================================================================
 // SMALL PROBE: where does a window field actually GO?
 // -----------------------------------------------------------------------------
+// *** RUN ON-HOST 2026-08-08. ANSWERED. Kept so the answer can be re-checked if
+// *** NovelAI ever changes it - there is no need to run it again otherwise.
+// ***
+// ***   storageKey "foo"         -> api.v1.storage["foo"]         (per SCRIPT)
+// ***   storageKey "story:foo"   -> api.v1.storyStorage["foo"]    (per STORY)
+// ***   storageKey "history:foo" -> api.v1.historyStorage["foo"]  (undo-aware)
+// ***
+// *** Every prefix behaves as declared, the key is stored BARE with the prefix
+// *** stripped, and the undocumented case - unprefixed - is the per-script
+// *** store. That confirmed the window bug outright: the engine wrote
+// *** unprefixed (-> storage) and read tempStorage. window.ts now binds with
+// *** "story:" and reads storyStorage, with no fallback.
+//
 // ONE script slot, no second half, ~20 seconds to run.
 //
 //   1. Paste this whole file into any NovelAI script slot.

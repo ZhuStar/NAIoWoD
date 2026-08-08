@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `bab02c8`** ("A cray asks its
-> own time").
+> **Last synced with the code as of commit `55c05b7`** ("Measured, so the
+> fallback comes out").
+> Prior: `bab02c8` ("A cray asks its own time").
 > Prior: `abd2179` ("The Roll button never rolled").
 > Prior: `e7a7bdc` ("A card must carry a def all the way home").
 > Prior: `1216053` ("Nobody is listening, so nobody is told").
@@ -270,12 +271,16 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   work is a MIGRATION rather than a decision: every existing story has its keys
   under `<scriptId>_`, so switching to a fixed prefix must read through the old
   one or it orphans live saves.
-- **`scripts/probe-window-field.ts` — the SMALL one, ONE slot.** Answers where
-  a window field actually goes: F1 is the `story:` prefix honoured (if yes,
-  `window.ts`'s storyStorage→temp→storage fallback is dead code and can go), F2
-  where an UNPREFIXED storageKey lands — the thing the docs are silent about and
-  that broke every window (§7.83) — and F3 whether `history:` is symmetric.
-  Paste, type `probe-field`, fill three boxes, click. It prints its own verdict.
+- **`scripts/probe-window-field.ts` — RUN, AND ANSWERED (2026-08-08).** Where a
+  window field actually goes, measured rather than read off the docs:
+  **unprefixed → `api.v1.storage` (per SCRIPT)**, **`story:` → `storyStorage`**,
+  **`history:` → `historyStorage`**, each under the BARE key with the prefix
+  stripped. All three prefixes behave exactly as declared, and the unprefixed
+  case — the one the docs never state — is the per-script store. That confirms
+  §7.83's diagnosis outright instead of by inference (the engine wrote
+  unprefixed → `storage`, and read `tempStorage`), and it let `window.ts` DROP
+  its fallback chain: `readField` is now a single `storyStorage` read, and all
+  672 tests pass without the fallback, which is the proof it was dead code.
 - **`scripts/probe-messaging.ts` answers the multi-script questions and has
   never been run.** Not in the build, not in `tsconfig` (which includes src/test/types
   only), so type-check it standalone against the vendored d.ts. One file, one
@@ -4250,11 +4255,13 @@ and `prefill` are mocked/available but not yet written.
     - `fieldKey` / `readField` / `writeField` in window.ts are now the ONLY way
       a form field is touched, because the picker modal and the input it belongs
       to have to agree and one pair of helpers is what keeps them agreeing.
-      `readField` falls back storyStorage → tempStorage → storage **by
-      presence, not truthiness**, so a field the player cleared reads as
-      cleared. The fallbacks are insurance: which store the host defaults to
-      cannot be settled off-host, and a silently empty field is the failure
-      being fixed.
+      `readField` tests **presence, not truthiness**, so a field the player
+      cleared reads as cleared rather than as absent. It shipped with a
+      storyStorage → tempStorage → storage fallback because the host's default
+      could not be settled off-host; `scripts/probe-window-field.ts` then
+      settled it (unprefixed → `api.v1.storage`), the fallback came out, and the
+      suite stayed green without it — which is how you tell insurance from dead
+      code.
     - **`api.v1.storage` was not in the host mock at all** — the store the host
       most likely defaults to was the one thing nothing modelled.
     - **WHY NO TEST CAUGHT IT, which is the reusable part:** the mock did not

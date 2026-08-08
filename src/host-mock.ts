@@ -134,10 +134,11 @@ export function __uiWindows(): { kind: string; options: { content?: UIPart[] } &
 // Type into a form field the way the HOST does, which is the whole point of
 // having it here: an input's `storageKey` names the store its value is synced
 // to - unprefixed goes to the script's own `storage`, "story:" to storyStorage,
-// "history:" to historyStorage (script-types.d.ts, every *Input part). The mock
-// modelled none of that, so a window could read its fields out of a store the
-// host never wrote to and every test still passed. Route test input through
-// here and that mismatch fails loudly instead.
+// "history:" to historyStorage. MEASURED on-host by
+// scripts/probe-window-field.ts, not inferred from the docs. The mock modelled
+// none of it, so a window could read its fields out of a store the host never
+// wrote to and every test still passed. Route test input through here and that
+// mismatch fails loudly instead.
 export async function __uiTypeInto(storageKey: string, value: string): Promise<void> {
   const [store, key] = storageKey.startsWith("story:") ? [__mockStore, storageKey.slice(6)]
     : storageKey.startsWith("history:") ? [__mockHistoryStore, storageKey.slice(8)]

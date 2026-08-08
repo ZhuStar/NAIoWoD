@@ -36,29 +36,31 @@ const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 
 // --- WHERE A FORM FIELD ACTUALLY LIVES ---------------------------------------
 // One place, because getting this wrong is INVISIBLE. The host syncs an input's
-// value to the store its `storageKey` NAMES: unprefixed goes to the host's own
-// default, `"story:"` to storyStorage, `"history:"` to historyStorage - stated
-// on every *Input part in script-types.d.ts. This engine wrote UNPREFIXED keys
-// and then read them back out of `tempStorage`, so the read never saw the
-// write and EVERY window field was permanently empty. [[win-roll]]'s Roll
-// button read an empty pool and refused; the other windows composed their
-// command with every knob blank. That is the "clicking Roll does nothing" bug.
+// value to the store its `storageKey` NAMES, and this is MEASURED on-host
+// (scripts/probe-window-field.ts), not inferred:
 //
-// The prefix is EXPLICIT now, and the reader uses the matching store. The
-// fallbacks are insurance rather than decoration: which store the host treats
-// as default cannot be determined off-host (the probe asks), and a silently
-// empty field is precisely the failure being fixed here. They test for PRESENCE
-// rather than truthiness, so a field the player deliberately cleared reads as
-// cleared instead of falling through to a stale value in another store.
+//   storageKey "foo"          -> api.v1.storage["foo"]          (per SCRIPT)
+//   storageKey "story:foo"    -> api.v1.storyStorage["foo"]     (per STORY)
+//   storageKey "history:foo"  -> api.v1.historyStorage["foo"]   (undo-aware)
+//
+// This engine wrote UNPREFIXED keys - so the host filed them under
+// `api.v1.storage` - and then read them back out of `tempStorage`. Two stores
+// that never meet, so EVERY window field was permanently empty: [[win-roll]]'s
+// Roll button read an empty pool and refused, and the other windows composed
+// their command with every knob blank.
+//
+// `story:` is the right store rather than merely a working one: a form belongs
+// to the STORY being played, not to the script that drew it - which also means
+// it survives the multi-script split, where several units share one storyStorage
+// and a window opened by one unit is readable by the unit that owns the verb.
 const UI_FIELD_STORE = "story:";
 const fieldKey = (key: string): string => `${UI_FIELD_STORE}${key}`;
 
+// PRESENCE, not truthiness - a field the player deliberately cleared reads as
+// cleared rather than as absent.
 async function readField(key: string): Promise<string> {
-  for (const store of [api.v1.storyStorage, api.v1.tempStorage, api.v1.storage]) {
-    const raw = await store.get(key);
-    if (raw !== undefined && raw !== null) return String(raw).trim();
-  }
-  return "";
+  const raw = await api.v1.storyStorage.get(key);
+  return raw === undefined || raw === null ? "" : String(raw).trim();
 }
 async function writeField(key: string, value: string): Promise<void> {
   await api.v1.storyStorage.set(key, value);

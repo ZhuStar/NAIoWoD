@@ -3979,7 +3979,9 @@ describe("roll window: win-roll + the table sidecar", () => {
     for (const w of __uiWindows()) walk(w.options.content as unknown as Array<Record<string, unknown>>);
     return out;
   };
-  const set = (k: string, v: string) => api.v1.tempStorage.set(`win:roll:${k}`, v);
+  // Through the HOST's own storageKey rule, not around it: a test that writes
+  // the field into a store the host never uses proves nothing (§7.83).
+  const set = (k: string, v: string) => __uiTypeInto(`story:win:roll:${k}`, v);
 
   test("name-roll bakes a table sidecar; @name reads it; table= on invocation overrides; @pools refuse to save", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');

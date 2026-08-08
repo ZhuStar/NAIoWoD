@@ -62,6 +62,8 @@ import {
   SuccessTable, SuccessTableRegistry, readSuccessTable, describeTableReading, describeTable,
   parseTableRows, DEFAULT_SUCCESS_TABLES, RollOutcomeKind,
   ContestMode, ContestOutcome, compareRolls, ExtendedContest, applyContestRound, describeContest, RollExecution,
+  ContestEntrant, FieldOutcome, compareField, describeStandings, ContestSide,
+  CONTEST_OPEN, CONTEST_DRAW, migrateContest,
   BotchPolicy,
 } from "./rolls";
 import {
@@ -3022,16 +3024,27 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
 // Roll one side of a contest. A named character rolls live (traits + boosts +
 // wound penalty); an ad-hoc side rolls its pool with a zero resolver, so only
 // literal numbers count. A char that no longer exists degrades to ad-hoc.
+// Every side of a contest rolls, in order. A named character rolls live off its
+// own sheet; an ad-hoc side rolls literals. One place, because three callers
+// need it and a field of five must not be spelled out at each.
+async function rollContestSides(sides: ContestSide[], ctx: CommandContext, overrides?: (side: ContestSide, i: number) => RollSpec): Promise<RollExecution[]> {
+  const out: RollExecution[] = [];
+  for (const [i, side] of sides.entries()) {
+    out.push(await execContestSide(overrides ? overrides(side, i) : side.base, side.char, ctx.rng));
+  }
+  return out;
+}
+
 // Apply one round, persist it, and keep the "current contest" pointer honest:
 // an open contest becomes the current one, a finished one stops being it. The
 // three callers used to hand-roll this, and the two that OPEN a contest forgot
 // to clear the pointer when a contest ended on its first round.
-async function commitContestRound(contest: ExtendedContest, aExec: RollExecution, bExec: RollExecution): Promise<{ after: ExtendedContest; note: string; tail: string }> {
-  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
+async function commitContestRound(contest: ExtendedContest, execs: RollExecution[]): Promise<{ after: ExtendedContest; note: string; tail: string }> {
+  const { contest: after, note } = applyContestRound(contest, execs);
   await ExtendedContestStore.save(after);
-  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
+  if (after.status === CONTEST_OPEN) await ExtendedContestStore.setCurrent(after.id);
   else if ((await ExtendedContestStore.currentId()) === after.id) await ExtendedContestStore.clearCurrent();
-  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  const tail = after.status === CONTEST_OPEN ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
   return { after, note, tail };
 }
 
@@ -3058,43 +3071,84 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
 // From the actor's side, what does a table read? The actor's winning margin (the
 // successes that actually land) at "success"; an actor botch reads as botch; any
 // non-win (resisted, out-contested, tie) reads as failure.
-function contestTableInput(o: ContestOutcome): { outcome: RollOutcomeKind; successes: number } {
-  if (o.aBotch) return { outcome: "botch", successes: 0 };
-  if (o.winner !== "a") return { outcome: "failure", successes: 0 };
+function contestTableInput(o: FieldOutcome, actor: string): { outcome: RollOutcomeKind; successes: number } {
+  const mine = o.standings.find(s => StringUtil.normalize(s.name) === StringUtil.normalize(actor));
+  if (mine?.botch) return { outcome: "botch", successes: 0 };
+  // Sharing the top with somebody is not winning it.
+  if (o.winners.length !== 1 || StringUtil.normalize(o.winners[0]) !== StringUtil.normalize(actor)) {
+    return { outcome: "failure", successes: 0 };
+  }
   return { outcome: "success", successes: o.margin };
 }
 
-// Resolve the opposition named by vs= (a character, an @alias, or a bare label).
-// No vs= => an ad-hoc "the-resistance"/"the-opposition" that rolls only literals.
-async function resolveOpponent(cmd: ParsedCommand, mode: ContestMode): Promise<{ error?: string; oppChar?: PlayableCharacter; oppName: string }> {
-  let oppArg = cmd.named["vs"]?.trim();
-  if (oppArg?.startsWith("@")) {
-    const ref = await resolveCharacterRef(oppArg);
-    if (ref.error) return { error: ref.error, oppName: "" };
-    oppArg = ref.name!;
+// THE OPPOSITION - one name or SEVERAL. `vs=` takes a comma-separated list, so
+// two men wrestling and five thieves reaching for the same purse are the same
+// command with a longer argument. Each entry is a character, an @alias, or a
+// bare label (an ad-hoc side that rolls only literal numbers). No vs= at all
+// leaves one ad-hoc opponent, exactly as before.
+interface Opponent { char?: PlayableCharacter; name: string }
+async function resolveOpponents(cmd: ParsedCommand, mode: ContestMode): Promise<{ error?: string; all: Opponent[] }> {
+  const raw = (cmd.named["vs"] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  if (!raw.length) {
+    return { all: [{ name: mode === "resisted" ? "the-resistance" : "the-opposition" }] };
   }
-  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
-  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
-  return { oppChar, oppName };
+  const all: Opponent[] = [];
+  for (const token of raw) {
+    let arg = token;
+    if (arg.startsWith("@")) {
+      const ref = await resolveCharacterRef(arg);
+      if (ref.error) return { error: ref.error, all: [] };
+      arg = ref.name!;
+    }
+    const char = await CharacterStore.load(arg);
+    const name = char ? char.name : arg;
+    // The same name twice would make the standings ambiguous, and it is always
+    // a typo rather than a man contesting himself.
+    if (all.some(o => StringUtil.normalize(o.name) === StringUtil.normalize(name))) {
+      return { error: `"${name}" is named twice in vs= - each side contests once.`, all: [] };
+    }
+    all.push({ char, name });
+  }
+  return { all };
 }
 
-// Run ONE resisted/contested round: the actor rolls mySpec through the live env
-// (spend + wound penalty, exactly like [[roll spend=...]]), the opposition rolls
-// theirSpec, compareRolls adjudicates, and a table (override or a saved sidecar)
-// reads the actor's winning margin. Returns a BODY string (the caller wraps it in
-// sys - so a procedure can append its next-steps inside the same reply).
-async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec: RollSpec, theirSpec: RollSpec, oppName: string, oppChar: PlayableCharacter | undefined, cmd: ParsedCommand, ctx: CommandContext, tableOverride?: string): Promise<string> {
+// The pool each opponent rolls. `vs-pool=` may give one per opponent (in vs=
+// order) or a single pool everyone rolls; failing that they all roll the pool
+// given positionally, which is the two-sided form unchanged.
+function opponentPools(cmd: ParsedCommand, shared: string, count: number): string[] {
+  const listed = (cmd.named["vs-pool"] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  if (!listed.length) return Array.from({ length: count }, () => shared);
+  if (listed.length === 1) return Array.from({ length: count }, () => listed[0]);
+  return Array.from({ length: count }, (_, i) => listed[i] ?? shared);
+}
+
+// Run ONE resisted/contested round against ANY NUMBER of opponents: the actor
+// rolls mySpec through the live env (spend + wound penalty, exactly like
+// [[roll spend=...]]), every opponent rolls its own, compareField adjudicates,
+// and a table (override or a saved sidecar) reads the actor's winning margin.
+// Returns a BODY string (the caller wraps it in sys - so a procedure can append
+// its next-steps inside the same reply).
+async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec: RollSpec, theirSpecs: Array<{ spec: RollSpec; opp: Opponent }>, cmd: ParsedCommand, ctx: CommandContext, tableOverride?: string): Promise<string> {
   const spend = await applySpend(me, cmd, ctx, mySpec.tags, poolTraitsOf(me, mySpec.pool));
   if (spend.refuse) return `${disp(me.name)} can't: ${spend.refuse}.`;
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
   const myEnv = await characterRollEnv(me);
   if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
   const myExec = runRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
-  const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
-  const outcome = compareRolls(mode, myExec, theirExec);
-  const t = contestTableInput(outcome);
-  const notes = [outcome.note, await tableNote(tableOverride ?? cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
-  return `${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}`;
+  const entrants: ContestEntrant[] = [{ name: me.name, exec: myExec }];
+  const shown = [`${disp(me.name)}: ${formatExecution(myExec)}`];
+  for (const { spec, opp } of theirSpecs) {
+    const exec = await execContestSide(spec, opp.char?.name, ctx.rng);
+    entrants.push({ name: opp.name, exec });
+    shown.push(`${disp(opp.name)}: ${formatExecution(exec)}`);
+  }
+  const field = compareField(mode, entrants);
+  // The table still reads the ACTOR's result - a table says what HIS margin
+  // bought, and the field only changes who he had to beat.
+  const t = contestTableInput(field, me.name);
+  const standing = entrants.length > 2 ? `standings ${describeStandings(field)}` : "";
+  const notes = [field.note, standing, await tableNote(tableOverride ?? cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  return `${mode}${entrants.length > 2 ? ` (${entrants.length} ways)` : ""} - ${shown.join(" vs ")} - ${notes}`;
 }
 
 async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -3103,15 +3157,20 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   const verb = mode === "resisted" ? "resist" : "contest";
-  if (!myPool || !theirPool) {
-    return sys(`${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].`);
+  // The opposition's pool comes from the second positional OR from vs-pool=
+  // (which is what a field of several with different pools needs).
+  if (!myPool || (!theirPool && !cmd.named["vs-pool"]?.trim())) {
+    return sys(`${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]]. `
+      + `More than one opposing: vs="Erik,Rok,Sigrid" - they all roll the second pool, or vs-pool="a,b,c" gives each its own.`);
   }
-  const opp = await resolveOpponent(cmd, mode);
+  const opp = await resolveOpponents(cmd, mode);
   if (opp.error) return sys(`${opp.error}`);
   const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
   const mySpec = await withAfflictionTags(me.name, makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags }));
-  const theirSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) });
-  return sys(await runSingleContest(mode, me, mySpec, theirSpec, opp.oppName, opp.oppChar, cmd, ctx));
+  const vsDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+  const pools = opponentPools(cmd, theirPool ?? "", opp.all.length);
+  const theirSpecs = opp.all.map((o, i) => ({ opp: o, spec: makeRollSpec({ pool: pools[i], difficulty: vsDiff }) }));
+  return sys(await runSingleContest(mode, me, mySpec, theirSpecs, cmd, ctx));
 }
 
 // Invoke a saved OPPOSED roll: the save holds the actor's shape + the opposition
@@ -3121,19 +3180,20 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
 async function launchOpposedFromSaved(char: PlayableCharacter, name: string, saved: SavedRoll, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
   const opp = saved.opposed!;
   const mySpec = await withAfflictionTags(char.name, overrideSpec(saved, args));
-  const oppRes = await resolveOpponent(cmd, opp.mode);
+  const oppRes = await resolveOpponents(cmd, opp.mode);
   if (oppRes.error) return sys(`${oppRes.error}`);
-  const theirPool = cmd.named["vs-pool"]?.trim() || opp.pool || mySpec.pool;
+  const theirPool = (cmd.named["vs-pool"] ?? "").split(",")[0]?.trim() || opp.pool || mySpec.pool;
   const theirDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) ?? opp.vsDifficulty;
   if (opp.extended) return launchOpposedExtended(char, name, saved, opp, mySpec, theirPool, theirDiff, oppRes, cmd, args, ctx);
-  const theirSpec = makeRollSpec({ pool: theirPool, difficulty: theirDiff });
-  const body = await runSingleContest(opp.mode, char, mySpec, theirSpec, oppRes.oppName, oppRes.oppChar, cmd, ctx, saved.table);
+  const pools = opponentPools(cmd, theirPool, oppRes.all.length);
+  const theirSpecs = oppRes.all.map((o, i) => ({ opp: o, spec: makeRollSpec({ pool: pools[i], difficulty: theirDiff }) }));
+  const body = await runSingleContest(opp.mode, char, mySpec, theirSpecs, cmd, ctx, saved.table);
   return sys(`${body}${surfaceSteps(saved.steps, undefined)}`);
 }
 
 // opposed + extended = an extended contest (a race like Pursuit). Both race to a
 // play-time `target`; `rounds`/`intervals` cap it (falling back to the save).
-async function launchOpposedExtended(char: PlayableCharacter, name: string, saved: SavedRoll, opp: OpposedSavedConfig, mySpec: RollSpec, theirPool: string, theirDiff: number | undefined, oppRes: { oppChar?: PlayableCharacter; oppName: string }, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
+async function launchOpposedExtended(char: PlayableCharacter, name: string, saved: SavedRoll, opp: OpposedSavedConfig, mySpec: RollSpec, theirPool: string, theirDiff: number | undefined, oppRes: { all: Opponent[] }, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
   const cfg = opp.extended!;
   const target = args.requires ?? intOrUndef(cmd.named["target"]);
   if (target === undefined || target < 1) {
@@ -3142,19 +3202,23 @@ async function launchOpposedExtended(char: PlayableCharacter, name: string, save
   const maxRounds = intOrUndef(cmd.named["rounds"] ?? cmd.named["intervals"]) ?? cfg.intervals;
   if (maxRounds === undefined || maxRounds < 1) return sys(`"${name}" needs rounds=<max> (its save defines none), e.g. [[roll @${name} requires=${target} rounds=5 vs="Erik"]].`);
   const aSpec = makeRollSpec({ ...mySpec, requires: 1 });
-  const bSpec = makeRollSpec({ pool: theirPool, difficulty: theirDiff, requires: 1 });
+  const pools = opponentPools(cmd, theirPool, oppRes.all.length);
   const contest: ExtendedContest = {
     id: api.v1.uuid(), label: cmd.named["label"] ?? name,
-    a: { name: char.name, base: aSpec, accumulated: 0, char: char.name },
-    b: { name: oppRes.oppName, base: bSpec, accumulated: 0, char: oppRes.oppChar?.name },
+    sides: [
+      { name: char.name, base: aSpec, accumulated: 0, char: char.name },
+      ...oppRes.all.map((o, i) => ({
+        name: o.name, base: makeRollSpec({ pool: pools[i], difficulty: theirDiff, requires: 1 }),
+        accumulated: 0, char: o.char?.name,
+      })),
+    ],
     target, maxRounds,
     interval: cmd.named["interval"] ?? cfg.interval ?? "",
     onBotch: cmd.named["on-botch"] ? parseBotchPolicy(cmd.named["on-botch"]) : (cfg.onBotch ?? "fail"),
-    rounds: 0, status: "open", log: [],
+    rounds: 0, status: CONTEST_OPEN, log: [],
   };
-  const aExec = await execContestSide(aSpec, char.name, ctx.rng);
-  const bExec = await execContestSide(bSpec, oppRes.oppChar?.name, ctx.rng);
-  const { after, note, tail } = await commitContestRound(contest, aExec, bExec);
+  const execs = await rollContestSides(contest.sides, ctx);
+  const { after, note, tail } = await commitContestRound(contest, execs);
   return sys(`${disp(char.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}${surfaceSteps(saved.steps, undefined)}`);
 }
 
@@ -3170,11 +3234,11 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   if (!myPool || !theirPool) {
-    return sys(`extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].`);
+    return sys(`extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]]. `
+      + `vs= takes a LIST for a race with more than two in it: vs="Erik,Rok,Sigrid".`);
   }
-  const opp = await resolveOpponent(cmd, "contested");
+  const opp = await resolveOpponents(cmd, "contested");
   if (opp.error) return sys(`${opp.error}`);
-  const { oppChar, oppName } = opp;
 
   const target = intOrUndef(cmd.named["target"] ?? cmd.named["requires"]) ?? 0;
   if (target < 1) return sys(`extended-contest needs target=<successes> (the goal both race to).`);
@@ -3182,43 +3246,52 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   if (maxRounds < 1) return sys(`extended-contest needs rounds=<max> (at least 1).`);
 
   const aSpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), requires: 1 });
-  const bSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]), requires: 1 });
+  const vsDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+  const pools = opponentPools(cmd, theirPool, opp.all.length);
   const contest: ExtendedContest = {
     id: api.v1.uuid(),
     label: cmd.named["label"] ?? "",
-    a: { name: me.name, base: aSpec, accumulated: 0, char: me.name },
-    b: { name: oppName, base: bSpec, accumulated: 0, char: oppChar?.name },
+    sides: [
+      { name: me.name, base: aSpec, accumulated: 0, char: me.name },
+      ...opp.all.map((o, i) => ({
+        name: o.name, base: makeRollSpec({ pool: pools[i], difficulty: vsDiff, requires: 1 }),
+        accumulated: 0, char: o.char?.name,
+      })),
+    ],
     target, maxRounds,
     interval: cmd.named["interval"] ?? "",
     onBotch: parseBotchPolicy(cmd.named["on-botch"]),
-    rounds: 0, status: "open", log: [],
+    rounds: 0, status: CONTEST_OPEN, log: [],
   };
-  const aExec = await execContestSide(aSpec, me.name, ctx.rng);
-  const bExec = await execContestSide(bSpec, oppChar?.name, ctx.rng);
-  const { after, note, tail } = await commitContestRound(contest, aExec, bExec);
+  const execs = await rollContestSides(contest.sides, ctx);
+  const { after, note, tail } = await commitContestRound(contest, execs);
   return sys(`${disp(me.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}`);
 }
 
 async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
   if (!contest) return sys(`No open contest. Start one with [[extended-contest ...]] or name its id.`);
-  if (contest.status !== "open") {
-    const who = contest.status === "draw" ? "a draw" : `won by ${contest.status === "a" ? contest.a.name : contest.b.name}`;
+  if (contest.status !== CONTEST_OPEN) {
+    const who = contest.status === CONTEST_DRAW ? "a draw" : `won by ${disp(contest.status)}`;
     return sys(`That contest is already ${who}.`);
   }
-  const aSpec = overrideSpec(contest.a.base, rollOverridesFromNamed(cmd));
+  // The ACTOR (side 0) takes this round's roll overrides; every other side may
+  // be re-difficultied at once with vs-difficulty=, as before.
+  const mine = rollOverridesFromNamed(cmd);
   const vDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
-  const bSpec = vDiff !== undefined ? overrideSpec(contest.b.base, { difficulty: vDiff }) : contest.b.base;
-  const aExec = await execContestSide(aSpec, contest.a.char, ctx.rng);
-  const bExec = await execContestSide(bSpec, contest.b.char, ctx.rng);
-  const { after, note } = await commitContestRound(contest, aExec, bExec);
+  const execs = await rollContestSides(contest.sides, ctx, (side, i) =>
+    i === 0 ? overrideSpec(side.base, mine)
+      : vDiff !== undefined ? overrideSpec(side.base, { difficulty: vDiff }) : side.base);
+  const { after, note } = await commitContestRound(contest, execs);
   return sys(`${describeContest(after)}. This round: ${note}.`);
 }
 
 async function cmdContestStatus(cmd: ParsedCommand): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
   if (!contest) return sys(`No extended contest found. Start one with [[extended-contest ...]].`);
-  const recent = contest.log.slice(-3).map(l => `r${l.round}: ${disp(contest.a.name)} +${l.aNet}/${disp(contest.b.name)} +${l.bNet}`).join(", ");
+  const recent = contest.log.slice(-3)
+    .map(l => `r${l.round}: ${Object.entries(l.nets ?? {}).map(([n, v]) => `${disp(n)} +${v}`).join("/")}`)
+    .join(", ");
   return sys(`${describeContest(contest)}${recent ? ` | recent: ${recent}` : ""}.`);
 }
 
@@ -3227,7 +3300,7 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   if (!contest) return sys(`No extended contest to cancel.`);
   await ExtendedContestStore.remove(contest.id);
   if ((await ExtendedContestStore.currentId()) === contest.id) await ExtendedContestStore.clearCurrent();
-  const progress = `${disp(contest.a.name)} ${contest.a.accumulated}/${contest.target} vs ${disp(contest.b.name)} ${contest.b.accumulated}/${contest.target}`;
+  const progress = contest.sides.map(s => `${disp(s.name)} ${s.accumulated}/${contest.target}`).join(" vs ");
   return sys(`Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`);
 }
 
@@ -5987,6 +6060,7 @@ CommandRouter.register("templates", cmdTemplates, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "ouroboros" }],
 });
 CommandRouter.register("extend-template", cmdExtendTemplate, {
+  inStory: false,
   summary: "a new template from an old one: state only what differs",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>", example: "Ouroboros" },
@@ -6013,10 +6087,12 @@ CommandRouter.register("extend-template", cmdExtendTemplate, {
   ],
 });
 CommandRouter.register("forget-template", cmdForgetTemplate, {
+  inStory: false,
   summary: "drop a chronicle template (the shipped one, if any, resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("define-resource", cmdDefineResource, {
+  inStory: false,
   summary: "define a pool or tracker a template can then grant",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>", example: "Living Resolve" },
@@ -6038,6 +6114,7 @@ CommandRouter.register("background", cmdBackground, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "fount" }],
 });
 CommandRouter.register("define-background", cmdDefineBackground, {
+  inStory: false,
   summary: "define/replace a background (a Talisman that IS a place grants that place's ratings)",
   params: [
     { key: "name", kind: "named", required: true, type: "literal", desc: "Name - BACKTICKS", example: "Talisman" },
@@ -6048,6 +6125,7 @@ CommandRouter.register("define-background", cmdDefineBackground, {
   ],
 });
 CommandRouter.register("forget-background", cmdForgetBackground, {
+  inStory: false,
   summary: "remove a custom background (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -6180,6 +6258,7 @@ CommandRouter.register("tables", cmdTables, {
   params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
 });
 CommandRouter.register("define-table", cmdDefineTable, {
+  inStory: false,
   summary: "define/replace a success table in its category's general card",
   note: "a missing subcategory prompts a modal to create it",
   params: [
@@ -6196,14 +6275,17 @@ CommandRouter.register("define-table", cmdDefineTable, {
   ],
 });
 CommandRouter.register("forget-table", cmdForgetTable, {
+  inStory: false,
   summary: "remove a table from its category's general card; built-ins can only be shadowed",
   params: [{ key: "name", kind: "positional", required: true, hint: "<[sub::]name|@alias>" }],
 });
 CommandRouter.register("define-table-category", cmdDefineTableCategory, {
+  inStory: false,
   summary: "create a table subcategory (a real lorebook category with its general card)",
   params: [{ key: "name", kind: "named", required: true, desc: "Category name (single segment)", example: "e.g. combat" }],
 });
 CommandRouter.register("table-alias", cmdTableAlias, {
+  inStory: false,
   summary: "define a table alias, or list them (no args); table=@alias resolves it",
   params: [
     { key: "token", kind: "positional", hint: "<@alias>" },
@@ -6211,10 +6293,12 @@ CommandRouter.register("table-alias", cmdTableAlias, {
   ],
 });
 CommandRouter.register("forget-table-alias", cmdForgetTableAlias, {
+  inStory: false,
   summary: "remove a table alias",
   params: [{ key: "token", kind: "positional", required: true, hint: "<@alias>" }],
 });
 CommandRouter.register("define-constraint", cmdDefineConstraint, {
+  inStory: false,
   summary: "define/replace a constraint group",
   params: [
     { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. clan-only-backgrounds" },
@@ -6232,6 +6316,7 @@ CommandRouter.register("constraint", cmdConstraint, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("forget-constraint", cmdForgetConstraint, {
+  inStory: false,
   summary: "remove a constraint group",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -6254,7 +6339,14 @@ CommandRouter.register("merits", () => cmdMerits(), {
   summary: "list owned merits/flaws, enhancement totals and advisory issues",
   note: "Never lists Arcana - they are not merits. [[show-arcanum]] is their list",
 });
+// A verb that writes a DEFINITION CARD is the player editing the chronicle's
+// rulebook, not a beat of the story: `inStory: false` keeps every "Defined
+// merit X" out of the AI's context, where it was pure noise. Sheet edits
+// ([[set-trait]], [[take-merit]], [[specialty]], [[grant]]) are NOT in this set
+// - those are things that happen to a character, and the Storyteller should see
+// them. `in-story` still overrides either way, per call.
 CommandRouter.register("define-merit", cmdDefineMerit, {
+  inStory: false,
   summary: "define a merit or flaw (writes the srd:merits-flaws overlay)",
   note: "kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]]",
   params: [
@@ -6278,6 +6370,7 @@ CommandRouter.register("merit", cmdMeritInfo, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "inviolate-soul" }],
 });
 CommandRouter.register("forget-merit", cmdForgetMerit, {
+  inStory: false,
   summary: "delete a custom merit/flaw definition (built-ins resurface)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -6297,6 +6390,7 @@ CommandRouter.register("arcanum", cmdArcanumInfo, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
 });
 CommandRouter.register("define-arcanum", cmdDefineArcanum, {
+  inStory: false,
   summary: "define an arcanum or taint (writes the srd:arcana overlay)",
   note: "per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list",
   params: [
@@ -6329,6 +6423,7 @@ CommandRouter.register("drop-arcanum", cmdDropArcanum, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
 });
 CommandRouter.register("forget-arcanum", cmdForgetArcanum, {
+  inStory: false,
   summary: "remove a custom arcanum/taint definition (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -6350,6 +6445,7 @@ CommandRouter.register("specialties", () => cmdSpecialties(), {
   summary: "list the current character's specialties",
 });
 CommandRouter.register("define-affliction", cmdDefineAffliction, {
+  inStory: false,
   summary: "define/replace an affliction (overlay; may shadow a built-in)",
   params: [
     { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. dazed" },
@@ -6367,6 +6463,7 @@ CommandRouter.register("affliction", cmdAfflictionInfo, {
   params: [{ key: "name", kind: "positional", hint: "[name]" }],
 });
 CommandRouter.register("forget-affliction", cmdForgetAffliction, {
+  inStory: false,
   summary: "remove an overlay definition; built-ins can only be shadowed",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -6864,15 +6961,20 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     nameHint: "<expression>", nameExample: "`courage + 2`",
     render: async (_name, scope, cmd) => cmdEval(cmd, scopeChar(scope)),
   },
+  // These two take an ID, not a character: the NAME is the extended action or
+  // contest to look at, and bare means "the one that is running". (Passing the
+  // scope's character here read the character name as an id and found nothing.)
   {
-    verb: "show-roll-status", summary: "an extended action's progress",
+    verb: "show-roll-status", summary: "an extended action's progress (bare: the one that is running)",
     replaces: [{ verb: "roll-status" }], scopes: ON_A_SHEET, defaultScope: "current",
-    render: async (_name, scope, cmd) => cmdRollStatus(asCmd(scope.key, cmd)),
+    nameHint: "[id]",
+    render: async (name, _scope, cmd) => cmdRollStatus(asCmd(name, cmd)),
   },
   {
-    verb: "show-contest-status", summary: "an extended contest's progress",
+    verb: "show-contest-status", summary: "an extended contest's progress (bare: the one that is running)",
     replaces: [{ verb: "contest-status" }], scopes: ON_A_SHEET, defaultScope: "current",
-    render: async (_name, scope, cmd) => cmdContestStatus(asCmd(scope.key, cmd)),
+    nameHint: "[id]",
+    render: async (name, _scope, cmd) => cmdContestStatus(asCmd(name, cmd)),
   },
 ];
 

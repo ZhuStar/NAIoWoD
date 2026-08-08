@@ -2752,6 +2752,97 @@ class SuccessTableRegistry {
 // contributes 0 successes (flagged); both sides botching is a mutual disaster.
 // =============================================================================
 type ContestMode = "resisted" | "contested";
+
+// =============================================================================
+// N SIDES, NOT TWO - a contest is a field, and two is just the small case
+// -----------------------------------------------------------------------------
+// Everything here used to be `a` and `b`: `aNet`/`bNet`, `winner: "a"|"b"`. Two
+// men wrestling is one shape a contest takes, and three thieves reaching for the
+// same purse is another - the rules are identical and only the arithmetic was
+// hard-coded. So the primitive is a FIELD of entrants and the two-sided call is
+// the case where the field has two.
+//
+// CONTESTED: the highest net takes it; several at the top is a draw between
+// them (and everyone else still has a rank, which is what a race needs).
+// RESISTED: the FIRST entrant is the actor and the rest resist him - he must
+// beat the BEST of them, because "resisted" means somebody stopped you and it
+// only takes one. A botch counts as zero and is said out loud.
+// =============================================================================
+interface ContestEntrant { name: string; exec: RollExecution }
+interface ContestStanding { name: string; net: number; botch: boolean; rank: number }
+interface FieldOutcome {
+  mode: ContestMode;
+  standings: ContestStanding[];       // best first; equal nets share a rank
+  winners: string[];                  // empty = nobody; several = a tie at the top
+  margin: number;                     // the winner's lead over the next rank (0 if tied)
+  note: string;
+}
+
+// The net a side actually scored: a botch is zero, never negative.
+function netOf(exec: RollExecution): { net: number; botch: boolean } {
+  const botch = exec.outcome === "botch";
+  return { net: botch ? 0 : Math.max(0, exec.result?.net ?? 0), botch };
+}
+
+function compareField(mode: ContestMode, entrants: ContestEntrant[]): FieldOutcome {
+  const scored = entrants.map(e => ({ name: e.name, ...netOf(e.exec) }));
+  const label = (n: string): string => StringUtil.toTitleCase(n);
+
+  if (mode === "resisted") {
+    // The actor against the best of everyone stopping him.
+    const [actor, ...resisters] = scored;
+    const standings: ContestStanding[] = [{ ...actor, rank: 1 }, ...resisters.map(r => ({ ...r, rank: 2 }))];
+    const base = { mode, standings, winners: [] as string[], margin: 0 };
+    if (!actor) return { ...base, note: "nobody acted" };
+    if (actor.botch) return { ...base, note: "the actor botches" };
+    const best = resisters.reduce((m, r) => Math.max(m, r.net), 0);
+    const margin = actor.net - best;
+    if (margin > 0) {
+      const botched = resisters.filter(r => r.botch).map(r => label(r.name));
+      return { ...base, winners: [actor.name], margin,
+        note: `prevails by ${margin}${resisters.length > 1 ? ` over ${resisters.length} resisting` : ""}`
+          + `${botched.length ? ` (${botched.join(", ")} botched)` : ""}` };
+    }
+    return { ...base, note: `the action is resisted${resisters.length > 1 ? ` (best of ${resisters.length})` : ""}` };
+  }
+
+  // Contested: rank the field. Equal nets share a rank, so a three-way tie at
+  // the top is three winners and the next man is fourth.
+  const order = [...scored].sort((x, y) => y.net - x.net);
+  const standings: ContestStanding[] = [];
+  let rank = 0, seen = 0, lastNet = Number.NaN;
+  for (const one of order) {
+    seen += 1;
+    if (one.net !== lastNet) { rank = seen; lastNet = one.net; }
+    standings.push({ ...one, rank });
+  }
+  if (!standings.length) return { mode, standings, winners: [], margin: 0, note: "nobody rolled" };
+  if (standings.every(s => s.botch)) {
+    return { mode, standings, winners: [], margin: 0, note: "everyone botches - mutual disaster" };
+  }
+  const top = standings.filter(s => s.rank === 1);
+  const runnerUp = standings.find(s => s.rank !== 1);
+  const botched = standings.filter(s => s.botch).map(s => label(s.name));
+  const botchNote = botched.length ? ` (${botched.join(", ")} botched)` : "";
+  if (top.length > 1) {
+    return { mode, standings, winners: top.map(t => t.name), margin: 0,
+      note: `tie at ${top[0].net} between ${top.map(t => label(t.name)).join(" and ")}${botchNote}` };
+  }
+  const margin = top[0].net - (runnerUp?.net ?? 0);
+  return { mode, standings, winners: [top[0].name], margin,
+    note: `${label(top[0].name)} wins by ${margin}${standings.length > 2 ? ` over ${standings.length - 1} others` : ""}${botchNote}` };
+}
+
+// How a field's standings read in a reply: "Erik 4, Rok 2, Sigrid 0 (botch)".
+function describeStandings(o: FieldOutcome): string {
+  return o.standings
+    .map(s => `${StringUtil.toTitleCase(s.name)} ${s.net}${s.botch ? " (botch)" : ""}`)
+    .join(", ");
+}
+
+// --- THE TWO-SIDED CASE ------------------------------------------------------
+// Kept because most contests ARE two-sided and every caller reads a/b. It is
+// compareField with a field of two, so there is one adjudication and not two.
 interface ContestOutcome {
   mode: ContestMode;
   aNet: number; bNet: number;       // successes counted for each side (botch -> 0)
@@ -2759,25 +2850,24 @@ interface ContestOutcome {
   winner: "a" | "b" | "none";
   margin: number;                   // the winner's lead (0 when none)
   note: string;
+  field: FieldOutcome;              // the general answer, for a caller that wants it
 }
 
 function compareRolls(mode: ContestMode, a: RollExecution, b: RollExecution): ContestOutcome {
-  const aBotch = a.outcome === "botch";
-  const bBotch = b.outcome === "botch";
-  const aNet = aBotch ? 0 : Math.max(0, a.result?.net ?? 0);
-  const bNet = bBotch ? 0 : Math.max(0, b.result?.net ?? 0);
-  const base = { mode, aNet, bNet, aBotch, bBotch };
-
-  if (aBotch && bBotch) return { ...base, winner: "none", margin: 0, note: "both sides botch - mutual disaster" };
+  const field = compareField(mode, [{ name: "a", exec: a }, { name: "b", exec: b }]);
+  const A = netOf(a), B = netOf(b);
+  const base = { mode, aNet: A.net, bNet: B.net, aBotch: A.botch, bBotch: B.botch, field };
+  // The two-sided wording is older than the field and several tests read it, so
+  // the special cases keep their exact phrasing.
+  if (A.botch && B.botch) return { ...base, winner: "none", margin: 0, note: "both sides botch - mutual disaster" };
   if (mode === "resisted") {
-    if (aBotch) return { ...base, winner: "none", margin: 0, note: "the actor botches" };
-    const margin = aNet - bNet;
-    if (margin > 0) return { ...base, winner: "a", margin, note: `prevails by ${margin}${bBotch ? " (resister botched)" : ""}` };
+    if (A.botch) return { ...base, winner: "none", margin: 0, note: "the actor botches" };
+    const margin = A.net - B.net;
+    if (margin > 0) return { ...base, winner: "a", margin, note: `prevails by ${margin}${B.botch ? " (resister botched)" : ""}` };
     return { ...base, winner: "none", margin: 0, note: "the action is resisted" };
   }
-  // contested
-  if (aNet > bNet) return { ...base, winner: "a", margin: aNet - bNet, note: `wins by ${aNet - bNet}${bBotch ? " (opponent botched)" : ""}` };
-  if (bNet > aNet) return { ...base, winner: "b", margin: bNet - aNet, note: `loses by ${bNet - aNet}${aBotch ? " (own botch)" : ""}` };
+  if (A.net > B.net) return { ...base, winner: "a", margin: A.net - B.net, note: `wins by ${A.net - B.net}${B.botch ? " (opponent botched)" : ""}` };
+  if (B.net > A.net) return { ...base, winner: "b", margin: B.net - A.net, note: `loses by ${B.net - A.net}${A.botch ? " (own botch)" : ""}` };
   return { ...base, winner: "none", margin: 0, note: "tie" };
 }
 
@@ -2788,74 +2878,104 @@ function compareRolls(mode: ContestMode, a: RollExecution, b: RollExecution): Co
 // ad-hoc side); rolls.ts never reads it - the interpreter uses it to re-resolve
 // this side's pool each round.
 interface ContestSide { name: string; base: RollSpec; accumulated: number; char?: string; }
-type ContestStatus = "open" | "a" | "b" | "draw";
+// "open" while it runs, "draw" when nobody got there first or the rounds ran
+// out, otherwise the NAME of the winner. A name rather than "a"/"b" because
+// there may be five of them.
+type ContestStatus = string;
+const CONTEST_OPEN = "open";
+const CONTEST_DRAW = "draw";
+
 interface ExtendedContest {
   id: string;
   label: string;
-  a: ContestSide;
-  b: ContestSide;
+  sides: ContestSide[];             // TWO OR MORE. Index 0 is the actor.
   target: number;
   maxRounds: number;
   interval: string;                 // advisory spacing, like extended rolls
   onBotch: BotchPolicy;             // per side: fail -> that side loses outright
   rounds: number;
   status: ContestStatus;
-  log: { round: number; aNet: number; bNet: number; note: string }[];
+  log: { round: number; nets: Record<string, number>; note: string }[];
 }
 
-// One round: both sides have rolled; accumulate and settle. Pure.
-function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExec: RollExecution): { contest: ExtendedContest; note: string } {
-  const next: ExtendedContest = { ...c, a: { ...c.a }, b: { ...c.b }, log: [...c.log] };
+// A contest saved before contests could have more than two sides kept `a` and
+// `b`. Read it as a field of two; after one round it is stored the new way.
+function migrateContest(raw: ExtendedContest & { a?: ContestSide; b?: ContestSide }): ExtendedContest {
+  if (raw.sides?.length) return raw;
+  const sides = [raw.a, raw.b].filter((x): x is ContestSide => x !== undefined);
+  const status = raw.status === "a" ? sides[0]?.name : raw.status === "b" ? sides[1]?.name : raw.status;
+  return { ...raw, sides, status: status ?? CONTEST_OPEN, log: raw.log ?? [] };
+}
+
+// One round: every side has rolled; accumulate and settle. Pure. `execs` is
+// parallel to `contest.sides`.
+function applyContestRound(c: ExtendedContest, execs: RollExecution[]): { contest: ExtendedContest; note: string } {
+  const next: ExtendedContest = { ...c, sides: c.sides.map(s => ({ ...s })), log: [...c.log] };
   next.rounds += 1;
-  const aBotch = aExec.outcome === "botch";
-  const bBotch = bExec.outcome === "botch";
-  const aNet = aBotch ? 0 : Math.max(0, aExec.result?.net ?? 0);
-  const bNet = bBotch ? 0 : Math.max(0, bExec.result?.net ?? 0);
+  const label = (n: string): string => StringUtil.toTitleCase(n);
+  const scored = c.sides.map((side, i) => {
+    const exec = execs[i];
+    const botch = exec?.outcome === "botch";
+    return { side, botch, net: botch ? 0 : Math.max(0, exec?.result?.net ?? 0) };
+  });
+  const nets: Record<string, number> = {};
+  for (const s of scored) nets[s.side.name] = s.net;
+  const botchers = scored.filter(s => s.botch);
   let note: string;
 
-  // Side names are stored normalized; notes show them in Title Case.
-  const aLabel = StringUtil.toTitleCase(c.a.name);
-  const bLabel = StringUtil.toTitleCase(c.b.name);
-  if (aBotch || bBotch) {
+  if (botchers.length) {
     if (c.onBotch === "fail") {
-      if (aBotch && bBotch) { next.status = "draw"; note = "both sides botch - the contest collapses"; }
-      else if (aBotch) { next.status = "b"; note = `${aLabel} botches - ${bLabel} wins outright`; }
-      else { next.status = "a"; note = `${bLabel} botches - ${aLabel} wins outright`; }
-      next.log.push({ round: next.rounds, aNet, bNet, note });
-      return { contest: next, note };
-    }
-    if (c.onBotch === "lose-successes") {
-      if (aBotch) next.a.accumulated = 0;
-      if (bBotch) next.b.accumulated = 0;
+      // A botch puts you out. Whoever is left takes it - unless nobody is.
+      const standing = scored.filter(s => !s.botch);
+      if (standing.length === 0) { next.status = CONTEST_DRAW; note = "everyone botches - the contest collapses"; }
+      else if (standing.length === 1) {
+        next.status = standing[0].side.name;
+        note = `${botchers.map(b => label(b.side.name)).join(", ")} botch${botchers.length === 1 ? "es" : ""} - ${label(standing[0].side.name)} wins outright`;
+      } else {
+        // More than one left: the botchers are out, the rest carry on. This is
+        // the case two sides could never reach.
+        next.sides = next.sides.filter(s => !botchers.some(b => b.side.name === s.name));
+        note = `${botchers.map(b => label(b.side.name)).join(", ")} botch out - ${next.sides.length} still in`;
+      }
+      if (next.status !== CONTEST_OPEN) {
+        next.log.push({ round: next.rounds, nets, note });
+        return { contest: next, note };
+      }
+    } else if (c.onBotch === "lose-successes") {
+      for (const b of botchers) {
+        const side = next.sides.find(s => s.name === b.side.name);
+        if (side) side.accumulated = 0;
+      }
       note = "botch - progress lost";
     } else note = "botch - a wasted round";
   } else note = "";
 
-  next.a.accumulated += aNet;
-  next.b.accumulated += bNet;
-  const aDone = next.a.accumulated >= c.target;
-  const bDone = next.b.accumulated >= c.target;
-  if (aDone || bDone) {
-    if (aDone && bDone) {
-      if (next.a.accumulated > next.b.accumulated) next.status = "a";
-      else if (next.b.accumulated > next.a.accumulated) next.status = "b";
-      // dead heat: stays open - nobody got there FIRST
-    } else next.status = aDone ? "a" : "b";
+  for (const s of scored) {
+    const side = next.sides.find(x => x.name === s.side.name);
+    if (side) side.accumulated += s.net;
   }
-  if (next.status === "open" && next.rounds >= c.maxRounds) next.status = "draw";
-  const progress = `${aLabel} ${next.a.accumulated}/${c.target} vs ${bLabel} ${next.b.accumulated}/${c.target}`;
+  // Whoever crossed the line this round; if several did, the highest total took
+  // it, and a dead heat stays OPEN because nobody got there first.
+  const done = next.sides.filter(s => s.accumulated >= c.target);
+  if (done.length) {
+    const best = Math.max(...done.map(s => s.accumulated));
+    const leaders = done.filter(s => s.accumulated === best);
+    if (leaders.length === 1) next.status = leaders[0].name;
+  }
+  if (next.status === CONTEST_OPEN && next.rounds >= c.maxRounds) next.status = CONTEST_DRAW;
+  const progress = next.sides.map(s => `${label(s.name)} ${s.accumulated}/${c.target}`).join(" vs ");
   note = note ? `${note}; ${progress}` : progress;
-  next.log.push({ round: next.rounds, aNet, bNet, note });
+  next.log.push({ round: next.rounds, nets, note });
   return { contest: next, note };
 }
 
 function describeContest(c: ExtendedContest): string {
-  const aLabel = StringUtil.toTitleCase(c.a.name);
-  const bLabel = StringUtil.toTitleCase(c.b.name);
   const head = c.label ? `"${c.label}" ` : "";
-  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? aLabel : bLabel} WINS`;
+  const state = c.status === CONTEST_OPEN ? "open"
+    : c.status === CONTEST_DRAW ? "draw"
+      : `${StringUtil.toTitleCase(c.status)} WINS`;
   const bits = [
-    `${aLabel} ${c.a.accumulated}/${c.target} vs ${bLabel} ${c.b.accumulated}/${c.target}`,
+    c.sides.map(s => `${StringUtil.toTitleCase(s.name)} ${s.accumulated}/${c.target}`).join(" vs "),
     `round ${c.rounds}/${c.maxRounds}`,
   ];
   if (c.interval) bits.push(`interval ${c.interval}`);
@@ -8587,7 +8707,10 @@ class ExtendedContestStore {
 
   static async save(c: ExtendedContest): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore._key(c.id), c); }
   static async load(id: string): Promise<ExtendedContest | undefined> {
-    return (await ExtendedContestStore._storage.get(ExtendedContestStore._key(id))) as ExtendedContest | undefined;
+    const raw = (await ExtendedContestStore._storage.get(ExtendedContestStore._key(id))) as ExtendedContest | undefined;
+    // A contest saved when a contest could only have two sides kept `a`/`b`.
+    // Read it as a field of two, so a race started last week still continues.
+    return raw ? migrateContest(raw) : undefined;
   }
   static async remove(id: string): Promise<void> { await ExtendedContestStore._storage.delete(ExtendedContestStore._key(id)); }
   static async setCurrent(id: string): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore.CURRENT_KEY, id); }
@@ -8599,11 +8722,11 @@ class ExtendedContestStore {
   static async resolve(id?: string): Promise<ExtendedContest | undefined> {
     if (id) return ExtendedContestStore.load(id);
     const cur = await ExtendedContestStore.currentId();
-    if (cur) { const c = await ExtendedContestStore.load(cur); if (c && c.status === "open") return c; }
+    if (cur) { const c = await ExtendedContestStore.load(cur); if (c && c.status === CONTEST_OPEN) return c; }
     const open: ExtendedContest[] = [];
     for (const cid of await ExtendedContestStore.ids()) {
       const c = await ExtendedContestStore.load(cid);
-      if (c && c.status === "open") open.push(c);
+      if (c && c.status === CONTEST_OPEN) open.push(c);
     }
     return open.length === 1 ? open[0] : undefined;
   }
@@ -12630,16 +12753,27 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
 // Roll one side of a contest. A named character rolls live (traits + boosts +
 // wound penalty); an ad-hoc side rolls its pool with a zero resolver, so only
 // literal numbers count. A char that no longer exists degrades to ad-hoc.
+// Every side of a contest rolls, in order. A named character rolls live off its
+// own sheet; an ad-hoc side rolls literals. One place, because three callers
+// need it and a field of five must not be spelled out at each.
+async function rollContestSides(sides: ContestSide[], ctx: CommandContext, overrides?: (side: ContestSide, i: number) => RollSpec): Promise<RollExecution[]> {
+  const out: RollExecution[] = [];
+  for (const [i, side] of sides.entries()) {
+    out.push(await execContestSide(overrides ? overrides(side, i) : side.base, side.char, ctx.rng));
+  }
+  return out;
+}
+
 // Apply one round, persist it, and keep the "current contest" pointer honest:
 // an open contest becomes the current one, a finished one stops being it. The
 // three callers used to hand-roll this, and the two that OPEN a contest forgot
 // to clear the pointer when a contest ended on its first round.
-async function commitContestRound(contest: ExtendedContest, aExec: RollExecution, bExec: RollExecution): Promise<{ after: ExtendedContest; note: string; tail: string }> {
-  const { contest: after, note } = applyContestRound(contest, aExec, bExec);
+async function commitContestRound(contest: ExtendedContest, execs: RollExecution[]): Promise<{ after: ExtendedContest; note: string; tail: string }> {
+  const { contest: after, note } = applyContestRound(contest, execs);
   await ExtendedContestStore.save(after);
-  if (after.status === "open") await ExtendedContestStore.setCurrent(after.id);
+  if (after.status === CONTEST_OPEN) await ExtendedContestStore.setCurrent(after.id);
   else if ((await ExtendedContestStore.currentId()) === after.id) await ExtendedContestStore.clearCurrent();
-  const tail = after.status === "open" ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
+  const tail = after.status === CONTEST_OPEN ? ` Continue with [[continue-contest]] (id ${after.id}).` : "";
   return { after, note, tail };
 }
 
@@ -12666,43 +12800,84 @@ async function execContestSide(base: RollSpec, charName: string | undefined, rng
 // From the actor's side, what does a table read? The actor's winning margin (the
 // successes that actually land) at "success"; an actor botch reads as botch; any
 // non-win (resisted, out-contested, tie) reads as failure.
-function contestTableInput(o: ContestOutcome): { outcome: RollOutcomeKind; successes: number } {
-  if (o.aBotch) return { outcome: "botch", successes: 0 };
-  if (o.winner !== "a") return { outcome: "failure", successes: 0 };
+function contestTableInput(o: FieldOutcome, actor: string): { outcome: RollOutcomeKind; successes: number } {
+  const mine = o.standings.find(s => StringUtil.normalize(s.name) === StringUtil.normalize(actor));
+  if (mine?.botch) return { outcome: "botch", successes: 0 };
+  // Sharing the top with somebody is not winning it.
+  if (o.winners.length !== 1 || StringUtil.normalize(o.winners[0]) !== StringUtil.normalize(actor)) {
+    return { outcome: "failure", successes: 0 };
+  }
   return { outcome: "success", successes: o.margin };
 }
 
-// Resolve the opposition named by vs= (a character, an @alias, or a bare label).
-// No vs= => an ad-hoc "the-resistance"/"the-opposition" that rolls only literals.
-async function resolveOpponent(cmd: ParsedCommand, mode: ContestMode): Promise<{ error?: string; oppChar?: PlayableCharacter; oppName: string }> {
-  let oppArg = cmd.named["vs"]?.trim();
-  if (oppArg?.startsWith("@")) {
-    const ref = await resolveCharacterRef(oppArg);
-    if (ref.error) return { error: ref.error, oppName: "" };
-    oppArg = ref.name!;
+// THE OPPOSITION - one name or SEVERAL. `vs=` takes a comma-separated list, so
+// two men wrestling and five thieves reaching for the same purse are the same
+// command with a longer argument. Each entry is a character, an @alias, or a
+// bare label (an ad-hoc side that rolls only literal numbers). No vs= at all
+// leaves one ad-hoc opponent, exactly as before.
+interface Opponent { char?: PlayableCharacter; name: string }
+async function resolveOpponents(cmd: ParsedCommand, mode: ContestMode): Promise<{ error?: string; all: Opponent[] }> {
+  const raw = (cmd.named["vs"] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  if (!raw.length) {
+    return { all: [{ name: mode === "resisted" ? "the-resistance" : "the-opposition" }] };
   }
-  const oppChar = oppArg ? await CharacterStore.load(oppArg) : undefined;
-  const oppName = oppChar ? oppChar.name : (oppArg || (mode === "resisted" ? "the-resistance" : "the-opposition"));
-  return { oppChar, oppName };
+  const all: Opponent[] = [];
+  for (const token of raw) {
+    let arg = token;
+    if (arg.startsWith("@")) {
+      const ref = await resolveCharacterRef(arg);
+      if (ref.error) return { error: ref.error, all: [] };
+      arg = ref.name!;
+    }
+    const char = await CharacterStore.load(arg);
+    const name = char ? char.name : arg;
+    // The same name twice would make the standings ambiguous, and it is always
+    // a typo rather than a man contesting himself.
+    if (all.some(o => StringUtil.normalize(o.name) === StringUtil.normalize(name))) {
+      return { error: `"${name}" is named twice in vs= - each side contests once.`, all: [] };
+    }
+    all.push({ char, name });
+  }
+  return { all };
 }
 
-// Run ONE resisted/contested round: the actor rolls mySpec through the live env
-// (spend + wound penalty, exactly like [[roll spend=...]]), the opposition rolls
-// theirSpec, compareRolls adjudicates, and a table (override or a saved sidecar)
-// reads the actor's winning margin. Returns a BODY string (the caller wraps it in
-// sys - so a procedure can append its next-steps inside the same reply).
-async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec: RollSpec, theirSpec: RollSpec, oppName: string, oppChar: PlayableCharacter | undefined, cmd: ParsedCommand, ctx: CommandContext, tableOverride?: string): Promise<string> {
+// The pool each opponent rolls. `vs-pool=` may give one per opponent (in vs=
+// order) or a single pool everyone rolls; failing that they all roll the pool
+// given positionally, which is the two-sided form unchanged.
+function opponentPools(cmd: ParsedCommand, shared: string, count: number): string[] {
+  const listed = (cmd.named["vs-pool"] ?? "").split(",").map(t => t.trim()).filter(Boolean);
+  if (!listed.length) return Array.from({ length: count }, () => shared);
+  if (listed.length === 1) return Array.from({ length: count }, () => listed[0]);
+  return Array.from({ length: count }, (_, i) => listed[i] ?? shared);
+}
+
+// Run ONE resisted/contested round against ANY NUMBER of opponents: the actor
+// rolls mySpec through the live env (spend + wound penalty, exactly like
+// [[roll spend=...]]), every opponent rolls its own, compareField adjudicates,
+// and a table (override or a saved sidecar) reads the actor's winning margin.
+// Returns a BODY string (the caller wraps it in sys - so a procedure can append
+// its next-steps inside the same reply).
+async function runSingleContest(mode: ContestMode, me: PlayableCharacter, mySpec: RollSpec, theirSpecs: Array<{ spec: RollSpec; opp: Opponent }>, cmd: ParsedCommand, ctx: CommandContext, tableOverride?: string): Promise<string> {
   const spend = await applySpend(me, cmd, ctx, mySpec.tags, poolTraitsOf(me, mySpec.pool));
   if (spend.refuse) return `${disp(me.name)} can't: ${spend.refuse}.`;
   const myExtra: Partial<RollModifier> = { ...(spend.extra ?? {}) };
   const myEnv = await characterRollEnv(me);
   if (myEnv.penalty !== 0) myExtra.diceMod = (myExtra.diceMod ?? 0) + myEnv.penalty;
   const myExec = runRoll(mySpec, myEnv.resolver, { rng: ctx.rng, extra: myExtra });
-  const theirExec = await execContestSide(theirSpec, oppChar?.name, ctx.rng);
-  const outcome = compareRolls(mode, myExec, theirExec);
-  const t = contestTableInput(outcome);
-  const notes = [outcome.note, await tableNote(tableOverride ?? cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
-  return `${mode} - ${disp(me.name)}: ${formatExecution(myExec)} vs ${disp(oppName)}: ${formatExecution(theirExec)} - ${notes}`;
+  const entrants: ContestEntrant[] = [{ name: me.name, exec: myExec }];
+  const shown = [`${disp(me.name)}: ${formatExecution(myExec)}`];
+  for (const { spec, opp } of theirSpecs) {
+    const exec = await execContestSide(spec, opp.char?.name, ctx.rng);
+    entrants.push({ name: opp.name, exec });
+    shown.push(`${disp(opp.name)}: ${formatExecution(exec)}`);
+  }
+  const field = compareField(mode, entrants);
+  // The table still reads the ACTOR's result - a table says what HIS margin
+  // bought, and the field only changes who he had to beat.
+  const t = contestTableInput(field, me.name);
+  const standing = entrants.length > 2 ? `standings ${describeStandings(field)}` : "";
+  const notes = [field.note, standing, await tableNote(tableOverride ?? cmd.named["table"], t.outcome, t.successes), spend.note].filter(Boolean).join("; ");
+  return `${mode}${entrants.length > 2 ? ` (${entrants.length} ways)` : ""} - ${shown.join(" vs ")} - ${notes}`;
 }
 
 async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
@@ -12711,15 +12886,20 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   const verb = mode === "resisted" ? "resist" : "contest";
-  if (!myPool || !theirPool) {
-    return sys(`${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]].`);
+  // The opposition's pool comes from the second positional OR from vs-pool=
+  // (which is what a field of several with different pools needs).
+  if (!myPool || (!theirPool && !cmd.named["vs-pool"]?.trim())) {
+    return sys(`${verb} needs your pool and the opposition's, e.g. [[${verb} dexterity+stealth perception+alertness vs="Erik"]]. `
+      + `More than one opposing: vs="Erik,Rok,Sigrid" - they all roll the second pool, or vs-pool="a,b,c" gives each its own.`);
   }
-  const opp = await resolveOpponent(cmd, mode);
+  const opp = await resolveOpponents(cmd, mode);
   if (opp.error) return sys(`${opp.error}`);
   const myTags = cmd.named["tags"] ? cmd.named["tags"].split(",").map(t => t.trim()).filter(Boolean) : undefined;
   const mySpec = await withAfflictionTags(me.name, makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), tags: myTags }));
-  const theirSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) });
-  return sys(await runSingleContest(mode, me, mySpec, theirSpec, opp.oppName, opp.oppChar, cmd, ctx));
+  const vsDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+  const pools = opponentPools(cmd, theirPool ?? "", opp.all.length);
+  const theirSpecs = opp.all.map((o, i) => ({ opp: o, spec: makeRollSpec({ pool: pools[i], difficulty: vsDiff }) }));
+  return sys(await runSingleContest(mode, me, mySpec, theirSpecs, cmd, ctx));
 }
 
 // Invoke a saved OPPOSED roll: the save holds the actor's shape + the opposition
@@ -12729,19 +12909,20 @@ async function cmdVersus(mode: ContestMode, cmd: ParsedCommand, ctx: CommandCont
 async function launchOpposedFromSaved(char: PlayableCharacter, name: string, saved: SavedRoll, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
   const opp = saved.opposed!;
   const mySpec = await withAfflictionTags(char.name, overrideSpec(saved, args));
-  const oppRes = await resolveOpponent(cmd, opp.mode);
+  const oppRes = await resolveOpponents(cmd, opp.mode);
   if (oppRes.error) return sys(`${oppRes.error}`);
-  const theirPool = cmd.named["vs-pool"]?.trim() || opp.pool || mySpec.pool;
+  const theirPool = (cmd.named["vs-pool"] ?? "").split(",")[0]?.trim() || opp.pool || mySpec.pool;
   const theirDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]) ?? opp.vsDifficulty;
   if (opp.extended) return launchOpposedExtended(char, name, saved, opp, mySpec, theirPool, theirDiff, oppRes, cmd, args, ctx);
-  const theirSpec = makeRollSpec({ pool: theirPool, difficulty: theirDiff });
-  const body = await runSingleContest(opp.mode, char, mySpec, theirSpec, oppRes.oppName, oppRes.oppChar, cmd, ctx, saved.table);
+  const pools = opponentPools(cmd, theirPool, oppRes.all.length);
+  const theirSpecs = oppRes.all.map((o, i) => ({ opp: o, spec: makeRollSpec({ pool: pools[i], difficulty: theirDiff }) }));
+  const body = await runSingleContest(opp.mode, char, mySpec, theirSpecs, cmd, ctx, saved.table);
   return sys(`${body}${surfaceSteps(saved.steps, undefined)}`);
 }
 
 // opposed + extended = an extended contest (a race like Pursuit). Both race to a
 // play-time `target`; `rounds`/`intervals` cap it (falling back to the save).
-async function launchOpposedExtended(char: PlayableCharacter, name: string, saved: SavedRoll, opp: OpposedSavedConfig, mySpec: RollSpec, theirPool: string, theirDiff: number | undefined, oppRes: { oppChar?: PlayableCharacter; oppName: string }, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
+async function launchOpposedExtended(char: PlayableCharacter, name: string, saved: SavedRoll, opp: OpposedSavedConfig, mySpec: RollSpec, theirPool: string, theirDiff: number | undefined, oppRes: { all: Opponent[] }, cmd: ParsedCommand, args: Partial<RollSpec>, ctx: CommandContext): Promise<string> {
   const cfg = opp.extended!;
   const target = args.requires ?? intOrUndef(cmd.named["target"]);
   if (target === undefined || target < 1) {
@@ -12750,19 +12931,23 @@ async function launchOpposedExtended(char: PlayableCharacter, name: string, save
   const maxRounds = intOrUndef(cmd.named["rounds"] ?? cmd.named["intervals"]) ?? cfg.intervals;
   if (maxRounds === undefined || maxRounds < 1) return sys(`"${name}" needs rounds=<max> (its save defines none), e.g. [[roll @${name} requires=${target} rounds=5 vs="Erik"]].`);
   const aSpec = makeRollSpec({ ...mySpec, requires: 1 });
-  const bSpec = makeRollSpec({ pool: theirPool, difficulty: theirDiff, requires: 1 });
+  const pools = opponentPools(cmd, theirPool, oppRes.all.length);
   const contest: ExtendedContest = {
     id: api.v1.uuid(), label: cmd.named["label"] ?? name,
-    a: { name: char.name, base: aSpec, accumulated: 0, char: char.name },
-    b: { name: oppRes.oppName, base: bSpec, accumulated: 0, char: oppRes.oppChar?.name },
+    sides: [
+      { name: char.name, base: aSpec, accumulated: 0, char: char.name },
+      ...oppRes.all.map((o, i) => ({
+        name: o.name, base: makeRollSpec({ pool: pools[i], difficulty: theirDiff, requires: 1 }),
+        accumulated: 0, char: o.char?.name,
+      })),
+    ],
     target, maxRounds,
     interval: cmd.named["interval"] ?? cfg.interval ?? "",
     onBotch: cmd.named["on-botch"] ? parseBotchPolicy(cmd.named["on-botch"]) : (cfg.onBotch ?? "fail"),
-    rounds: 0, status: "open", log: [],
+    rounds: 0, status: CONTEST_OPEN, log: [],
   };
-  const aExec = await execContestSide(aSpec, char.name, ctx.rng);
-  const bExec = await execContestSide(bSpec, oppRes.oppChar?.name, ctx.rng);
-  const { after, note, tail } = await commitContestRound(contest, aExec, bExec);
+  const execs = await rollContestSides(contest.sides, ctx);
+  const { after, note, tail } = await commitContestRound(contest, execs);
   return sys(`${disp(char.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}${surfaceSteps(saved.steps, undefined)}`);
 }
 
@@ -12778,11 +12963,11 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   const myPool = cmd.positional[0]?.trim();
   const theirPool = cmd.positional[1]?.trim();
   if (!myPool || !theirPool) {
-    return sys(`extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]].`);
+    return sys(`extended-contest needs both pools, e.g. [[extended-contest wits+melee wits+melee vs="Erik" target=5 rounds=5]]. `
+      + `vs= takes a LIST for a race with more than two in it: vs="Erik,Rok,Sigrid".`);
   }
-  const opp = await resolveOpponent(cmd, "contested");
+  const opp = await resolveOpponents(cmd, "contested");
   if (opp.error) return sys(`${opp.error}`);
-  const { oppChar, oppName } = opp;
 
   const target = intOrUndef(cmd.named["target"] ?? cmd.named["requires"]) ?? 0;
   if (target < 1) return sys(`extended-contest needs target=<successes> (the goal both race to).`);
@@ -12790,43 +12975,52 @@ async function cmdExtendedContest(cmd: ParsedCommand, ctx: CommandContext): Prom
   if (maxRounds < 1) return sys(`extended-contest needs rounds=<max> (at least 1).`);
 
   const aSpec = makeRollSpec({ pool: myPool, difficulty: intOrUndef(cmd.named["difficulty"] ?? cmd.named["diff"]), requires: 1 });
-  const bSpec = makeRollSpec({ pool: theirPool, difficulty: intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]), requires: 1 });
+  const vsDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
+  const pools = opponentPools(cmd, theirPool, opp.all.length);
   const contest: ExtendedContest = {
     id: api.v1.uuid(),
     label: cmd.named["label"] ?? "",
-    a: { name: me.name, base: aSpec, accumulated: 0, char: me.name },
-    b: { name: oppName, base: bSpec, accumulated: 0, char: oppChar?.name },
+    sides: [
+      { name: me.name, base: aSpec, accumulated: 0, char: me.name },
+      ...opp.all.map((o, i) => ({
+        name: o.name, base: makeRollSpec({ pool: pools[i], difficulty: vsDiff, requires: 1 }),
+        accumulated: 0, char: o.char?.name,
+      })),
+    ],
     target, maxRounds,
     interval: cmd.named["interval"] ?? "",
     onBotch: parseBotchPolicy(cmd.named["on-botch"]),
-    rounds: 0, status: "open", log: [],
+    rounds: 0, status: CONTEST_OPEN, log: [],
   };
-  const aExec = await execContestSide(aSpec, me.name, ctx.rng);
-  const bExec = await execContestSide(bSpec, oppChar?.name, ctx.rng);
-  const { after, note, tail } = await commitContestRound(contest, aExec, bExec);
+  const execs = await rollContestSides(contest.sides, ctx);
+  const { after, note, tail } = await commitContestRound(contest, execs);
   return sys(`${disp(me.name)} opens ${describeContest(after)}. Round 1: ${note}.${tail}`);
 }
 
 async function cmdContinueContest(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
   if (!contest) return sys(`No open contest. Start one with [[extended-contest ...]] or name its id.`);
-  if (contest.status !== "open") {
-    const who = contest.status === "draw" ? "a draw" : `won by ${contest.status === "a" ? contest.a.name : contest.b.name}`;
+  if (contest.status !== CONTEST_OPEN) {
+    const who = contest.status === CONTEST_DRAW ? "a draw" : `won by ${disp(contest.status)}`;
     return sys(`That contest is already ${who}.`);
   }
-  const aSpec = overrideSpec(contest.a.base, rollOverridesFromNamed(cmd));
+  // The ACTOR (side 0) takes this round's roll overrides; every other side may
+  // be re-difficultied at once with vs-difficulty=, as before.
+  const mine = rollOverridesFromNamed(cmd);
   const vDiff = intOrUndef(cmd.named["vs-difficulty"] ?? cmd.named["vs-diff"]);
-  const bSpec = vDiff !== undefined ? overrideSpec(contest.b.base, { difficulty: vDiff }) : contest.b.base;
-  const aExec = await execContestSide(aSpec, contest.a.char, ctx.rng);
-  const bExec = await execContestSide(bSpec, contest.b.char, ctx.rng);
-  const { after, note } = await commitContestRound(contest, aExec, bExec);
+  const execs = await rollContestSides(contest.sides, ctx, (side, i) =>
+    i === 0 ? overrideSpec(side.base, mine)
+      : vDiff !== undefined ? overrideSpec(side.base, { difficulty: vDiff }) : side.base);
+  const { after, note } = await commitContestRound(contest, execs);
   return sys(`${describeContest(after)}. This round: ${note}.`);
 }
 
 async function cmdContestStatus(cmd: ParsedCommand): Promise<string> {
   const contest = await ExtendedContestStore.resolve(cmd.positional[0]);
   if (!contest) return sys(`No extended contest found. Start one with [[extended-contest ...]].`);
-  const recent = contest.log.slice(-3).map(l => `r${l.round}: ${disp(contest.a.name)} +${l.aNet}/${disp(contest.b.name)} +${l.bNet}`).join(", ");
+  const recent = contest.log.slice(-3)
+    .map(l => `r${l.round}: ${Object.entries(l.nets ?? {}).map(([n, v]) => `${disp(n)} +${v}`).join("/")}`)
+    .join(", ");
   return sys(`${describeContest(contest)}${recent ? ` | recent: ${recent}` : ""}.`);
 }
 
@@ -12835,7 +13029,7 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   if (!contest) return sys(`No extended contest to cancel.`);
   await ExtendedContestStore.remove(contest.id);
   if ((await ExtendedContestStore.currentId()) === contest.id) await ExtendedContestStore.clearCurrent();
-  const progress = `${disp(contest.a.name)} ${contest.a.accumulated}/${contest.target} vs ${disp(contest.b.name)} ${contest.b.accumulated}/${contest.target}`;
+  const progress = contest.sides.map(s => `${disp(s.name)} ${s.accumulated}/${contest.target}`).join(" vs ");
   return sys(`Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`);
 }
 
@@ -15595,6 +15789,7 @@ CommandRouter.register("templates", cmdTemplates, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "ouroboros" }],
 });
 CommandRouter.register("extend-template", cmdExtendTemplate, {
+  inStory: false,
   summary: "a new template from an old one: state only what differs",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>", example: "Ouroboros" },
@@ -15621,10 +15816,12 @@ CommandRouter.register("extend-template", cmdExtendTemplate, {
   ],
 });
 CommandRouter.register("forget-template", cmdForgetTemplate, {
+  inStory: false,
   summary: "drop a chronicle template (the shipped one, if any, resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("define-resource", cmdDefineResource, {
+  inStory: false,
   summary: "define a pool or tracker a template can then grant",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name>", example: "Living Resolve" },
@@ -15646,6 +15843,7 @@ CommandRouter.register("background", cmdBackground, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "fount" }],
 });
 CommandRouter.register("define-background", cmdDefineBackground, {
+  inStory: false,
   summary: "define/replace a background (a Talisman that IS a place grants that place's ratings)",
   params: [
     { key: "name", kind: "named", required: true, type: "literal", desc: "Name - BACKTICKS", example: "Talisman" },
@@ -15656,6 +15854,7 @@ CommandRouter.register("define-background", cmdDefineBackground, {
   ],
 });
 CommandRouter.register("forget-background", cmdForgetBackground, {
+  inStory: false,
   summary: "remove a custom background (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -15788,6 +15987,7 @@ CommandRouter.register("tables", cmdTables, {
   params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
 });
 CommandRouter.register("define-table", cmdDefineTable, {
+  inStory: false,
   summary: "define/replace a success table in its category's general card",
   note: "a missing subcategory prompts a modal to create it",
   params: [
@@ -15804,14 +16004,17 @@ CommandRouter.register("define-table", cmdDefineTable, {
   ],
 });
 CommandRouter.register("forget-table", cmdForgetTable, {
+  inStory: false,
   summary: "remove a table from its category's general card; built-ins can only be shadowed",
   params: [{ key: "name", kind: "positional", required: true, hint: "<[sub::]name|@alias>" }],
 });
 CommandRouter.register("define-table-category", cmdDefineTableCategory, {
+  inStory: false,
   summary: "create a table subcategory (a real lorebook category with its general card)",
   params: [{ key: "name", kind: "named", required: true, desc: "Category name (single segment)", example: "e.g. combat" }],
 });
 CommandRouter.register("table-alias", cmdTableAlias, {
+  inStory: false,
   summary: "define a table alias, or list them (no args); table=@alias resolves it",
   params: [
     { key: "token", kind: "positional", hint: "<@alias>" },
@@ -15819,10 +16022,12 @@ CommandRouter.register("table-alias", cmdTableAlias, {
   ],
 });
 CommandRouter.register("forget-table-alias", cmdForgetTableAlias, {
+  inStory: false,
   summary: "remove a table alias",
   params: [{ key: "token", kind: "positional", required: true, hint: "<@alias>" }],
 });
 CommandRouter.register("define-constraint", cmdDefineConstraint, {
+  inStory: false,
   summary: "define/replace a constraint group",
   params: [
     { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. clan-only-backgrounds" },
@@ -15840,6 +16045,7 @@ CommandRouter.register("constraint", cmdConstraint, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("forget-constraint", cmdForgetConstraint, {
+  inStory: false,
   summary: "remove a constraint group",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -15862,7 +16068,14 @@ CommandRouter.register("merits", () => cmdMerits(), {
   summary: "list owned merits/flaws, enhancement totals and advisory issues",
   note: "Never lists Arcana - they are not merits. [[show-arcanum]] is their list",
 });
+// A verb that writes a DEFINITION CARD is the player editing the chronicle's
+// rulebook, not a beat of the story: `inStory: false` keeps every "Defined
+// merit X" out of the AI's context, where it was pure noise. Sheet edits
+// ([[set-trait]], [[take-merit]], [[specialty]], [[grant]]) are NOT in this set
+// - those are things that happen to a character, and the Storyteller should see
+// them. `in-story` still overrides either way, per call.
 CommandRouter.register("define-merit", cmdDefineMerit, {
+  inStory: false,
   summary: "define a merit or flaw (writes the srd:merits-flaws overlay)",
   note: "kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]]",
   params: [
@@ -15886,6 +16099,7 @@ CommandRouter.register("merit", cmdMeritInfo, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "inviolate-soul" }],
 });
 CommandRouter.register("forget-merit", cmdForgetMerit, {
+  inStory: false,
   summary: "delete a custom merit/flaw definition (built-ins resurface)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -15905,6 +16119,7 @@ CommandRouter.register("arcanum", cmdArcanumInfo, {
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
 });
 CommandRouter.register("define-arcanum", cmdDefineArcanum, {
+  inStory: false,
   summary: "define an arcanum or taint (writes the srd:arcana overlay)",
   note: "per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list",
   params: [
@@ -15937,6 +16152,7 @@ CommandRouter.register("drop-arcanum", cmdDropArcanum, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
 });
 CommandRouter.register("forget-arcanum", cmdForgetArcanum, {
+  inStory: false,
   summary: "remove a custom arcanum/taint definition (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -15958,6 +16174,7 @@ CommandRouter.register("specialties", () => cmdSpecialties(), {
   summary: "list the current character's specialties",
 });
 CommandRouter.register("define-affliction", cmdDefineAffliction, {
+  inStory: false,
   summary: "define/replace an affliction (overlay; may shadow a built-in)",
   params: [
     { key: "name", kind: "named", required: true, desc: "Name", example: "e.g. dazed" },
@@ -15975,6 +16192,7 @@ CommandRouter.register("affliction", cmdAfflictionInfo, {
   params: [{ key: "name", kind: "positional", hint: "[name]" }],
 });
 CommandRouter.register("forget-affliction", cmdForgetAffliction, {
+  inStory: false,
   summary: "remove an overlay definition; built-ins can only be shadowed",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
@@ -16472,15 +16690,20 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     nameHint: "<expression>", nameExample: "`courage + 2`",
     render: async (_name, scope, cmd) => cmdEval(cmd, scopeChar(scope)),
   },
+  // These two take an ID, not a character: the NAME is the extended action or
+  // contest to look at, and bare means "the one that is running". (Passing the
+  // scope's character here read the character name as an id and found nothing.)
   {
-    verb: "show-roll-status", summary: "an extended action's progress",
+    verb: "show-roll-status", summary: "an extended action's progress (bare: the one that is running)",
     replaces: [{ verb: "roll-status" }], scopes: ON_A_SHEET, defaultScope: "current",
-    render: async (_name, scope, cmd) => cmdRollStatus(asCmd(scope.key, cmd)),
+    nameHint: "[id]",
+    render: async (name, _scope, cmd) => cmdRollStatus(asCmd(name, cmd)),
   },
   {
-    verb: "show-contest-status", summary: "an extended contest's progress",
+    verb: "show-contest-status", summary: "an extended contest's progress (bare: the one that is running)",
     replaces: [{ verb: "contest-status" }], scopes: ON_A_SHEET, defaultScope: "current",
-    render: async (_name, scope, cmd) => cmdContestStatus(asCmd(scope.key, cmd)),
+    nameHint: "[id]",
+    render: async (name, _scope, cmd) => cmdContestStatus(asCmd(name, cmd)),
   },
 ];
 

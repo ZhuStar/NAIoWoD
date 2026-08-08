@@ -19,7 +19,7 @@ import {
   overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY, DEFAULT_NAMED_ROLLS,
   ExtendedRoll, applyInterval, ExtendedRollStore,
   readSuccessTable, describeTableReading, describeTable, SuccessTableRegistry, parseTableRows,
-  compareRolls, applyContestRound, describeContest,
+  compareRolls, compareField, describeStandings, migrateContest, applyContestRound, describeContest,
   ExtendedContestStore, TableLibrary, TableAliases, TABLES_CATEGORY, GENERAL_ENTRY,
   reloadAllConfigStores, resetAllConfigStores, ALL_CONFIG_STORES,
   structuralHash, ensurePath, TrackedLorebook, combineConfigTexts, reconcileLorebook,
@@ -2123,39 +2123,145 @@ describe("extended contests (applyContestRound)", () => {
   const three = exec("3", [6, 6, 6]);
   const one = exec("3", [6, 2, 2]);
   const botch = exec("2", [1, 2]);
+  const side = (name: string) => ({ name, base: makeRollSpec({ pool: "3" }), accumulated: 0 });
   const base: ExtendedContest = {
-    id: "c", label: "",
-    a: { name: "Anja", base: makeRollSpec({ pool: "3" }), accumulated: 0 },
-    b: { name: "Bram", base: makeRollSpec({ pool: "3" }), accumulated: 0 },
+    id: "c", label: "", sides: [side("Anja"), side("Bram")],
     target: 5, maxRounds: 3, interval: "", onBotch: "fail", rounds: 0, status: "open", log: [],
   };
+  const fresh = (over: Partial<ExtendedContest> = {}): ExtendedContest =>
+    ({ ...base, sides: base.sides.map(s => ({ ...s })), log: [], ...over });
 
   test("both accumulate; the first to the goal wins", () => {
-    let c = applyContestRound(base, three, one).contest;   // Anja 3, Bram 1
-    expect(c.a.accumulated).toBe(3);
-    expect(c.b.accumulated).toBe(1);
+    let c = applyContestRound(fresh(), [three, one]).contest;   // Anja 3, Bram 1
+    expect(c.sides[0].accumulated).toBe(3);
+    expect(c.sides[1].accumulated).toBe(1);
     expect(c.status).toBe("open");
-    c = applyContestRound(c, three, one).contest;          // Anja 6 >= 5 -> wins
-    expect(c.status).toBe("a");
+    c = applyContestRound(c, [three, one]).contest;             // Anja 6 >= 5 -> wins
+    expect(c.status).toBe("Anja");
   });
 
   test("a dead heat in the same round stays open (nobody got there first)", () => {
-    const t3: ExtendedContest = { ...base, target: 3, maxRounds: 5, a: { ...base.a }, b: { ...base.b } };
-    const r = applyContestRound(t3, three, three);         // both hit 3 -> equal -> open
+    const r = applyContestRound(fresh({ target: 3, maxRounds: 5 }), [three, three]);
     expect(r.contest.status).toBe("open");
   });
 
   test("under the fail policy, a botch loses the round outright", () => {
-    expect(applyContestRound(base, botch, one).contest.status).toBe("b");
-    expect(applyContestRound(base, botch, one).note).toContain("botches");
-    expect(applyContestRound(base, botch, botch).contest.status).toBe("draw"); // both botch
+    expect(applyContestRound(fresh(), [botch, one]).contest.status).toBe("Bram");
+    expect(applyContestRound(fresh(), [botch, one]).note).toContain("botches");
+    expect(applyContestRound(fresh(), [botch, botch]).contest.status).toBe("draw"); // both botch
   });
 
   test("running out of rounds is a draw", () => {
-    let c: ExtendedContest = { ...base, target: 100, maxRounds: 2, a: { ...base.a }, b: { ...base.b } };
-    c = applyContestRound(c, three, one).contest;
-    c = applyContestRound(c, three, one).contest;
+    let c = fresh({ target: 100, maxRounds: 2 });
+    c = applyContestRound(c, [three, one]).contest;
+    c = applyContestRound(c, [three, one]).contest;
     expect(c.status).toBe("draw");
+  });
+
+  // --- MORE THAN TWO --------------------------------------------------------
+  test("a race with three in it: everyone accumulates, the first past the post wins", () => {
+    const three3: ExtendedContest = { ...base, sides: [side("Anja"), side("Bram"), side("Cwen")], log: [] };
+    let c = applyContestRound(three3, [three, one, one]).contest;
+    expect(c.sides.map(s => s.accumulated)).toEqual([3, 1, 1]);
+    expect(c.status).toBe("open");
+    c = applyContestRound(c, [three, one, one]).contest;        // Anja 6 >= 5
+    expect(c.status).toBe("Anja");
+  });
+
+  test("a botch under `fail` puts you OUT while the others carry on - the case two sides could never reach", () => {
+    const three3: ExtendedContest = { ...base, sides: [side("Anja"), side("Bram"), side("Cwen")], log: [] };
+    const r = applyContestRound(three3, [three, botch, one]);
+    expect(r.contest.status).toBe("open");                      // still a contest
+    expect(r.contest.sides.map(s => s.name)).toEqual(["Anja", "Cwen"]);
+    expect(r.note).toContain("botch out");
+    // ...and with only one left standing, that one takes it outright.
+    const two = applyContestRound(three3, [three, botch, botch]);
+    expect(two.contest.status).toBe("Anja");
+  });
+
+  test("a three-way dead heat stays open; the highest total takes it when they differ", () => {
+    const t3: ExtendedContest = { ...base, target: 3, maxRounds: 5, sides: [side("Anja"), side("Bram"), side("Cwen")], log: [] };
+    expect(applyContestRound(t3, [three, three, three]).contest.status).toBe("open");
+    // Anja crosses higher than Bram in the same round, so she got there first.
+    const mixed = applyContestRound({ ...t3, target: 2 }, [three, one, one]);
+    expect(mixed.contest.status).toBe("Anja");
+  });
+
+  test("a contest stored before contests could have three sides still continues", () => {
+    const old = {
+      id: "old", label: "", target: 5, maxRounds: 3, interval: "", onBotch: "fail" as const,
+      rounds: 1, status: "a", log: [],
+      a: { name: "Anja", base: makeRollSpec({ pool: "3" }), accumulated: 4 },
+      b: { name: "Bram", base: makeRollSpec({ pool: "3" }), accumulated: 1 },
+    } as unknown as ExtendedContest;
+    const migrated = migrateContest(old);
+    expect(migrated.sides.map(s => s.name)).toEqual(["Anja", "Bram"]);
+    expect(migrated.sides[0].accumulated).toBe(4);
+    expect(migrated.status).toBe("Anja");        // "a" was an index; now it is a name
+  });
+});
+
+describe("contests with more than two participants (compareField)", () => {
+  const exec = (pool: string, faces: number[]): RollExecution =>
+    executeRoll(makeRollSpec({ pool }), () => 0, { rng: seqRng(faces) });
+  const nets = (n: number) => exec(String(Math.max(n, 1)), Array(Math.max(n, 1)).fill(6)).result!.net;
+
+  test("contested: the highest net takes it, and everyone else still has a rank", () => {
+    const f = compareField("contested", [
+      { name: "Anja", exec: exec("3", [6, 6, 6]) },      // 3
+      { name: "Bram", exec: exec("3", [6, 2, 2]) },      // 1
+      { name: "Cwen", exec: exec("3", [6, 6, 2]) },      // 2
+    ]);
+    expect(f.winners).toEqual(["Anja"]);
+    expect(f.margin).toBe(1);                             // over Cwen, the runner-up
+    expect(f.standings.map(s => s.name)).toEqual(["Anja", "Cwen", "Bram"]);
+    expect(f.standings.map(s => s.rank)).toEqual([1, 2, 3]);
+    expect(describeStandings(f)).toBe("Anja 3, Cwen 2, Bram 1");
+  });
+
+  test("equal nets share a rank, so a tie at the top is a draw between them", () => {
+    const f = compareField("contested", [
+      { name: "Anja", exec: exec("3", [6, 6, 6]) },
+      { name: "Bram", exec: exec("3", [6, 6, 6]) },
+      { name: "Cwen", exec: exec("3", [6, 2, 2]) },
+    ]);
+    expect(f.winners.sort()).toEqual(["Anja", "Bram"]);
+    expect(f.margin).toBe(0);
+    expect(f.note).toContain("tie at 3");
+    expect(f.standings.map(s => s.rank)).toEqual([1, 1, 3]);   // Cwen is third, not second
+  });
+
+  test("resisted: the actor must beat the BEST of them - one is enough to stop him", () => {
+    const strong = { name: "Anja", exec: exec("3", [6, 6, 6]) };      // 3
+    const weak = { name: "Bram", exec: exec("3", [6, 2, 2]) };        // 1
+    const equal = { name: "Cwen", exec: exec("3", [6, 6, 6]) };       // 3
+    expect(compareField("resisted", [strong, weak]).winners).toEqual(["Anja"]);
+    // Two resisting, and the second one matches him: resisted.
+    const stopped = compareField("resisted", [strong, weak, equal]);
+    expect(stopped.winners).toEqual([]);
+    expect(stopped.note).toContain("best of 2");
+  });
+
+  test("a botch is zero and is said out loud; everyone botching is mutual disaster", () => {
+    const botch = exec("2", [1, 2]);
+    const f = compareField("contested", [
+      { name: "Anja", exec: exec("3", [6, 2, 2]) },
+      { name: "Bram", exec: botch },
+      { name: "Cwen", exec: botch },
+    ]);
+    expect(f.winners).toEqual(["Anja"]);
+    expect(f.note).toContain("Bram, Cwen botched");
+    expect(compareField("contested", [{ name: "B", exec: botch }, { name: "C", exec: botch }]).note)
+      .toContain("everyone botches");
+  });
+
+  test("the two-sided call is the field of two - one adjudication, not two", () => {
+    const a = exec("3", [6, 6, 6]), b = exec("3", [6, 2, 2]);
+    const two = compareRolls("contested", a, b);
+    expect(two.winner).toBe("a");
+    expect(two.margin).toBe(2);
+    expect(two.field.winners).toEqual(["a"]);
+    expect(two.field.margin).toBe(2);
   });
 });
 
@@ -2207,13 +2313,37 @@ describe("resisted & contested rolls (commands)", () => {
     expect(r).toContain("The Resistance"); // default ad-hoc label
   });
 
-  test("contest: higher total wins; the note is from the actor's view", async () => {
+  test("contest: higher total wins, and the note NAMES the winner (it may not be either of two)", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     const win = await CommandRouter.route("contest 4 3", { rng: seqRng([6, 6, 6, 2, 6, 2, 2]) }); // 3 vs 1
     expect(win).toContain("contested");
-    expect(win).toContain("wins by 2");
+    expect(win).toContain("Rok wins by 2");
     const lose = await CommandRouter.route("contest 3 4", { rng: seqRng([6, 2, 2, 6, 6, 6, 2]) }); // 1 vs 3
-    expect(lose).toContain("loses by 2");
+    expect(lose).toContain("The Opposition wins by 2");
+  });
+
+  test("a contest with THREE in it: vs= takes a list, and the standings are ranked", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    // Rok 3, Erik 1, Sigrid 2 - all ad-hoc sides rolling flat pools.
+    const r = await CommandRouter.route('contest 3 vs="Erik,Sigrid" vs-pool="3,3"',
+      { rng: seqRng([6, 6, 6, /* Erik */ 6, 2, 2, /* Sigrid */ 6, 6, 2]) });
+    expect(r).toContain("(3 ways)");
+    expect(r).toContain("Rok wins by 1");                 // over Sigrid, the runner-up
+    expect(r).toContain("standings Rok 3, Sigrid 2, Erik 1");
+  });
+
+  test("resisted against several: it only takes one of them to stop you", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    // Rok 2; Erik 1; Sigrid 2 - Sigrid matches him, so the action is resisted.
+    const r = await CommandRouter.route('resist 3 vs="Erik,Sigrid" vs-pool="3,3"',
+      { rng: seqRng([6, 6, 2, /* Erik */ 6, 2, 2, /* Sigrid */ 6, 6, 2]) });
+    expect(r).toContain("the action is resisted");
+    expect(r).toContain("best of 2");
+  });
+
+  test("naming the same side twice is a typo, not a man contesting himself", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    expect(await CommandRouter.route('contest 3 3 vs="Erik,Erik"')).toContain("named twice");
   });
 
   test("contest: a table reads the winning margin", async () => {
@@ -7527,6 +7657,34 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
     // A listing is the mirror image of that.
     expect((await processAdventureInput("[[show-sheet]]"))!.inputText!).toContain("wod:ctx-skip");
     expect((await processAdventureInput("[[show-sheet in-story]]"))!.inputText!).not.toContain("wod:ctx-skip");
+  });
+
+  test("writing the RULEBOOK is not a story beat; writing a SHEET is", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const hidden = async (body: string): Promise<boolean> =>
+      (await processAdventureInput(body))!.inputText!.includes("wod:ctx-skip");
+    // Definition cards - the chronicle's rulebook - stay out of the AI's context.
+    expect(await hidden("[[define-merit name=`Probe` points=1]]")).toBe(true);
+    expect(await hidden("[[forget-merit probe]]")).toBe(true);
+    expect(await hidden("[[extend-template name=`Probe Tpl` extends=vampire]]")).toBe(true);
+    // ...and things that happen to a CHARACTER do not.
+    expect(await hidden("[[take-merit iron-will 3]]")).toBe(false);
+    expect(await hidden("[[specialty melee `Swords`]]")).toBe(false);
+    // The flag still overrides either default, per call.
+    expect(await hidden("[[define-merit name=`Probe2` points=1 in-story]]")).toBe(false);
+    expect(await hidden("[[take-merit acute-senses 1 in-story=false]]")).toBe(true);
+    // The declaration is on the SPEC, so help and windows can see it too.
+    expect(CommandRouter.specFor("define-merit")!.inStory).toBe(false);
+    expect(CommandRouter.specFor("take-merit")!.inStory).toBeUndefined();
+  });
+
+  test("show-roll-status / show-contest-status take an ID, not the scope's character", async () => {
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("extended-contest 3 3 vs=\"Erik\" target=99 rounds=5", { rng: seqRng([6, 6, 6, 6, 2, 2]) });
+    // Bare means "the one that is running" - it must not read "rok" as an id.
+    expect(await CommandRouter.route("show-contest-status")).toContain("round 1/5");
+    await CommandRouter.route("extended-roll 3 requires=99 intervals=5", { rng: seqRng([6, 6, 6]) });
+    expect(await CommandRouter.route("show-roll-status")).toContain("3/99 successes");
   });
 
   test("@all is reserved, so an alias can never shadow the wildcard", async () => {

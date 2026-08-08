@@ -43,7 +43,10 @@ import {
   ALL_CONFIG_STORES, parseConfigBody, parseNamedConfigList, configEntryText, namedDefsToCard,
   writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
 } from "./services";
-import { RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, DEFAULT_DIFFICULTY, ExtendedRoll, ExtendedContest, BotchPolicy, ContestMode } from "./rolls";
+import {
+  RollSpec, SuccessTable, SuccessTableRegistry, DEFAULT_SUCCESS_TABLES, DEFAULT_DIFFICULTY,
+  ExtendedRoll, ExtendedContest, BotchPolicy, ContestMode, migrateContest, CONTEST_OPEN,
+} from "./rolls";
 import { Duration, addDuration, parseStoryDate } from "./core/time";
 import { WizardPrompt, WizardStateData } from "./wizard";
 
@@ -1610,7 +1613,10 @@ export class ExtendedContestStore {
 
   static async save(c: ExtendedContest): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore._key(c.id), c); }
   static async load(id: string): Promise<ExtendedContest | undefined> {
-    return (await ExtendedContestStore._storage.get(ExtendedContestStore._key(id))) as ExtendedContest | undefined;
+    const raw = (await ExtendedContestStore._storage.get(ExtendedContestStore._key(id))) as ExtendedContest | undefined;
+    // A contest saved when a contest could only have two sides kept `a`/`b`.
+    // Read it as a field of two, so a race started last week still continues.
+    return raw ? migrateContest(raw) : undefined;
   }
   static async remove(id: string): Promise<void> { await ExtendedContestStore._storage.delete(ExtendedContestStore._key(id)); }
   static async setCurrent(id: string): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore.CURRENT_KEY, id); }
@@ -1622,11 +1628,11 @@ export class ExtendedContestStore {
   static async resolve(id?: string): Promise<ExtendedContest | undefined> {
     if (id) return ExtendedContestStore.load(id);
     const cur = await ExtendedContestStore.currentId();
-    if (cur) { const c = await ExtendedContestStore.load(cur); if (c && c.status === "open") return c; }
+    if (cur) { const c = await ExtendedContestStore.load(cur); if (c && c.status === CONTEST_OPEN) return c; }
     const open: ExtendedContest[] = [];
     for (const cid of await ExtendedContestStore.ids()) {
       const c = await ExtendedContestStore.load(cid);
-      if (c && c.status === "open") open.push(c);
+      if (c && c.status === CONTEST_OPEN) open.push(c);
     }
     return open.length === 1 ? open[0] : undefined;
   }

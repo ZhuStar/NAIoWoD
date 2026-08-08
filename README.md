@@ -951,6 +951,15 @@ Storyteller should react to, stays in — and the flag overrides it per call:
 It does not make the turn generate: looking something up is still not an action,
 so the reply sits there and is read on the *next* generation.
 
+**Writing the rulebook is not a story beat.** Every verb that writes a
+*definition card* — `define-merit`, `define-arcanum`, `define-background`,
+`define-affliction`, `define-constraint`, `define-resource`, `define-table`,
+`define-table-category`, `extend-template`, their `forget-*` twins and the table
+aliases — declares `inStory: false`, so "Defined merit X" no longer costs you
+context. Edits to a **character** (`set-trait`, `take-merit`, `specialty`,
+`grant`) are not in that set: those are things that happen to somebody, and the
+Storyteller should see them.
+
 ### Flags — a bare word means yes
 
 Any boolean argument is true when written with no value, because there is
@@ -1384,6 +1393,28 @@ own traits) or an **ad-hoc** obstacle (`vs="the sturdy lock"`, or no `vs=` at al
 - **`contest <your-pool> <their-pool> …`** — symmetric: the **higher total wins**,
   a tie is a **draw**. A **botched** side counts 0 and is flagged; both botching is
   a mutual disaster.
+
+### Contests with more than two in them
+
+A contest is a **field**, and two is just the small case. `vs=` takes a list:
+
+```
+[[contest wits+alertness vs="Erik,Sigrid,the guard"]]
+     → contested (4 ways) — Rok: … vs Erik: … vs Sigrid: … vs The Guard: …
+       — Rok wins by 1; standings Rok 3, Sigrid 2, Erik 1, The Guard 0
+```
+
+- Everyone rolls the second positional pool; **`vs-pool="a,b,c"`** gives each
+  its own (one entry there applies to all of them).
+- **Contested** ranks the field: the highest net takes it, equal nets *share* a
+  rank, so a tie at the top is a draw between those and the next man is third.
+- **Resisted** is the actor against the **best** of everyone stopping him — it
+  only takes one to stop you.
+- A botch counts zero and is named. Under `on-botch=fail` in an extended
+  contest, a botcher is **out** and the others carry on — a case two sides could
+  never reach.
+- A success table still reads the *actor's* margin: the field only changes who
+  he had to beat.
 
 ### Extended contests — first to the goal wins
 

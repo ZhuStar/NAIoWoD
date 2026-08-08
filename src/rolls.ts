@@ -529,6 +529,97 @@ export class SuccessTableRegistry {
 // contributes 0 successes (flagged); both sides botching is a mutual disaster.
 // =============================================================================
 export type ContestMode = "resisted" | "contested";
+
+// =============================================================================
+// N SIDES, NOT TWO - a contest is a field, and two is just the small case
+// -----------------------------------------------------------------------------
+// Everything here used to be `a` and `b`: `aNet`/`bNet`, `winner: "a"|"b"`. Two
+// men wrestling is one shape a contest takes, and three thieves reaching for the
+// same purse is another - the rules are identical and only the arithmetic was
+// hard-coded. So the primitive is a FIELD of entrants and the two-sided call is
+// the case where the field has two.
+//
+// CONTESTED: the highest net takes it; several at the top is a draw between
+// them (and everyone else still has a rank, which is what a race needs).
+// RESISTED: the FIRST entrant is the actor and the rest resist him - he must
+// beat the BEST of them, because "resisted" means somebody stopped you and it
+// only takes one. A botch counts as zero and is said out loud.
+// =============================================================================
+export interface ContestEntrant { name: string; exec: RollExecution }
+export interface ContestStanding { name: string; net: number; botch: boolean; rank: number }
+export interface FieldOutcome {
+  mode: ContestMode;
+  standings: ContestStanding[];       // best first; equal nets share a rank
+  winners: string[];                  // empty = nobody; several = a tie at the top
+  margin: number;                     // the winner's lead over the next rank (0 if tied)
+  note: string;
+}
+
+// The net a side actually scored: a botch is zero, never negative.
+function netOf(exec: RollExecution): { net: number; botch: boolean } {
+  const botch = exec.outcome === "botch";
+  return { net: botch ? 0 : Math.max(0, exec.result?.net ?? 0), botch };
+}
+
+export function compareField(mode: ContestMode, entrants: ContestEntrant[]): FieldOutcome {
+  const scored = entrants.map(e => ({ name: e.name, ...netOf(e.exec) }));
+  const label = (n: string): string => StringUtil.toTitleCase(n);
+
+  if (mode === "resisted") {
+    // The actor against the best of everyone stopping him.
+    const [actor, ...resisters] = scored;
+    const standings: ContestStanding[] = [{ ...actor, rank: 1 }, ...resisters.map(r => ({ ...r, rank: 2 }))];
+    const base = { mode, standings, winners: [] as string[], margin: 0 };
+    if (!actor) return { ...base, note: "nobody acted" };
+    if (actor.botch) return { ...base, note: "the actor botches" };
+    const best = resisters.reduce((m, r) => Math.max(m, r.net), 0);
+    const margin = actor.net - best;
+    if (margin > 0) {
+      const botched = resisters.filter(r => r.botch).map(r => label(r.name));
+      return { ...base, winners: [actor.name], margin,
+        note: `prevails by ${margin}${resisters.length > 1 ? ` over ${resisters.length} resisting` : ""}`
+          + `${botched.length ? ` (${botched.join(", ")} botched)` : ""}` };
+    }
+    return { ...base, note: `the action is resisted${resisters.length > 1 ? ` (best of ${resisters.length})` : ""}` };
+  }
+
+  // Contested: rank the field. Equal nets share a rank, so a three-way tie at
+  // the top is three winners and the next man is fourth.
+  const order = [...scored].sort((x, y) => y.net - x.net);
+  const standings: ContestStanding[] = [];
+  let rank = 0, seen = 0, lastNet = Number.NaN;
+  for (const one of order) {
+    seen += 1;
+    if (one.net !== lastNet) { rank = seen; lastNet = one.net; }
+    standings.push({ ...one, rank });
+  }
+  if (!standings.length) return { mode, standings, winners: [], margin: 0, note: "nobody rolled" };
+  if (standings.every(s => s.botch)) {
+    return { mode, standings, winners: [], margin: 0, note: "everyone botches - mutual disaster" };
+  }
+  const top = standings.filter(s => s.rank === 1);
+  const runnerUp = standings.find(s => s.rank !== 1);
+  const botched = standings.filter(s => s.botch).map(s => label(s.name));
+  const botchNote = botched.length ? ` (${botched.join(", ")} botched)` : "";
+  if (top.length > 1) {
+    return { mode, standings, winners: top.map(t => t.name), margin: 0,
+      note: `tie at ${top[0].net} between ${top.map(t => label(t.name)).join(" and ")}${botchNote}` };
+  }
+  const margin = top[0].net - (runnerUp?.net ?? 0);
+  return { mode, standings, winners: [top[0].name], margin,
+    note: `${label(top[0].name)} wins by ${margin}${standings.length > 2 ? ` over ${standings.length - 1} others` : ""}${botchNote}` };
+}
+
+// How a field's standings read in a reply: "Erik 4, Rok 2, Sigrid 0 (botch)".
+export function describeStandings(o: FieldOutcome): string {
+  return o.standings
+    .map(s => `${StringUtil.toTitleCase(s.name)} ${s.net}${s.botch ? " (botch)" : ""}`)
+    .join(", ");
+}
+
+// --- THE TWO-SIDED CASE ------------------------------------------------------
+// Kept because most contests ARE two-sided and every caller reads a/b. It is
+// compareField with a field of two, so there is one adjudication and not two.
 export interface ContestOutcome {
   mode: ContestMode;
   aNet: number; bNet: number;       // successes counted for each side (botch -> 0)
@@ -536,25 +627,24 @@ export interface ContestOutcome {
   winner: "a" | "b" | "none";
   margin: number;                   // the winner's lead (0 when none)
   note: string;
+  field: FieldOutcome;              // the general answer, for a caller that wants it
 }
 
 export function compareRolls(mode: ContestMode, a: RollExecution, b: RollExecution): ContestOutcome {
-  const aBotch = a.outcome === "botch";
-  const bBotch = b.outcome === "botch";
-  const aNet = aBotch ? 0 : Math.max(0, a.result?.net ?? 0);
-  const bNet = bBotch ? 0 : Math.max(0, b.result?.net ?? 0);
-  const base = { mode, aNet, bNet, aBotch, bBotch };
-
-  if (aBotch && bBotch) return { ...base, winner: "none", margin: 0, note: "both sides botch - mutual disaster" };
+  const field = compareField(mode, [{ name: "a", exec: a }, { name: "b", exec: b }]);
+  const A = netOf(a), B = netOf(b);
+  const base = { mode, aNet: A.net, bNet: B.net, aBotch: A.botch, bBotch: B.botch, field };
+  // The two-sided wording is older than the field and several tests read it, so
+  // the special cases keep their exact phrasing.
+  if (A.botch && B.botch) return { ...base, winner: "none", margin: 0, note: "both sides botch - mutual disaster" };
   if (mode === "resisted") {
-    if (aBotch) return { ...base, winner: "none", margin: 0, note: "the actor botches" };
-    const margin = aNet - bNet;
-    if (margin > 0) return { ...base, winner: "a", margin, note: `prevails by ${margin}${bBotch ? " (resister botched)" : ""}` };
+    if (A.botch) return { ...base, winner: "none", margin: 0, note: "the actor botches" };
+    const margin = A.net - B.net;
+    if (margin > 0) return { ...base, winner: "a", margin, note: `prevails by ${margin}${B.botch ? " (resister botched)" : ""}` };
     return { ...base, winner: "none", margin: 0, note: "the action is resisted" };
   }
-  // contested
-  if (aNet > bNet) return { ...base, winner: "a", margin: aNet - bNet, note: `wins by ${aNet - bNet}${bBotch ? " (opponent botched)" : ""}` };
-  if (bNet > aNet) return { ...base, winner: "b", margin: bNet - aNet, note: `loses by ${bNet - aNet}${aBotch ? " (own botch)" : ""}` };
+  if (A.net > B.net) return { ...base, winner: "a", margin: A.net - B.net, note: `wins by ${A.net - B.net}${B.botch ? " (opponent botched)" : ""}` };
+  if (B.net > A.net) return { ...base, winner: "b", margin: B.net - A.net, note: `loses by ${B.net - A.net}${A.botch ? " (own botch)" : ""}` };
   return { ...base, winner: "none", margin: 0, note: "tie" };
 }
 
@@ -565,74 +655,104 @@ export function compareRolls(mode: ContestMode, a: RollExecution, b: RollExecuti
 // ad-hoc side); rolls.ts never reads it - the interpreter uses it to re-resolve
 // this side's pool each round.
 export interface ContestSide { name: string; base: RollSpec; accumulated: number; char?: string; }
-export type ContestStatus = "open" | "a" | "b" | "draw";
+// "open" while it runs, "draw" when nobody got there first or the rounds ran
+// out, otherwise the NAME of the winner. A name rather than "a"/"b" because
+// there may be five of them.
+export type ContestStatus = string;
+export const CONTEST_OPEN = "open";
+export const CONTEST_DRAW = "draw";
+
 export interface ExtendedContest {
   id: string;
   label: string;
-  a: ContestSide;
-  b: ContestSide;
+  sides: ContestSide[];             // TWO OR MORE. Index 0 is the actor.
   target: number;
   maxRounds: number;
   interval: string;                 // advisory spacing, like extended rolls
   onBotch: BotchPolicy;             // per side: fail -> that side loses outright
   rounds: number;
   status: ContestStatus;
-  log: { round: number; aNet: number; bNet: number; note: string }[];
+  log: { round: number; nets: Record<string, number>; note: string }[];
 }
 
-// One round: both sides have rolled; accumulate and settle. Pure.
-export function applyContestRound(c: ExtendedContest, aExec: RollExecution, bExec: RollExecution): { contest: ExtendedContest; note: string } {
-  const next: ExtendedContest = { ...c, a: { ...c.a }, b: { ...c.b }, log: [...c.log] };
+// A contest saved before contests could have more than two sides kept `a` and
+// `b`. Read it as a field of two; after one round it is stored the new way.
+export function migrateContest(raw: ExtendedContest & { a?: ContestSide; b?: ContestSide }): ExtendedContest {
+  if (raw.sides?.length) return raw;
+  const sides = [raw.a, raw.b].filter((x): x is ContestSide => x !== undefined);
+  const status = raw.status === "a" ? sides[0]?.name : raw.status === "b" ? sides[1]?.name : raw.status;
+  return { ...raw, sides, status: status ?? CONTEST_OPEN, log: raw.log ?? [] };
+}
+
+// One round: every side has rolled; accumulate and settle. Pure. `execs` is
+// parallel to `contest.sides`.
+export function applyContestRound(c: ExtendedContest, execs: RollExecution[]): { contest: ExtendedContest; note: string } {
+  const next: ExtendedContest = { ...c, sides: c.sides.map(s => ({ ...s })), log: [...c.log] };
   next.rounds += 1;
-  const aBotch = aExec.outcome === "botch";
-  const bBotch = bExec.outcome === "botch";
-  const aNet = aBotch ? 0 : Math.max(0, aExec.result?.net ?? 0);
-  const bNet = bBotch ? 0 : Math.max(0, bExec.result?.net ?? 0);
+  const label = (n: string): string => StringUtil.toTitleCase(n);
+  const scored = c.sides.map((side, i) => {
+    const exec = execs[i];
+    const botch = exec?.outcome === "botch";
+    return { side, botch, net: botch ? 0 : Math.max(0, exec?.result?.net ?? 0) };
+  });
+  const nets: Record<string, number> = {};
+  for (const s of scored) nets[s.side.name] = s.net;
+  const botchers = scored.filter(s => s.botch);
   let note: string;
 
-  // Side names are stored normalized; notes show them in Title Case.
-  const aLabel = StringUtil.toTitleCase(c.a.name);
-  const bLabel = StringUtil.toTitleCase(c.b.name);
-  if (aBotch || bBotch) {
+  if (botchers.length) {
     if (c.onBotch === "fail") {
-      if (aBotch && bBotch) { next.status = "draw"; note = "both sides botch - the contest collapses"; }
-      else if (aBotch) { next.status = "b"; note = `${aLabel} botches - ${bLabel} wins outright`; }
-      else { next.status = "a"; note = `${bLabel} botches - ${aLabel} wins outright`; }
-      next.log.push({ round: next.rounds, aNet, bNet, note });
-      return { contest: next, note };
-    }
-    if (c.onBotch === "lose-successes") {
-      if (aBotch) next.a.accumulated = 0;
-      if (bBotch) next.b.accumulated = 0;
+      // A botch puts you out. Whoever is left takes it - unless nobody is.
+      const standing = scored.filter(s => !s.botch);
+      if (standing.length === 0) { next.status = CONTEST_DRAW; note = "everyone botches - the contest collapses"; }
+      else if (standing.length === 1) {
+        next.status = standing[0].side.name;
+        note = `${botchers.map(b => label(b.side.name)).join(", ")} botch${botchers.length === 1 ? "es" : ""} - ${label(standing[0].side.name)} wins outright`;
+      } else {
+        // More than one left: the botchers are out, the rest carry on. This is
+        // the case two sides could never reach.
+        next.sides = next.sides.filter(s => !botchers.some(b => b.side.name === s.name));
+        note = `${botchers.map(b => label(b.side.name)).join(", ")} botch out - ${next.sides.length} still in`;
+      }
+      if (next.status !== CONTEST_OPEN) {
+        next.log.push({ round: next.rounds, nets, note });
+        return { contest: next, note };
+      }
+    } else if (c.onBotch === "lose-successes") {
+      for (const b of botchers) {
+        const side = next.sides.find(s => s.name === b.side.name);
+        if (side) side.accumulated = 0;
+      }
       note = "botch - progress lost";
     } else note = "botch - a wasted round";
   } else note = "";
 
-  next.a.accumulated += aNet;
-  next.b.accumulated += bNet;
-  const aDone = next.a.accumulated >= c.target;
-  const bDone = next.b.accumulated >= c.target;
-  if (aDone || bDone) {
-    if (aDone && bDone) {
-      if (next.a.accumulated > next.b.accumulated) next.status = "a";
-      else if (next.b.accumulated > next.a.accumulated) next.status = "b";
-      // dead heat: stays open - nobody got there FIRST
-    } else next.status = aDone ? "a" : "b";
+  for (const s of scored) {
+    const side = next.sides.find(x => x.name === s.side.name);
+    if (side) side.accumulated += s.net;
   }
-  if (next.status === "open" && next.rounds >= c.maxRounds) next.status = "draw";
-  const progress = `${aLabel} ${next.a.accumulated}/${c.target} vs ${bLabel} ${next.b.accumulated}/${c.target}`;
+  // Whoever crossed the line this round; if several did, the highest total took
+  // it, and a dead heat stays OPEN because nobody got there first.
+  const done = next.sides.filter(s => s.accumulated >= c.target);
+  if (done.length) {
+    const best = Math.max(...done.map(s => s.accumulated));
+    const leaders = done.filter(s => s.accumulated === best);
+    if (leaders.length === 1) next.status = leaders[0].name;
+  }
+  if (next.status === CONTEST_OPEN && next.rounds >= c.maxRounds) next.status = CONTEST_DRAW;
+  const progress = next.sides.map(s => `${label(s.name)} ${s.accumulated}/${c.target}`).join(" vs ");
   note = note ? `${note}; ${progress}` : progress;
-  next.log.push({ round: next.rounds, aNet, bNet, note });
+  next.log.push({ round: next.rounds, nets, note });
   return { contest: next, note };
 }
 
 export function describeContest(c: ExtendedContest): string {
-  const aLabel = StringUtil.toTitleCase(c.a.name);
-  const bLabel = StringUtil.toTitleCase(c.b.name);
   const head = c.label ? `"${c.label}" ` : "";
-  const state = c.status === "open" ? "open" : c.status === "draw" ? "draw" : `${c.status === "a" ? aLabel : bLabel} WINS`;
+  const state = c.status === CONTEST_OPEN ? "open"
+    : c.status === CONTEST_DRAW ? "draw"
+      : `${StringUtil.toTitleCase(c.status)} WINS`;
   const bits = [
-    `${aLabel} ${c.a.accumulated}/${c.target} vs ${bLabel} ${c.b.accumulated}/${c.target}`,
+    c.sides.map(s => `${StringUtil.toTitleCase(s.name)} ${s.accumulated}/${c.target}`).join(" vs "),
     `round ${c.rounds}/${c.maxRounds}`,
   ];
   if (c.interval) bits.push(`interval ${c.interval}`);

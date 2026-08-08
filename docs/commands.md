@@ -122,7 +122,7 @@ one reply in the story.
 | `show-character` | the chronicle's playable characters (marks current/default) |
 | `show-clan` | the clans and their Disciplines |
 | `show-constraint` | the story's constraint groups, and what the character breaks |
-| `show-contest-status` | an extended contest's progress |
+| `show-contest-status` | an extended contest's progress (bare: the one that is running) |
 | `show-cost` | what a dot costs from each purse (chronicle rules, Storyteller-applied) |
 | `show-cray` | the cray's points, status and how it refills |
 | `show-creation` | the creation budget: every pool against what the sheet holds (advisory) |
@@ -137,7 +137,7 @@ one reply in the story.
 | `show-player` | the current player (the storyteller, unless somebody took a seat) |
 | `show-resource` | a character's live pools and trackers (and what they cannot use) |
 | `show-roll` | the chronicle's saved rolls, or one in full |
-| `show-roll-status` | an extended action's progress |
+| `show-roll-status` | an extended action's progress (bare: the one that is running) |
 | `show-scene` | the chronicle's scenes, or one in full (defaults to the open one) |
 | `show-sheet` | a character's record as the engine reads it (effective values marked) |
 | `show-specialty` | a character's specialties (one applies per roll, via specialty=) |
@@ -2152,10 +2152,10 @@ the story's constraint groups, and what the character breaks
 
 ### `show-contest-status`
 
-an extended contest's progress
+an extended contest's progress (bare: the one that is running)
 
 ```
-[[show-contest-status [name|@all] [in=<where>] [in-story]]]
+[[show-contest-status [[id]] [in=<where>] [in-story]  (an extended contest's progress (bare: the one that is running))]]
 ```
 
 | argument | kind | meaning |
@@ -2167,7 +2167,7 @@ an extended contest's progress
 **`[[help show-contest-status]]`** replies:
 
 ```
-[SYSTEM: show-contest-status - show-contest-status [name|@all] [in=<where>] [in-story]  (an extended contest's progress)]
+[SYSTEM: show-contest-status - show-contest-status [[id]] [in=<where>] [in-story]  (an extended contest's progress (bare: the one that is running))]
 ```
 
 ### `show-cost`
@@ -2453,10 +2453,10 @@ the chronicle's saved rolls, or one in full
 
 ### `show-roll-status`
 
-an extended action's progress
+an extended action's progress (bare: the one that is running)
 
 ```
-[[show-roll-status [name|@all] [in=<where>] [in-story]]]
+[[show-roll-status [[id]] [in=<where>] [in-story]  (an extended action's progress (bare: the one that is running))]]
 ```
 
 | argument | kind | meaning |
@@ -2468,7 +2468,7 @@ an extended action's progress
 **`[[help show-roll-status]]`** replies:
 
 ```
-[SYSTEM: show-roll-status - show-roll-status [name|@all] [in=<where>] [in-story]  (an extended action's progress)]
+[SYSTEM: show-roll-status - show-roll-status [[id]] [in=<where>] [in-story]  (an extended action's progress (bare: the one that is running))]
 ```
 
 ### `show-scene`

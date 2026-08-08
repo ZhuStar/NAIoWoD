@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `147a55f`** ("A flag with no
-> value means yes, and in-story belongs to every command").
+> **Last synced with the code as of commit `06bf156`** ("A contest is a
+> field, and writing the rulebook is not a story beat").
+> Prior: `147a55f` ("A flag with no value means yes, and in-story belongs to
+> every command").
 > Prior: `e63dec7` ("One way to look at anything: show-* verbs, seven scopes,
 > and none of it in context").
 > Prior: `70892be` ("An arcanum is not a merit: its own type, its own list, its
@@ -3728,6 +3730,59 @@ and `prefill` are mocked/available but not yet written.
        alias** for players who now reasonably guess it. The 93-pointer sweep of
        §7.73 had rewritten `[[help]]` to `[[show-help]]` in reply prose; that
        part is reverted.
+
+
+75. **The rulebook is not the story; a contest is a field** (owner: *"Yes, flip
+    the define/forget family to in-story=false by default if they write to
+    Lorebook entries. They do, right? // Also, do we have a way to roll a contest
+    with more than 2 participants? We must."*).
+
+    **(a) THEY DO - and I checked rather than remembered.** A probe script spied
+    on `api.v1.lorebook.create/updateEntry` and ran every define/forget verb:
+    all nine `define-*` and six `forget-*` definition verbs write a card; four
+    (`forget-alias`, `forget-date`, `forget-scene`, `forget-roll`) and both table
+    aliases touch only storage; and TWO - `forget-specialty`, `forget-grant` -
+    write a lorebook entry that is the CHARACTER SHEET, via
+    `CharacterStore.save`'s write-through.
+    So the line is not "writes a lorebook entry" (that would sweep in every
+    `set-trait`) but **writes a DEFINITION CARD**: the chronicle's rulebook.
+    Those 16 verbs plus the two table aliases (storage-only, but the same act -
+    naming a thing for the chronicle to reuse) declare **`inStory: false`**, so
+    "Defined merit X" stops costing context. `forget-specialty`/`forget-grant`
+    are deliberately LEFT in-story: their siblings `[[specialty]]`/`[[grant]]`
+    are in-story, and splitting a pair would be incoherent - a thing that happens
+    to a character is something the Storyteller should see.
+
+    **(b) NO, WE DID NOT - contests were hard-wired to two.** `aNet`/`bNet`,
+    `winner: "a"|"b"|"none"`, `ExtendedContest {a, b}`, `applyContestRound(c,
+    aExec, bExec)`. Two men wrestling is one shape a contest takes; three thieves
+    reaching for the same purse is another, and only the arithmetic was fixed.
+    - **`compareField(mode, entrants[])` is now the primitive**, and
+      `compareRolls(mode, a, b)` is the field of two implemented in terms of it,
+      so there is ONE adjudication. `FieldOutcome` carries ranked `standings`,
+      `winners[]` (several = a tie) and `margin` over the runner-up.
+      `ContestOutcome` keeps its two-sided shape and gains `.field`.
+    - **Equal nets SHARE a rank**: a three-way tie at the top is three winners
+      and the next man is FOURTH. That is the thing a two-sided comparison had no
+      way to express.
+    - **Resisted generalizes to "beat the BEST of them"** - it only takes one to
+      stop you - and says `best of N` when there is more than one.
+    - **`ExtendedContest.sides: ContestSide[]`**, `status` is a winner's NAME
+      (or `CONTEST_OPEN`/`CONTEST_DRAW`), `log` entries carry
+      `nets: Record<name, number>`. `applyContestRound(c, execs[])`.
+      **Under `on-botch=fail` a botcher is now REMOVED and the rest carry on** -
+      with two sides that could only ever end the contest, so the old reading is
+      the special case. `migrateContest` reads the old `{a, b}` shape and
+      `ExtendedContestStore.load` calls it, so a race started before this still
+      runs.
+    - **Command surface, backwards compatible:** `vs=` takes a comma list
+      (`vs="Erik,Rok,Sigrid"`); they all roll the second positional pool, or
+      **`vs-pool="a,b,c"`** gives each its own (one entry = all of them). Naming
+      the same side twice is refused as the typo it is. A success table still
+      reads the ACTOR's margin - the field only changes who he had to beat.
+    - The reply now NAMES the winner ("The Opposition wins by 2") rather than
+      phrasing it from the actor's view ("loses by 2"), because with three in the
+      field the actor's view is not enough to say who took it.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

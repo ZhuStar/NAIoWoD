@@ -131,6 +131,10 @@ context before generation (`markCtxSkip` / `processContextBuilt`).
   does not exist and the value is filed as a positional.
 - **A mistyped flag value reads as ABSENT, never as false** (`readBool`
   returns `undefined`), so a typo cannot silently mean "no".
+- **Writing a DEFINITION CARD is not a story beat.** Every `define-*`/`forget-*`
+  verb that writes the chronicle's rulebook declares `inStory: false`. Sheet
+  edits (`set-trait`, `take-merit`, `specialty`, `grant`) are NOT in that set:
+  a thing that happens to a character is something the Storyteller should see.
 - **`[[help]]` is the exception to the `show-*` naming.** It keeps its name
   because it is what a player types before knowing anything; it is listed in
   `QUIET_VERBS` instead, and `show-help` is an alias of it.
@@ -141,7 +145,27 @@ context before generation (`markCtxSkip` / `processContextBuilt`).
 
 ---
 
-## 7. What crosses a wire
+## 7. A contest is a FIELD, not two sides
+
+`compareField(mode, entrants[])` is the primitive; `compareRolls(mode, a, b)` is
+the case where the field has two, implemented in terms of it so there is ONE
+adjudication.
+
+- **Contested** ranks the field; **equal nets SHARE a rank**, so a tie at the
+  top is a draw between those and the next entrant is third, not second.
+- **Resisted** is entrant 0 (the actor) against the **best** of the rest — it
+  only takes one to stop you.
+- A botch is **zero, never negative**, and is named in the note.
+- In an extended contest under `on-botch=fail`, a botcher is REMOVED and the
+  rest carry on. With two sides that could only ever end the contest, so the
+  two-side reading ("the other one wins") is a special case of this.
+- `ExtendedContest.status` is a **winner's NAME**, or `CONTEST_OPEN`/
+  `CONTEST_DRAW` — never `"a"`/`"b"`. `migrateContest` reads the old shape, and
+  `ExtendedContestStore.load` calls it, so a race started before this still runs.
+
+---
+
+## 8. What crosses a wire
 
 `api.v1.messaging` **serializes**. Only plain data survives.
 
@@ -160,7 +184,7 @@ post office relays *afterwards* — a correctness choice, not a performance one.
 
 ---
 
-## 8. Performance — count awaits, not milliseconds
+## 9. Performance — count awaits, not milliseconds
 
 CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
@@ -181,7 +205,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 9. Policies that look like bugs but are not
+## 10. Policies that look like bugs but are not
 
 - **Advisory, not enforced.** Everything creation-side reports and lets the
   Storyteller decide. `[[creation]]`, `[[budget]]`, constraints, instance caps —
@@ -200,7 +224,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 10. The verification battery — run ALL of it before pushing
+## 11. The verification battery — run ALL of it before pushing
 
 ```bash
 bun run build          # dist/naiowod.ts is COMMITTED; the suite checks it is in sync
@@ -221,7 +245,7 @@ Then a live `init()` smoke reproducing whatever the change was about.
 
 ---
 
-## 11. Where to look when something is wrong
+## 12. Where to look when something is wrong
 
 | Symptom | Look at |
 |---|---|

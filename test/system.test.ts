@@ -2880,12 +2880,12 @@ describe("afflictions: the Feral Speech flow (afflict/advance/lift, mirrors, NPC
     expect(await CommandRouter.route('afflictions "Grey Wolf"')).toContain("feral-whispers (target: Kvar)");
   });
 
-  test("lift removes both sides of a mirrored affliction; spend= is the shrug-off", async () => {
+  test("remove takes both sides of a mirrored affliction; spend= is the shrug-off", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route('afflict feral-whispers target="Grey Wolf"');
     await CommandRouter.route("gain willpower 2");
-    const lifted = await CommandRouter.route("lift feral-whispers spend=willpower");
-    expect(lifted).toContain("shakes off feral-whispers");
+    const lifted = await CommandRouter.route("remove feral-whispers spend=willpower");
+    expect(lifted).toContain("is free of feral-whispers");
     expect(lifted).toContain("spent 1 willpower");
     expect(lifted).toContain("feral-whispers lifted from Grey Wolf");
     expect(await CommandRouter.route("afflictions")).toContain("no afflictions");
@@ -2896,7 +2896,7 @@ describe("afflictions: the Feral Speech flow (afflict/advance/lift, mirrors, NPC
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route('afflict feral-whispers target="Grey Wolf"');
     expect(await CommandRouter.route("advance feral-whispers")).toContain("no successor");
-    expect(await CommandRouter.route("lift concentrating-on")).toContain("does not have");
+    expect(await CommandRouter.route("remove concentrating-on")).toContain("does not have");
   });
 });
 
@@ -2912,7 +2912,7 @@ describe("afflictions: tags bite in rolls and contests", () => {
     await CommandRouter.route("afflict dazed");
     const after = await CommandRouter.route("roll 3", { rng: seqRng([6, 6, 6]) });
     expect(after).toContain("vs diff 7");
-    await CommandRouter.route("lift dazed");
+    await CommandRouter.route("remove dazed");
     const healed = await CommandRouter.route("roll 3", { rng: seqRng([6, 6, 6]) });
     expect(healed).toContain("vs diff 6");
   });
@@ -5248,7 +5248,7 @@ describe("the rest gates: full-rested AND in-sanctum, on both fuels", () => {
     expect(both).toContain("+2 living-resolve");
     expect(both).toContain("rested in the sanctum");
     // Leaving the sanctum closes the gate again.
-    await CommandRouter.route("lift in-sanctum");
+    await CommandRouter.route("remove in-sanctum");
     expect(await CommandRouter.route("advance-time 1d")).not.toContain("rested in the sanctum");
   });
 
@@ -5417,7 +5417,7 @@ describe("the sanctum in play: what a rating actually does to a roll", () => {
     const botch = await CommandRouter.route('cast pillars="corona:2"', { rng: () => 0.05 });
     expect(botch).toContain("this is their sanctum: NO Backlash");
     expect(botch).not.toContain("⚡");
-    await CommandRouter.route("lift in-sanctum");
+    await CommandRouter.route("remove in-sanctum");
     expect(await CommandRouter.route('cast pillars="corona:2"', { rng: () => 0.05 })).toContain("⚡ BACKLASH");
   });
 
@@ -7218,7 +7218,7 @@ describe("every way an affliction can end", () => {
     // Time does not touch it.
     await CommandRouter.route("advance-time 100 days");
     expect(await CommandRouter.route("afflictions")).toContain("blessed");
-    expect(await CommandRouter.route("lift blessed")).toContain("blessed");
+    expect(await CommandRouter.route("remove blessed")).toContain("blessed");
   });
 
   test("an affliction records what inflicted it", async () => {
@@ -7271,7 +7271,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
 
   test("a cooldown blocks re-application, and says how long is left", async () => {
     await CommandRouter.route("afflict blessed scenes=1 cooldown-for=`2 days`");
-    await CommandRouter.route("lift blessed");
+    await CommandRouter.route("remove blessed");
     const refused = await CommandRouter.route("afflict blessed");
     expect(refused).toContain("cannot take blessed again yet");
     expect(refused).toContain("until");
@@ -7283,7 +7283,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
 
   test("a cooldown runs out on the clock and the thing becomes available again", async () => {
     await CommandRouter.route("afflict blessed cooldown-for=`2 days`");
-    await CommandRouter.route("lift blessed");
+    await CommandRouter.route("remove blessed");
     expect(await CommandRouter.route("afflict blessed")).toContain("cannot take");
     await CommandRouter.route("advance-time 3 days");
     expect(await CommandRouter.route("afflictions")).not.toContain("cooling");
@@ -7293,7 +7293,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
   test("a cooldown counts scenes and rolls too - the same six measures", async () => {
     await CommandRouter.route('scene "The Hall"');
     await CommandRouter.route("afflict blessed cooldown-scenes=1");
-    await CommandRouter.route("lift blessed");
+    await CommandRouter.route("remove blessed");
     expect(await CommandRouter.route("afflict blessed")).toContain("cannot take");
     await CommandRouter.route("end-scene");
     expect(await CommandRouter.route("afflict blessed")).toContain("is now");
@@ -7570,15 +7570,22 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
 
   test("a togglable passive switches off and back on without losing the power", async () => {
     await CommandRouter.route("set-trait potence 2 group=discipline");
-    expect(await CommandRouter.route("afflictions")).toContain("potent");
+    expect(await CommandRouter.route("show-affliction")).toContain("potent");
     const off = await CommandRouter.route("toggle potent");
     expect(off).toContain("switches Potent OFF");
-    expect(await CommandRouter.route("afflictions")).not.toContain("potent");
+    expect(off).toContain("held down, not lost");
+    // HELD DOWN IS NOT GONE. It is still listed, still counted, still his - and
+    // it is not biting. Removing it would have lost the bindings and the level.
+    const listed = await CommandRouter.route("show-affliction");
+    expect(listed).toContain("potent");
+    expect(listed).toContain("HELD DOWN");
+    expect((await CharacterAfflictions.list("Vlad")).find(a => a.def === "potent")!.suspended!.by).toBe("self");
+    expect(await CharacterAfflictions.tags("Vlad")).not.toContain("potent");
     // The Discipline is still rated - he simply is not using it.
-    expect(await CommandRouter.route("sheet")).toContain("otence");
+    expect(await CommandRouter.route("show-sheet")).toContain("otence");
     const on = await CommandRouter.route("toggle potent");
-    expect(on).toContain("switches Potent ON");
-    expect(on).toContain("is now applied");
+    expect(on).toContain("switches Potent back ON");
+    expect(await CharacterAfflictions.tags("Vlad")).toContain("potent");
   });
 
   test("automatic vs offered is data, and offered waits for [[invoke]]", async () => {
@@ -7982,7 +7989,7 @@ describe("difficulty-modifier - the shared affliction", () => {
     expect(easier).toContain("vs diff 4");                 // 6 - 2
     expect(easier).toContain("difficulty -2 (easier)");
     // The SAME affliction, the other way: a signed level, no second definition.
-    await CommandRouter.route("lift difficulty-modifier");
+    await CommandRouter.route("remove difficulty-modifier");
     await CommandRouter.route("define-affliction name=`cursed` apply=`difficulty +1 if=$trait` bindings=trait");
     await CommandRouter.route("afflict cursed trait=melee level=2");
     const harder = await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) });
@@ -8009,7 +8016,7 @@ describe("difficulty-modifier - the shared affliction", () => {
     expect(await CommandRouter.route("roll occult", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
     // ...and `all` means no trait gate at all.
-    await CommandRouter.route("lift difficulty-modifier");
+    await CommandRouter.route("remove difficulty-modifier");
     await CommandRouter.route("afflict difficulty-modifier trait=all level=1 from=`merit:blessed`");
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
   });
@@ -8040,7 +8047,7 @@ describe("difficulty-modifier - the shared affliction", () => {
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
     // ...and because the effect is a STATE, it can be switched off - which a
     // passive op could never be.
-    await CommandRouter.route("lift difficulty-modifier");
+    await CommandRouter.route("remove difficulty-modifier");
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
   });
 
@@ -8051,5 +8058,106 @@ describe("difficulty-modifier - the shared affliction", () => {
     // affliction it applies DOES.
     expect(await CommandRouter.route("show-merit duellist")).toContain('applies "difficulty-modifier"');
     expect(MeritFlawRegistry.get("duellist")!.grants!.afflicts).toBe("difficulty-modifier");
+  });
+});
+
+// =============================================================================
+// HELD DOWN IS NOT GONE - lift / restore / remove (§7.78)
+// =============================================================================
+describe("lift vs remove: the Majesty distinction", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset(); AbilityCategories.reset();
+    resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route('scene "Court"');
+    await CommandRouter.route("set-trait subterfuge 3");
+    await CommandRouter.route("set-trait climb 3");
+    await CommandRouter.route("gain willpower 3");
+  });
+
+  test("the TARGET of Majesty buys relief and is still under it", async () => {
+    await CommandRouter.route("define-affliction name=`majesty` apply=`difficulty +2 if=talent` "
+      + "lift=cost lift-cost=willpower lift-for=`1 scene`");
+    await CommandRouter.route("afflict majesty from=`discipline:presence`");
+    expect(await CommandRouter.route("roll subterfuge", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 8");
+
+    const relief = await CommandRouter.route("lift majesty");
+    expect(relief).toContain("spent 1 willpower");
+    expect(relief).toContain("still on Rok");
+    // Not biting...
+    expect(await CommandRouter.route("roll subterfuge", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+    // ...and STILL THERE. This is the whole distinction: lifted, not removed.
+    const held = (await CharacterAfflictions.list("Rok")).find(a => a.def === "majesty")!;
+    expect(held).toBeDefined();
+    expect(held.suspended!.by).toBe("self");
+    expect(await CommandRouter.route("show-affliction")).toContain("HELD DOWN");
+
+    // The relief runs out on its own clock; the affliction never left.
+    expect(await CommandRouter.route("end-scene")).toContain("Majesty takes hold again");
+    expect(await CommandRouter.route("roll subterfuge", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 8");
+  });
+
+  test("[[remove]] is what ENDS it - walking out of his presence", async () => {
+    await CommandRouter.route("define-affliction name=`majesty` apply=`difficulty +2 if=talent` lift=cost lift-cost=willpower");
+    await CommandRouter.route("afflict majesty from=`discipline:presence`");
+    expect(await CommandRouter.route("remove majesty")).toContain("is free of majesty");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("majesty");
+    expect(await CommandRouter.route("roll subterfuge", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+  });
+
+  test("the HOLDER's side is at-will: off and on as he pleases, nothing spent", async () => {
+    await CommandRouter.route("define-affliction name=`radiating-majesty` apply=`difficulty -1 if=social` lift=at-will");
+    await CommandRouter.route("afflict radiating-majesty");
+    const before = (await CharacterResources.all(await CharacterStore.load("Rok") as never)) as never;
+    expect(before).toBeDefined();
+    const off = await CommandRouter.route("lift radiating-majesty");
+    expect(off).toContain("holds off radiating-majesty");
+    expect(off).not.toContain("spent");                     // at will costs nothing
+    expect(await CommandRouter.route("restore radiating-majesty")).toContain("takes hold of Rok again");
+    expect((await CharacterAfflictions.list("Rok")).find(a => a.def === "radiating-majesty")!.suspended).toBeUndefined();
+  });
+
+  test("claws cannot be willed away, but a glove holds them down while worn", async () => {
+    await CommandRouter.route("define-affliction name=`claw-hands` apply=`difficulty -2 if=climb` "
+      + "lift=never lift-note=`bone and horn`");
+    await CommandRouter.route("define-affliction name=`wearing-gloves` suppresses=claw-hands");
+    await CommandRouter.route("afflict claw-hands from=`frenzy:1197`");
+    expect(await CommandRouter.route("roll climb", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
+
+    // No act of will puts them away.
+    const refused = await CommandRouter.route("lift claw-hands");
+    expect(refused).toContain("cannot be shrugged off");
+    expect(refused).toContain("bone and horn");
+
+    // The glove does - and nobody had to remember to hold them down.
+    const gloved = await CommandRouter.route("afflict wearing-gloves");
+    expect(gloved).toContain("claw-hands held down by wearing-gloves");
+    expect(await CommandRouter.route("roll climb", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
+    expect((await CharacterAfflictions.list("Rok")).find(a => a.def === "claw-hands")!.suspended!.by)
+      .toBe("wearing-gloves");
+    // ...and taking the glove off brings them back, with nobody restoring them.
+    expect(await CommandRouter.route("remove wearing-gloves")).toContain("claw-hands is back");
+    expect(await CommandRouter.route("roll climb", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
+    // A suspension somebody else holds is not his to end.
+    await CommandRouter.route("afflict wearing-gloves");
+    expect(await CommandRouter.route("restore claw-hands")).toContain("held down by wearing-gloves");
+  });
+
+  test("`from` picks ONE instance of a shared affliction, for both verbs", async () => {
+    await CommandRouter.route("afflict difficulty-modifier trait=climb level=2 from=`merit:sure-footed`");
+    await CommandRouter.route("afflict difficulty-modifier trait=subterfuge level=1 from=`merit:glib`");
+    await CommandRouter.route("remove difficulty-modifier from=`merit:glib`");
+    const left = await CharacterAfflictions.list("Rok");
+    expect(left.filter(a => a.def === "difficulty-modifier").length).toBe(1);
+    expect(left[0].from).toBe("merit:sure-footed");
+    // ...and lifting one leaves the other biting.
+    await CommandRouter.route("afflict difficulty-modifier trait=subterfuge level=1 from=`merit:glib`");
+    await CommandRouter.route("define-affliction name=`difficulty-modifier` apply=`difficulty -1 if=$trait` bindings=trait lift=at-will");
+    await CommandRouter.route("lift difficulty-modifier from=`merit:glib`");
+    const now = await CharacterAfflictions.list("Rok");
+    expect(now.find(a => a.from === "merit:glib")!.suspended).toBeDefined();
+    expect(now.find(a => a.from === "merit:sure-footed")!.suspended).toBeUndefined();
   });
 });

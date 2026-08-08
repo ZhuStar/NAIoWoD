@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `281ea88`** ("One affliction most
-> merits want, and it is signed").
+> **Last synced with the code as of commit `dae9f8a`** ("Held down is not
+> gone: lift, restore and remove are three things").
+> Prior: `281ea88` ("One affliction most merits want, and it is signed").
 > Prior: `49a4c57` ("A trait knows what kind of trait it is, and a merit can say
 > what it turns on").
 > Prior: `06bf156` ("A contest is a field, and writing the rulebook is not a
@@ -3897,6 +3898,54 @@ and `prefill` are mocked/available but not yet written.
     - `[[define-affliction apply=...]]` (same shorthand as a merit passive) and
       `[[afflict ... level=N]]` make all of it authorable; the card reader learned
       `apply` too, per §7's invariant.
+
+
+78. **Held down is not gone** (owner, correcting me: *"'passive' is supposed to
+    be a duration. Lifting an affliction and removing it are two different
+    things. For example, the five dots Presence power Majesty puts everyone
+    around the person with Majesty under a passive affliction, and they can lift
+    it temporarily ... by spending willpower or rolling willpower, and
+    permanently (i.e. removing the affliction) by getting out of the presence of
+    the one with Majesty. Similarly, the person with Majesty who's radiating this
+    affliction also has a passive, and they can lift it and apply it at will.
+    It's toggleable. On the other hand, a bonus to climbing that a Gangrel has
+    due to alterations in his body ... cannot be lifted just by willing it, but
+    wearing some sort of glove or something like that would lift the afflictions
+    while the glove is being worn."*).
+
+    I had offered `[[lift ... from=]]` for per-instance removal, which answered
+    the wrong question. **`[[lift]]` REMOVED**, and one word for two things made
+    Majesty unsayable: you buy an hour free of it and you are STILL under it.
+
+    - **THREE VERBS, one meaning each.** `[[lift]]` holds it down, `[[remove]]`
+      ends it, `[[restore]]` ends the relief early. Every existing use of `lift`
+      meant remove and was rewritten.
+    - **`ActiveAffliction.suspended {by, until, at, note}`.** A suspended
+      instance contributes NO ops and NO tags, and is still listed, still
+      counted, still ended by whatever would have ended it. `afflictionActive()`
+      is the one predicate; reading for EFFECT must ask, reading for EXISTENCE
+      must not.
+    - **`AfflictionDef.lift {how, cost, roll, for, note}`** - his three cases,
+      exactly: `at-will` (the Majesty holder's own side), `cost` (the target's:
+      pay `cost` for `for` long), `never` (the claws). **The default is `never`**,
+      because most afflictions are not shruggable and a permissive default would
+      quietly make every one of them optional.
+    - **`AfflictionDef.suppresses`** is the glove: while `wearing-gloves` is on,
+      `claw-hands` is held down, and taking the glove off brings them back with
+      NOBODY restoring them. `refreshSuppression` recomputes it from scratch
+      wherever the list changes (apply, lift, restore, remove, the tick). A
+      suspension held by another affliction is not the character's to restore,
+      and says so.
+    - **The relief runs on the SAME six-measure expiry model** - a synthetic
+      instance whose `expiry` is the relief's `until` goes through the very same
+      `afflictionEnded`. Two early-return guards in the tick had to widen: a
+      relief measured in rolls/turns/scenes counts down even when no affliction
+      does.
+    - **`[[toggle]]` now suspends** instead of removing, so switching a passive
+      off keeps its bindings and level rather than rebuilding them - which
+      matters now that a shared affliction carries both.
+    - **`from=` on `lift` and `remove`** picks one instance, which is what he
+      originally asked for and is now the smaller half of the answer.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

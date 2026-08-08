@@ -16,7 +16,7 @@ every other read-only verb was renamed `show-*`, but this is the one command
 a player types before they know anything at all. `[[show-help]]` is an alias.
 
 ```
-[SYSTEM: 127 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
+[SYSTEM: 129 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -29,7 +29,7 @@ one reply in the story.
 
 ---
 
-## All 127 commands
+## All 129 commands
 
 | command | what it does |
 |---|---|
@@ -96,16 +96,18 @@ one reply in the story.
 | `hide` | write to the current scene's private plan (mirrored into the Author's Note) |
 | `invoke` | use a power that OFFERS an affliction rather than applying it automatically |
 | `leave-library` | step back through the measured door |
-| `lift` | remove an affliction - and its mirror; spend = shrug-off |
+| `lift` | HOLD an affliction down - he is still under it, and the relief runs out |
 | `magick` | work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels |
 | `measure-door` | the Talisman ritual: ten minutes measuring a door opens the Library of the Unseen |
 | `name-roll` | save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest) |
 | `paid` | record what a purchase really cost (no expression = the Storyteller granted it) |
 | `play` | switch to a character; no name selects the default |
 | `player` | show or switch the current player; storyteller is always valid |
+| `remove` | END an affliction - the thing causing it is gone |
 | `research` | search the library: Intelligence + Library (must be in it) |
 | `reset-uses` | scene/turn change: clears effect-use counters |
 | `resist` | resisted action: your margin over theirs counts (tie = fail) |
+| `restore` | end the relief early - the affliction takes hold again |
 | `roll` | roll a dice pool for the current character |
 | `roll-for` | roll for a named character without switching to them |
 | `save-date` | bookmark the current moment (or a given date) under a name |
@@ -695,7 +697,7 @@ mark damage on the current character
 define/replace an affliction (overlay; may shadow a built-in)
 
 ```
-[[define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [apply=`<op>[:<tag>] [+N|-N] [if=<trait|category>]`] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]]
+[[define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [apply=`<op>[:<tag>] [+N|-N] [if=<trait|category>]`] [lift=at-will|cost|never] [lift-cost=<resource>] [lift-for=<duration>] [lift-roll=".."] [lift-note=".."] [suppresses="a,b"] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]]
 ```
 
 | argument | kind | meaning |
@@ -706,6 +708,12 @@ define/replace an affliction (overlay; may shadow a built-in)
 | `then` | named | Successor affliction ([[advance]] applies it) |
 | `mirror` | named | Affliction the bound target gains, bound back |
 | `apply` | named `literal` | What it DOES while it is on - the same shorthand a merit passive uses; "$slot" reads a binding <br>*e.g.* `difficulty -2 if=drive on=reckless` |
+| `lift` | named `enum` | Who may HOLD IT DOWN: at-will, cost (pay for relief), never (default - only something else can) — one of `at-will`, `cost`, `never` |
+| `lift-cost` | named | What buying relief costs <br>*e.g.* `willpower` |
+| `lift-for` | named | How long the relief lasts <br>*e.g.* `1 scene` |
+| `lift-roll` | named | ...or a pool rolled for it (ST-adjudicated) |
+| `lift-note` | named `literal` | Why it can or cannot be shrugged off |
+| `suppresses` | named | Afflictions HELD DOWN while this one is on (the glove over the claws) <br>*e.g.* `claw-hands` |
 | `tags` | named | Tags joined to the afflicted character's rolls |
 | `description` | named `literal` | Description |
 | `note` | named | Note (optional) |
@@ -714,7 +722,7 @@ define/replace an affliction (overlay; may shadow a built-in)
 **`[[help define-affliction]]`** replies:
 
 ```
-[SYSTEM: define-affliction - define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [apply=`<op>[:<tag>] [+N|-N] [if=<trait|category>]`] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]
+[SYSTEM: define-affliction - define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [apply=`<op>[:<tag>] [+N|-N] [if=<trait|category>]`] [lift=at-will|cost|never] [lift-cost=<resource>] [lift-for=<duration>] [lift-roll=".."] [lift-note=".."] [suppresses="a,b"] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]
 ```
 
 ### `define-arcanum`
@@ -1580,24 +1588,46 @@ step back through the measured door
 
 ### `lift`
 
-remove an affliction - and its mirror; spend = shrug-off
+HOLD an affliction down - he is still under it, and the relief runs out
 
 ```
-[[lift <affliction> [on=<name|@alias>] [spend=res[::effect][!]] [spend-amount=N] [in-story]]]
+[[lift <affliction> [on=<name|@alias>] [from=".."] [spend=res[::effect][!]] [spend-amount=N] [waive] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story]]]
 ```
+
+> [[remove]] is what ENDS one; [[restore]] ends the relief early
 
 | argument | kind | meaning |
 |---|---|---|
 | `affliction` | positional **required** | `<affliction>` |
-| `on` | named | `<name\|@alias>` |
-| `spend` | named | `res[::effect][!]` <br>*e.g.* `blood  ·  blood::heal  ·  willpower!` |
-| `spend-amount` | named `int` | How many points to spend (default 1) |
+| `on` | named | Who (default: the current character) |
+| `from` | named | Which instance, when several sources applied the same one <br>*e.g.* `merit:crack-rider` |
+| `spend` | named | Pay for the relief (its definition may name the price) |
+| `spend-amount` | named `int` | — |
+| `waive` | named `bool` | Hold it down even though its definition says it cannot be |
+| `rolls` | named `int` | Ends after this many MATCHING rolls |
+| `with-tags` | named | Only rolls carrying all of these count |
+| `without-tags` | named | Rolls carrying any of these do not count |
+| `using` | named | Only rolls whose pool uses one of these count |
+| `not-using` | named | Rolls whose pool uses any of these do not count |
+| `turns` | named `int` | Ends after this many turns ([[turn]] counts them) |
+| `scenes` | named `int` | Ends after this many scenes ([[end-scene]] counts them) |
+| `for` | named | Ends after this much story time <br>*e.g.* `1 hour` |
+| `until` | named | Ends when this becomes true: full-moons, elapsed-days, elapsed-hours and any trait, with > < >= <= = != and and/or/not <br>*e.g.* `full-moons >= 1` |
+| `until-event` | named | ADVISORY: nothing ends it but [[lift]] <br>*e.g.* `you next attend the voivode` |
+| `from` | named | What inflicted it - an arcanum, a spell, a Discipline, a botch <br>*e.g.* `arcanum:sharpened-senses` |
+| `cooldown-for` | named | After it ends, this long before it may be taken again <br>*e.g.* `1 day` |
+| `cooldown-rolls` | named `int` | — |
+| `cooldown-turns` | named `int` | — |
+| `cooldown-scenes` | named `int` | — |
+| `cooldown-until` | named | `<condition>` <br>*e.g.* `full-moons >= 1` |
+| `waive` | named `bool` | Apply it even while cooling |
+| `orphan` | named | What happens if its source goes: end at once, carry on unchanged, or an expression over what is left (remaining-seconds, remaining-rolls) <br>*e.g.* `immediately` |
 | `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
 **`[[help lift]]`** replies:
 
 ```
-[SYSTEM: lift - lift <affliction> [on=<name|@alias>] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (remove an affliction - and its mirror; spend = shrug-off)]
+[SYSTEM: lift - lift <affliction> [on=<name|@alias>] [from=".."] [spend=res[::effect][!]] [spend-amount=N] [waive] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story]  (HOLD an affliction down - he is still under it, and the relief runs out; [[remove]] is what ENDS one; [[restore]] ends the relief early)]
 ```
 
 ### `magick`
@@ -1747,6 +1777,31 @@ show or switch the current player; storyteller is always valid
 [SYSTEM: player - player [name="<id>"] [default] [in-story]  (show or switch the current player; storyteller is always valid)]
 ```
 
+### `remove`
+
+END an affliction - the thing causing it is gone
+
+```
+[[remove <affliction> [on=<name|@alias>] [from=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]]]
+```
+
+> [[lift]] only holds one down
+
+| argument | kind | meaning |
+|---|---|---|
+| `affliction` | positional **required** | `<affliction>` |
+| `on` | named | `<name\|@alias>` |
+| `from` | named | Which instance, when several sources applied the same one <br>*e.g.* `merit:crack-rider` |
+| `spend` | named | Pay to be rid of it |
+| `spend-amount` | named `int` | — |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help remove]]`** replies:
+
+```
+[SYSTEM: remove - remove <affliction> [on=<name|@alias>] [from=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (END an affliction - the thing causing it is gone; [[lift]] only holds one down)]
+```
+
 ### `research`
 
 search the library: Intelligence + Library (must be in it)
@@ -1810,6 +1865,26 @@ resisted action: your margin over theirs counts (tie = fail)
 
 ```
 [SYSTEM: resist - resist <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (resisted action: your margin over theirs counts (tie = fail))]
+```
+
+### `restore`
+
+end the relief early - the affliction takes hold again
+
+```
+[[restore <affliction> [on=<name|@alias>] [in-story]]]
+```
+
+| argument | kind | meaning |
+|---|---|---|
+| `affliction` | positional **required** | `<affliction>` |
+| `on` | named | `<name\|@alias>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help restore]]`** replies:
+
+```
+[SYSTEM: restore - restore <affliction> [on=<name|@alias>] [in-story]  (end the relief early - the affliction takes hold again)]
 ```
 
 ### `roll`

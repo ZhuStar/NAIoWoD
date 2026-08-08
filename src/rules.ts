@@ -2697,6 +2697,49 @@ export interface AfflictionDef {
   // Amounts scale by the instance's `level`, so one definition also serves the
   // 1/2/3 ladder every rated Merit is written on.
   apply?: EffectOp[];
+  // =========================================================================
+  // HELD DOWN IS NOT GONE
+  // -------------------------------------------------------------------------
+  // Majesty puts everyone near its holder under a passive. They can buy relief
+  // - spend Willpower and be free of it for a scene - but they are STILL under
+  // Majesty; the relief runs out and it bites again. What ENDS it is walking
+  // out of his presence. Two different things, and the engine had one word for
+  // both.
+  //
+  // `lift` says who may hold it down and at what price:
+  //   at-will - the holder's own side of Majesty: on and off as he pleases
+  //   cost    - the target's side: pay `cost` (or roll `roll`) for `for` long
+  //   never   - a Gangrel's claws. No act of will puts them away; only an
+  //             outside thing (see `suppresses`) or losing the affliction.
+  // The DEFAULT is `never`, because most afflictions are not shruggable and a
+  // permissive default would quietly make every one of them optional.
+  lift?: AfflictionLift;
+  // While THIS one is on, those are held down. The glove that covers the claws:
+  // `wearing-gloves` suppresses `claw-hands`, and the claws are back the moment
+  // the glove comes off - nobody has to remember to restore them.
+  suppresses?: string[];
+}
+
+export type LiftPolicy = "at-will" | "cost" | "never";
+export const LIFT_POLICIES: LiftPolicy[] = ["at-will", "cost", "never"];
+export interface AfflictionLift {
+  how?: LiftPolicy;      // default "never"
+  cost?: string;         // the spend that buys relief ("willpower", "willpower::shrug")
+  roll?: string;         // ...or a pool rolled for it (ST-adjudicated)
+  for?: string;          // how long relief lasts ("1 scene", "3 rolls"); absent = until restored
+  note?: string;
+}
+export function liftPolicyOf(def: AfflictionDef | undefined): LiftPolicy {
+  return def?.lift?.how ?? "never";
+}
+export function describeLift(lift: AfflictionLift | undefined): string {
+  if (!lift) return "cannot be shrugged off (only ended, or held down by something else)";
+  const how = lift.how ?? "never";
+  if (how === "never") return `cannot be shrugged off${lift.note ? ` - ${lift.note}` : ""}`;
+  const price = how === "cost"
+    ? ` by spending ${lift.cost ?? "something the chronicle names"}${lift.roll ? ` or rolling ${lift.roll}` : ""}`
+    : " at will";
+  return `can be held down${price}${lift.for ? ` for ${lift.for}` : ""}${lift.note ? ` - ${lift.note}` : ""}`;
 }
 
 // What a scaled affliction grants at `rating`: every tier at or below it, with
@@ -2730,6 +2773,18 @@ export function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string
   if (parts.scalesWith && parts.scalesWith.trim()) def.scalesWith = StringUtil.normalize(parts.scalesWith);
   if (parts.tiers?.length) def.tiers = [...parts.tiers].sort((a, b) => a.atLeast - b.atLeast);
   if (parts.requiresAwakened) def.requiresAwakened = true;
+  const suppresses = asStringList(parts.suppresses as CardValue | undefined)
+    .map(x => StringUtil.normalize(x)).filter(x => x.length > 0);
+  if (suppresses.length) def.suppresses = suppresses;
+  const lift = asMap(parts.lift as CardValue | undefined);
+  const how = StringUtil.normalize(asText(lift["how"]) ?? "");
+  const liftDef: AfflictionLift = {};
+  if (LIFT_POLICIES.includes(how as LiftPolicy)) liftDef.how = how as LiftPolicy;
+  for (const field of ["cost", "roll", "for", "note"] as const) {
+    const v = asText(lift[field]);
+    if (v) liftDef[field] = v;
+  }
+  if (Object.keys(liftDef).length) def.lift = liftDef;
   // A field the card reader does not know does not exist (docs/invariants.md
   // §7): definitions round-trip through their lorebook card.
   const apply = Array.isArray(parts.apply) ? parts.apply : effectOpsFromCard(parts.apply as CardValue | undefined);

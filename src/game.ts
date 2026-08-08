@@ -31,6 +31,7 @@ import {
   expiryIsAdvisoryOnly,
   AfflictionDef,
   MeritFlawRequirements, resolvePowerInstance, passiveOpsOf, grantBindings, grantLevel,
+  liftPolicyOf, describeLift, LIFT_POLICIES, AfflictionLift,
   DIFFICULTY_MODIFIER, afflictionOpsOf,
   magicRulesFrom, FELLOWSHIPS, isAwakened, foldAfflictionTiers, uncancelableCap,
   uncancelableAllowance, isCastingRoll, CASTING_TAGS,
@@ -3454,6 +3455,42 @@ async function afflictionEnded(char: PlayableCharacter | undefined, c: ActiveAff
   return expiryElapsed(c.expiry, now, await expiryCondition(char, c, now));
 }
 
+// THE RELIEF RUNS OUT. A suspension is an expiry pointed at the suspension
+// rather than at the affliction, so it reuses the whole six-measure model: an
+// hour of peace from Majesty, three rolls of it, or a scene. When it elapses
+// the affliction is NOT re-applied - it never left - it simply bites again.
+//
+// Only a suspension somebody BOUGHT ("self") runs on a clock. One held by
+// another affliction ends when that one does, which refreshSuppression decides.
+async function tickSuspensions(subject: string, spend?: { field: "turns" | "scenes"; n: number } | { rolls: number }): Promise<string[]> {
+  const list = await CharacterAfflictions.list(subject);
+  if (!list.some(a => a.suspended?.by === "self" && a.suspended.until)) return [];
+  let dirty = false;
+  for (const a of list) {
+    const until = a.suspended?.by === "self" ? a.suspended.until : undefined;
+    if (!until || !spend) continue;
+    if ("rolls" in spend) {
+      if (until.rolls !== undefined) { until.rolls -= spend.rolls; dirty = true; }
+    } else if (until[spend.field] !== undefined) {
+      until[spend.field] = until[spend.field]! - spend.n; dirty = true;
+    }
+  }
+  const now = (await StoryClock.get())?.now ?? 0;
+  const char = await CharacterStore.load(subject);
+  const back: string[] = [];
+  for (const a of list) {
+    if (a.suspended?.by !== "self" || !a.suspended.until) continue;
+    // Judged with the affliction's OWN expiry machinery, on a synthetic
+    // instance whose expiry is the relief's - one model, not two.
+    const probe: ActiveAffliction = { ...a, expiry: a.suspended.until, at: a.suspended.at ?? a.at };
+    if (!(await afflictionEnded(char ?? undefined, probe, now))) continue;
+    delete a.suspended; dirty = true;
+    back.push(`${disp(subject)}: ${disp(a.def)} takes hold again`);
+  }
+  if (dirty) await CharacterAfflictions.replace(subject, list);
+  return back;
+}
+
 async function expireAfflictions(now: number): Promise<string[]> {
   const lifted: string[] = [];
   for (const name of await CharacterStore.listNames()) {
@@ -3463,6 +3500,8 @@ async function expireAfflictions(now: number): Promise<string[]> {
       const r = await removeAffliction(name, c.def);
       if (r.removed) lifted.push(`${disp(name)}: ${disp(c.def)} ends${r.alsoLifted ? ` (and ${disp(r.alsoLifted)})` : ""}`);
     }
+    lifted.push(...await tickSuspensions(name));
+    await CharacterAfflictions.refreshSuppression(name);
   }
   return lifted;
 }
@@ -3473,7 +3512,10 @@ async function expireAfflictions(now: number): Promise<string[]> {
 // happened is the same reply that says the effect ended.
 async function spendAfflictionCharges(subject: string, tags: string[], poolTraits: string[]): Promise<string[]> {
   const active = await CharacterAfflictions.list(subject);
-  if (!active.some(c => c.expiry?.rolls !== undefined)) return [];
+  // A relief measured in ROLLS counts down even when no affliction does.
+  const anyCharge = active.some(c => c.expiry?.rolls !== undefined);
+  const anyRelief = active.some(c => c.suspended?.by === "self" && c.suspended.until?.rolls !== undefined);
+  if (!anyCharge && !anyRelief) return [];
   const notes: string[] = [];
   const next = active.map(c => {
     if (c.expiry?.rolls === undefined || !rollSpendsCharge(c.expiry, tags, poolTraits)) return c;
@@ -3481,6 +3523,7 @@ async function spendAfflictionCharges(subject: string, tags: string[], poolTrait
   });
   await CharacterAfflictions.replace(subject, next);
   await countDownCooldowns("rolls", 1, subject);
+  notes.push(...await tickSuspensions(subject, { rolls: 1 }));
   const now = (await StoryClock.get())?.now ?? 0;
   const char = await CharacterStore.load(subject);
   for (const c of next) {
@@ -3504,11 +3547,14 @@ async function countDownAfflictions(field: "turns" | "scenes", n: number): Promi
   const now = (await StoryClock.get())?.now ?? 0;
   for (const name of await CharacterStore.listNames()) {
     const active = await CharacterAfflictions.list(name);
-    if (!active.some(c => c.expiry?.[field] !== undefined)) continue;
+    // ...and so does a relief measured in turns or scenes.
+    const anyRelief = active.some(c => c.suspended?.by === "self" && c.suspended.until?.[field] !== undefined);
+    if (!active.some(c => c.expiry?.[field] !== undefined) && !anyRelief) continue;
     const next = active.map(c => c.expiry?.[field] === undefined
       ? c
       : { ...c, expiry: { ...c.expiry, [field]: c.expiry[field]! - n } });
     await CharacterAfflictions.replace(name, next);
+    ended.push(...await tickSuspensions(name, { field, n }));
     const char = await CharacterStore.load(name);
     for (const c of next) {
       if (!(await afflictionEnded(char ?? undefined, c, now))) continue;
@@ -4940,6 +4986,14 @@ function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
   const bits = [c.def];
   const bound = Object.entries(c.bindings).map(([k, v]) => `${k}: ${disp(v)}`).join(", ");
   if (bound) bits.push(`(${bound})`);
+  if (c.level !== undefined && c.level !== 1) bits.push(`level ${c.level}`);
+  // HELD DOWN is not GONE, and a report that did not say so would be lying by
+  // omission: it is listed, it is counted, and it is not biting.
+  if (c.suspended) {
+    const relief = describeExpiry(c.suspended.until, formatStoryDate);
+    bits.push(`⏸ HELD DOWN by ${c.suspended.by === "self" ? "an act of will" : c.suspended.by}`
+      + `${relief ? ` - ${relief}` : ""} (still on him; [[restore ${c.def}]] ends the relief)`);
+  }
   // What the ENGINE is counting comes first; the def's prose duration is the
   // fallback for an affliction nobody gave an expiry to.
   const left = describeExpiry(c.expiry, formatStoryDate);
@@ -5014,7 +5068,14 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
   if (orphan) inst.orphan = orphan;
   inst.at = (await StoryClock.get())?.now ?? 0;
   await CharacterAfflictions.afflict(subject, inst);
-  const lines = [`${disp(subject)} is now ${afflictionLine(inst)}`];
+  // Applying one may HOLD ANOTHER DOWN (the glove over the claws) - or be held
+  // down itself, if a suppressor is already on him. Recomputed here so nobody
+  // has to remember either direction.
+  const suppression = await CharacterAfflictions.refreshSuppression(subject);
+  const fresh = (await CharacterAfflictions.list(subject))
+    .find(a => CharacterAfflictions.instanceKey(a) === CharacterAfflictions.instanceKey(inst)) ?? inst;
+  const lines = [`${disp(subject)} is now ${afflictionLine(fresh)}`];
+  if (suppression.length) lines.push(suppression.join("; "));
   if (def.mirror && bindings["target"]) {
     const mirrorDef = AfflictionRegistry.get(def.mirror);
     if (!mirrorDef) lines.push(`mirror "${def.mirror}" is not defined - skipped`);
@@ -5214,8 +5275,8 @@ async function countDownCooldowns(field: "rolls" | "turns" | "scenes", n: number
   }
 }
 
-async function removeAffliction(subject: string, defName: string): Promise<{ removed?: ActiveAffliction; alsoLifted?: string; error?: string }> {
-  const removed = await CharacterAfflictions.lift(subject, defName);
+async function removeAffliction(subject: string, defName: string, from?: string): Promise<{ removed?: ActiveAffliction; alsoLifted?: string; error?: string }> {
+  const removed = await CharacterAfflictions.lift(subject, defName, from);
   if (!removed) return { error: `${disp(subject)} does not have "${StringUtil.normalize(defName)}". [[afflictions${subject ? ` ${subject}` : ""}]] lists them.` };
   await armCooldown(subject, removed);
   const def = AfflictionRegistry.get(removed.def);
@@ -5240,6 +5301,19 @@ async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
     if ("error" in ops) return sys(ops.error);
     apply = ops;
   }
+  // WHO MAY HOLD IT DOWN, and at what price. Sub-args rather than a packed
+  // string, so each one is a declared knob a window can render.
+  const liftHow = StringUtil.normalize(cmd.named["lift"] ?? "");
+  if (liftHow && !LIFT_POLICIES.includes(liftHow as never)) {
+    return sys(`lift= must be one of ${LIFT_POLICIES.join(", ")} (got "${liftHow}"). `
+      + `at-will = on and off as he pleases; cost = pay for relief; never = only something else can hold it down.`);
+  }
+  const lift: AfflictionLift = {};
+  if (liftHow) lift.how = liftHow as never;
+  for (const [key, field] of [["lift-cost", "cost"], ["lift-roll", "roll"], ["lift-for", "for"], ["lift-note", "note"]] as const) {
+    const v = cmd.named[key]?.trim();
+    if (v) lift[field] = v;
+  }
   const def = makeAfflictionDef({
     name,
     description: cmd.named["description"],
@@ -5250,9 +5324,16 @@ async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
     tags: (cmd.named["tags"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
     note: cmd.named["note"],
     apply,
+    ...(Object.keys(lift).length ? { lift } : {}),
+    suppresses: (cmd.named["suppresses"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
   });
   await AfflictionRegistry.put(def);
-  return sys(`Defined affliction ${describeAfflictionDef(def)}.`);
+  const extras = [
+    def.apply?.length ? `does: ${def.apply.map(describePassiveOp).join("; ")}` : "",
+    def.lift ? describeLift(def.lift) : "",
+    def.suppresses?.length ? `holds down: ${def.suppresses.join(", ")}` : "",
+  ].filter(Boolean);
+  return sys(`Defined affliction ${describeAfflictionDef(def)}${extras.length ? ` - ${extras.join("; ")}` : ""}.`);
 }
 
 async function cmdAfflictionInfo(cmd: ParsedCommand): Promise<string> {
@@ -5362,9 +5443,20 @@ async function cmdToggle(cmd: ParsedCommand): Promise<string> {
       + `[[afflict ${name}]] applies it outright.`);
   }
   if (on) {
-    const r = await removeAffliction(subject.name!, name);
-    return sys(`${disp(char.name)} switches ${disp(name)} OFF${r.alsoLifted ? ` (${r.alsoLifted})` : ""}. `
-      + `${source ? `[[toggle ${name}]] switches it back on.` : ""}`);
+    // Switching a passive off HOLDS IT DOWN; it does not take it away. The
+    // bindings and level survive, so switching back on restores exactly what
+    // was there rather than reconstructing it.
+    if (on.suspended) {
+      await CharacterAfflictions.update(subject.name!, a => a.def === name && a.suspended?.by === "self",
+        a => { delete a.suspended; });
+      await CharacterAfflictions.refreshSuppression(subject.name!);
+      return sys(`${disp(char.name)} switches ${disp(name)} back ON.`);
+    }
+    await CharacterAfflictions.update(subject.name!, a => a.def === name && !a.suspended,
+      a => { a.suspended = { by: "self", note: "switched off" }; });
+    const knock = await CharacterAfflictions.refreshSuppression(subject.name!);
+    return sys(`${disp(char.name)} switches ${disp(name)} OFF - it is held down, not lost. `
+      + `[[toggle ${name}]] switches it back on.${knock.length ? ` ${knock.join("; ")}.` : ""}`);
   }
   const said = await applyPassiveGrant(subject.name!, source!.kind, source!.key, source!.grant, source!.ctx);
   return sys(`${disp(char.name)} switches ${disp(name)} ON. ${said}`);
@@ -5427,24 +5519,130 @@ async function cmdAdvance(cmd: ParsedCommand): Promise<string> {
   return sys(`${current.def} ends; ${r.lines!.join("; ")}.`);
 }
 
+// =============================================================================
+// HELD DOWN, ENDED, AND BACK - three things, three verbs
+// -----------------------------------------------------------------------------
+// [[lift]]    holds it down. He is still under it; the relief runs out.
+// [[remove]]  ends it. The thing causing it is gone.
+// [[restore]] ends the relief early - it bites again now.
+//
+// The engine had one word for the first two, which made Majesty unsayable: you
+// buy an hour free of it and you are STILL under Majesty, and what ends it is
+// walking out of his presence.
+// =============================================================================
 async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
+  const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  if (!name) return sys(`lift needs an affliction, e.g. [[lift majesty spend=willpower]]. `
+    + `Lifting HOLDS IT DOWN - [[remove ${"<affliction>"}]] is what ends one.`);
+  const subject = await afflictionSubject(cmd);
+  if (subject.error) return sys(`${subject.error}`);
+  const from = cmd.named["from"]?.trim();
+  const held = (await CharacterAfflictions.list(subject.name!))
+    .filter(a => a.def === name && (!from || StringUtil.normalize(a.from ?? "") === StringUtil.normalize(from)));
+  if (!held.length) {
+    return sys(`${disp(subject.name!)} does not have "${name}"${from ? ` from ${from}` : ""}. [[show-affliction]] lists them.`);
+  }
+  if (held.every(a => a.suspended)) return sys(`${name} is already held down on ${disp(subject.name!)}.`);
+  const def = AfflictionRegistry.get(name);
+  const policy = liftPolicyOf(def);
+  const waived = flagOf(cmd, "waive") === true;
+  // WHO MAY, AND AT WHAT PRICE. `never` is the default, because most
+  // afflictions are not shruggable and a permissive default would quietly make
+  // every one of them optional.
+  if (policy === "never" && !waived) {
+    return sys(`${name} ${describeLift(def?.lift)}. `
+      + `Something else may hold it down (an affliction that suppresses it), [[remove ${name}]] ends it, `
+      + `or add waive=true.`);
+  }
+  let spendNote = "";
+  const wants = def?.lift?.cost;
+  if (policy === "cost" && !waived) {
+    const paying = cmd.named["spend"] ?? wants;
+    if (!paying) return sys(`${name} is held down by paying, and its definition names no cost - give spend=<resource>.`);
+    const char = await CharacterStore.load(subject.name!);
+    if (!char) return sys(`${disp(subject.name!)} has no sheet to spend from.`);
+    const spend = await applySpend(char, { ...cmd, named: { ...cmd.named, spend: paying } }, ctx, [], []);
+    if (spend.refuse) return sys(`${disp(char.name)} can't: ${spend.refuse}.`);
+    spendNote = spend.note ? ` (${spend.note})` : "";
+  } else if (cmd.named["spend"]) {
+    const char = await CharacterStore.load(subject.name!);
+    if (char) {
+      const spend = await applySpend(char, cmd, ctx, [], []);
+      if (spend.refuse) return sys(`${disp(char.name)} can't: ${spend.refuse}.`);
+      spendNote = spend.note ? ` (${spend.note})` : "";
+    }
+  }
+  // HOW LONG the relief lasts: what was asked for, else what the definition
+  // says, else until somebody restores it.
+  const asked = await expiryFromArgs(cmd);
+  if (asked.error) return sys(asked.error);
+  let until = asked.value;
+  if (!until && def?.lift?.for) {
+    // "1 scene" / "3 rolls" / "1 hour" - the same three measures an expiry has,
+    // read off the definition when the command names none.
+    const spoken = StringUtil.normalize(def.lift.for);
+    const counted = spoken.match(/^(\d+)-(roll|turn|scene)s?$/);
+    if (counted) {
+      const n = parseInt(counted[1], 10);
+      until = counted[2] === "roll" ? { rolls: n } : counted[2] === "turn" ? { turns: n } : { scenes: n };
+    } else {
+      const parsed = parseDuration(def.lift.for);
+      if (!("error" in parsed)) {
+        const clock = await StoryClock.get();
+        if (clock) until = { until: clock.now + parsed.seconds + parsed.months * 2_592_000 };
+      }
+    }
+  }
+  const now = (await StoryClock.get())?.now;
+  const touched = await CharacterAfflictions.update(subject.name!,
+    a => a.def === name && !a.suspended && (!from || StringUtil.normalize(a.from ?? "") === StringUtil.normalize(from)),
+    a => { a.suspended = { by: "self", ...(until ? { until } : {}), ...(now !== undefined ? { at: now } : {}) }; });
+  // Holding a suppressor down releases whatever IT was holding down.
+  const knock = await CharacterAfflictions.refreshSuppression(subject.name!);
+  const forHow = until ? ` for ${describeExpiry(until, formatStoryDate) || "a while"}` : " until restored";
+  return sys(`${disp(subject.name!)} holds off ${name}${touched.length > 1 ? ` (${touched.length} of them)` : ""}`
+    + `${spendNote}${forHow}. It is still on ${disp(subject.name!)} - [[restore ${name}]] ends the relief, `
+    + `[[remove ${name}]] ends the affliction.${knock.length ? ` ${knock.join("; ")}.` : ""}`);
+}
+
+// [[restore]] - the relief is over, it bites again.
+async function cmdRestore(cmd: ParsedCommand): Promise<string> {
+  const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
+  if (!name) return sys(`restore needs an affliction, e.g. [[restore majesty]].`);
+  const subject = await afflictionSubject(cmd);
+  if (subject.error) return sys(`${subject.error}`);
+  const touched = await CharacterAfflictions.update(subject.name!,
+    a => a.def === name && a.suspended?.by === "self",
+    a => { delete a.suspended; });
+  if (!touched.length) {
+    const anyHeld = (await CharacterAfflictions.list(subject.name!)).find(a => a.def === name && a.suspended);
+    return anyHeld
+      ? sys(`${name} is held down by ${anyHeld.suspended!.by}, not by ${disp(subject.name!)} - that has to go first.`)
+      : sys(`${name} is not being held down on ${disp(subject.name!)}.`);
+  }
+  const knock = await CharacterAfflictions.refreshSuppression(subject.name!);
+  return sys(`${name} takes hold of ${disp(subject.name!)} again.${knock.length ? ` ${knock.join("; ")}.` : ""}`);
+}
+
+// [[remove]] - it is over. The thing causing it is gone.
+async function cmdRemoveAffliction(cmd: ParsedCommand, ctx: CommandContext): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return sys(`lift needs an affliction, e.g. [[lift feral-whispers]].`);
+  if (!name) return sys(`remove needs an affliction, e.g. [[remove majesty]] (or [[lift]] to hold it down instead).`);
   const subject = await afflictionSubject(cmd);
   if (subject.error) return sys(`${subject.error}`);
   let spendNote = "";
   if (cmd.named["spend"]) {
-    // The shrug-off: pay to end it. Only someone with a sheet can spend.
     const char = await CharacterStore.load(subject.name!);
     if (!char) return sys(`${disp(subject.name!)} has no sheet to spend from.`);
     const spend = await applySpend(char, cmd, ctx, [], []);
     if (spend.refuse) return sys(`${disp(char.name)} can't: ${spend.refuse}.`);
     spendNote = spend.note ? ` (${spend.note})` : "";
   }
-  const r = await removeAffliction(subject.name!, name);
+  const r = await removeAffliction(subject.name!, name, cmd.named["from"]?.trim());
   if (r.error) return sys(`${r.error}`);
+  const knock = await CharacterAfflictions.refreshSuppression(subject.name!);
   const also = r.alsoLifted ? `; ${r.alsoLifted}` : "";
-  return sys(`${disp(subject.name!)} shakes off ${r.removed!.def}${spendNote}${also}.`);
+  return sys(`${disp(subject.name!)} is free of ${r.removed!.def}${spendNote}${also}.${knock.length ? ` ${knock.join("; ")}.` : ""}`);
 }
 
 async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
@@ -6615,6 +6813,14 @@ CommandRouter.register("define-affliction", cmdDefineAffliction, {
     { key: "apply", kind: "named", type: "literal",
       hint: "`<op>[:<tag>] [+N|-N] [if=<trait|category>]`", example: "difficulty -2 if=drive on=reckless",
       desc: 'What it DOES while it is on - the same shorthand a merit passive uses; "$slot" reads a binding' },
+    { key: "lift", kind: "named", type: "enum", options: [...LIFT_POLICIES],
+      desc: "Who may HOLD IT DOWN: at-will, cost (pay for relief), never (default - only something else can)" },
+    { key: "lift-cost", kind: "named", hint: "<resource>", example: "willpower", desc: "What buying relief costs" },
+    { key: "lift-for", kind: "named", hint: "<duration>", example: "1 scene", desc: "How long the relief lasts" },
+    { key: "lift-roll", kind: "named", desc: "...or a pool rolled for it (ST-adjudicated)" },
+    { key: "lift-note", kind: "named", type: "literal", desc: "Why it can or cannot be shrugged off" },
+    { key: "suppresses", kind: "named", hint: '"a,b"', example: "claw-hands",
+      desc: "Afflictions HELD DOWN while this one is on (the glove over the claws)" },
     { key: "tags", kind: "named", hint: '"a,b"', desc: "Tags joined to the afflicted character's rolls" },
     { key: "description", kind: "named", type: "literal", desc: "Description" },
     { key: "note", kind: "named", desc: "Note (optional)" },
@@ -6690,12 +6896,34 @@ CommandRouter.register("advance", cmdAdvance, {
   ],
 });
 CommandRouter.register("lift", cmdLift, {
-  summary: "remove an affliction - and its mirror; spend = shrug-off",
+  summary: "HOLD an affliction down - he is still under it, and the relief runs out",
+  note: "[[remove]] is what ENDS one; [[restore]] ends the relief early",
+  params: [
+    { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
+    { key: "on", kind: "named", hint: "<name|@alias>", desc: "Who (default: the current character)" },
+    { key: "from", kind: "named", desc: "Which instance, when several sources applied the same one", example: "merit:crack-rider" },
+    { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Pay for the relief (its definition may name the price)" },
+    { key: "spend-amount", kind: "named", type: "int" },
+    { key: "waive", kind: "named", type: "bool", desc: "Hold it down even though its definition says it cannot be" },
+    ...EXPIRY_PARAMS,
+  ],
+});
+CommandRouter.register("restore", cmdRestore, {
+  summary: "end the relief early - the affliction takes hold again",
   params: [
     { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
     { key: "on", kind: "named", hint: "<name|@alias>" },
-    { key: "spend", kind: "named", hint: SPEND_HINT, example: SPEND_EXAMPLE },
-    { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1)" },
+  ],
+});
+CommandRouter.register("remove", cmdRemoveAffliction, {
+  summary: "END an affliction - the thing causing it is gone",
+  note: "[[lift]] only holds one down",
+  params: [
+    { key: "affliction", kind: "positional", required: true, hint: "<affliction>" },
+    { key: "on", kind: "named", hint: "<name|@alias>" },
+    { key: "from", kind: "named", desc: "Which instance, when several sources applied the same one", example: "merit:crack-rider" },
+    { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Pay to be rid of it" },
+    { key: "spend-amount", kind: "named", type: "int" },
   ],
 });
 CommandRouter.register("afflictions", cmdAfflictions, {

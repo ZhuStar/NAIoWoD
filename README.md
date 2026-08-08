@@ -2121,6 +2121,56 @@ Any affliction can now carry ops (`[[define-affliction apply=…]]`), and
 `$binding` in an op reads the instance's own binding — which is what lets one
 definition serve every rated merit in the book.
 
+### Held down is not gone — `[[lift]]`, `[[restore]]`, `[[remove]]`
+
+Majesty puts everyone near its holder under a passive. They can spend Willpower
+and be free of it for a scene — and they are **still under Majesty**; the relief
+runs out and it bites again. What *ends* it is walking out of his presence.
+Those are two different things, and the engine used to have one word for both.
+
+```
+[[lift <affliction>]]     hold it down — still on him, and the relief runs out
+[[restore <affliction>]]  end the relief early — it bites again now
+[[remove <affliction>]]   END it — the thing causing it is gone
+```
+
+An affliction says **who may hold it down, and at what price**:
+
+| `lift=` | means |
+|---|---|
+| `at-will` | the holder's own side of Majesty: off and on as he pleases, nothing spent |
+| `cost` | the target's side: pay `lift-cost` for `lift-for` long |
+| `never` | **the default.** A Gangrel's claws: no act of will puts them away |
+
+```
+[[define-affliction name=`majesty` apply=`difficulty +2 if=talent`
+   lift=cost lift-cost=willpower lift-for=`1 scene`]]
+
+[[lift majesty]] → Rok holds off majesty (spent 1 willpower) for 1 more scene.
+                   It is still on Rok — [[restore]] ends the relief,
+                   [[remove]] ends the affliction.
+[[end-scene]]    → Rok: Majesty takes hold again.
+```
+
+**Something else can hold one down.** `suppresses` is the glove over the claws —
+and nobody has to remember to put them back:
+
+```
+[[define-affliction name=`claw-hands` apply=`difficulty -2 if=climb` lift=never]]
+[[define-affliction name=`wearing-gloves` suppresses=claw-hands]]
+
+[[lift claw-hands]]      → cannot be shrugged off …
+[[afflict wearing-gloves]] → claw-hands held down by wearing-gloves
+[[remove wearing-gloves]]  → claw-hands is back
+```
+
+A held-down affliction is **listed, counted and still his** — it simply grants
+nothing: no ops, no tags. `[[toggle]]` uses this too, so switching a passive off
+keeps its bindings and level instead of rebuilding them. The relief runs on the
+same six-measure expiry model everything else uses (rolls, turns, scenes, time,
+an expression, or advisory), and `from=` on `lift`/`remove` picks one instance
+when several sources applied the same affliction.
+
 ### A merit can define what it turns on
 
 `grants=` names the affliction a merit applies when taken — the same machinery

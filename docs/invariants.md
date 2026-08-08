@@ -191,6 +191,18 @@ the same two gates a merit's passive uses (`trait` names a trait OR a category,
 - **Do not put the same effect in a passive AND its granted affliction** — it
   applies twice. If a def grants an affliction that does the work, the def
   carries no passive of its own (Trait Affinity).
+- **HELD DOWN IS NOT GONE.** `[[lift]]` suspends (still on him, relief runs
+  out), `[[remove]]` ends it, `[[restore]]` ends the relief early. A suspended
+  instance contributes NO ops and NO tags and is still listed, still counted,
+  still ended by whatever would have ended it. Anything reading an affliction
+  for EFFECT must call `afflictionActive`; anything reading it for EXISTENCE
+  must not.
+- **`lift.how` defaults to `never`**, because most afflictions are not
+  shruggable and a permissive default would quietly make every one optional.
+- **A suspension is owned.** `by: "self"` runs on its own expiry clock;
+  `by: <affliction>` is recomputed by `refreshSuppression` and ends when that
+  affliction does — so the glove coming off restores the claws with nobody
+  remembering to. Call it wherever the affliction list changes.
 - **A tag something else consumed is not `unknown`.** `resolveSpec`'s `usedTags`
   exists so a roll does not tell a player their tag did nothing when an
   affliction gated on it.
@@ -306,6 +318,7 @@ Then a live `init()` smoke reproducing whatever the change was about.
 | A listing is cluttering the AI's context | Its verb is not named `show-*`. §6. |
 | A definition loses a field when reloaded | The card reader does not know it. §7. |
 | An effect applies twice | It is in a passive AND in the affliction that passive grants. §8. |
+| A lifted affliction still bites | Something read it without `afflictionActive`. §8. |
 | A name resolves to 0 | `::` folding, or the hyphen rule, or a bare name not reaching the extension. |
 | A duration is wildly wrong | Seconds vs milliseconds. §1. |
 | An arcanum shows up as a merit (or vice versa) | Something asked the wrong registry, or a report walk used `ownedPowerInstances`. §5. |

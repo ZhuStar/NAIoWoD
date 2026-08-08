@@ -2389,6 +2389,27 @@ export interface ActiveAffliction {
   // `difficulty-modifier` serves "-1 per level on the trait you chose" at any
   // level. Absent = 1.
   level?: number;
+  // HELD DOWN, BUT STILL ON HIM. This is the whole Majesty distinction: he
+  // spent Willpower and is free of it for a scene, and he is STILL under
+  // Majesty - the relief runs out and it bites again. An affliction with this
+  // set contributes NOTHING (no ops, no tags) and is still listed, still
+  // counted, still ended by whatever would have ended it.
+  suspended?: AfflictionSuspension;
+}
+export interface AfflictionSuspension {
+  // What is holding it down: "self" (he shrugged it off), or the NAME of the
+  // affliction doing the suppressing - the glove over the claws. A suspension
+  // held by another affliction ends the moment that one does, and nobody has to
+  // remember to restore it.
+  by: string;
+  until?: AfflictionExpiry;    // when the relief runs out; absent = until restored
+  at?: number;                 // the story epoch it began (what `until` measures from)
+  note?: string;
+}
+// Is this instance actually biting? Everything that reads an affliction for
+// EFFECT must ask; everything that reads it for EXISTENCE must not.
+export function afflictionActive(a: ActiveAffliction): boolean {
+  return a.suspended === undefined;
 }
 
 // A COOLDOWN is an expiry pointed the other way: not "when does this end" but
@@ -2432,6 +2453,7 @@ export class CharacterAfflictions {
     for (const active of await CharacterAfflictions.list(subject)) {
       const def = AfflictionRegistry.get(active.def);
       if (!def?.apply?.length) continue;
+      if (!afflictionActive(active)) continue;   // held down: still on him, not biting
       const ops = afflictionOpsOf(def, active.bindings ?? {}, active.level ?? 1);
       // Name the SOURCE when there is one: a roll note saying
       // "difficulty-modifier" tells a player nothing, and "trait-affinity:melee"
@@ -2474,13 +2496,28 @@ export class CharacterAfflictions {
   }
 
   // Remove one affliction; returns the removed instance (bindings drive mirror-lifting).
-  static async lift(name: string, defName: string): Promise<ActiveAffliction | undefined> {
+  // REMOVE one instance. `from` picks WHICH, now that a shared affliction is
+  // held once per source: without it, every instance of the def goes (which is
+  // what a bare "this is over" means).
+  static async lift(name: string, defName: string, from?: string): Promise<ActiveAffliction | undefined> {
     const n = StringUtil.normalize(defName);
+    const src = from ? StringUtil.normalize(from).replace(/::+/g, ":") : undefined;
     const all = await CharacterAfflictions.list(name);
-    const hit = all.find(c => c.def === n);
+    const matches = (c: ActiveAffliction): boolean =>
+      c.def === n && (src === undefined || StringUtil.normalize(c.from ?? "").replace(/::+/g, ":") === src);
+    const hit = all.find(matches);
     if (!hit) return undefined;
-    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), all.filter(c => c.def !== n));
+    await CharacterAfflictions._storage.set(CharacterAfflictions._key(name), all.filter(c => !matches(c)));
     return hit;
+  }
+  // Rewrite one instance in place - what a suspension and its lifting need.
+  static async update(name: string, match: (a: ActiveAffliction) => boolean, edit: (a: ActiveAffliction) => void): Promise<ActiveAffliction[]> {
+    const all = await CharacterAfflictions.list(name);
+    const hits = all.filter(match);
+    if (!hits.length) return [];
+    for (const h of hits) edit(h);
+    await CharacterAfflictions.replace(name, all);
+    return hits;
   }
   static async clear(name: string): Promise<void> { await CharacterAfflictions._storage.delete(CharacterAfflictions._key(name)); }
 
@@ -2488,10 +2525,44 @@ export class CharacterAfflictions {
   static async tags(name: string): Promise<string[]> {
     const out: string[] = [];
     for (const c of await CharacterAfflictions.list(name)) {
+      if (!afflictionActive(c)) continue;      // held down grants nothing, tags included
       const def = AfflictionRegistry.get(c.def);
       if (def?.tags) out.push(...def.tags);
     }
     return out;
+  }
+
+  // WHAT IS HOLDING WHAT DOWN, recomputed from scratch. An affliction that
+  // `suppresses` others holds them down for as long as it is itself active; the
+  // moment it ends - or is itself held down - they come back on their own. That
+  // is the glove: nobody restores the claws, taking the glove off does.
+  //
+  // Only `by`-another-affliction suspensions are touched. A suspension somebody
+  // BOUGHT ("self") is his own and runs on its own clock.
+  static async refreshSuppression(name: string): Promise<string[]> {
+    const list = await CharacterAfflictions.list(name);
+    const held = new Map<string, string>();          // suppressed def -> suppressor
+    for (const a of list) {
+      if (!afflictionActive(a)) continue;            // a held-down glove holds nothing
+      for (const target of AfflictionRegistry.get(a.def)?.suppresses ?? []) {
+        if (!held.has(target)) held.set(target, a.def);
+      }
+    }
+    const changed: string[] = [];
+    let dirty = false;
+    for (const a of list) {
+      const by = held.get(a.def);
+      const suspendedByOther = a.suspended && a.suspended.by !== "self";
+      if (by && !a.suspended) {
+        a.suspended = { by, note: `held down by ${by}` };
+        changed.push(`${a.def} held down by ${by}`); dirty = true;
+      } else if (!by && suspendedByOther) {
+        delete a.suspended;
+        changed.push(`${a.def} is back`); dirty = true;
+      }
+    }
+    if (dirty) await CharacterAfflictions.replace(name, list);
+    return changed;
   }
 }
 

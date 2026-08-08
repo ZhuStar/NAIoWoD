@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `abd2179`** ("The Roll button
-> never rolled").
+> **Last synced with the code as of commit `bab02c8`** ("A cray asks its
+> own time").
+> Prior: `abd2179` ("The Roll button never rolled").
 > Prior: `e7a7bdc` ("A card must carry a def all the way home").
 > Prior: `1216053` ("Nobody is listening, so nobody is told").
 > Prior: `bd60c4f` ("The moon has phases and the week has days").
@@ -1476,7 +1477,8 @@ bookmarks, `name → epoch` map) · **`scene:<name>`** (scene records, §7.31) /
 {unsuccessful, botched}}}`, §7.33 — lazily reset when the current scene differs;
 key = cast label else the pillar signature; success deletes its entry) ·
 **`cray:<char>`** (the cray SITE's live state `{points, status: active|dormant|
-dead, lastTapDay}`, §7.35 - the RATING is a Background on the sheet) ·
+dead, lastTapDay, perPoint?}` - `perPoint` is the ritual time this cray asks per
+point harvested, §7.84; §7.35 - the RATING is a Background on the sheet) ·
 `char_<name>` (legacy LiveCharacter serialization). **tempStorage**
 (session-scoped, cleared on close): `recon:<category>/<entry>:<kind>:<hash>`
 (the once-per-session reconciliation-modal guard).
@@ -4256,6 +4258,50 @@ and `prefill` are mocked/available but not yet written.
     Cray and Talisman are **Backgrounds** — `[[set-trait sanctum 5]]` — and a
     second Mentor is `` [[set-trait mentor 2 note=`Belial` add=true]] `` (`add`
     holds another rather than replacing, `note` keeps them distinct).
+
+
+84. **A cray asks its own time, and something you have may cut it** (owner:
+    *"A Cray should have its own time per point harvested. Each Cray is
+    different in this... one Cray could require two hours of ritual per point of
+    quintessence, and another one hour... Then you harvest the Cray with a how
+    many points argument, and the time automatically passes and your
+    quintessence automatically increases... This could be even changed with some
+    merit or whatever, an affliction in the end. Let's say that Cray Harvesting
+    Expertise allows you to reduce the time for harvesting in half."*).
+
+    Three separate things, and keeping them separate is the design:
+
+    - **The price in time is a fact about the SITE**, so `CrayState.perPoint`
+      holds it as the player writes it (`"2h"`, `"90m"`), set by
+      **`[[set-cray per-point=2h]]`**, `default` handing it back. Absent, the
+      chronicle's own rule answers — new magic knob
+      **`cray-harvest-minutes-per-point`** (60). Measured against the CLOCK
+      (`addDuration(now, dur) - now`) rather than assumed, so `1mo` is the month
+      that actually follows.
+    - **The time passes by itself.** `[[harvest 3]]` advances the clock by
+      points × per-point, credits `magic-fuel` (Living Resolve for the
+      Ouroboros — "whatever passes for quintessence"), runs recovery and expires
+      afflictions over the span. Asking the player to also type `time=6h` was
+      asking them to do the engine's arithmetic; `time=` now OVERRIDES (a
+      Storyteller may rule it took all night) and `time=0` skips the clock.
+    - **What shortens it is an affliction**, like every other modifier here:
+      the **`ritual-time`** EffectOp, `amount` a PERCENT (negative = faster),
+      `target` naming which ritual (absent/`*` = all). So Cray Harvesting
+      Expertise is `` apply=`ritual-time:harvest -50` `` and nothing new had to
+      be invented — a merit's `grants` reaches it through the same path.
+
+    Two decisions inside that: percentages from several sources **add rather
+    than compound** (two −25% cards make −50%, which is what a player expects
+    from reading them), and the total is **floored at −90%** with a one-minute
+    minimum, so no stack of bonuses makes a ritual free. Replies name the
+    SOURCE and the original — *"2 hours for 2 points at 2h each (−50% from
+    modifier-cray-harvest, was 4 hours)"* — because a player told "2 hours"
+    deserves to know which of his merits made it two.
+
+    Worth recording for the next person: the `apply=` shorthand is
+    `` `<op>[:<tag>] [+N|-N]` `` — the part after the colon is the TARGET and the
+    signed number is the AMOUNT. Writing `ritual-time:-50` silently files −50 as
+    the target and the op does nothing, which is exactly what happened first.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

@@ -71,6 +71,7 @@ import {
   processGenerationEnd, stripAgedCtxSkip,
   parseCardText, formatCardText, characterToCard, characterFromCard, asNamedList,
   namedDefsToCard, DEFAULT_MERITS_FLAWS, DEFAULT_ARCANA, DEFAULT_BACKGROUNDS, DEFAULT_AFFLICTIONS,
+  RITUAL_TIME_OP, ritualTimePercent, scaleRitualSeconds,
   meritFlawFromCard, arcanumFromCard, makeBackgroundDef, makeTemplateDef,
   asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
@@ -5674,6 +5675,67 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
     expect(greedy).toContain("survives, depleted");
     expect((await CharacterStore.load("Marius"))!.backgrounds.cray).toBe(4);
     expect((await CommandRouter.route("cray"))).toContain("cray 4 (0/20 points)");
+  });
+
+  test("a cray asks its OWN time per point, and harvesting spends it automatically", async () => {
+    const c = await marius();
+    await CharacterResources.spend(c, "living-resolve", 30);
+    // Unset, it falls back to the chronicle's rule (60 minutes a point).
+    expect(await CommandRouter.route("show-cray")).toContain("1 hour per point");
+    expect(await CommandRouter.route("show-cray")).toContain("the chronicle's default");
+
+    // Each cray is different in this, so the time lives on the SITE.
+    expect(await CommandRouter.route("set-cray per-point=2h")).toContain("2 hours per point");
+    expect(await CommandRouter.route("show-cray")).not.toContain("the chronicle's default");
+
+    // The player says how many points; the clock is the engine's arithmetic.
+    const before = (await StoryClock.get())!.now;
+    const r = await CommandRouter.route("harvest 3");
+    expect(r).toContain("6 hours for 3 points at 2h each");
+    expect((await StoryClock.get())!.now - before).toBe(6 * 3600);
+    expect(r).toContain("+3 living-resolve");
+  });
+
+  test("`ritual-time` shortens it, sources stack additively, and none of it can reach zero", async () => {
+    const c = await marius();
+    await CharacterResources.spend(c, "living-resolve", 30);
+    await CommandRouter.route("set-cray per-point=2h");
+
+    // "Cray Harvesting Expertise halves the time" - an affliction like any other.
+    await CommandRouter.route("define-affliction modifier-cray-harvest apply=`ritual-time:harvest -50`");
+    await CommandRouter.route("afflict modifier-cray-harvest");
+    expect(await CommandRouter.route("show-cray")).toContain("1 hour per point (-50% from modifier-cray-harvest)");
+
+    const before = (await StoryClock.get())!.now;
+    const r = await CommandRouter.route("harvest 2");
+    expect(r).toContain("-50% from modifier-cray-harvest, was 4 hours");
+    expect((await StoryClock.get())!.now - before).toBe(2 * 3600);
+
+    // A second source ADDS rather than compounding: two -25%s are -50%, which
+    // is what a player reading two cards expects.
+    await CommandRouter.route("define-affliction modifier-swift-rites apply=`ritual-time -25`");
+    await CommandRouter.route("afflict modifier-swift-rites");
+    expect(await CommandRouter.route("show-cray")).toContain("30 minutes per point (-75%");
+
+    // And no stack of bonuses makes a ritual free: floored at -90%, never
+    // under a minute.
+    expect(ritualTimePercent([{ op: RITUAL_TIME_OP, amount: -500 }], "harvest")).toBe(-90);
+    expect(scaleRitualSeconds(7200, -90)).toBe(720);
+    expect(scaleRitualSeconds(60, -90)).toBe(60);
+    // A target names WHICH ritual; one aimed elsewhere does not touch harvest.
+    expect(ritualTimePercent([{ op: RITUAL_TIME_OP, amount: -50, target: "seal" }], "harvest")).toBe(0);
+  });
+
+  test("time= still overrides the ritual, and time=0 leaves the clock alone", async () => {
+    const c = await marius();
+    await CharacterResources.spend(c, "living-resolve", 30);
+    await CommandRouter.route("set-cray per-point=2h");
+    const before = (await StoryClock.get())!.now;
+    await CommandRouter.route("harvest 1 time=`1d`");
+    expect((await StoryClock.get())!.now - before).toBe(86400);      // the Storyteller's ruling wins
+    const mid = (await StoryClock.get())!.now;
+    expect(await CommandRouter.route("harvest 1 time=0")).not.toContain("The ritual runs");
+    expect((await StoryClock.get())!.now).toBe(mid);                  // and 0 means do not move it
   });
 
   test("a failed aftermath roll puts the cray to sleep; a botch kills it", async () => {

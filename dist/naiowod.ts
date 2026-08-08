@@ -4732,13 +4732,52 @@ interface MagicRules {
   // How many Foundation dots buy one more un-cancelable success per roll:
   // cap = max(1, floor(Foundation / this)). Foundation 5 / 2 = 2 successes.
   uncancelablePerFoundation: number;
+  // How long the harvesting RITUAL takes per point drawn, in minutes - the
+  // chronicle's default. Each cray SITE may override it (CrayState.perPoint),
+  // because the time a cray asks of you is a fact about that cray.
+  crayHarvestMinutesPerPoint: number;
 }
 const DEFAULT_MAGIC_RULES: MagicRules = {
   simpleBase: 4, complexBase: 5, difficultyCap: 10, minDifficulty: 4,
   quintPerTurn: 3, quintFreeLimit: 2, retryPenalty: 1, botchRetryPenalty: 2,
   ongoingMultiplier: 10, ongoingFuelPerSuccess: 1, sealPerPillarDot: 5, sealWillpowerPer: 10,
-  uncancelablePerFoundation: 2,
+  uncancelablePerFoundation: 2, crayHarvestMinutesPerPoint: 60,
 };
+
+// --- HOW LONG A RITUAL TAKES, AND WHAT SHORTENS IT ---------------------------
+// A cray asks for its own time per point - two hours at one site, one at
+// another - and something a character HAS may cut that: "Cray Harvesting
+// Expertise halves the time". That second half is an affliction like every
+// other modifier in the engine, so it is an EffectOp:
+//
+//   { op: "ritual-time", target: "harvest", amount: -50 }   // half as long
+//
+// `amount` is a PERCENT, negative for faster, and `target` names the ritual
+// (absent or "*" means every ritual). Percentages from several sources add
+// rather than compound - two -25% merits make -50%, which is what a player
+// expects when reading two cards - and the total is clamped so no stack of
+// bonuses can make a ritual free or negative.
+const RITUAL_TIME_OP = "ritual-time";
+const RITUAL_TIME_FLOOR_PERCENT = -90;
+
+function ritualTimePercent(ops: readonly EffectOp[], ritual: string): number {
+  let pct = 0;
+  for (const op of ops) {
+    if (op.op !== RITUAL_TIME_OP) continue;
+    const target = StringUtil.normalize(op.target ?? "*");
+    if (target !== "*" && target !== StringUtil.normalize(ritual)) continue;
+    pct += op.amount ?? 0;
+  }
+  return Math.max(RITUAL_TIME_FLOOR_PERCENT, pct);
+}
+
+// Apply that percentage to a base number of seconds. Never below one minute:
+// a ritual that takes no time at all is not a ritual, and rounding to the
+// minute keeps the story clock's report readable.
+function scaleRitualSeconds(baseSeconds: number, percent: number): number {
+  const scaled = Math.round(baseSeconds * (100 + percent) / 100);
+  return Math.max(60, Math.round(scaled / 60) * 60);
+}
 
 // The most un-cancelable successes one roll can carry, for this character's
 // Foundation: the Willpower being spent is only worth so much certainty. The
@@ -4773,6 +4812,7 @@ const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
   "ongoing-multiplier": "ongoingMultiplier", "ongoing-fuel-per-success": "ongoingFuelPerSuccess",
   "seal-per-pillar-dot": "sealPerPillarDot", "seal-willpower-per": "sealWillpowerPer",
   "uncancelable-per-foundation": "uncancelablePerFoundation",
+  "cray-harvest-minutes-per-point": "crayHarvestMinutesPerPoint",
 };
 const MAGIC_KNOB_NAMES: string[] = Object.keys(MAGIC_KNOBS);
 
@@ -10557,7 +10597,16 @@ class EffectUses {
 // here, keyed by owner, since the Background assumes exclusive access.
 // =============================================================================
 type CrayStatus = "active" | "dormant" | "dead";
-interface CrayState { points: number; status: CrayStatus; lastTapDay: number }
+interface CrayState {
+  points: number;
+  status: CrayStatus;
+  lastTapDay: number;
+  // HOW LONG THIS CRAY ASKS FOR, per point harvested - a duration as the player
+  // writes it ("2h", "90m", "1d"). Each cray is different in this, so it is a
+  // fact about the SITE and not a rule about crays; absent means the
+  // chronicle's default (magic rule `cray-harvest-minutes-per-point`).
+  perPoint?: string;
+}
 const DORMANT_DAYS_PER_POINT = 365;
 
 class CrayStore {
@@ -13381,6 +13430,50 @@ function crayLine(char: PlayableCharacter, state: CrayState): string {
   return `cray ${rating} (${state.points}/${CrayStore.capacity(char)} points${status})`;
 }
 
+// WHAT THE RITUAL COSTS IN TIME. Two hours a point at one cray, one at another
+// (CrayState.perPoint), falling back to the chronicle's own default; then
+// whatever the character HAS that shortens it - "Cray Harvesting Expertise
+// halves the time" is an affliction carrying a `ritual-time` op, exactly like
+// every other modifier here. Sources are named, because a player reading "3
+// hours" deserves to know which of his merits made it three.
+interface RitualTime { seconds: number; base: number; percent: number; sources: string[]; perPoint: string }
+
+async function harvestTime(char: PlayableCharacter, points: number): Promise<RitualTime> {
+  const state = await CrayStore.get(char);
+  const fallbackMinutes = magicRulesFrom(MagicRulesConfig.current()).crayHarvestMinutesPerPoint;
+  const now = (await StoryClock.get())?.now ?? 0;
+  let perPoint = `${fallbackMinutes}m`;
+  let onePoint = fallbackMinutes * 60;
+  if (state.perPoint) {
+    const dur = parseDuration(state.perPoint);
+    if (!("error" in dur)) {
+      // Measured against the clock rather than assumed, so "1mo" is the month
+      // that actually follows rather than a guess at how long a month is.
+      onePoint = addDuration(now, dur) - now;
+      perPoint = state.perPoint;
+    }
+  }
+  const base = onePoint * Math.max(1, points);
+  const sources: string[] = [];
+  const ops: EffectOp[] = [];
+  for (const { from, ops: theirs } of await CharacterAfflictions.ops(char.name)) {
+    const mine = theirs.filter(o => o.op === RITUAL_TIME_OP);
+    if (!mine.length) continue;
+    ops.push(...mine);
+    sources.push(from);
+  }
+  const percent = ritualTimePercent(ops, "harvest");
+  return { seconds: scaleRitualSeconds(base, percent), base, percent, sources, perPoint };
+}
+
+// "2 hours per point; 3 points = 6 hours" - and the modifier when there is one.
+function describeHarvestTime(t: RitualTime, points: number): string {
+  const span = (s: number): string => formatCalendarSpan(diffCalendar(0, s));
+  const cut = t.percent === 0 ? ""
+    : ` (${t.percent > 0 ? "+" : ""}${t.percent}% from ${t.sources.join(", ") || "an affliction"}, was ${span(t.base)})`;
+  return `${span(t.seconds)} for ${points} point${points === 1 ? "" : "s"} at ${t.perPoint} each${cut}`;
+}
+
 async function cmdCray(forChar?: PlayableCharacter): Promise<string> {
   const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
@@ -13389,8 +13482,37 @@ async function cmdCray(forChar?: PlayableCharacter): Promise<string> {
   const regen = state.status === "dead" ? "never regenerates"
     : state.status === "dormant" ? "1 point per YEAR (dormant)"
     : "1 point per day it goes untapped";
+  const ritual = await harvestTime(char, 1);
+  const cut = ritual.percent === 0 ? "" : ` (${ritual.percent > 0 ? "+" : ""}${ritual.percent}% from ${ritual.sources.join(", ")})`;
   return sys(`${disp(char.name)}'s ${crayLine(char, state)}: ${regen}. `
+    + `Harvesting it costs ${formatCalendarSpan(diffCalendar(0, ritual.seconds))} per point${cut}`
+    + `${state.perPoint ? "" : " (the chronicle's default - [[set-cray per-point=2h]] gives this cray its own)"}. `
     + `[[harvest N]] to draw it ritually, [[absorb]] to tear it out (Wits + Foundation vs ${10 - CrayStore.rating(char)}).`);
+}
+
+// A cray's own facts, set on the SITE rather than on the rules: each cray asks
+// a different price in time, so that price lives with the cray.
+async function cmdSetCray(cmd: ParsedCommand): Promise<string> {
+  const char = await CharacterStore.getCurrent();
+  if (!char) return noCharacter();
+  if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray (it is a Background - [[set-trait cray 3]] rates it).`);
+  const raw = (cmd.named["per-point"] ?? cmd.positional[0])?.trim();
+  if (!raw) {
+    return sys(`set-cray needs what to set, e.g. [[set-cray per-point=2h]] (the ritual time per point drawn). [[show-cray]] shows it.`);
+  }
+  const state = await CrayStore.get(char);
+  if (raw === "default" || raw === "-") {
+    await CrayStore.set(char, { ...state, perPoint: undefined });
+    const back = await harvestTime(char, 1);
+    return sys(`${disp(char.name)}'s cray goes back to the chronicle's default: ${formatCalendarSpan(diffCalendar(0, back.seconds))} per point.`);
+  }
+  const dur = parseDuration(raw);
+  if ("error" in dur) return sys(dur.error);
+  await CrayStore.set(char, { ...state, perPoint: raw });
+  const ritual = await harvestTime(char, 1);
+  return sys(`${disp(char.name)}'s cray now asks ${formatCalendarSpan(diffCalendar(0, ritual.seconds))} per point harvested`
+    + `${ritual.percent === 0 ? "" : ` (after ${ritual.percent}% from ${ritual.sources.join(", ")})`}. `
+    + `[[harvest 3]] would take ${formatCalendarSpan(diffCalendar(0, (await harvestTime(char, 3)).seconds))}.`);
 }
 
 // Draw `want` points out of the cray and into the mage. Shared by the ritual
@@ -13442,19 +13564,30 @@ async function cmdHarvest(cmd: ParsedCommand, ctx: CommandContext): Promise<stri
   if (!char) return noCharacter();
   if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray to harvest.`);
   const want = Math.max(1, parseInt(cmd.positional[0] ?? "1", 10) || 1);
+  // THE TIME PASSES BY ITSELF. Harvesting is a ritual measured in hours per
+  // point, so asking the player to also type `time=6h` was asking them to do
+  // the engine's arithmetic. `time=` still overrides (a Storyteller may rule
+  // this one took all night), and `time=0` skips the clock entirely.
+  const ritual = await harvestTime(char, want);
+  const override = cmd.named["time"]?.trim();
+  let move: Duration = { months: 0, seconds: ritual.seconds };
+  if (override) {
+    const dur = parseDuration(override);
+    if ("error" in dur) return sys(dur.error);
+    move = dur;
+  }
+
   const r = await drawFromCray(char, want, ctx);
   if (r.refuse) return sys(`${disp(char.name)} can't harvest ${want}: ${r.refuse}.`);
+
   let timeNote = "";
-  const timeArg = cmd.named["time"]?.trim();
-  if (timeArg) {
-    const dur = parseDuration(timeArg);
-    if ("error" in dur) return sys(dur.error);
-    const before = await StoryClock.get();
-    if (before) {
-      const after = (await StoryClock.advance(dur))!;
-      timeNote = ` The ritual takes until ${formatStoryDate(after.now)}.`;
-      timeNote += await applyRecovery(before.now, after.now);
-    }
+  const before = await StoryClock.get();
+  if (before && (move.months || move.seconds)) {
+    const after = (await StoryClock.advance(move))!;
+    timeNote = ` The ritual runs ${override ? formatCalendarSpan(diffCalendar(before.now, after.now)) : describeHarvestTime(ritual, want)}`
+      + `, until ${formatStoryDay(after.now)}.`;
+    timeNote += await applyRecovery(before.now, after.now);
+    timeNote += (await expireAfflictions(after.now)).map(e => ` ${e}.`).join("");
   }
   const state = await CrayStore.get(char);
   return sys(`${disp(char.name)} harvests the cray - ${r.notes.join("; ")}. Now ${crayLine(char, state)}.${timeNote}`);
@@ -17207,11 +17340,20 @@ CommandRouter.register("leave-library", cmdLeaveLibrary, {
   summary: "step back through the measured door",
 });
 CommandRouter.register("cray", () => cmdCray(), { summary: "the cray's points, status and how it refills" });
+CommandRouter.register("set-cray", cmdSetCray, {
+  summary: "what this cray asks of you - the ritual time per point harvested",
+  note: "Each cray is different: `per-point=2h` here, `1h` there. `default` hands it back to the chronicle's rule. A merit or affliction carrying a `ritual-time` op modifies it (e.g. -50% halves it).",
+  params: [
+    { key: "per-point", kind: "named", hint: "<duration|default>", example: "2h",
+      desc: "How long the ritual takes per point drawn" },
+  ],
+});
 CommandRouter.register("harvest", cmdHarvest, {
-  summary: "draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot)",
+  summary: "draw Quintessence from the cray ritually - the ritual's time passes by itself (no roll; overdrawing costs the site a dot)",
+  note: "Time per point is the cray's own ([[set-cray per-point=2h]]), shortened by anything the character has carrying a `ritual-time` op. `time=` overrides it; `time=0` skips the clock.",
   params: [
     { key: "points", kind: "positional", type: "int", hint: "[points]", example: "3" },
-    { key: "time", kind: "named", desc: "How long the ritual takes (advances the clock)", example: "2h" },
+    { key: "time", kind: "named", desc: "Override how long the ritual takes (0 = do not move the clock)", example: "2h" },
   ],
 });
 CommandRouter.register("absorb", cmdAbsorb, {

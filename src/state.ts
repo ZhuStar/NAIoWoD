@@ -2856,7 +2856,16 @@ export class EffectUses {
 // here, keyed by owner, since the Background assumes exclusive access.
 // =============================================================================
 export type CrayStatus = "active" | "dormant" | "dead";
-export interface CrayState { points: number; status: CrayStatus; lastTapDay: number }
+export interface CrayState {
+  points: number;
+  status: CrayStatus;
+  lastTapDay: number;
+  // HOW LONG THIS CRAY ASKS FOR, per point harvested - a duration as the player
+  // writes it ("2h", "90m", "1d"). Each cray is different in this, so it is a
+  // fact about the SITE and not a rule about crays; absent means the
+  // chronicle's default (magic rule `cray-harvest-minutes-per-point`).
+  perPoint?: string;
+}
 const DORMANT_DAYS_PER_POINT = 365;
 
 export class CrayStore {

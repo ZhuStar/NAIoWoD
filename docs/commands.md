@@ -16,7 +16,7 @@ every other read-only verb was renamed `show-*`, but this is the one command
 a player types before they know anything at all. `[[show-help]]` is an alias.
 
 ```
-[SYSTEM: 130 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-moon, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
+[SYSTEM: 131 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, set-cray, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-moon, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -29,7 +29,7 @@ one reply in the story.
 
 ---
 
-## All 130 commands
+## All 131 commands
 
 | command | what it does |
 |---|---|
@@ -91,7 +91,7 @@ one reply in the story.
 | `forget-template` | drop a chronicle template (the shipped one, if any, resurfaces) |
 | `gain` | regain a resource |
 | `grant` | where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus |
-| `harvest` | draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot) |
+| `harvest` | draw Quintessence from the cray ritually - the ritual's time passes by itself (no roll; overdrawing costs the site a dot) |
 | `help` | list commands, or show one's usage |
 | `hide` | write to the current scene's private plan (mirrored into the Author's Note) |
 | `invoke` | use a power that OFFERS an affliction rather than applying it automatically |
@@ -113,6 +113,7 @@ one reply in the story.
 | `save-date` | bookmark the current moment (or a given date) under a name |
 | `scene` | open a named scene at the current story time (one location; turn=<len> sets a Turn's length) |
 | `seal-spell` | seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10 |
+| `set-cray` | what this cray asks of you - the ritual time per point harvested |
 | `set-default` | change the default character |
 | `set-trait` | set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start) |
 | `show-affliction` | afflictions on a character, or the ones the chronicle defines |
@@ -1491,22 +1492,24 @@ where something came from when it wasn't bought: a template's free dot, or a Sto
 
 ### `harvest`
 
-draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot)
+draw Quintessence from the cray ritually - the ritual's time passes by itself (no roll; overdrawing costs the site a dot)
 
 ```
-[[harvest [[points]] [time=".."] [in-story]  (draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot))]]
+[[harvest [[points]] [time=".."] [in-story]  (draw Quintessence from the cray ritually - the ritual's time passes by itself (no roll; overdrawing costs the site a dot); Time per point is the cray's own ([[set-cray per-point=2h]]), shortened by anything the character has carrying a `ritual-time` op. `time=` overrides it; `time=0` skips the clock.)]]
 ```
+
+> Time per point is the cray's own ([[set-cray per-point=2h]]), shortened by anything the character has carrying a `ritual-time` op. `time=` overrides it; `time=0` skips the clock.
 
 | argument | kind | meaning |
 |---|---|---|
 | `points` | positional `int` | `[points]` <br>*e.g.* `3` |
-| `time` | named | How long the ritual takes (advances the clock) <br>*e.g.* `2h` |
+| `time` | named | Override how long the ritual takes (0 = do not move the clock) <br>*e.g.* `2h` |
 | `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
 **`[[help harvest]]`** replies:
 
 ```
-[SYSTEM: harvest - harvest [[points]] [time=".."] [in-story]  (draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot))]
+[SYSTEM: harvest - harvest [[points]] [time=".."] [in-story]  (draw Quintessence from the cray ritually - the ritual's time passes by itself (no roll; overdrawing costs the site a dot); Time per point is the cray's own ([[set-cray per-point=2h]]), shortened by anything the character has carrying a `ritual-time` op. `time=` overrides it; `time=0` skips the clock.)]
 ```
 
 ### `help`
@@ -2011,6 +2014,27 @@ seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 1
 
 ```
 [SYSTEM: seal-spell - seal-spell pillar=N [pay] [in-story]  (seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10)]
+```
+
+### `set-cray`
+
+what this cray asks of you - the ritual time per point harvested
+
+```
+[[set-cray [per-point=<duration|default>] [in-story]  (what this cray asks of you - the ritual time per point harvested; Each cray is different: `per-point=2h` here, `1h` there. `default` hands it back to the chronicle's rule. A merit or affliction carrying a `ritual-time` op modifies it (e.g. -50% halves it).)]]
+```
+
+> Each cray is different: `per-point=2h` here, `1h` there. `default` hands it back to the chronicle's rule. A merit or affliction carrying a `ritual-time` op modifies it (e.g. -50% halves it).
+
+| argument | kind | meaning |
+|---|---|---|
+| `per-point` | named | How long the ritual takes per point drawn <br>*e.g.* `2h` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help set-cray]]`** replies:
+
+```
+[SYSTEM: set-cray - set-cray [per-point=<duration|default>] [in-story]  (what this cray asks of you - the ritual time per point harvested; Each cray is different: `per-point=2h` here, `1h` there. `default` hands it back to the chronicle's rule. A merit or affliction carrying a `ritual-time` op modifies it (e.g. -50% halves it).)]
 ```
 
 ### `set-default`

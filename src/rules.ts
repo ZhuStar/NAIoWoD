@@ -1565,13 +1565,52 @@ export interface MagicRules {
   // How many Foundation dots buy one more un-cancelable success per roll:
   // cap = max(1, floor(Foundation / this)). Foundation 5 / 2 = 2 successes.
   uncancelablePerFoundation: number;
+  // How long the harvesting RITUAL takes per point drawn, in minutes - the
+  // chronicle's default. Each cray SITE may override it (CrayState.perPoint),
+  // because the time a cray asks of you is a fact about that cray.
+  crayHarvestMinutesPerPoint: number;
 }
 export const DEFAULT_MAGIC_RULES: MagicRules = {
   simpleBase: 4, complexBase: 5, difficultyCap: 10, minDifficulty: 4,
   quintPerTurn: 3, quintFreeLimit: 2, retryPenalty: 1, botchRetryPenalty: 2,
   ongoingMultiplier: 10, ongoingFuelPerSuccess: 1, sealPerPillarDot: 5, sealWillpowerPer: 10,
-  uncancelablePerFoundation: 2,
+  uncancelablePerFoundation: 2, crayHarvestMinutesPerPoint: 60,
 };
+
+// --- HOW LONG A RITUAL TAKES, AND WHAT SHORTENS IT ---------------------------
+// A cray asks for its own time per point - two hours at one site, one at
+// another - and something a character HAS may cut that: "Cray Harvesting
+// Expertise halves the time". That second half is an affliction like every
+// other modifier in the engine, so it is an EffectOp:
+//
+//   { op: "ritual-time", target: "harvest", amount: -50 }   // half as long
+//
+// `amount` is a PERCENT, negative for faster, and `target` names the ritual
+// (absent or "*" means every ritual). Percentages from several sources add
+// rather than compound - two -25% merits make -50%, which is what a player
+// expects when reading two cards - and the total is clamped so no stack of
+// bonuses can make a ritual free or negative.
+export const RITUAL_TIME_OP = "ritual-time";
+export const RITUAL_TIME_FLOOR_PERCENT = -90;
+
+export function ritualTimePercent(ops: readonly EffectOp[], ritual: string): number {
+  let pct = 0;
+  for (const op of ops) {
+    if (op.op !== RITUAL_TIME_OP) continue;
+    const target = StringUtil.normalize(op.target ?? "*");
+    if (target !== "*" && target !== StringUtil.normalize(ritual)) continue;
+    pct += op.amount ?? 0;
+  }
+  return Math.max(RITUAL_TIME_FLOOR_PERCENT, pct);
+}
+
+// Apply that percentage to a base number of seconds. Never below one minute:
+// a ritual that takes no time at all is not a ritual, and rounding to the
+// minute keeps the story clock's report readable.
+export function scaleRitualSeconds(baseSeconds: number, percent: number): number {
+  const scaled = Math.round(baseSeconds * (100 + percent) / 100);
+  return Math.max(60, Math.round(scaled / 60) * 60);
+}
 
 // The most un-cancelable successes one roll can carry, for this character's
 // Foundation: the Willpower being spent is only worth so much certainty. The
@@ -1606,6 +1645,7 @@ const MAGIC_KNOBS: Record<string, keyof MagicRules> = {
   "ongoing-multiplier": "ongoingMultiplier", "ongoing-fuel-per-success": "ongoingFuelPerSuccess",
   "seal-per-pillar-dot": "sealPerPillarDot", "seal-willpower-per": "sealWillpowerPer",
   "uncancelable-per-foundation": "uncancelablePerFoundation",
+  "cray-harvest-minutes-per-point": "crayHarvestMinutesPerPoint",
 };
 export const MAGIC_KNOB_NAMES: string[] = Object.keys(MAGIC_KNOBS);
 

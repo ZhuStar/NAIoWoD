@@ -243,6 +243,34 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   read-only query (`isQuietVerb` — the `show-` prefix since §7.73) — the hook's cancel-the-turn lever.
 - `api.v1.uuid()`, `api.v1.generate` (future Storyteller loop), UI extension
   API (`api.v1.ui.*` — future wizard renderer), permissions for document edit.
+- **THE HOST ALREADY PROVIDES AN ORDERED, CANCELLABLE SCRIPT CHAIN**, and it
+  took until the multi-script plan to notice. `docs/hooks.md`: *"Scripts execute
+  their hooks in the same order as they are listed in the User Scripts modal"*,
+  each may modify `inputText`, and any may set `stopFurtherScripts` to halt the
+  rest. That IS a bus — ordered, synchronous, with priority and
+  stop-propagation — supplied free. So **commands get distributed across scripts
+  by the hook chain, not by messages**, and `api.v1.messaging` is for
+  fire-and-forget events only. This is why probe Q5 ("can a reply arrive while a
+  hook awaits?") stopped being the blocker it was written to be.
+- **THE OPEN QUESTION THAT DECIDES THE MULTI-SCRIPT SPLIT** is storage, not
+  messaging. `docs/storage-api.md` says *"Each script gets its own storage
+  separate from other scripts"* — but it says that of `storage`, while
+  describing `storyStorage` as "always stored in the current story". If
+  `storyStorage` is SHARED between scripts, N scripts seeing one game state is a
+  **one-line change**: `ScopedStorage`'s prefix is already a constructor
+  parameter (services.ts:27) defaulting to `api.v1.script.id`, so a fixed
+  `"naiowod"` makes every unit read the same keys. If it is isolated, every
+  split unit must reach the sheet through the lorebook instead. UNVERIFIED.
+- **`scripts/probe-messaging.ts` answers all of the above and has never been
+  run.** Not in the build, not in `tsconfig` (which includes src/test/types
+  only), so type-check it standalone against the vendored d.ts. One file, one
+  `ROLE` constant: paste it twice, change `"one"` to `"two"` in the second slot,
+  reload, then type `probe-hooks` and `probe-reply` in the Text Adventure box.
+  It reports Q1–Q5 (messaging), **S1/S2 (storage sharing — the deciding one)**
+  and H1/H2/H3 (does the chain really pass `inputText` down, does
+  `stopFurtherScripts` really halt, what order do hooks run in). The `as Role`
+  on the constant is load-bearing: without it TS narrows to the literal `"one"`
+  and calls every `ROLE === "two"` branch unreachable.
 
 ## 5. Fine-grained module map
 
@@ -4438,13 +4466,22 @@ Ordered roughly by unlock value:
       first with a throwaway two-script experiment before committing.
 
     **The bus itself SHIPPED in §7.62** (`core/bus.ts` + `PostOffice`, with the
-    messaging mock and `scripts/probe-messaging.ts`). What is LEFT of this item:
-    running the probe on-host to learn what messaging actually guarantees, and
-    then **adopting** the bus — nothing in the engine publishes to it yet, by
-    design. The obvious first publishers are the ones the owner has already
-    asked for: the per-character resource ledger (#21) as a `monitor` handler,
-    and the recalculation cache (#16), whose invalidation is what an event bus
-    is FOR.
+    messaging mock and `scripts/probe-messaging.ts`). The obvious first
+    publishers are the ones the owner has already asked for: the per-character
+    resource ledger (#21) as a `monitor` handler, and the recalculation cache
+    (#16), whose invalidation is what an event bus is FOR.
+
+    **SUPERSEDED IN PART, 2026-08-08.** Two of the assumptions above were wrong
+    in the engine's favour, and §4 now records both. (a) Messaging is NOT the
+    backbone for commands — the **host hook chain already is one** (ordered by
+    modal position, each script may rewrite `inputText`, any may
+    `stopFurtherScripts`), so messaging carries fire-and-forget events only and
+    the ordering/delivery risk above mostly evaporates. (b) The question that
+    actually gates splitting the engine is **whether `storyStorage` is shared
+    between scripts**, which nobody had asked. The probe was rewritten to answer
+    both (S1/S2 + H1/H2/H3 alongside the original Q1–Q5) and is a two-slot
+    paste with one `ROLE` constant. Running it is now the gate on the
+    multi-script split, not on "adopting the bus".
 
 24. **DO THE WORK WHILE THE PLAYER IS READING** (owner, 2026-07-31: *"a lot of
     the script is asynchronous due to the nature of the NovelAI Scripting API.

@@ -23,7 +23,7 @@ export async function renderCommandReference(): Promise<string> {
   await init();
   const verbs = CommandRouter.verbs().slice().sort();
   const deprecated = CommandRouter.deprecatedVerbs().slice().sort((a, b) => a.verb.localeCompare(b.verb));
-  const bareHelp = await CommandRouter.route("show-help");
+  const bareHelp = await CommandRouter.route("help");
 
   const rows: string[] = [];
   const detail: string[] = [];
@@ -61,8 +61,8 @@ export async function renderCommandReference(): Promise<string> {
       params.length
         ? `| argument | kind | meaning |\n|---|---|---|\n${params.join("\n")}\n`
         : "_No arguments._\n",
-      "**`[[show-help " + verb + "]]`** replies:\n",
-      "```\n" + (await CommandRouter.route(`show-help ${verb}`)) + "\n```\n",
+      "**`[[help " + verb + "]]`** replies:\n",
+      "```\n" + (await CommandRouter.route(`help ${verb}`)) + "\n```\n",
     );
   }
 
@@ -78,10 +78,11 @@ export async function renderCommandReference(): Promise<string> {
     "",
     "---",
     "",
-    "## `[[show-help]]` — what it publishes",
+    "## `[[help]]` — what it publishes",
     "",
-    "With no argument it lists every current verb (`[[help]]` is the same command,",
-    "kept as a visible alias because it is what a player who knows nothing types):",
+    "With no argument it lists every current verb. `[[help]]` KEEPS its name —",
+    "every other read-only verb was renamed `show-*`, but this is the one command",
+    "a player types before they know anything at all. `[[show-help]]` is an alias.",
     "",
     "```",
     bareHelp,
@@ -111,7 +112,7 @@ export async function renderCommandReference(): Promise<string> {
     `## ${deprecated.length} older names that still work`,
     "",
     "Each does exactly what it always did, then says what replaced it. They are",
-    "left out of `[[show-help]]` and out of the table above: the current",
+    "left out of `[[help]]` and out of the table above: the current",
     "vocabulary is what a player should be reading.",
     "",
     "| old name | now |",

@@ -113,6 +113,10 @@ field to its window for free.
 4b. **The name is the policy.** A read-only verb is called `show-*`, and that
    prefix — not a hand-maintained list — is what keeps its reply out of the AI's
    context. `SHOW_SUBJECTS` is the one table; a subject cannot be half-wired.
+   `[[help]]` is the deliberate exception: it keeps the name everybody already
+   knows, and `show-help` aliases it.
+4c. **`in-story` is on every verb**, attached by `CommandRouter.register` rather
+   than declared 130 times, and it runs both directions.
 5. **Afflictions are the common currency.** An arcanum, a spell, a Discipline and
    a botched roll all express "something is on you" the same way — with a source,
    an expiry, a cooldown and an orphan policy.

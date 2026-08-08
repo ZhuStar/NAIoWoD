@@ -117,9 +117,23 @@ context before generation (`markCtxSkip` / `processContextBuilt`).
 - **A listing that is not called `show-*` will leak into the model's context.**
   The old `QUIET_VERBS` set was hand-maintained and new verbs were forgotten
   from it; what remains there is only read-only verbs that are not listings.
-- **`in-story=true` overrides the hiding, and nothing else.** The turn stays
-  quiet: looking something up is not an action, so the reply is read on the
-  NEXT generation rather than prompting one now.
+- **`in-story` is UNIVERSAL and runs BOTH ways.** `CommandRouter.register`
+  attaches it to every verb, so there is no command whose context placement the
+  player cannot override: `[[show-sheet in-story]]` shows a listing to the AI,
+  `[[roll stealth in-story=false]]` hides an action from it. Resolution order is
+  what the player said → `CommandSpec.inStory` → `!isQuietVerb`.
+- **It overrides the hiding and nothing else.** The turn stays quiet: looking
+  something up is not an action, so the reply is read on the NEXT generation
+  rather than prompting one now.
+- **A bare flag means true** (`[[... in-story]]`), promoted by
+  `CommandRouter.parse` — NOT by `CommandParser`, which stays spec-agnostic.
+  Anything read as a flag must be declared `type: "bool"`, or the bare form
+  does not exist and the value is filed as a positional.
+- **A mistyped flag value reads as ABSENT, never as false** (`readBool`
+  returns `undefined`), so a typo cannot silently mean "no".
+- **`[[help]]` is the exception to the `show-*` naming.** It keeps its name
+  because it is what a player types before knowing anything; it is listed in
+  `QUIET_VERBS` instead, and `show-help` is an alias of it.
 - **`@all` is reserved in `parseAliasToken`.** `@` is the alias sigil, so an
   alias named "all" would shadow the wildcard on every listing.
 - A scope a subject does not declare is answered with a CORRECTION naming the

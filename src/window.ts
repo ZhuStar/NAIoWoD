@@ -52,9 +52,13 @@ const labelOf = (spec: CommandSpec | undefined, key: string): string => {
 
 // A row of buttons behaving as a single-select: the current value is marked
 // with a bullet; clicking one writes it to tempStorage and re-renders.
+// What a flag offers in a window. "" is the third answer - say nothing and let
+// the verb's own default stand - and it composes to nothing.
+const BOOL_OPTIONS = ["true", "false", ""];
+
 function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: string, rerender: () => Promise<void>): UIPart {
   const buttons = (p.options ?? []).map(o => part.button({
-    text: o === current ? `• ${o}` : o,
+    text: `${o === current ? "• " : ""}${o === "" ? "(default)" : o}`,
     callback: async () => { await api.v1.tempStorage.set(WKEY(verb, p.key), o); await rerender(); },
   }));
   return part.row({ content: [part.text({ text: `${p.desc ?? p.key}:` }), ...buttons] });
@@ -144,7 +148,12 @@ export async function openCommandWindow(verb: string, opts?: {
     const content: UIPart[] = [];
     if (opts?.blurb) content.push(part.text({ text: opts.blurb, markdown: true }));
     for (const p of spec.params ?? []) {
-      if (p.type === "enum" && p.options?.length) {
+      if (p.type === "bool") {
+        // A flag has one vocabulary, so the spec does not restate it: the
+        // window offers both answers and "unset" (leave it to the verb).
+        const current = String((await temp.get(WKEY(verb, p.key))) ?? p.default ?? "");
+        content.push(selectorRow(part, verb, { ...p, options: BOOL_OPTIONS }, current, () => render()));
+      } else if (p.type === "enum" && p.options?.length) {
         const current = String((await temp.get(WKEY(verb, p.key))) ?? p.default ?? "");
         content.push(selectorRow(part, verb, p, current, () => render()));
       } else if (p.type === "int") {

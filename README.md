@@ -928,17 +928,44 @@ answer for is a correction, not an empty list:
 → That is a campaign, and this one is only asked of current / character.
 ```
 
-**`in-story=true`** puts one reply back into the story for the Storyteller to
-read. It does not make the turn generate — looking something up is still not an
-action, so the reply sits there and is read on the next generation:
-
-```
-[[show-sheet in-story=true]]   the AI can now see the sheet
-```
-
 Roughly forty older names (`merits`, `sheet`, `clans`, `afflictions`, …) still
-work and say what replaced them; they are kept out of `[[show-help]]` so the
-listed surface is the current one. `docs/commands.md` has the full table.
+work and say what replaced them; they are kept out of `[[help]]` so the listed
+surface is the current one. `docs/commands.md` has the full table.
+
+**`[[help]]` is the one exception to `show-*`** — it keeps its name, because it
+is what a player types before they know anything at all. `[[show-help]]` is
+registered as an alias for the players who now reasonably guess it.
+
+### `in-story` — where a reply lives, on any command
+
+**Every** command carries the `in-story` flag, and it runs both ways. Each verb
+has a default — a reply that is for the *player* (every `show-*`, `help`,
+maintenance) stays out of the AI's context; anything else, being an action the
+Storyteller should react to, stays in — and the flag overrides it per call:
+
+```
+[[show-sheet in-story]]           the AI can now read the sheet
+[[roll stealth in-story=false]]   a roll behind the Storyteller's screen
+```
+
+It does not make the turn generate: looking something up is still not an action,
+so the reply sits there and is read on the *next* generation.
+
+### Flags — a bare word means yes
+
+Any boolean argument is true when written with no value, because there is
+nothing else it could mean:
+
+```
+[[show-sheet in-story]]        ≡  in-story=true
+[[take-merit true-faith waive]] ≡  waive=true
+```
+
+`true/yes/y/on/1` and `false/no/n/off/0` are all understood, either way. A
+mistyped value reads as **absent** rather than as *false*, so a typo can never
+silently mean "no". The promotion happens in the router, which knows what each
+verb declares — the parser itself stays grammar-only, so a real positional is
+never eaten (`[[show-merit iron-will]]` keeps its name).
 
 ### `[[flush-context]]` — clean the story on demand
 

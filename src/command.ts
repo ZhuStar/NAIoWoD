@@ -167,7 +167,29 @@ export class CommandParser {
 // The declarative description of a verb's arguments. Handlers remain the
 // validators (a spec never rejects input); the spec is the SHARED knowledge:
 // derived help, window forms, and command composition all read it.
-export type ParamType = "string" | "int" | "enum" | "literal";
+// "bool" is a FLAG: `in-story=true`, `in-story=false`, or - because a flag with
+// no value can only mean one thing - the bare word `in-story`. See
+// promoteBareFlags: the parser stays spec-agnostic, so the promotion happens in
+// the router, which is the layer that knows what a verb declares.
+export type ParamType = "string" | "int" | "enum" | "literal" | "bool";
+
+// The words a flag accepts, either way. Anything else is a typo and reads as
+// ABSENT rather than as false - a mistyped flag must not silently mean "no".
+const BOOL_TRUE = ["true", "yes", "y", "on", "1"];
+const BOOL_FALSE = ["false", "no", "n", "off", "0"];
+export function readBool(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const v = StringUtil.normalize(raw);
+  if (v === "") return true;                 // `key=` is still the flag being set
+  if (BOOL_TRUE.includes(v)) return true;
+  if (BOOL_FALSE.includes(v)) return false;
+  return undefined;
+}
+// A declared flag, read off a parsed command. `undefined` = the player did not
+// say, which is what lets a per-verb DEFAULT exist.
+export function flagOf(cmd: ParsedCommand, key: string): boolean | undefined {
+  return readBool(cmd.named[key]);
+}
 
 export interface ParamSpec {
   key: string;                       // named key, or the positional's label
@@ -195,11 +217,51 @@ export interface CommandSpec {
   // nothing else.
   deprecated?: string;
   hidden?: boolean;                  // default: whatever `deprecated` implies
+  // DOES THIS REPLY BELONG IN THE STORY? Every command answers this, and the
+  // player overrides it per call with the universal `in-story` flag. Absent
+  // means "work it out": a reply that is for the PLAYER (every show-* verb,
+  // help, maintenance) defaults to false and is stripped from the AI's context;
+  // everything else - an action the Storyteller should be able to react to -
+  // defaults to true. Set it here when a verb's default is not what its name
+  // implies.
+  inStory?: boolean;
 }
+
+// The flag every command carries. Declared once and attached to every spec at
+// registration, because a knob missing from its CommandSpec does not exist -
+// and this one is genuinely universal, so hand-declaring it 130 times would be
+// 130 chances to forget.
+export const IN_STORY_KEY = "in-story";
+export const IN_STORY_PARAM: ParamSpec = {
+  key: IN_STORY_KEY, kind: "named", type: "bool",
+  desc: "Keep this reply in the story for the AI to read (in-story=false hides one that normally stays)",
+};
 // Is this verb kept out of the listings? Deprecated implies hidden unless the
 // spec says otherwise.
 export function specHidden(spec: CommandSpec): boolean {
   return spec.hidden ?? spec.deprecated !== undefined;
+}
+
+// A FLAG WITH NO VALUE CAN ONLY MEAN ONE THING. `[[show-sheet in-story]]` is
+// `in-story=true`: the parser filed the bare word as a positional because it
+// has no idea what the verb declares, and this is the layer that does.
+//
+// Only a `bool` param is promoted, and only an exact match, so a positional
+// value is never eaten by accident - `[[show-merit iron-will]]` keeps its name.
+// (A thing genuinely named after a flag is the one collision; `name=` says so
+// explicitly and is the escape hatch.)
+export function promoteBareFlags(cmd: ParsedCommand, spec: CommandSpec): ParsedCommand {
+  const flags = new Set((spec.params ?? []).filter(p => p.type === "bool").map(p => p.key));
+  if (!flags.size || !cmd.positional.length) return cmd;
+  const positional: string[] = [];
+  const named = { ...cmd.named };
+  for (const token of cmd.positional) {
+    const key = StringUtil.normalize(token);
+    // An explicit key=value already given wins over a stray bare word.
+    if (flags.has(key) && named[key] === undefined) named[key] = "true";
+    else positional.push(token);
+  }
+  return { ...cmd, positional, named };
 }
 
 // Derive the one-line usage string [[help]] shows for a verb.
@@ -208,6 +270,10 @@ export function describeCommandSpec(verb: string, spec: CommandSpec): string {
   for (const p of spec.params ?? []) {
     let core: string;
     if (p.kind === "positional") core = p.hint ?? `<${p.key}>`;
+    // A flag is shown BARE, because that is how it is meant to be typed - but a
+    // REQUIRED one shows both answers, since you have to say which and the
+    // bare form can only say one of them.
+    else if (p.type === "bool") core = p.required ? `${p.key}=true|false` : p.key;
     else if (p.type === "enum" && p.options?.length) core = `${p.key}=${p.options.join("|")}`;
     else if (p.type === "int") core = `${p.key}=${p.hint ?? "N"}`;
     else core = `${p.key}=${p.hint ?? '".."'}`;
@@ -266,7 +332,13 @@ export class CommandRouter {
   private static _beforeRoute: Array<() => Promise<void>> = [];
 
   static register(verb: string, handler: CommandHandler, spec: CommandSpec): void {
-    CommandRouter._registry.set(verb.toLowerCase(), { handler, spec });
+    // EVERY verb gets the in-story flag, so there is no such thing as a command
+    // whose context placement the player cannot override.
+    const params = spec.params ?? [];
+    const full = params.some(p => p.key === IN_STORY_KEY)
+      ? spec
+      : { ...spec, params: [...params, IN_STORY_PARAM] };
+    CommandRouter._registry.set(verb.toLowerCase(), { handler, spec: full });
   }
   static beforeRoute(hook: () => Promise<void>): void { CommandRouter._beforeRoute.push(hook); }
   // The CURRENT vocabulary. Deprecated aliases still route; they are simply not
@@ -306,10 +378,20 @@ export class CommandRouter {
       .map(([verb, def]) => ({ verb, help: describeCommandSpec(verb, def.spec) }));
   }
 
+  // THE parse entry point: tokenize, then promote bare flags using the verb's
+  // own declaration. Everything that needs a parsed command goes through here -
+  // the router itself and processAdventureInput - so `[[show-sheet in-story]]`
+  // means the same thing to both. CommandParser stays spec-agnostic.
+  static parse(body: string): ParsedCommand {
+    const cmd = CommandParser.parse(body);
+    const spec = CommandRouter._registry.get(cmd.name)?.spec;
+    return spec ? promoteBareFlags(cmd, spec) : cmd;
+  }
+
   // Routes one command body to its handler; returns the OOC replacement text
   // (always a single line - the host strips newlines from inputText).
   static async route(body: string, ctx: CommandContext = {}): Promise<string> {
-    const cmd = CommandParser.parse(body);
+    const cmd = CommandRouter.parse(body);
     for (const hook of CommandRouter._beforeRoute) await hook();
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return sys(`Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`);

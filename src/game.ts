@@ -70,6 +70,7 @@ import {
 import {
   ParsedCommand, CommandParser, CommandContext, CommandHandler, CommandRouter, ParamSpec, sys,
   commandEnvelope, commandChannel, COMMAND_CHANNEL, sysNote, stripSys,
+  flagOf, IN_STORY_KEY,
 } from "./command";
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, characterToCard,
@@ -1107,7 +1108,7 @@ async function cmdNameRoll(cmd: ParsedCommand): Promise<string> {
   const intervals = intOrUndef(cmd.named["intervals"]);
   const interval = cmd.named["interval"]?.trim();
   const onBotchRaw = cmd.named["on-botch"]?.trim();
-  const extendedFlag = ["true", "yes", "1"].includes((cmd.named["extended"] ?? "").toLowerCase());
+  const extendedFlag = flagOf(cmd, "extended") === true;
   if (extendedFlag || intervals !== undefined || interval || onBotchRaw) {
     const cfg: ExtendedSavedConfig = {};
     if (intervals !== undefined) cfg.intervals = intervals;
@@ -1588,8 +1589,8 @@ async function cmdCast(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
   // The spell's roll: over the cap, difficulty converts to extra required
   // successes (resolveSpec notes it); reductions buy those off first.
   const requires = Math.max(1, intOrUndef(cmd.named["requires"]) ?? 1);
-  const ongoing = (cmd.named["ongoing"] ?? "").toLowerCase() === "true";
-  const extended = ongoing || (cmd.named["extended"] ?? "").toLowerCase() === "true";
+  const ongoing = flagOf(cmd, "ongoing") === true;
+  const extended = ongoing || flagOf(cmd, "extended") === true;
   const spec = makeRollSpec({
     pool, difficulty, requires: extended ? 1 : requires,
     tags: castTags, difficultyCap: rules.difficultyCap,
@@ -1666,7 +1667,7 @@ async function cmdSealSpell(cmd: ParsedCommand): Promise<string> {
   const willDef = CharacterResources.resolveDef(char, "willpower");
   const fused = fuelDef && willDef && StringUtil.normalize(fuelDef.name) === StringUtil.normalize(willDef.name);
 
-  if ((cmd.named["pay"] ?? "").toLowerCase() !== "true") {
+  if (flagOf(cmd, "pay") !== true) {
     const how = fused ? ` ${fuelDef.name} is the fused substance - the same ${Math.max(sealQ, sealW)} points cover both components.` : "";
     return sys(`Sealing (highest Pillar ${level}): ${price}.${how} Payable over time (ST tracks the debt) - [[seal-spell pillar=${level} pay=true]] to spend now.`);
   }
@@ -3793,9 +3794,9 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
 // ride the backtick-literal channel, so their case survives.
 async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
   const rawName = cmd.named["name"]?.trim();
-  if (!rawName) return sys(`define-table needs name="..". See [[show-help define-table]].`);
+  if (!rawName) return sys(`define-table needs name="..". See [[help define-table]].`);
   const segs = StringUtil.normalize(rawName).split(":").filter(Boolean);
-  if (segs.length === 0) return sys(`define-table needs name="..". See [[show-help define-table]].`);
+  if (segs.length === 0) return sys(`define-table needs name="..". See [[help define-table]].`);
   if (segs.length > 2) return sys(`Table paths go one level deep for now (name="sub::name").`);
   const sub = segs.length === 2 ? segs[0] : undefined;
   const name = segs[segs.length - 1];
@@ -4555,7 +4556,7 @@ async function takeOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
   const raw = cmd.positional[0]?.trim();
   if (!raw) return sys(`${family.verbs.take} needs a name, e.g. [[${family.verbs.take} trait-affinity::melee 2]].`);
   const key = StringUtil.normalize(raw);
-  const waived = cmd.named["waive"] === "true";
+  const waived = flagOf(cmd, "waive") === true;
   const hit = resolvePowerInstance(key, n => family.registry.get(n));
   if (!hit) {
     const elsewhere = familyOwning(key);
@@ -5100,7 +5101,7 @@ async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   // A cooldown is checked HERE and nowhere else: the one moment somebody tries
   // to apply the thing again.
   const cooling = await cooldownLeft(await CharacterStore.load(subject.name!) ?? undefined, subject.name!, def.name);
-  if (cooling && cmd.named["waive"] !== "true") {
+  if (cooling && flagOf(cmd, "waive") !== true) {
     return sys(`${disp(subject.name!)} cannot take ${def.name} again yet - ${cooling}. Add waive=true to override.`);
   }
   const cooldown = await expiryFromArgs(cmd, "cooldown-");
@@ -5364,12 +5365,12 @@ async function cmdPlayer(cmd: ParsedCommand): Promise<string> {
   }
   await PlayerStore.setCurrent(name);
   let note = "";
-  if ((cmd.named["default"] ?? "") === "true") { await PlayerStore.setDefault(name); note = " (also the default player now)"; }
+  if (flagOf(cmd, "default") === true) { await PlayerStore.setDefault(name); note = " (also the default player now)"; }
   return sys(`Current player is now ${disp(StringUtil.normalize(name))}${note}.`);
 }
 
 // --- DISCOVERABILITY -------------------------------------------------------
-// [[show-help]] surfaces the command registry; [[show-character]] and [[set-default]]
+// [[help]] surfaces the command registry; [[show-character]] and [[set-default]]
 // round out character selection (creation sets the first default; this changes it).
 async function cmdHelp(cmd: ParsedCommand): Promise<string> {
   const verb = cmd.positional[0]?.trim().toLowerCase();
@@ -5383,13 +5384,13 @@ async function cmdHelp(cmd: ParsedCommand): Promise<string> {
     }
     return help
       ? sys(`${verb} - ${help}`)
-      : sys(`No command "${verb}". [[show-help]] lists them all.`);
+      : sys(`No command "${verb}". [[help]] lists them all.`);
   }
   // The CURRENT vocabulary only. Old names still route; listing them would
   // double the wall of text a player is reading to find out what exists.
   const verbs = CommandRouter.verbs();
   const older = CommandRouter.deprecatedVerbs().length;
-  return sys(`${verbs.length} commands: ${verbs.join(", ")}. [[show-help <verb>]] for one's usage. `
+  return sys(`${verbs.length} commands: ${verbs.join(", ")}. [[help <verb>]] for one's usage. `
     + `Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context `
     + `(add in-story=true to keep one). ${older} older name${older === 1 ? "" : "s"} still work and say what replaced them.`);
 }
@@ -5465,7 +5466,7 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
 
   const note = cmd.named["note"]?.trim();
   const paid = cmd.named["paid"]?.trim();
-  const add = (cmd.named["add"] ?? "").toLowerCase() === "true";
+  const add = flagOf(cmd, "add") === true;
   if (add || note !== undefined || (char.instances?.[trait]?.length ?? 0) > 1) {
     // More than one of the same Background: keep them as instances, each with
     // its own note and its own price.
@@ -5665,10 +5666,10 @@ CommandRouter.beforeRoute(async () => {
 
 // --- REGISTRATIONS ------------------------------------------------------------
 // Every verb registers with its CommandSpec: the ONE declarative description
-// of its arguments. [[show-help]] derives from it; windows render forms and compose
+// of its arguments. [[help]] derives from it; windows render forms and compose
 // command strings from it. Handlers stay the validators - a spec describes,
 // it never rejects.
-// `hint` is the GRAMMAR (it goes in the one-line usage [[show-help]] prints);
+// `hint` is the GRAMMAR (it goes in the one-line usage [[help]] prints);
 // `example` is what a window shows inside the empty field, so it must be
 // something a player could type. The grammar reads: a resource name, "::effect"
 // to pick one of its NAMED effects (heal, boost, fuel, cast...) instead of the
@@ -5698,7 +5699,7 @@ CommandRouter.register("help", cmdHelp, {
 });
 CommandRouter.register("creator-mode", cmdCreatorMode, {
   summary: "toggle lorebook hand-editing; edits sync in while on",
-  params: [{ key: "set", kind: "named", type: "enum", options: ["true", "false"], required: true }],
+  params: [{ key: "set", kind: "named", type: "bool", required: true }],
 });
 CommandRouter.register("create-playable", cmdCreatePlayable, {
   summary: "create a playable character (attributes 1, abilities 0 - allocation is opt-in)",
@@ -5727,7 +5728,7 @@ CommandRouter.register("set-trait", cmdSetTrait, {
     { key: "group", kind: "named", desc: "Which group it belongs to (inferred when the trait is already known)", example: "background" },
     { key: "note", kind: "named", type: "literal", desc: "Whose/which one this is - keeps it as a separate instance" },
     { key: "paid", kind: "named", desc: "What it really cost (0 = the Storyteller granted it)" },
-    { key: "add", kind: "named", type: "enum", options: ["true"], desc: "Hold ANOTHER of the same trait rather than replacing" },
+    { key: "add", kind: "named", type: "bool", desc: "Hold ANOTHER of the same trait rather than replacing" },
   ],
 });
 CommandRouter.register("convert-cards", cmdConvertCards, {
@@ -5755,7 +5756,7 @@ CommandRouter.register("name-roll", cmdNameRoll, {
     { key: "name", kind: "positional", required: true, hint: "<name>" },
     { key: "pool", kind: "positional", required: true, hint: "<pool>" }, ...ROLL_KNOBS,
     { key: "table", kind: "named", desc: "Success table read when the roll is invoked" },
-    { key: "extended", kind: "named", type: "enum", options: ["true"], desc: "Make it an extended procedure (target supplied at invoke)" },
+    { key: "extended", kind: "named", type: "bool", desc: "Make it an extended procedure (target supplied at invoke)" },
     { key: "intervals", kind: "named", type: "int", desc: "Extended: default max rolls" },
     { key: "interval", kind: "named", desc: "Extended: advisory spacing (e.g. 1 turn)" },
     { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"], desc: "Extended: botch policy" },
@@ -5932,8 +5933,8 @@ CommandRouter.register("magick", cmdCast, {
     { key: "quintessence", kind: "named", type: "int", desc: "Extra points: -1 difficulty each (min 4; 3/turn cap)" },
     { key: "label", kind: "named", desc: "Spell name (keys the same-scene retry ledger)" },
     { key: "requires", kind: "named", type: "int", desc: "Successes needed (extended/ongoing: the ST's total)" },
-    { key: "extended", kind: "named", type: "enum", options: ["true"], desc: "Accrue successes over intervals" },
-    { key: "ongoing", kind: "named", type: "enum", options: ["true"], desc: "Indefinite-duration spell (successes ×10; per-success fuel; seal at the end)" },
+    { key: "extended", kind: "named", type: "bool", desc: "Accrue successes over intervals" },
+    { key: "ongoing", kind: "named", type: "bool", desc: "Indefinite-duration spell (successes ×10; per-success fuel; seal at the end)" },
     { key: "interval", kind: "named", desc: "Time between extended rolls (advisory)" },
     { key: "intervals", kind: "named", type: "int", desc: "Max rolls for an extended casting" },
     { key: "on-botch", kind: "named", type: "enum", options: ["fail", "lose-successes", "ignore"], desc: "Extended botch policy (default fail: Backlash ends it)" },
@@ -5951,7 +5952,7 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
   summary: "seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10",
   params: [
     { key: "pillar", kind: "named", type: "int", required: true, desc: "Highest Pillar level involved" },
-    { key: "pay", kind: "named", type: "enum", options: ["true"], desc: "Spend now (else the price is quoted as a debt)" },
+    { key: "pay", kind: "named", type: "bool", desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
 CommandRouter.register("creation", cmdCreation, {
@@ -5993,8 +5994,8 @@ CommandRouter.register("extend-template", cmdExtendTemplate, {
     { key: "description", kind: "named", hint: "<text>", desc: "Its display name" },
     { key: "soak", kind: "named", type: "enum", options: Object.keys(SOAK_TABLES), desc: "Which soak table it uses" },
     { key: "morality", kind: "named", type: "enum", options: ["humanity", "torment", "none"], desc: "Its Road/Humanity, or none" },
-    { key: "awakened", kind: "named", type: "enum", options: ["true", "false"], desc: "Does it work Awakened magic?" },
-    { key: "has-virtues", kind: "named", type: "enum", options: ["true", "false"] },
+    { key: "awakened", kind: "named", type: "bool", desc: "Does it work Awakened magic?" },
+    { key: "has-virtues", kind: "named", type: "bool" },
     { key: "resources", kind: "named", hint: '"a,b"', desc: "Resources to ADD (define them first with [[define-resource]])" },
     { key: "capabilities", kind: "named", hint: '"vitae,resolve"', desc: "What it can USE, added to the parent's" },
     {
@@ -6242,7 +6243,7 @@ CommandRouter.register("take-merit", cmdTakeMerit, {
     { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
     { key: "points", kind: "positional", hint: "[points]" },
     { key: "paid", kind: "named", desc: "What it REALLY cost (0 = the Storyteller granted it)" },
-    { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive unmet prerequisites" },
+    { key: "waive", kind: "named", type: "bool", desc: "Waive unmet prerequisites" },
   ],
 });
 CommandRouter.register("drop-merit", cmdDropMerit, {
@@ -6320,7 +6321,7 @@ CommandRouter.register("take-arcanum", cmdTakeArcanum, {
     { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
     { key: "points", kind: "positional", hint: "[points]" },
     { key: "paid", kind: "named", desc: "What it REALLY cost (0 = the Storyteller granted it)" },
-    { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive prerequisites / template limits / the capability gate" },
+    { key: "waive", kind: "named", type: "bool", desc: "Waive prerequisites / template limits / the capability gate" },
   ],
 });
 CommandRouter.register("drop-arcanum", cmdDropArcanum, {
@@ -6393,7 +6394,7 @@ const EXPIRY_PARAMS: ParamSpec[] = [
   { key: "cooldown-turns", kind: "named", type: "int" },
   { key: "cooldown-scenes", kind: "named", type: "int" },
   { key: "cooldown-until", kind: "named", hint: "<condition>", example: "full-moons >= 1" },
-  { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Apply it even while cooling" },
+  { key: "waive", kind: "named", type: "bool", desc: "Apply it even while cooling" },
   {
     key: "orphan", kind: "named", hint: "immediately | keep | <expression>", example: "immediately",
     desc: "What happens if its source goes: end at once, carry on unchanged, or an expression over what is left (remaining-seconds, remaining-rolls)",
@@ -6457,7 +6458,7 @@ CommandRouter.register("player", cmdPlayer, {
   summary: "show or switch the current player; storyteller is always valid",
   params: [
     { key: "name", kind: "named", hint: '"<id>"' },
-    { key: "default", kind: "named", type: "enum", options: ["true"], desc: "Also make it the default player" },
+    { key: "default", kind: "named", type: "bool", desc: "Also make it the default player" },
   ],
 });
 
@@ -6667,13 +6668,6 @@ const IN_THE_BOOKS: ShowScopeKind[] = ["campaign", "template", "clan", "fellowsh
 
 const SHOW_SUBJECTS: ShowSubject[] = [
   // --- THE CHRONICLE'S OWN VOCABULARY ---------------------------------------
-  {
-    verb: "show-help", summary: "list commands, or show one's usage",
-    // `help` stays VISIBLE: it is what a player who knows nothing else types.
-    replaces: [{ verb: "help" }], scopes: ["campaign"], defaultScope: "campaign",
-    nameHint: "verb|@all", nameExample: "roll",
-    render: async (name, _scope, cmd) => cmdHelp(asCmd(name, cmd)),
-  },
   {
     verb: "show-character", summary: "the chronicle's playable characters (marks current/default)",
     replaces: [{ verb: "characters" }], scopes: ["campaign"], defaultScope: "campaign",
@@ -6974,15 +6968,11 @@ function scopedBackgroundDefs(scope: ResolvedScope): string {
 // subject cannot be half-wired: declaring it registers the verb, its `in=` and
 // `in-story=` knobs, and the deprecation pointer on each name it replaces.
 export const SHOW_VERB_PREFIX = "show-";
+// The verbs the subject table owns. Exported so a test can check the real list
+// rather than guessing from the prefix - `show-help` wears the prefix but is an
+// alias of [[help]], not a subject.
+export const SHOW_SUBJECT_VERBS: string[] = [];
 const SHOW_ALL_HINT = "name|@all";
-
-// THE override. A show reply is stripped from the AI's context; this puts it
-// back. Declared on every show verb because a knob missing from its CommandSpec
-// does not exist (docs/invariants.md §10).
-const IN_STORY_PARAM: ParamSpec = {
-  key: "in-story", kind: "named", type: "enum", options: ["true"],
-  desc: "Keep this reply in the story for the AI to read (default: hidden from context)",
-};
 
 function showParams(subject: ShowSubject): ParamSpec[] {
   return [
@@ -6993,7 +6983,8 @@ function showParams(subject: ShowSubject): ParamSpec[] {
       desc: `Where to look: ${subject.scopes.join(", ")} (default ${subject.defaultScope}); `
         + `a bare name is worked out, kind::name is explicit` },
     ...(subject.extra ?? []),
-    IN_STORY_PARAM,
+    // `in-story` is NOT listed here: CommandRouter.register attaches it to every
+    // verb, show or not (src/command.ts IN_STORY_PARAM).
   ];
 }
 
@@ -7009,17 +7000,25 @@ for (const subject of SHOW_SUBJECTS) {
     note: subject.note,
     params: showParams(subject),
   });
+  SHOW_SUBJECT_VERBS.push(subject.verb);
 }
 
 // ...and every name that used to mean it now says so. ONE table, so a rename
 // cannot leave a dangling pointer: an unregistered verb here fails the suite.
 export const SHOW_DEPRECATIONS: Array<{ from: string; to: string; hidden?: boolean }> =
   SHOW_SUBJECTS.flatMap(s => (s.replaces ?? []).map(r => ({ from: r.verb, to: s.verb })));
-for (const { from, to } of SHOW_DEPRECATIONS) {
-  // [[show-help]] is the exception that stays LISTED: it is the one verb a player
-  // who knows nothing else will type, and hiding it would hide the way in.
-  CommandRouter.deprecate(from, to, from === "help" ? { hidden: false } : {});
-}
+for (const { from, to } of SHOW_DEPRECATIONS) CommandRouter.deprecate(from, to);
+
+// HELP IS THE EXCEPTION, and it runs the other way. Everything else that only
+// reports was renamed to `show-*`, but [[help]] is what a player types before
+// they know anything at all - in this engine and in every other one - so it
+// KEEPS its name and is not deprecated. `show-help` is registered as the alias,
+// for the players who will now reasonably guess it. Both are quiet.
+CommandRouter.register("show-help",
+  (cmd, ctx) => CommandRouter.route(`help ${cmd.positional.join(" ")}`.trim(), ctx), {
+    summary: "alias of [[help]], which keeps its name - it is the one command everybody already knows",
+    params: [{ key: "verb", kind: "positional", hint: "[verb]", example: "show-merit" }],
+  });
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
@@ -7037,6 +7036,10 @@ const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 // This is the game-layer "quiet the turn" policy; it stays OUT of the pure
 // CommandSpec (which describes grammar).
 const QUIET_VERBS = new Set<string>([
+  // [[help]] keeps its name (see the registration after SHOW_SUBJECTS): it is
+  // the one command a player already knows before they know anything, so it is
+  // named for discovery rather than for this scheme - and listed here instead.
+  "help", "show-help",
   // Maintenance: the player operating the machine, never a story beat.
   "flush-context", "convert-cards",
 ]);
@@ -7050,13 +7053,23 @@ export function isQuietVerb(verb: string): boolean {
   return replacedBy !== undefined && (replacedBy.startsWith(SHOW_VERB_PREFIX) || QUIET_VERBS.has(replacedBy));
 }
 
-// THE OVERRIDE. A quiet reply is stripped from the AI's context; `in-story=true`
-// leaves it in, for the player who wants the Storyteller to have read their
-// sheet. It does NOT re-enable generation for the turn: looking something up is
-// still not an action, so the reply sits in the story and is read on the next
+// DOES THIS REPLY BELONG IN THE STORY? Three answers, in order:
+//   1. what the player said on THIS call - `in-story`, `in-story=false`
+//   2. what the verb declares (CommandSpec.inStory)
+//   3. its name: a quiet verb is for the player, so no; anything else, yes
+//
+// Both directions matter. `[[show-sheet in-story]]` lets the Storyteller read
+// the sheet; `[[roll stealth in-story=false]]` is a roll behind the screen.
+//
+// It does NOT change generation for the turn: looking something up is still not
+// an action, so a show reply sits in the story and is read on the NEXT
 // generation rather than prompting one now.
 export function wantsInStory(cmd: ParsedCommand): boolean {
-  return StringUtil.normalize(cmd.named["in-story"] ?? "") === "true";
+  const said = flagOf(cmd, IN_STORY_KEY);
+  if (said !== undefined) return said;
+  const declared = CommandRouter.specFor(cmd.name)?.inStory;
+  if (declared !== undefined) return declared;
+  return !isQuietVerb(cmd.name);
 }
 
 // =============================================================================
@@ -7198,7 +7211,9 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
   let anyQuiet = false;
   for (const m of matches) {
     out += rawInputText.slice(cursor, m.index);
-    const parsed = CommandParser.parse(m[1]);
+    // Through the ROUTER's parse, so a bare flag (`[[show-sheet in-story]]`) is
+    // promoted here exactly as it is when the command is dispatched.
+    const parsed = CommandRouter.parse(m[1]);
     const quiet = isQuietVerb(parsed.name);
     if (quiet) anyQuiet = true;
     // EVERY command is announced on the bus, in the formalized envelope, on
@@ -7212,9 +7227,9 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
     await PostOffice.publish(COMMAND_CHANNEL, envelope);
     await PostOffice.publish(commandChannel(parsed.name), envelope);
     const reply = await CommandRouter.route(m[1]);
-    // Quiet replies are noise the AI shouldn't read - unless the player says
-    // otherwise. The turn stays quiet either way.
-    out += quiet && !wantsInStory(parsed) ? await markCtxSkip(reply) : reply;
+    // ONE question, asked of every command: does this reply belong in the story?
+    // (The turn's quietness is a separate matter, decided above.)
+    out += wantsInStory(parsed) ? reply : await markCtxSkip(reply);
     cursor = (m.index ?? 0) + m[0].length;
   }
   out += rawInputText.slice(cursor);

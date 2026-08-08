@@ -9,13 +9,14 @@ may share one line; each is replaced by its `[SYSTEM: …]` reply.
 
 ---
 
-## `[[show-help]]` — what it publishes
+## `[[help]]` — what it publishes
 
-With no argument it lists every current verb (`[[help]]` is the same command,
-kept as a visible alias because it is what a player who knows nothing types):
+With no argument it lists every current verb. `[[help]]` KEEPS its name —
+every other read-only verb was renamed `show-*`, but this is the one command
+a player types before they know anything at all. `[[show-help]]` is an alias.
 
 ```
-[SYSTEM: 125 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, alias, forget-alias, player, show-help, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, win-constraint, win-table, win-affliction, win-afflict, win-roll. [[show-help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 39 older names still work and say what replaced them.]
+[SYSTEM: 125 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -131,7 +132,7 @@ one reply in the story.
 | `show-fellowship` | the mystic fellowships' Foundation & Pillars |
 | `show-grant` | what a purchase really cost and where it came from |
 | `show-health` | a character's health track, penalty and what soaks what |
-| `show-help` | list commands, or show one's usage |
+| `show-help` | alias of [[help]], which keeps its name - it is the one command everybody already knows |
 | `show-merit` | merits & flaws: what a character owns, or what the chronicle defines |
 | `show-player` | the current player (the storyteller, unless somebody took a seat) |
 | `show-resource` | a character's live pools and trackers (and what they cannot use) |
@@ -160,10 +161,10 @@ one reply in the story.
 
 ---
 
-## 39 older names that still work
+## 38 older names that still work
 
 Each does exactly what it always did, then says what replaced it. They are
-left out of `[[show-help]]` and out of the table above: the current
+left out of `[[help]]` and out of the table above: the current
 vocabulary is what a player should be reading.
 
 | old name | now |
@@ -191,7 +192,6 @@ vocabulary is what a player should be reading.
 | `eval` | `show-eval` |
 | `fellowships` | `show-fellowship` |
 | `health` | `show-health` |
-| `help` | `show-help` |
 | `list-rolls` | `show-roll` |
 | `merit` | `show-merit` |
 | `merits` | `show-merit` |
@@ -217,17 +217,18 @@ vocabulary is what a player should be reading.
 tear Quintessence from the cray directly: Wits + Foundation vs 10 - its rating
 
 ```
-[[absorb [foundation=<trait>]]]
+[[absorb [foundation=<trait>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `foundation` | named | Foundation trait (default: auto) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help absorb]]`** replies:
+**`[[help absorb]]`** replies:
 
 ```
-[SYSTEM: absorb - absorb [foundation=<trait>]  (tear Quintessence from the cray directly: Wits + Foundation vs 10 - its rating)]
+[SYSTEM: absorb - absorb [foundation=<trait>] [in-story]  (tear Quintessence from the cray directly: Wits + Foundation vs 10 - its rating)]
 ```
 
 ### `add-step`
@@ -235,7 +236,7 @@ tear Quintessence from the cray directly: Wits + Foundation vs 10 - its rating
 append a follow-up step to a saved procedure (composes named rolls)
 
 ```
-[[add-step <procedure> roll=@<saved-roll> [when=always|on-success|on-fail|on-botch] [note=".."]  (append a follow-up step to a saved procedure (composes named rolls))]]
+[[add-step <procedure> roll=@<saved-roll> [when=always|on-success|on-fail|on-botch] [note=".."] [in-story]  (append a follow-up step to a saved procedure (composes named rolls))]]
 ```
 
 | argument | kind | meaning |
@@ -244,11 +245,12 @@ append a follow-up step to a saved procedure (composes named rolls)
 | `roll` | named **required** | The follow-up roll to run |
 | `when` | named `enum` | When this step applies, by the entry's outcome — one of `always`, `on-success`, `on-fail`, `on-botch` |
 | `note` | named `literal` | What this step is, in fiction |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help add-step]]`** replies:
+**`[[help add-step]]`** replies:
 
 ```
-[SYSTEM: add-step - add-step <procedure> roll=@<saved-roll> [when=always|on-success|on-fail|on-botch] [note=".."]  (append a follow-up step to a saved procedure (composes named rolls))]
+[SYSTEM: add-step - add-step <procedure> roll=@<saved-roll> [when=always|on-success|on-fail|on-botch] [note=".."] [in-story]  (append a follow-up step to a saved procedure (composes named rolls))]
 ```
 
 ### `advance`
@@ -256,18 +258,19 @@ append a follow-up step to a saved procedure (composes named rolls)
 end an affliction and begin its successor, bindings carried forward
 
 ```
-[[advance <affliction> [on=<name|@alias>]]]
+[[advance <affliction> [on=<name|@alias>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `affliction` | positional **required** | `<affliction>` |
 | `on` | named | `<name\|@alias>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help advance]]`** replies:
+**`[[help advance]]`** replies:
 
 ```
-[SYSTEM: advance - advance <affliction> [on=<name|@alias>]  (end an affliction and begin its successor, bindings carried forward)]
+[SYSTEM: advance - advance <affliction> [on=<name|@alias>] [in-story]  (end an affliction and begin its successor, bindings carried forward)]
 ```
 
 ### `advance-time`
@@ -275,17 +278,18 @@ end an affliction and begin its successor, bindings carried forward
 move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery
 
 ```
-[[advance-time <duration>  (move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery)]]
+[[advance-time <duration> [in-story]  (move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery)]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `duration` | positional **required** | `<duration>` <br>*e.g.* `2d 6h` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help advance-time]]`** replies:
+**`[[help advance-time]]`** replies:
 
 ```
-[SYSTEM: advance-time - advance-time <duration>  (move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery)]
+[SYSTEM: advance-time - advance-time <duration> [in-story]  (move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery)]
 ```
 
 ### `afflict`
@@ -293,7 +297,7 @@ move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons app
 apply an affliction; extra <slot>=<name|@alias> args fill its bindings
 
 ```
-[[afflict <affliction> [on=<name|@alias>] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive=true] [orphan=immediately | keep | <expression>] [<key>=<value> ...]]]
+[[afflict <affliction> [on=<name|@alias>] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story] [<key>=<value> ...]]]
 ```
 
 > mirror defs also afflict the bound target
@@ -318,13 +322,14 @@ apply an affliction; extra <slot>=<name|@alias> args fill its bindings
 | `cooldown-turns` | named `int` | — |
 | `cooldown-scenes` | named `int` | — |
 | `cooldown-until` | named | `<condition>` <br>*e.g.* `full-moons >= 1` |
-| `waive` | named `enum` | Apply it even while cooling — one of `true` |
+| `waive` | named `bool` | Apply it even while cooling |
 | `orphan` | named | What happens if its source goes: end at once, carry on unchanged, or an expression over what is left (remaining-seconds, remaining-rolls) <br>*e.g.* `immediately` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help afflict]]`** replies:
+**`[[help afflict]]`** replies:
 
 ```
-[SYSTEM: afflict - afflict <affliction> [on=<name|@alias>] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive=true] [orphan=immediately | keep | <expression>] [<key>=<value> ...]  (apply an affliction; extra <slot>=<name|@alias> args fill its bindings; mirror defs also afflict the bound target)]
+[SYSTEM: afflict - afflict <affliction> [on=<name|@alias>] [rolls=N] [with-tags="a,b"] [without-tags="a,b"] [using="melee"] [not-using="wits"] [turns=N] [scenes=N] [for=<duration>] [until=<condition>] [until-event=<text>] [from=<source>] [cooldown-for=<duration>] [cooldown-rolls=N] [cooldown-turns=N] [cooldown-scenes=N] [cooldown-until=<condition>] [waive] [orphan=immediately | keep | <expression>] [in-story] [<key>=<value> ...]  (apply an affliction; extra <slot>=<name|@alias> args fill its bindings; mirror defs also afflict the bound target)]
 ```
 
 ### `alias`
@@ -332,7 +337,7 @@ apply an affliction; extra <slot>=<name|@alias> args fill its bindings
 define an alias for a character
 
 ```
-[[alias <@token> "Target Name"]]
+[[alias <@token> "Target Name" [in-story]]]
 ```
 
 > bare @a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope
@@ -341,11 +346,12 @@ define an alias for a character
 |---|---|---|
 | `token` | positional **required** | `<@token>` |
 | `target` | positional **required** | `"Target Name"` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help alias]]`** replies:
+**`[[help alias]]`** replies:
 
 ```
-[SYSTEM: alias - alias <@token> "Target Name"  (define an alias for a character; bare @a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)]
+[SYSTEM: alias - alias <@token> "Target Name" [in-story]  (define an alias for a character; bare @a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)]
 ```
 
 ### `attune`
@@ -353,18 +359,19 @@ define an alias for a character
 what this character can USE (a pool he cannot use is only points)
 
 ```
-[[attune [[awakened|vitae|resolve]] [[off]]  (what this character can USE (a pool he cannot use is only points))]]
+[[attune [[awakened|vitae|resolve]] [[off]] [in-story]  (what this character can USE (a pool he cannot use is only points))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `capability` | positional | `[awakened\|vitae\|resolve]` |
 | `off` | positional | `[off]` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help attune]]`** replies:
+**`[[help attune]]`** replies:
 
 ```
-[SYSTEM: attune - attune [[awakened|vitae|resolve]] [[off]]  (what this character can USE (a pool he cannot use is only points))]
+[SYSTEM: attune - attune [[awakened|vitae|resolve]] [[off]] [in-story]  (what this character can USE (a pool he cannot use is only points))]
 ```
 
 ### `cancel-contest`
@@ -372,17 +379,18 @@ what this character can USE (a pool he cannot use is only points)
 cancel an extended contest
 
 ```
-[[cancel-contest [[id]]]]
+[[cancel-contest [[id]] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `id` | positional | `[id]` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help cancel-contest]]`** replies:
+**`[[help cancel-contest]]`** replies:
 
 ```
-[SYSTEM: cancel-contest - cancel-contest [[id]]  (cancel an extended contest)]
+[SYSTEM: cancel-contest - cancel-contest [[id]] [in-story]  (cancel an extended contest)]
 ```
 
 ### `cancel-roll`
@@ -390,17 +398,18 @@ cancel an extended contest
 cancel an extended action
 
 ```
-[[cancel-roll [[id]]]]
+[[cancel-roll [[id]] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `id` | positional | `[id]` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help cancel-roll]]`** replies:
+**`[[help cancel-roll]]`** replies:
 
 ```
-[SYSTEM: cancel-roll - cancel-roll [[id]]  (cancel an extended action)]
+[SYSTEM: cancel-roll - cancel-roll [[id]] [in-story]  (cancel an extended action)]
 ```
 
 ### `cancel-wizard`
@@ -408,15 +417,17 @@ cancel an extended action
 abandon the running wizard
 
 ```
-[[cancel-wizard]]
+[[cancel-wizard [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help cancel-wizard]]`** replies:
+**`[[help cancel-wizard]]`** replies:
 
 ```
-[SYSTEM: cancel-wizard - cancel-wizard  (abandon the running wizard)]
+[SYSTEM: cancel-wizard - cancel-wizard [in-story]  (abandon the running wizard)]
 ```
 
 ### `cast`
@@ -424,7 +435,7 @@ _No arguments._
 @deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery
 
 ```
-[[cast pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended=true] [ongoing=true] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N]  (@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery)]]
+[[cast pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended] [ongoing] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N] [in-story]  (@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery)]]
 ```
 
 | argument | kind | meaning |
@@ -434,18 +445,19 @@ _No arguments._
 | `quintessence` | named `int` | Extra points: -1 difficulty each (min 4; 3/turn cap) |
 | `label` | named | Spell name (keys the same-scene retry ledger) |
 | `requires` | named `int` | Successes needed (extended/ongoing: the ST's total) |
-| `extended` | named `enum` | Accrue successes over intervals — one of `true` |
-| `ongoing` | named `enum` | Indefinite-duration spell (successes ×10; per-success fuel; seal at the end) — one of `true` |
+| `extended` | named `bool` | Accrue successes over intervals |
+| `ongoing` | named `bool` | Indefinite-duration spell (successes ×10; per-success fuel; seal at the end) |
 | `interval` | named | Time between extended rolls (advisory) |
 | `intervals` | named `int` | Max rolls for an extended casting |
 | `on-botch` | named `enum` | Extended botch policy (default fail: Backlash ends it) — one of `fail`, `lose-successes`, `ignore` |
 | `spend` | named | Resource to spend on the roll |
 | `spend-amount` | named `int` | How many points to spend (default 1; a resource may cap it per use) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help cast]]`** replies:
+**`[[help cast]]`** replies:
 
 ```
-[SYSTEM: cast - cast pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended=true] [ongoing=true] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N]  (@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery)]
+[SYSTEM: cast - cast pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended] [ongoing] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N] [in-story]  (@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery)]
 ```
 
 ### `choose`
@@ -453,18 +465,19 @@ _No arguments._
 pick a clan, a fellowship, or the Attribute/Ability priorities
 
 ```
-[[choose [<clan|fellowship|attributes|abilities>] [<value>]]]
+[[choose [<clan|fellowship|attributes|abilities>] [<value>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `what` | positional | `<clan\|fellowship\|attributes\|abilities>` <br>*e.g.* `clan` |
 | `value` | positional | `<value>` <br>*e.g.* `tremere` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help choose]]`** replies:
+**`[[help choose]]`** replies:
 
 ```
-[SYSTEM: choose - choose [<clan|fellowship|attributes|abilities>] [<value>]  (pick a clan, a fellowship, or the Attribute/Ability priorities)]
+[SYSTEM: choose - choose [<clan|fellowship|attributes|abilities>] [<value>] [in-story]  (pick a clan, a fellowship, or the Attribute/Ability priorities)]
 ```
 
 ### `clear-boosts`
@@ -472,15 +485,17 @@ pick a clan, a fellowship, or the Attribute/Ability priorities
 clear trait boosts (the ST calls the duration)
 
 ```
-[[clear-boosts  (clear trait boosts (the ST calls the duration))]]
+[[clear-boosts [in-story]  (clear trait boosts (the ST calls the duration))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help clear-boosts]]`** replies:
+**`[[help clear-boosts]]`** replies:
 
 ```
-[SYSTEM: clear-boosts - clear-boosts  (clear trait boosts (the ST calls the duration))]
+[SYSTEM: clear-boosts - clear-boosts [in-story]  (clear trait boosts (the ST calls the duration))]
 ```
 
 ### `clear-steps`
@@ -488,17 +503,18 @@ _No arguments._
 drop all follow-up steps from a saved procedure (its entry roll stays)
 
 ```
-[[clear-steps <procedure>  (drop all follow-up steps from a saved procedure (its entry roll stays))]]
+[[clear-steps <procedure> [in-story]  (drop all follow-up steps from a saved procedure (its entry roll stays))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<procedure>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help clear-steps]]`** replies:
+**`[[help clear-steps]]`** replies:
 
 ```
-[SYSTEM: clear-steps - clear-steps <procedure>  (drop all follow-up steps from a saved procedure (its entry roll stays))]
+[SYSTEM: clear-steps - clear-steps <procedure> [in-story]  (drop all follow-up steps from a saved procedure (its entry roll stays))]
 ```
 
 ### `configure-resources`
@@ -506,15 +522,17 @@ drop all follow-up steps from a saved procedure (its entry roll stays)
 guided resource setup; plain replies answer it
 
 ```
-[[configure-resources]]
+[[configure-resources [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help configure-resources]]`** replies:
+**`[[help configure-resources]]`** replies:
 
 ```
-[SYSTEM: configure-resources - configure-resources  (guided resource setup; plain replies answer it)]
+[SYSTEM: configure-resources - configure-resources [in-story]  (guided resource setup; plain replies answer it)]
 ```
 
 ### `contest`
@@ -522,7 +540,7 @@ _No arguments._
 contested action: higher total wins (tie = draw)
 
 ```
-[[contest <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N]  (contested action: higher total wins (tie = draw))]]
+[[contest <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (contested action: higher total wins (tie = draw))]]
 ```
 
 | argument | kind | meaning |
@@ -535,11 +553,12 @@ contested action: higher total wins (tie = draw)
 | `table` | named | Success table read with your margin |
 | `spend` | named | `res[::effect][!]` <br>*e.g.* `blood  ·  blood::heal  ·  willpower!` |
 | `spend-amount` | named `int` | How many points to spend (default 1) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help contest]]`** replies:
+**`[[help contest]]`** replies:
 
 ```
-[SYSTEM: contest - contest <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N]  (contested action: higher total wins (tie = draw))]
+[SYSTEM: contest - contest <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (contested action: higher total wins (tie = draw))]
 ```
 
 ### `continue-contest`
@@ -547,7 +566,7 @@ contested action: higher total wins (tie = draw)
 roll the next contest round
 
 ```
-[[continue-contest [[id]] [difficulty=N] [vs-difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"]]]
+[[continue-contest [[id]] [difficulty=N] [vs-difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -558,11 +577,12 @@ roll the next contest round
 | `diff-mod` | named `int` | — |
 | `dice-modifier` | named `int` | — |
 | `tags` | named | `"a,b"` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help continue-contest]]`** replies:
+**`[[help continue-contest]]`** replies:
 
 ```
-[SYSTEM: continue-contest - continue-contest [[id]] [difficulty=N] [vs-difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"]  (roll the next contest round)]
+[SYSTEM: continue-contest - continue-contest [[id]] [difficulty=N] [vs-difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"] [in-story]  (roll the next contest round)]
 ```
 
 ### `continue-roll`
@@ -570,7 +590,7 @@ roll the next contest round
 whoever is current rolls the next interval (named-only overrides)
 
 ```
-[[continue-roll [[id]] [difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N]  (whoever is current rolls the next interval (named-only overrides))]]
+[[continue-roll [[id]] [difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (whoever is current rolls the next interval (named-only overrides))]]
 ```
 
 | argument | kind | meaning |
@@ -582,11 +602,12 @@ whoever is current rolls the next interval (named-only overrides)
 | `tags` | named | `"a,b"` |
 | `spend` | named | `res[::effect][!]` <br>*e.g.* `blood  ·  blood::heal  ·  willpower!` |
 | `spend-amount` | named `int` | How many points to spend (default 1) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help continue-roll]]`** replies:
+**`[[help continue-roll]]`** replies:
 
 ```
-[SYSTEM: continue-roll - continue-roll [[id]] [difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N]  (whoever is current rolls the next interval (named-only overrides))]
+[SYSTEM: continue-roll - continue-roll [[id]] [difficulty=N] [diff-mod=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (whoever is current rolls the next interval (named-only overrides))]
 ```
 
 ### `convert-cards`
@@ -594,15 +615,17 @@ whoever is current rolls the next interval (named-only overrides)
 rewrite any lorebook card still holding JSON in the readable format (one-shot)
 
 ```
-[[convert-cards  (rewrite any lorebook card still holding JSON in the readable format (one-shot))]]
+[[convert-cards [in-story]  (rewrite any lorebook card still holding JSON in the readable format (one-shot))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help convert-cards]]`** replies:
+**`[[help convert-cards]]`** replies:
 
 ```
-[SYSTEM: convert-cards - convert-cards  (rewrite any lorebook card still holding JSON in the readable format (one-shot))]
+[SYSTEM: convert-cards - convert-cards [in-story]  (rewrite any lorebook card still holding JSON in the readable format (one-shot))]
 ```
 
 ### `create-playable`
@@ -610,18 +633,19 @@ _No arguments._
 create a playable character (attributes 1, abilities 0 - allocation is opt-in)
 
 ```
-[[create-playable name=".." templates="a,b"  (create a playable character (attributes 1, abilities 0 - allocation is opt-in))]]
+[[create-playable name=".." templates="a,b" [in-story]  (create a playable character (attributes 1, abilities 0 - allocation is opt-in))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named **required** | Name <br>*e.g.* `e.g. Erik the Red` |
 | `templates` | named **required** | Templates (comma-separated; hybrids legal) <br>*e.g.* `e.g. vampire` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help create-playable]]`** replies:
+**`[[help create-playable]]`** replies:
 
 ```
-[SYSTEM: create-playable - create-playable name=".." templates="a,b"  (create a playable character (attributes 1, abilities 0 - allocation is opt-in))]
+[SYSTEM: create-playable - create-playable name=".." templates="a,b" [in-story]  (create a playable character (attributes 1, abilities 0 - allocation is opt-in))]
 ```
 
 ### `creator-mode`
@@ -629,17 +653,18 @@ create a playable character (attributes 1, abilities 0 - allocation is opt-in)
 toggle lorebook hand-editing; edits sync in while on
 
 ```
-[[creator-mode set=true|false]]
+[[creator-mode set=true|false [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
-| `set` | named `enum` **required** | — — one of `true`, `false` |
+| `set` | named `bool` **required** | — |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help creator-mode]]`** replies:
+**`[[help creator-mode]]`** replies:
 
 ```
-[SYSTEM: creator-mode - creator-mode set=true|false  (toggle lorebook hand-editing; edits sync in while on)]
+[SYSTEM: creator-mode - creator-mode set=true|false [in-story]  (toggle lorebook hand-editing; edits sync in while on)]
 ```
 
 ### `damage`
@@ -647,18 +672,19 @@ toggle lorebook hand-editing; edits sync in while on
 mark damage on the current character
 
 ```
-[[damage <bashing|lethal|aggravated> [[n]]]]
+[[damage <bashing|lethal|aggravated> [[n]] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `severity` | positional `enum` **required** | `<bashing\|lethal\|aggravated>` — one of `bashing`, `lethal`, `aggravated` |
 | `n` | positional | `[n]` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help damage]]`** replies:
+**`[[help damage]]`** replies:
 
 ```
-[SYSTEM: damage - damage <bashing|lethal|aggravated> [[n]]  (mark damage on the current character)]
+[SYSTEM: damage - damage <bashing|lethal|aggravated> [[n]] [in-story]  (mark damage on the current character)]
 ```
 
 ### `define-affliction`
@@ -666,7 +692,7 @@ mark damage on the current character
 define/replace an affliction (overlay; may shadow a built-in)
 
 ```
-[[define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."]  (define/replace an affliction (overlay; may shadow a built-in))]]
+[[define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]]
 ```
 
 | argument | kind | meaning |
@@ -679,11 +705,12 @@ define/replace an affliction (overlay; may shadow a built-in)
 | `tags` | named | Tags joined to the afflicted character's rolls |
 | `description` | named `literal` | Description |
 | `note` | named | Note (optional) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-affliction]]`** replies:
+**`[[help define-affliction]]`** replies:
 
 ```
-[SYSTEM: define-affliction - define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."]  (define/replace an affliction (overlay; may shadow a built-in))]
+[SYSTEM: define-affliction - define-affliction name=".." [bindings="target"] [duration="1 turn|until x|instant"] [then=".."] [mirror=".."] [tags="a,b"] [description=".."] [note=".."] [in-story]  (define/replace an affliction (overlay; may shadow a built-in))]
 ```
 
 ### `define-arcanum`
@@ -691,7 +718,7 @@ define/replace an affliction (overlay; may shadow a built-in)
 define an arcanum or taint (writes the srd:arcana overlay)
 
 ```
-[[define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]]
+[[define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."] [in-story]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]]
 ```
 
 > per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list
@@ -711,11 +738,12 @@ define an arcanum or taint (writes the srd:arcana overlay)
 | `max-from-trait` | named | Rating ceiling is this trait <br>*e.g.* `resolve` |
 | `passive` | named `literal` | Always-on ops, ";"-separated - BACKTICKS |
 | `description` | named `literal` | Description - BACKTICKS |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-arcanum]]`** replies:
+**`[[help define-arcanum]]`** replies:
 
 ```
-[SYSTEM: define-arcanum - define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]
+[SYSTEM: define-arcanum - define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."] [in-story]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]
 ```
 
 ### `define-background`
@@ -723,7 +751,7 @@ define an arcanum or taint (writes the srd:arcana overlay)
 define/replace a background (a Talisman that IS a place grants that place's ratings)
 
 ```
-[[define-background name=".." [max=N] [templates="a,b"] [grants="trait:n,trait:n"] [description=".."]  (define/replace a background (a Talisman that IS a place grants that place's ratings))]]
+[[define-background name=".." [max=N] [templates="a,b"] [grants="trait:n,trait:n"] [description=".."] [in-story]  (define/replace a background (a Talisman that IS a place grants that place's ratings))]]
 ```
 
 | argument | kind | meaning |
@@ -733,11 +761,12 @@ define/replace a background (a Talisman that IS a place grants that place's rati
 | `templates` | named | Who may take it (blank = anyone) |
 | `grants` | named | Other traits it confers <br>*e.g.* `cray:5,library:5,sanctum:5` |
 | `description` | named `literal` | Description - BACKTICKS |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-background]]`** replies:
+**`[[help define-background]]`** replies:
 
 ```
-[SYSTEM: define-background - define-background name=".." [max=N] [templates="a,b"] [grants="trait:n,trait:n"] [description=".."]  (define/replace a background (a Talisman that IS a place grants that place's ratings))]
+[SYSTEM: define-background - define-background name=".." [max=N] [templates="a,b"] [grants="trait:n,trait:n"] [description=".."] [in-story]  (define/replace a background (a Talisman that IS a place grants that place's ratings))]
 ```
 
 ### `define-constraint`
@@ -745,7 +774,7 @@ define/replace a background (a Talisman that IS a place grants that place's rati
 define/replace a constraint group
 
 ```
-[[define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|arcanum|any] [members="a,b"] [max=N] [scope=".."] [note=".."]]]
+[[define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|arcanum|any] [members="a,b"] [max=N] [scope=".."] [note=".."] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -757,11 +786,12 @@ define/replace a constraint group
 | `max` | named `int` | Max to hold (exclusive only; default 1) |
 | `scope` | named | Scope: templates/choices it applies to (comma-separated; empty = everyone) <br>*e.g.* `e.g. tzimisce` |
 | `note` | named | Note (optional) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-constraint]]`** replies:
+**`[[help define-constraint]]`** replies:
 
 ```
-[SYSTEM: define-constraint - define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|arcanum|any] [members="a,b"] [max=N] [scope=".."] [note=".."]  (define/replace a constraint group)]
+[SYSTEM: define-constraint - define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|arcanum|any] [members="a,b"] [max=N] [scope=".."] [note=".."] [in-story]  (define/replace a constraint group)]
 ```
 
 ### `define-merit`
@@ -769,7 +799,7 @@ define/replace a constraint group
 define a merit or flaw (writes the srd:merits-flaws overlay)
 
 ```
-[[define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]]
+[[define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`] [in-story]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]]
 ```
 
 > kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]]
@@ -789,11 +819,12 @@ define a merit or flaw (writes the srd:merits-flaws overlay)
 | `limit-per-kind` | named | And at most this many of a trait kind <br>*e.g.* `attribute:1` |
 | `max-from-trait` | named | Rating ceiling is this trait ("no more purchases than his Resolve") <br>*e.g.* `resolve` |
 | `description` | named `literal` | Rules text |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-merit]]`** replies:
+**`[[help define-merit]]`** replies:
 
 ```
-[SYSTEM: define-merit - define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]
+[SYSTEM: define-merit - define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`] [in-story]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]
 ```
 
 ### `define-resource`
@@ -801,7 +832,7 @@ define a merit or flaw (writes the srd:merits-flaws overlay)
 define a pool or tracker a template can then grant
 
 ```
-[[define-resource <name> [kind=pool|tracker] [start=N] [max=N] [roles="a,b"] [replaces="a,b"] [requires="vitae"] [per-turn=N] [description=<text>]]]
+[[define-resource <name> [kind=pool|tracker] [start=N] [max=N] [roles="a,b"] [replaces="a,b"] [requires="vitae"] [per-turn=N] [description=<text>] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -815,11 +846,12 @@ define a pool or tracker a template can then grant
 | `requires` | named | What a character must be able to USE (awakened, vitae, resolve, arcana) to spend it at all |
 | `per-turn` | named `int` | Most that may be spent in one turn |
 | `description` | named | `<text>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-resource]]`** replies:
+**`[[help define-resource]]`** replies:
 
 ```
-[SYSTEM: define-resource - define-resource <name> [kind=pool|tracker] [start=N] [max=N] [roles="a,b"] [replaces="a,b"] [requires="vitae"] [per-turn=N] [description=<text>]  (define a pool or tracker a template can then grant)]
+[SYSTEM: define-resource - define-resource <name> [kind=pool|tracker] [start=N] [max=N] [roles="a,b"] [replaces="a,b"] [requires="vitae"] [per-turn=N] [description=<text>] [in-story]  (define a pool or tracker a template can then grant)]
 ```
 
 ### `define-table`
@@ -827,7 +859,7 @@ define a pool or tracker a template can then grant
 define/replace a success table in its category's general card
 
 ```
-[[define-table name="[sub::]name" [rows=`1:Cowed, 3:Terrified[=2]`] [value-per-success=N] [cap=N] [overflow-per=N] [overflow-value=N] [overflow-label=".."] [botch=".."] [failure=".."] [description=".."]]]
+[[define-table name="[sub::]name" [rows=`1:Cowed, 3:Terrified[=2]`] [value-per-success=N] [cap=N] [overflow-per=N] [overflow-value=N] [overflow-label=".."] [botch=".."] [failure=".."] [description=".."] [in-story]]]
 ```
 
 > a missing subcategory prompts a modal to create it
@@ -844,11 +876,12 @@ define/replace a success table in its category's general card
 | `botch` | named `literal` | What a botch means here |
 | `failure` | named `literal` | What failure means here |
 | `description` | named `literal` | Description |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-table]]`** replies:
+**`[[help define-table]]`** replies:
 
 ```
-[SYSTEM: define-table - define-table name="[sub::]name" [rows=`1:Cowed, 3:Terrified[=2]`] [value-per-success=N] [cap=N] [overflow-per=N] [overflow-value=N] [overflow-label=".."] [botch=".."] [failure=".."] [description=".."]  (define/replace a success table in its category's general card; a missing subcategory prompts a modal to create it)]
+[SYSTEM: define-table - define-table name="[sub::]name" [rows=`1:Cowed, 3:Terrified[=2]`] [value-per-success=N] [cap=N] [overflow-per=N] [overflow-value=N] [overflow-label=".."] [botch=".."] [failure=".."] [description=".."] [in-story]  (define/replace a success table in its category's general card; a missing subcategory prompts a modal to create it)]
 ```
 
 ### `define-table-category`
@@ -856,17 +889,18 @@ define/replace a success table in its category's general card
 create a table subcategory (a real lorebook category with its general card)
 
 ```
-[[define-table-category name=".."  (create a table subcategory (a real lorebook category with its general card))]]
+[[define-table-category name=".." [in-story]  (create a table subcategory (a real lorebook category with its general card))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named **required** | Category name (single segment) <br>*e.g.* `e.g. combat` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help define-table-category]]`** replies:
+**`[[help define-table-category]]`** replies:
 
 ```
-[SYSTEM: define-table-category - define-table-category name=".."  (create a table subcategory (a real lorebook category with its general card))]
+[SYSTEM: define-table-category - define-table-category name=".." [in-story]  (create a table subcategory (a real lorebook category with its general card))]
 ```
 
 ### `downtime`
@@ -874,17 +908,18 @@ create a table subcategory (a real lorebook category with its general card)
 close the current scene and gloss the clock forward
 
 ```
-[[downtime <duration>]]
+[[downtime <duration> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `duration` | positional **required** | `<duration>` <br>*e.g.* `3d` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help downtime]]`** replies:
+**`[[help downtime]]`** replies:
 
 ```
-[SYSTEM: downtime - downtime <duration>  (close the current scene and gloss the clock forward)]
+[SYSTEM: downtime - downtime <duration> [in-story]  (close the current scene and gloss the clock forward)]
 ```
 
 ### `drop-arcanum`
@@ -892,17 +927,18 @@ close the current scene and gloss the clock forward
 drop an owned arcanum or taint (its passives lift with it)
 
 ```
-[[drop-arcanum <name[::param]>  (drop an owned arcanum or taint (its passives lift with it))]]
+[[drop-arcanum <name[::param]> [in-story]  (drop an owned arcanum or taint (its passives lift with it))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name[::param]>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help drop-arcanum]]`** replies:
+**`[[help drop-arcanum]]`** replies:
 
 ```
-[SYSTEM: drop-arcanum - drop-arcanum <name[::param]>  (drop an owned arcanum or taint (its passives lift with it))]
+[SYSTEM: drop-arcanum - drop-arcanum <name[::param]> [in-story]  (drop an owned arcanum or taint (its passives lift with it))]
 ```
 
 ### `drop-merit`
@@ -910,17 +946,18 @@ drop an owned arcanum or taint (its passives lift with it)
 drop an owned merit/flaw instance
 
 ```
-[[drop-merit <name[::param]>]]
+[[drop-merit <name[::param]> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name[::param]>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help drop-merit]]`** replies:
+**`[[help drop-merit]]`** replies:
 
 ```
-[SYSTEM: drop-merit - drop-merit <name[::param]>  (drop an owned merit/flaw instance)]
+[SYSTEM: drop-merit - drop-merit <name[::param]> [in-story]  (drop an owned merit/flaw instance)]
 ```
 
 ### `end-scene`
@@ -928,15 +965,17 @@ drop an owned merit/flaw instance
 close the current scene
 
 ```
-[[end-scene]]
+[[end-scene [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help end-scene]]`** replies:
+**`[[help end-scene]]`** replies:
 
 ```
-[SYSTEM: end-scene - end-scene  (close the current scene)]
+[SYSTEM: end-scene - end-scene [in-story]  (close the current scene)]
 ```
 
 ### `enter-library`
@@ -944,15 +983,17 @@ _No arguments._
 enter your library (applies in-library)
 
 ```
-[[enter-library  (enter your library (applies in-library))]]
+[[enter-library [in-story]  (enter your library (applies in-library))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help enter-library]]`** replies:
+**`[[help enter-library]]`** replies:
 
 ```
-[SYSTEM: enter-library - enter-library  (enter your library (applies in-library))]
+[SYSTEM: enter-library - enter-library [in-story]  (enter your library (applies in-library))]
 ```
 
 ### `enter-sanctum`
@@ -960,15 +1001,17 @@ _No arguments._
 enter your sanctum (applies in-sanctum)
 
 ```
-[[enter-sanctum  (enter your sanctum (applies in-sanctum))]]
+[[enter-sanctum [in-story]  (enter your sanctum (applies in-sanctum))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help enter-sanctum]]`** replies:
+**`[[help enter-sanctum]]`** replies:
 
 ```
-[SYSTEM: enter-sanctum - enter-sanctum  (enter your sanctum (applies in-sanctum))]
+[SYSTEM: enter-sanctum - enter-sanctum [in-story]  (enter your sanctum (applies in-sanctum))]
 ```
 
 ### `exit-library`
@@ -976,15 +1019,17 @@ _No arguments._
 leave your library (lifts in-library)
 
 ```
-[[exit-library  (leave your library (lifts in-library))]]
+[[exit-library [in-story]  (leave your library (lifts in-library))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help exit-library]]`** replies:
+**`[[help exit-library]]`** replies:
 
 ```
-[SYSTEM: exit-library - exit-library  (leave your library (lifts in-library))]
+[SYSTEM: exit-library - exit-library [in-story]  (leave your library (lifts in-library))]
 ```
 
 ### `exit-sanctum`
@@ -992,15 +1037,17 @@ _No arguments._
 leave your sanctum (lifts in-sanctum)
 
 ```
-[[exit-sanctum  (leave your sanctum (lifts in-sanctum))]]
+[[exit-sanctum [in-story]  (leave your sanctum (lifts in-sanctum))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help exit-sanctum]]`** replies:
+**`[[help exit-sanctum]]`** replies:
 
 ```
-[SYSTEM: exit-sanctum - exit-sanctum  (leave your sanctum (lifts in-sanctum))]
+[SYSTEM: exit-sanctum - exit-sanctum [in-story]  (leave your sanctum (lifts in-sanctum))]
 ```
 
 ### `extend-template`
@@ -1008,7 +1055,7 @@ _No arguments._
 a new template from an old one: state only what differs
 
 ```
-[[extend-template <name> [extends=<template>] [description=<text>] [soak=mortal|vampire|ghoul|mage|demon|werewolf] [morality=humanity|torment|none] [awakened=true|false] [has-virtues=true|false] [resources="a,b"] [capabilities="vitae,resolve"] [budgets="arcana=role:willpower"] [creation="disciplines=4"] [disciplines="celerity,potence"]]]
+[[extend-template <name> [extends=<template>] [description=<text>] [soak=mortal|vampire|ghoul|mage|demon|werewolf] [morality=humanity|torment|none] [awakened] [has-virtues] [resources="a,b"] [capabilities="vitae,resolve"] [budgets="arcana=role:willpower"] [creation="disciplines=4"] [disciplines="celerity,potence"] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -1018,18 +1065,19 @@ a new template from an old one: state only what differs
 | `description` | named | Its display name |
 | `soak` | named `enum` | Which soak table it uses — one of `mortal`, `vampire`, `ghoul`, `mage`, `demon`, `werewolf` |
 | `morality` | named `enum` | Its Road/Humanity, or none — one of `humanity`, `torment`, `none` |
-| `awakened` | named `enum` | Does it work Awakened magic? — one of `true`, `false` |
-| `has-virtues` | named `enum` | — — one of `true`, `false` |
+| `awakened` | named `bool` | Does it work Awakened magic? |
+| `has-virtues` | named `bool` | — |
 | `resources` | named | Resources to ADD (define them first with [[define-resource]]) |
 | `capabilities` | named | What it can USE, added to the parent's |
 | `budgets` | named | Any part of any purse: "purse=<allowance expression>", or "purse:freebie=" / "purse:experience=" for what a dot costs ("-" = cannot be bought) <br>*e.g.* `arcana=role:willpower,arcana:freebie=-` |
 | `creation` | named | The creation pools: attribute-start, attribute-max, ability-start, ability-max, backgrounds, freebies, disciplines, discipline-max, virtues, virtue-start <br>*e.g.* `disciplines=4,discipline-max=5` |
 | `disciplines` | named | The Disciplines that are its own; a leading = means these and no family's <br>*e.g.* `=celerity,potence` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help extend-template]]`** replies:
+**`[[help extend-template]]`** replies:
 
 ```
-[SYSTEM: extend-template - extend-template <name> [extends=<template>] [description=<text>] [soak=mortal|vampire|ghoul|mage|demon|werewolf] [morality=humanity|torment|none] [awakened=true|false] [has-virtues=true|false] [resources="a,b"] [capabilities="vitae,resolve"] [budgets="arcana=role:willpower"] [creation="disciplines=4"] [disciplines="celerity,potence"]  (a new template from an old one: state only what differs)]
+[SYSTEM: extend-template - extend-template <name> [extends=<template>] [description=<text>] [soak=mortal|vampire|ghoul|mage|demon|werewolf] [morality=humanity|torment|none] [awakened] [has-virtues] [resources="a,b"] [capabilities="vitae,resolve"] [budgets="arcana=role:willpower"] [creation="disciplines=4"] [disciplines="celerity,potence"] [in-story]  (a new template from an old one: state only what differs)]
 ```
 
 ### `extended-contest`
@@ -1037,7 +1085,7 @@ a new template from an old one: state only what differs
 both sides accumulate; first to the goal wins (dead heat stays open)
 
 ```
-[[extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=".."] [interval=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [vs-difficulty=N]  (both sides accumulate; first to the goal wins (dead heat stays open))]]
+[[extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=".."] [interval=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [vs-difficulty=N] [in-story]  (both sides accumulate; first to the goal wins (dead heat stays open))]]
 ```
 
 | argument | kind | meaning |
@@ -1052,11 +1100,12 @@ both sides accumulate; first to the goal wins (dead heat stays open)
 | `on-botch` | named `enum` | — — one of `fail`, `lose-successes`, `ignore` |
 | `difficulty` | named `int` | — |
 | `vs-difficulty` | named `int` | — |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help extended-contest]]`** replies:
+**`[[help extended-contest]]`** replies:
 
 ```
-[SYSTEM: extended-contest - extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=".."] [interval=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [vs-difficulty=N]  (both sides accumulate; first to the goal wins (dead heat stays open))]
+[SYSTEM: extended-contest - extended-contest <your-pool> <their-pool> target=<n> rounds=<max> [vs="Name"] [label=".."] [interval=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [vs-difficulty=N] [in-story]  (both sides accumulate; first to the goal wins (dead heat stays open))]
 ```
 
 ### `extended-roll`
@@ -1064,7 +1113,7 @@ both sides accumulate; first to the goal wins (dead heat stays open)
 start an extended action (rolls interval 1 now)
 
 ```
-[[extended-roll <pool> requires=<target> intervals=<max> [interval=".."] [label=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N]  (start an extended action (rolls interval 1 now); plus the usual roll knobs)]]
+[[extended-roll <pool> requires=<target> intervals=<max> [interval=".."] [label=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (start an extended action (rolls interval 1 now); plus the usual roll knobs)]]
 ```
 
 > plus the usual roll knobs
@@ -1082,11 +1131,12 @@ start an extended action (rolls interval 1 now)
 | `tags` | named | `"a,b"` |
 | `spend` | named | `res[::effect][!]` <br>*e.g.* `blood  ·  blood::heal  ·  willpower!` |
 | `spend-amount` | named `int` | How many points to spend (default 1) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help extended-roll]]`** replies:
+**`[[help extended-roll]]`** replies:
 
 ```
-[SYSTEM: extended-roll - extended-roll <pool> requires=<target> intervals=<max> [interval=".."] [label=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N]  (start an extended action (rolls interval 1 now); plus the usual roll knobs)]
+[SYSTEM: extended-roll - extended-roll <pool> requires=<target> intervals=<max> [interval=".."] [label=".."] [on-botch=fail|lose-successes|ignore] [difficulty=N] [dice-modifier=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (start an extended action (rolls interval 1 now); plus the usual roll knobs)]
 ```
 
 ### `flush-context`
@@ -1094,15 +1144,17 @@ start an extended action (rolls interval 1 now)
 clean the story now: strip engine notes and hidden blocks (run this if things feel slow)
 
 ```
-[[flush-context  (clean the story now: strip engine notes and hidden blocks (run this if things feel slow))]]
+[[flush-context [in-story]  (clean the story now: strip engine notes and hidden blocks (run this if things feel slow))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help flush-context]]`** replies:
+**`[[help flush-context]]`** replies:
 
 ```
-[SYSTEM: flush-context - flush-context  (clean the story now: strip engine notes and hidden blocks (run this if things feel slow))]
+[SYSTEM: flush-context - flush-context [in-story]  (clean the story now: strip engine notes and hidden blocks (run this if things feel slow))]
 ```
 
 ### `forget-affliction`
@@ -1110,17 +1162,18 @@ _No arguments._
 remove an overlay definition; built-ins can only be shadowed
 
 ```
-[[forget-affliction <name>]]
+[[forget-affliction <name> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-affliction]]`** replies:
+**`[[help forget-affliction]]`** replies:
 
 ```
-[SYSTEM: forget-affliction - forget-affliction <name>  (remove an overlay definition; built-ins can only be shadowed)]
+[SYSTEM: forget-affliction - forget-affliction <name> [in-story]  (remove an overlay definition; built-ins can only be shadowed)]
 ```
 
 ### `forget-alias`
@@ -1128,17 +1181,18 @@ remove an overlay definition; built-ins can only be shadowed
 remove an alias (bare @a = global; scoped tokens as in alias)
 
 ```
-[[forget-alias <@token>  (remove an alias (bare @a = global; scoped tokens as in alias))]]
+[[forget-alias <@token> [in-story]  (remove an alias (bare @a = global; scoped tokens as in alias))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `token` | positional **required** | `<@token>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-alias]]`** replies:
+**`[[help forget-alias]]`** replies:
 
 ```
-[SYSTEM: forget-alias - forget-alias <@token>  (remove an alias (bare @a = global; scoped tokens as in alias))]
+[SYSTEM: forget-alias - forget-alias <@token> [in-story]  (remove an alias (bare @a = global; scoped tokens as in alias))]
 ```
 
 ### `forget-arcanum`
@@ -1146,17 +1200,18 @@ remove an alias (bare @a = global; scoped tokens as in alias)
 remove a custom arcanum/taint definition (a built-in resurfaces)
 
 ```
-[[forget-arcanum <name>  (remove a custom arcanum/taint definition (a built-in resurfaces))]]
+[[forget-arcanum <name> [in-story]  (remove a custom arcanum/taint definition (a built-in resurfaces))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-arcanum]]`** replies:
+**`[[help forget-arcanum]]`** replies:
 
 ```
-[SYSTEM: forget-arcanum - forget-arcanum <name>  (remove a custom arcanum/taint definition (a built-in resurfaces))]
+[SYSTEM: forget-arcanum - forget-arcanum <name> [in-story]  (remove a custom arcanum/taint definition (a built-in resurfaces))]
 ```
 
 ### `forget-background`
@@ -1164,17 +1219,18 @@ remove a custom arcanum/taint definition (a built-in resurfaces)
 remove a custom background (a built-in resurfaces)
 
 ```
-[[forget-background <name>  (remove a custom background (a built-in resurfaces))]]
+[[forget-background <name> [in-story]  (remove a custom background (a built-in resurfaces))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-background]]`** replies:
+**`[[help forget-background]]`** replies:
 
 ```
-[SYSTEM: forget-background - forget-background <name>  (remove a custom background (a built-in resurfaces))]
+[SYSTEM: forget-background - forget-background <name> [in-story]  (remove a custom background (a built-in resurfaces))]
 ```
 
 ### `forget-constraint`
@@ -1182,17 +1238,18 @@ remove a custom background (a built-in resurfaces)
 remove a constraint group
 
 ```
-[[forget-constraint <name>]]
+[[forget-constraint <name> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-constraint]]`** replies:
+**`[[help forget-constraint]]`** replies:
 
 ```
-[SYSTEM: forget-constraint - forget-constraint <name>  (remove a constraint group)]
+[SYSTEM: forget-constraint - forget-constraint <name> [in-story]  (remove a constraint group)]
 ```
 
 ### `forget-date`
@@ -1200,17 +1257,18 @@ remove a constraint group
 delete a saved date bookmark
 
 ```
-[[forget-date <name>]]
+[[forget-date <name> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-date]]`** replies:
+**`[[help forget-date]]`** replies:
 
 ```
-[SYSTEM: forget-date - forget-date <name>  (delete a saved date bookmark)]
+[SYSTEM: forget-date - forget-date <name> [in-story]  (delete a saved date bookmark)]
 ```
 
 ### `forget-grant`
@@ -1218,17 +1276,18 @@ delete a saved date bookmark
 drop a grant - the thing goes back to being bought normally
 
 ```
-[[forget-grant <trait|purse>]]
+[[forget-grant <trait|purse> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `what` | positional **required** | `<trait\|purse>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-grant]]`** replies:
+**`[[help forget-grant]]`** replies:
 
 ```
-[SYSTEM: forget-grant - forget-grant <trait|purse>  (drop a grant - the thing goes back to being bought normally)]
+[SYSTEM: forget-grant - forget-grant <trait|purse> [in-story]  (drop a grant - the thing goes back to being bought normally)]
 ```
 
 ### `forget-merit`
@@ -1236,17 +1295,18 @@ drop a grant - the thing goes back to being bought normally
 delete a custom merit/flaw definition (built-ins resurface)
 
 ```
-[[forget-merit <name>  (delete a custom merit/flaw definition (built-ins resurface))]]
+[[forget-merit <name> [in-story]  (delete a custom merit/flaw definition (built-ins resurface))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-merit]]`** replies:
+**`[[help forget-merit]]`** replies:
 
 ```
-[SYSTEM: forget-merit - forget-merit <name>  (delete a custom merit/flaw definition (built-ins resurface))]
+[SYSTEM: forget-merit - forget-merit <name> [in-story]  (delete a custom merit/flaw definition (built-ins resurface))]
 ```
 
 ### `forget-roll`
@@ -1254,17 +1314,18 @@ delete a custom merit/flaw definition (built-ins resurface)
 delete a saved roll
 
 ```
-[[forget-roll <name>]]
+[[forget-roll <name> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-roll]]`** replies:
+**`[[help forget-roll]]`** replies:
 
 ```
-[SYSTEM: forget-roll - forget-roll <name>  (delete a saved roll)]
+[SYSTEM: forget-roll - forget-roll <name> [in-story]  (delete a saved roll)]
 ```
 
 ### `forget-scene`
@@ -1272,17 +1333,18 @@ delete a saved roll
 delete a scene record
 
 ```
-[[forget-scene <name>]]
+[[forget-scene <name> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-scene]]`** replies:
+**`[[help forget-scene]]`** replies:
 
 ```
-[SYSTEM: forget-scene - forget-scene <name>  (delete a scene record)]
+[SYSTEM: forget-scene - forget-scene <name> [in-story]  (delete a scene record)]
 ```
 
 ### `forget-specialty`
@@ -1290,18 +1352,19 @@ delete a scene record
 remove a specialty (label needed only when a trait has several)
 
 ```
-[[forget-specialty <trait> [[`<Label>`]]  (remove a specialty (label needed only when a trait has several))]]
+[[forget-specialty <trait> [[`<Label>`]] [in-story]  (remove a specialty (label needed only when a trait has several))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `trait` | positional **required** | `<trait>` |
 | `label` | positional `literal` | `[`<Label>`]` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-specialty]]`** replies:
+**`[[help forget-specialty]]`** replies:
 
 ```
-[SYSTEM: forget-specialty - forget-specialty <trait> [[`<Label>`]]  (remove a specialty (label needed only when a trait has several))]
+[SYSTEM: forget-specialty - forget-specialty <trait> [[`<Label>`]] [in-story]  (remove a specialty (label needed only when a trait has several))]
 ```
 
 ### `forget-table`
@@ -1309,17 +1372,18 @@ remove a specialty (label needed only when a trait has several)
 remove a table from its category's general card; built-ins can only be shadowed
 
 ```
-[[forget-table <[sub::]name|@alias>]]
+[[forget-table <[sub::]name|@alias> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<[sub::]name\|@alias>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-table]]`** replies:
+**`[[help forget-table]]`** replies:
 
 ```
-[SYSTEM: forget-table - forget-table <[sub::]name|@alias>  (remove a table from its category's general card; built-ins can only be shadowed)]
+[SYSTEM: forget-table - forget-table <[sub::]name|@alias> [in-story]  (remove a table from its category's general card; built-ins can only be shadowed)]
 ```
 
 ### `forget-table-alias`
@@ -1327,17 +1391,18 @@ remove a table from its category's general card; built-ins can only be shadowed
 remove a table alias
 
 ```
-[[forget-table-alias <@alias>]]
+[[forget-table-alias <@alias> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `token` | positional **required** | `<@alias>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-table-alias]]`** replies:
+**`[[help forget-table-alias]]`** replies:
 
 ```
-[SYSTEM: forget-table-alias - forget-table-alias <@alias>  (remove a table alias)]
+[SYSTEM: forget-table-alias - forget-table-alias <@alias> [in-story]  (remove a table alias)]
 ```
 
 ### `forget-template`
@@ -1345,17 +1410,18 @@ remove a table alias
 drop a chronicle template (the shipped one, if any, resurfaces)
 
 ```
-[[forget-template <name>  (drop a chronicle template (the shipped one, if any, resurfaces))]]
+[[forget-template <name> [in-story]  (drop a chronicle template (the shipped one, if any, resurfaces))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help forget-template]]`** replies:
+**`[[help forget-template]]`** replies:
 
 ```
-[SYSTEM: forget-template - forget-template <name>  (drop a chronicle template (the shipped one, if any, resurfaces))]
+[SYSTEM: forget-template - forget-template <name> [in-story]  (drop a chronicle template (the shipped one, if any, resurfaces))]
 ```
 
 ### `gain`
@@ -1363,18 +1429,19 @@ drop a chronicle template (the shipped one, if any, resurfaces)
 regain a resource
 
 ```
-[[gain <resource> [[amount]]]]
+[[gain <resource> [[amount]] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `resource` | positional **required** | `<resource>` |
 | `amount` | positional | `[amount]` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help gain]]`** replies:
+**`[[help gain]]`** replies:
 
 ```
-[SYSTEM: gain - gain <resource> [[amount]]  (regain a resource)]
+[SYSTEM: gain - gain <resource> [[amount]] [in-story]  (regain a resource)]
 ```
 
 ### `grant`
@@ -1382,7 +1449,7 @@ regain a resource
 where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus
 
 ```
-[[grant [<trait|merit|purse>] [[points]] [source=freebies|arcana|template|clan|background|storyteller|experience|maturation] [note=<text>]]]
+[[grant [<trait|merit|purse>] [[points]] [source=freebies|arcana|template|clan|background|storyteller|experience|maturation] [note=<text>] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -1391,11 +1458,12 @@ where something came from when it wasn't bought: a template's free dot, or a Sto
 | `points` | positional `int` | Given: this ADDS to that purse |
 | `source` | named `enum` | Where it came from (default: storyteller) — one of `freebies`, `arcana`, `template`, `clan`, `background`, `storyteller`, `experience`, `maturation` |
 | `note` | named | `<text>` <br>*e.g.* `everyone in this chronicle is Suspect` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help grant]]`** replies:
+**`[[help grant]]`** replies:
 
 ```
-[SYSTEM: grant - grant [<trait|merit|purse>] [[points]] [source=freebies|arcana|template|clan|background|storyteller|experience|maturation] [note=<text>]  (where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus)]
+[SYSTEM: grant - grant [<trait|merit|purse>] [[points]] [source=freebies|arcana|template|clan|background|storyteller|experience|maturation] [note=<text>] [in-story]  (where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus)]
 ```
 
 ### `harvest`
@@ -1403,18 +1471,19 @@ where something came from when it wasn't bought: a template's free dot, or a Sto
 draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot)
 
 ```
-[[harvest [[points]] [time=".."]  (draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot))]]
+[[harvest [[points]] [time=".."] [in-story]  (draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `points` | positional `int` | `[points]` <br>*e.g.* `3` |
 | `time` | named | How long the ritual takes (advances the clock) <br>*e.g.* `2h` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help harvest]]`** replies:
+**`[[help harvest]]`** replies:
 
 ```
-[SYSTEM: harvest - harvest [[points]] [time=".."]  (draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot))]
+[SYSTEM: harvest - harvest [[points]] [time=".."] [in-story]  (draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot))]
 ```
 
 ### `help`
@@ -1422,17 +1491,18 @@ draw Quintessence from the cray ritually (no roll; overdrawing costs the site a 
 list commands, or show one's usage
 
 ```
-[[help [<verb>]]]
+[[help [<verb>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `verb` | positional | `<verb>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help help]]`** replies:
+**`[[help help]]`** replies:
 
 ```
-[SYSTEM: help is now [[show-help]] - it still works. show-help - show-help [verb|@all] [in=<where>] [in-story=true]  (list commands, or show one's usage)]
+[SYSTEM: help - help [<verb>] [in-story]  (list commands, or show one's usage)]
 ```
 
 ### `hide`
@@ -1440,7 +1510,7 @@ list commands, or show one's usage
 write to the current scene's private plan (mirrored into the Author's Note)
 
 ```
-[[hide [text=".."] [op=append|overwrite]  (write to the current scene's private plan (mirrored into the Author's Note); the AI does this automatically via <hide op=append|overwrite>...</hide> in its narration)]]
+[[hide [text=".."] [op=append|overwrite] [in-story]  (write to the current scene's private plan (mirrored into the Author's Note); the AI does this automatically via <hide op=append|overwrite>...</hide> in its narration)]]
 ```
 
 > the AI does this automatically via <hide op=append|overwrite>...</hide> in its narration
@@ -1449,11 +1519,12 @@ write to the current scene's private plan (mirrored into the Author's Note)
 |---|---|---|
 | `text` | named `literal` | The plan text (verbatim) |
 | `op` | named `enum` | Append (default) or overwrite the plan — one of `append`, `overwrite` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help hide]]`** replies:
+**`[[help hide]]`** replies:
 
 ```
-[SYSTEM: hide - hide [text=".."] [op=append|overwrite]  (write to the current scene's private plan (mirrored into the Author's Note); the AI does this automatically via <hide op=append|overwrite>...</hide> in its narration)]
+[SYSTEM: hide - hide [text=".."] [op=append|overwrite] [in-story]  (write to the current scene's private plan (mirrored into the Author's Note); the AI does this automatically via <hide op=append|overwrite>...</hide> in its narration)]
 ```
 
 ### `invoke`
@@ -1461,17 +1532,18 @@ write to the current scene's private plan (mirrored into the Author's Note)
 use a power that OFFERS an affliction rather than applying it automatically
 
 ```
-[[invoke <affliction>]]
+[[invoke <affliction> [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `affliction` | positional **required** | `<affliction>` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help invoke]]`** replies:
+**`[[help invoke]]`** replies:
 
 ```
-[SYSTEM: invoke - invoke <affliction>  (use a power that OFFERS an affliction rather than applying it automatically)]
+[SYSTEM: invoke - invoke <affliction> [in-story]  (use a power that OFFERS an affliction rather than applying it automatically)]
 ```
 
 ### `leave-library`
@@ -1479,15 +1551,17 @@ use a power that OFFERS an affliction rather than applying it automatically
 step back through the measured door
 
 ```
-[[leave-library]]
+[[leave-library [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help leave-library]]`** replies:
+**`[[help leave-library]]`** replies:
 
 ```
-[SYSTEM: leave-library - leave-library  (step back through the measured door)]
+[SYSTEM: leave-library - leave-library [in-story]  (step back through the measured door)]
 ```
 
 ### `lift`
@@ -1495,7 +1569,7 @@ _No arguments._
 remove an affliction - and its mirror; spend = shrug-off
 
 ```
-[[lift <affliction> [on=<name|@alias>] [spend=res[::effect][!]] [spend-amount=N]]]
+[[lift <affliction> [on=<name|@alias>] [spend=res[::effect][!]] [spend-amount=N] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -1504,11 +1578,12 @@ remove an affliction - and its mirror; spend = shrug-off
 | `on` | named | `<name\|@alias>` |
 | `spend` | named | `res[::effect][!]` <br>*e.g.* `blood  ·  blood::heal  ·  willpower!` |
 | `spend-amount` | named `int` | How many points to spend (default 1) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help lift]]`** replies:
+**`[[help lift]]`** replies:
 
 ```
-[SYSTEM: lift - lift <affliction> [on=<name|@alias>] [spend=res[::effect][!]] [spend-amount=N]  (remove an affliction - and its mirror; spend = shrug-off)]
+[SYSTEM: lift - lift <affliction> [on=<name|@alias>] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (remove an affliction - and its mirror; spend = shrug-off)]
 ```
 
 ### `magick`
@@ -1516,7 +1591,7 @@ remove an affliction - and its mirror; spend = shrug-off
 work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels
 
 ```
-[[magick pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended=true] [ongoing=true] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N]  (work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels)]]
+[[magick pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended] [ongoing] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N] [in-story]  (work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels)]]
 ```
 
 | argument | kind | meaning |
@@ -1526,18 +1601,19 @@ work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels
 | `quintessence` | named `int` | Extra points: -1 difficulty each (min 4; 3/turn cap) |
 | `label` | named | Spell name (keys the same-scene retry ledger) |
 | `requires` | named `int` | Successes needed (extended/ongoing: the ST's total) |
-| `extended` | named `enum` | Accrue successes over intervals — one of `true` |
-| `ongoing` | named `enum` | Indefinite-duration spell (successes ×10; per-success fuel; seal at the end) — one of `true` |
+| `extended` | named `bool` | Accrue successes over intervals |
+| `ongoing` | named `bool` | Indefinite-duration spell (successes ×10; per-success fuel; seal at the end) |
 | `interval` | named | Time between extended rolls (advisory) |
 | `intervals` | named `int` | Max rolls for an extended casting |
 | `on-botch` | named `enum` | Extended botch policy (default fail: Backlash ends it) — one of `fail`, `lose-successes`, `ignore` |
 | `spend` | named | Resource to spend on the roll |
 | `spend-amount` | named `int` | How many points to spend (default 1; a resource may cap it per use) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help magick]]`** replies:
+**`[[help magick]]`** replies:
 
 ```
-[SYSTEM: magick - magick pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended=true] [ongoing=true] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N]  (work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels)]
+[SYSTEM: magick - magick pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended] [ongoing] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N] [in-story]  (work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels)]
 ```
 
 ### `measure-door`
@@ -1545,15 +1621,17 @@ work Awakened magick (Dark Ages: Mage) - pillars carry the REQUIRED levels
 the Talisman ritual: ten minutes measuring a door opens the Library of the Unseen
 
 ```
-[[measure-door]]
+[[measure-door [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help measure-door]]`** replies:
+**`[[help measure-door]]`** replies:
 
 ```
-[SYSTEM: measure-door - measure-door  (the Talisman ritual: ten minutes measuring a door opens the Library of the Unseen)]
+[SYSTEM: measure-door - measure-door [in-story]  (the Talisman ritual: ten minutes measuring a door opens the Library of the Unseen)]
 ```
 
 ### `name-roll`
@@ -1561,7 +1639,7 @@ _No arguments._
 save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest)
 
 ```
-[[name-roll <name> <pool> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [extended=true] [intervals=N] [interval=".."] [on-botch=fail|lose-successes|ignore] [opposed=resisted|contested] [vs-pool=".."] [vs-difficulty=N] [description=".."]  (save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest))]]
+[[name-roll <name> <pool> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [extended] [intervals=N] [interval=".."] [on-botch=fail|lose-successes|ignore] [opposed=resisted|contested] [vs-pool=".."] [vs-difficulty=N] [description=".."] [in-story]  (save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest))]]
 ```
 
 | argument | kind | meaning |
@@ -1580,7 +1658,7 @@ save a roll under a name; @name invokes it with its spend/specialty/table baked 
 | `spend-amount` | named `int` | How many points to spend (default 1; a resource may cap it per use) |
 | `specialty` | named | Apply ONE specialty (+1 die; pool must use its trait) <br>*e.g.* `Swords  ·  or its trait: melee` |
 | `table` | named | Success table read when the roll is invoked |
-| `extended` | named `enum` | Make it an extended procedure (target supplied at invoke) — one of `true` |
+| `extended` | named `bool` | Make it an extended procedure (target supplied at invoke) |
 | `intervals` | named `int` | Extended: default max rolls |
 | `interval` | named | Extended: advisory spacing (e.g. 1 turn) |
 | `on-botch` | named `enum` | Extended: botch policy — one of `fail`, `lose-successes`, `ignore` |
@@ -1588,11 +1666,12 @@ save a roll under a name; @name invokes it with its spend/specialty/table baked 
 | `vs-pool` | named | Opposed: the opposition's pool (default: your own pool) |
 | `vs-difficulty` | named `int` | Opposed: default difficulty for the opposition's roll |
 | `description` | named `literal` | Rules prose (verbatim) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help name-roll]]`** replies:
+**`[[help name-roll]]`** replies:
 
 ```
-[SYSTEM: name-roll - name-roll <name> <pool> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [extended=true] [intervals=N] [interval=".."] [on-botch=fail|lose-successes|ignore] [opposed=resisted|contested] [vs-pool=".."] [vs-difficulty=N] [description=".."]  (save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest))]
+[SYSTEM: name-roll - name-roll <name> <pool> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [extended] [intervals=N] [interval=".."] [on-botch=fail|lose-successes|ignore] [opposed=resisted|contested] [vs-pool=".."] [vs-difficulty=N] [description=".."] [in-story]  (save a roll under a name; @name invokes it with its spend/specialty/table baked in (extended=true makes a procedure, opposed= makes a contest))]
 ```
 
 ### `paid`
@@ -1600,18 +1679,19 @@ save a roll under a name; @name invokes it with its spend/specialty/table baked 
 record what a purchase really cost (no expression = the Storyteller granted it)
 
 ```
-[[paid [<trait|merit-key>] [[expr|listed]]  (record what a purchase really cost (no expression = the Storyteller granted it))]]
+[[paid [<trait|merit-key>] [[expr|listed]] [in-story]  (record what a purchase really cost (no expression = the Storyteller granted it))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `key` | positional | `<trait\|merit-key>` <br>*e.g.* `mentor` |
 | `expr` | positional | `[expr\|listed]` <br>*e.g.* `0` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help paid]]`** replies:
+**`[[help paid]]`** replies:
 
 ```
-[SYSTEM: paid - paid [<trait|merit-key>] [[expr|listed]]  (record what a purchase really cost (no expression = the Storyteller granted it))]
+[SYSTEM: paid - paid [<trait|merit-key>] [[expr|listed]] [in-story]  (record what a purchase really cost (no expression = the Storyteller granted it))]
 ```
 
 ### `play`
@@ -1619,17 +1699,18 @@ record what a purchase really cost (no expression = the Storyteller granted it)
 switch to a character; no name selects the default
 
 ```
-[[play [name="<name|@alias>"]]]
+[[play [name="<name|@alias>"] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named | `"<name\|@alias>"` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help play]]`** replies:
+**`[[help play]]`** replies:
 
 ```
-[SYSTEM: play - play [name="<name|@alias>"]  (switch to a character; no name selects the default)]
+[SYSTEM: play - play [name="<name|@alias>"] [in-story]  (switch to a character; no name selects the default)]
 ```
 
 ### `player`
@@ -1637,18 +1718,19 @@ switch to a character; no name selects the default
 show or switch the current player; storyteller is always valid
 
 ```
-[[player [name="<id>"] [default=true]]]
+[[player [name="<id>"] [default] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named | `"<id>"` |
-| `default` | named `enum` | Also make it the default player — one of `true` |
+| `default` | named `bool` | Also make it the default player |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help player]]`** replies:
+**`[[help player]]`** replies:
 
 ```
-[SYSTEM: player - player [name="<id>"] [default=true]  (show or switch the current player; storyteller is always valid)]
+[SYSTEM: player - player [name="<id>"] [default] [in-story]  (show or switch the current player; storyteller is always valid)]
 ```
 
 ### `research`
@@ -1656,7 +1738,7 @@ show or switch the current player; storyteller is always valid
 search the library: Intelligence + Library (must be in it)
 
 ```
-[[research <topic> [difficulty=N] [tags="a,b"]  (search the library: Intelligence + Library (must be in it))]]
+[[research <topic> [difficulty=N] [tags="a,b"] [in-story]  (search the library: Intelligence + Library (must be in it))]]
 ```
 
 | argument | kind | meaning |
@@ -1664,11 +1746,12 @@ search the library: Intelligence + Library (must be in it)
 | `topic` | positional **required** | `<topic>` <br>*e.g.* ``the seals of Belial`` |
 | `difficulty` | named `int` | How obscure the secret is (default 6) |
 | `tags` | named | Roll tags (e.g. hermetic, in the rotunda) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help research]]`** replies:
+**`[[help research]]`** replies:
 
 ```
-[SYSTEM: research - research <topic> [difficulty=N] [tags="a,b"]  (search the library: Intelligence + Library (must be in it))]
+[SYSTEM: research - research <topic> [difficulty=N] [tags="a,b"] [in-story]  (search the library: Intelligence + Library (must be in it))]
 ```
 
 ### `reset-uses`
@@ -1676,15 +1759,17 @@ search the library: Intelligence + Library (must be in it)
 scene/turn change: clears effect-use counters
 
 ```
-[[reset-uses]]
+[[reset-uses [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help reset-uses]]`** replies:
+**`[[help reset-uses]]`** replies:
 
 ```
-[SYSTEM: reset-uses - reset-uses  (scene/turn change: clears effect-use counters)]
+[SYSTEM: reset-uses - reset-uses [in-story]  (scene/turn change: clears effect-use counters)]
 ```
 
 ### `resist`
@@ -1692,7 +1777,7 @@ _No arguments._
 resisted action: your margin over theirs counts (tie = fail)
 
 ```
-[[resist <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N]  (resisted action: your margin over theirs counts (tie = fail))]]
+[[resist <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (resisted action: your margin over theirs counts (tie = fail))]]
 ```
 
 | argument | kind | meaning |
@@ -1705,11 +1790,12 @@ resisted action: your margin over theirs counts (tie = fail)
 | `table` | named | Success table read with your margin |
 | `spend` | named | `res[::effect][!]` <br>*e.g.* `blood  ·  blood::heal  ·  willpower!` |
 | `spend-amount` | named `int` | How many points to spend (default 1) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help resist]]`** replies:
+**`[[help resist]]`** replies:
 
 ```
-[SYSTEM: resist - resist <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N]  (resisted action: your margin over theirs counts (tie = fail))]
+[SYSTEM: resist - resist <your-pool> <their-pool> [vs="Name"] [difficulty=N] [vs-difficulty=N] [table=".."] [spend=res[::effect][!]] [spend-amount=N] [in-story]  (resisted action: your margin over theirs counts (tie = fail))]
 ```
 
 ### `roll`
@@ -1717,7 +1803,7 @@ resisted action: your margin over theirs counts (tie = fail)
 roll a dice pool for the current character
 
 ```
-[[roll <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."]]]
+[[roll <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -1735,11 +1821,12 @@ roll a dice pool for the current character
 | `spend-amount` | named `int` | How many points to spend (default 1; a resource may cap it per use) |
 | `specialty` | named | Apply ONE specialty (+1 die; pool must use its trait) <br>*e.g.* `Swords  ·  or its trait: melee` |
 | `table` | named | Success table to read the outcome |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help roll]]`** replies:
+**`[[help roll]]`** replies:
 
 ```
-[SYSTEM: roll - roll <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."]  (roll a dice pool for the current character)]
+[SYSTEM: roll - roll <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [in-story]  (roll a dice pool for the current character)]
 ```
 
 ### `roll-for`
@@ -1747,7 +1834,7 @@ roll a dice pool for the current character
 roll for a named character without switching to them
 
 ```
-[[roll-for "<name|@alias>" <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."]]]
+[[roll-for "<name|@alias>" <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -1766,11 +1853,12 @@ roll for a named character without switching to them
 | `spend-amount` | named `int` | How many points to spend (default 1; a resource may cap it per use) |
 | `specialty` | named | Apply ONE specialty (+1 die; pool must use its trait) <br>*e.g.* `Swords  ·  or its trait: melee` |
 | `table` | named | Success table to read the outcome |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help roll-for]]`** replies:
+**`[[help roll-for]]`** replies:
 
 ```
-[SYSTEM: roll-for - roll-for "<name|@alias>" <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."]  (roll for a named character without switching to them)]
+[SYSTEM: roll-for - roll-for "<name|@alias>" <pool|@name> [[difficulty|expr]] [[diff-mod]] [requires=N] [dice-modifier=N] [min-difficulty=N] [successes=N] [uncancelable=N] [tags="a,b"] [spend=res[::effect][!]] [spend-amount=N] [specialty=<trait|label>] [table=".."] [in-story]  (roll for a named character without switching to them)]
 ```
 
 ### `save-date`
@@ -1778,18 +1866,19 @@ roll for a named character without switching to them
 bookmark the current moment (or a given date) under a name
 
 ```
-[[save-date <name> [[yyyy-mm-dd-hh]]  (bookmark the current moment (or a given date) under a name)]]
+[[save-date <name> [[yyyy-mm-dd-hh]] [in-story]  (bookmark the current moment (or a given date) under a name)]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional **required** | `<name>` |
 | `date` | positional | `[yyyy-mm-dd-hh]` <br>*e.g.* `1197-12-25-00` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help save-date]]`** replies:
+**`[[help save-date]]`** replies:
 
 ```
-[SYSTEM: save-date - save-date <name> [[yyyy-mm-dd-hh]]  (bookmark the current moment (or a given date) under a name)]
+[SYSTEM: save-date - save-date <name> [[yyyy-mm-dd-hh]] [in-story]  (bookmark the current moment (or a given date) under a name)]
 ```
 
 ### `scene`
@@ -1797,7 +1886,7 @@ bookmark the current moment (or a given date) under a name
 open a named scene at the current story time (one location; turn=<len> sets a Turn's length)
 
 ```
-[[scene <name> [location=".."] [turn=".."] [chapter=".."]  (open a named scene at the current story time (one location; turn=<len> sets a Turn's length))]]
+[[scene <name> [location=".."] [turn=".."] [chapter=".."] [in-story]  (open a named scene at the current story time (one location; turn=<len> sets a Turn's length))]]
 ```
 
 | argument | kind | meaning |
@@ -1806,11 +1895,12 @@ open a named scene at the current story time (one location; turn=<len> sets a Tu
 | `location` | named `literal` | The scene's single location |
 | `turn` | named | A Turn's length here (e.g. 3s for combat); omit for freeform <br>*e.g.* `3s` |
 | `chapter` | named `literal` | Optional grouping label |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help scene]]`** replies:
+**`[[help scene]]`** replies:
 
 ```
-[SYSTEM: scene - scene <name> [location=".."] [turn=".."] [chapter=".."]  (open a named scene at the current story time (one location; turn=<len> sets a Turn's length))]
+[SYSTEM: scene - scene <name> [location=".."] [turn=".."] [chapter=".."] [in-story]  (open a named scene at the current story time (one location; turn=<len> sets a Turn's length))]
 ```
 
 ### `seal-spell`
@@ -1818,18 +1908,19 @@ open a named scene at the current story time (one location; turn=<len> sets a Tu
 seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10
 
 ```
-[[seal-spell pillar=N [pay=true]]]
+[[seal-spell pillar=N [pay] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `pillar` | named `int` **required** | Highest Pillar level involved |
-| `pay` | named `enum` | Spend now (else the price is quoted as a debt) — one of `true` |
+| `pay` | named `bool` | Spend now (else the price is quoted as a debt) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help seal-spell]]`** replies:
+**`[[help seal-spell]]`** replies:
 
 ```
-[SYSTEM: seal-spell - seal-spell pillar=N [pay=true]  (seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10)]
+[SYSTEM: seal-spell - seal-spell pillar=N [pay] [in-story]  (seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10)]
 ```
 
 ### `set-default`
@@ -1837,17 +1928,18 @@ seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 1
 change the default character
 
 ```
-[[set-default name="<name|@alias>"]]
+[[set-default name="<name|@alias>" [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named **required** | `"<name\|@alias>"` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help set-default]]`** replies:
+**`[[help set-default]]`** replies:
 
 ```
-[SYSTEM: set-default - set-default name="<name|@alias>"  (change the default character)]
+[SYSTEM: set-default - set-default name="<name|@alias>" [in-story]  (change the default character)]
 ```
 
 ### `set-trait`
@@ -1855,7 +1947,7 @@ change the default character
 set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start)
 
 ```
-[[set-trait <trait> <n> [group=".."] [note=".."] [paid=".."] [add=true]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]]
+[[set-trait <trait> <n> [group=".."] [note=".."] [paid=".."] [add] [in-story]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]]
 ```
 
 > merits use [[take-merit]]; specialties use [[specialty]]
@@ -1867,12 +1959,13 @@ set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pill
 | `group` | named | Which group it belongs to (inferred when the trait is already known) <br>*e.g.* `background` |
 | `note` | named `literal` | Whose/which one this is - keeps it as a separate instance |
 | `paid` | named | What it really cost (0 = the Storyteller granted it) |
-| `add` | named `enum` | Hold ANOTHER of the same trait rather than replacing — one of `true` |
+| `add` | named `bool` | Hold ANOTHER of the same trait rather than replacing |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help set-trait]]`** replies:
+**`[[help set-trait]]`** replies:
 
 ```
-[SYSTEM: set-trait - set-trait <trait> <n> [group=".."] [note=".."] [paid=".."] [add=true]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]
+[SYSTEM: set-trait - set-trait <trait> <n> [group=".."] [note=".."] [paid=".."] [add] [in-story]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]
 ```
 
 ### `show-affliction`
@@ -1880,19 +1973,19 @@ set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pill
 afflictions on a character, or the ones the chronicle defines
 
 ```
-[[show-affliction [name|@all] [in=<where>] [in-story=true]]]
+[[show-affliction [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `in-sanctum` |
 | `in` | named | Where to look: campaign, current, character, scene (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-affliction]]`** replies:
+**`[[help show-affliction]]`** replies:
 
 ```
-[SYSTEM: show-affliction - show-affliction [name|@all] [in=<where>] [in-story=true]  (afflictions on a character, or the ones the chronicle defines)]
+[SYSTEM: show-affliction - show-affliction [name|@all] [in=<where>] [in-story]  (afflictions on a character, or the ones the chronicle defines)]
 ```
 
 ### `show-alias`
@@ -1900,19 +1993,19 @@ afflictions on a character, or the ones the chronicle defines
 every alias, grouped by scope
 
 ```
-[[show-alias [name|@all] [in=<where>] [in-story=true]]]
+[[show-alias [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign, player, character, current (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · player · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-alias]]`** replies:
+**`[[help show-alias]]`** replies:
 
 ```
-[SYSTEM: show-alias - show-alias [name|@all] [in=<where>] [in-story=true]  (every alias, grouped by scope)]
+[SYSTEM: show-alias - show-alias [name|@all] [in=<where>] [in-story]  (every alias, grouped by scope)]
 ```
 
 ### `show-arcanum`
@@ -1920,7 +2013,7 @@ every alias, grouped by scope
 arcana & taints: what a character owns, or what the chronicle defines
 
 ```
-[[show-arcanum [name|@all] [in=<where>] [in-story=true]]]
+[[show-arcanum [name|@all] [in=<where>] [in-story]]]
 ```
 
 > Their own category - not merits, and only a demon or a demon's thrall has this list at all
@@ -1929,12 +2022,12 @@ arcana & taints: what a character owns, or what the chronicle defines
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `celestial-radiance` |
 | `in` | named | Where to look: campaign, template, clan, fellowship, current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · template · clan` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-arcanum]]`** replies:
+**`[[help show-arcanum]]`** replies:
 
 ```
-[SYSTEM: show-arcanum - show-arcanum [name|@all] [in=<where>] [in-story=true]  (arcana & taints: what a character owns, or what the chronicle defines; Their own category - not merits, and only a demon or a demon's thrall has this list at all)]
+[SYSTEM: show-arcanum - show-arcanum [name|@all] [in=<where>] [in-story]  (arcana & taints: what a character owns, or what the chronicle defines; Their own category - not merits, and only a demon or a demon's thrall has this list at all)]
 ```
 
 ### `show-background`
@@ -1942,19 +2035,19 @@ arcana & taints: what a character owns, or what the chronicle defines
 backgrounds: what a character holds and confers, or what the chronicle defines
 
 ```
-[[show-background [name|@all] [in=<where>] [in-story=true]]]
+[[show-background [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `fount` |
 | `in` | named | Where to look: campaign, template, clan, fellowship, current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · template · clan` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-background]]`** replies:
+**`[[help show-background]]`** replies:
 
 ```
-[SYSTEM: show-background - show-background [name|@all] [in=<where>] [in-story=true]  (backgrounds: what a character holds and confers, or what the chronicle defines)]
+[SYSTEM: show-background - show-background [name|@all] [in=<where>] [in-story]  (backgrounds: what a character holds and confers, or what the chronicle defines)]
 ```
 
 ### `show-budget`
@@ -1962,19 +2055,19 @@ backgrounds: what a character holds and confers, or what the chronicle defines
 what each purse allows, what is spent, what is left (advisory)
 
 ```
-[[show-budget [name|@all] [in=<where>] [in-story=true]  (what each purse allows, what is spent, what is left (advisory))]]
+[[show-budget [name|@all] [in=<where>] [in-story]  (what each purse allows, what is spent, what is left (advisory))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-budget]]`** replies:
+**`[[help show-budget]]`** replies:
 
 ```
-[SYSTEM: show-budget - show-budget [name|@all] [in=<where>] [in-story=true]  (what each purse allows, what is spent, what is left (advisory))]
+[SYSTEM: show-budget - show-budget [name|@all] [in=<where>] [in-story]  (what each purse allows, what is spent, what is left (advisory))]
 ```
 
 ### `show-capability`
@@ -1982,19 +2075,19 @@ what each purse allows, what is spent, what is left (advisory)
 what a character can USE (a pool he cannot use is only points)
 
 ```
-[[show-capability [name|@all] [in=<where>] [in-story=true]  (what a character can USE (a pool he cannot use is only points))]]
+[[show-capability [name|@all] [in=<where>] [in-story]  (what a character can USE (a pool he cannot use is only points))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-capability]]`** replies:
+**`[[help show-capability]]`** replies:
 
 ```
-[SYSTEM: show-capability - show-capability [name|@all] [in=<where>] [in-story=true]  (what a character can USE (a pool he cannot use is only points))]
+[SYSTEM: show-capability - show-capability [name|@all] [in=<where>] [in-story]  (what a character can USE (a pool he cannot use is only points))]
 ```
 
 ### `show-character`
@@ -2002,19 +2095,19 @@ what a character can USE (a pool he cannot use is only points)
 the chronicle's playable characters (marks current/default)
 
 ```
-[[show-character [name|@all] [in=<where>] [in-story=true]  (the chronicle's playable characters (marks current/default))]]
+[[show-character [name|@all] [in=<where>] [in-story]  (the chronicle's playable characters (marks current/default))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-character]]`** replies:
+**`[[help show-character]]`** replies:
 
 ```
-[SYSTEM: show-character - show-character [name|@all] [in=<where>] [in-story=true]  (the chronicle's playable characters (marks current/default))]
+[SYSTEM: show-character - show-character [name|@all] [in=<where>] [in-story]  (the chronicle's playable characters (marks current/default))]
 ```
 
 ### `show-clan`
@@ -2022,19 +2115,19 @@ the chronicle's playable characters (marks current/default)
 the clans and their Disciplines
 
 ```
-[[show-clan [name|@all] [in=<where>] [in-story=true]]]
+[[show-clan [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `nosferatu` |
 | `in` | named | Where to look: campaign, clan, current, character (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · clan · current` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-clan]]`** replies:
+**`[[help show-clan]]`** replies:
 
 ```
-[SYSTEM: show-clan - show-clan [name|@all] [in=<where>] [in-story=true]  (the clans and their Disciplines)]
+[SYSTEM: show-clan - show-clan [name|@all] [in=<where>] [in-story]  (the clans and their Disciplines)]
 ```
 
 ### `show-constraint`
@@ -2042,19 +2135,19 @@ the clans and their Disciplines
 the story's constraint groups, and what the character breaks
 
 ```
-[[show-constraint [name|@all] [in=<where>] [in-story=true]]]
+[[show-constraint [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `clan-only-backgrounds` |
 | `in` | named | Where to look: campaign, template, clan, fellowship, current, character (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · template · clan` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-constraint]]`** replies:
+**`[[help show-constraint]]`** replies:
 
 ```
-[SYSTEM: show-constraint - show-constraint [name|@all] [in=<where>] [in-story=true]  (the story's constraint groups, and what the character breaks)]
+[SYSTEM: show-constraint - show-constraint [name|@all] [in=<where>] [in-story]  (the story's constraint groups, and what the character breaks)]
 ```
 
 ### `show-contest-status`
@@ -2062,19 +2155,19 @@ the story's constraint groups, and what the character breaks
 an extended contest's progress
 
 ```
-[[show-contest-status [name|@all] [in=<where>] [in-story=true]]]
+[[show-contest-status [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-contest-status]]`** replies:
+**`[[help show-contest-status]]`** replies:
 
 ```
-[SYSTEM: show-contest-status - show-contest-status [name|@all] [in=<where>] [in-story=true]  (an extended contest's progress)]
+[SYSTEM: show-contest-status - show-contest-status [name|@all] [in=<where>] [in-story]  (an extended contest's progress)]
 ```
 
 ### `show-cost`
@@ -2082,19 +2175,19 @@ an extended contest's progress
 what a dot costs from each purse (chronicle rules, Storyteller-applied)
 
 ```
-[[show-cost [name|@all] [in=<where>] [in-story=true]  (what a dot costs from each purse (chronicle rules, Storyteller-applied))]]
+[[show-cost [name|@all] [in=<where>] [in-story]  (what a dot costs from each purse (chronicle rules, Storyteller-applied))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-cost]]`** replies:
+**`[[help show-cost]]`** replies:
 
 ```
-[SYSTEM: show-cost - show-cost [name|@all] [in=<where>] [in-story=true]  (what a dot costs from each purse (chronicle rules, Storyteller-applied))]
+[SYSTEM: show-cost - show-cost [name|@all] [in=<where>] [in-story]  (what a dot costs from each purse (chronicle rules, Storyteller-applied))]
 ```
 
 ### `show-cray`
@@ -2102,19 +2195,19 @@ what a dot costs from each purse (chronicle rules, Storyteller-applied)
 the cray's points, status and how it refills
 
 ```
-[[show-cray [name|@all] [in=<where>] [in-story=true]]]
+[[show-cray [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-cray]]`** replies:
+**`[[help show-cray]]`** replies:
 
 ```
-[SYSTEM: show-cray - show-cray [name|@all] [in=<where>] [in-story=true]  (the cray's points, status and how it refills)]
+[SYSTEM: show-cray - show-cray [name|@all] [in=<where>] [in-story]  (the cray's points, status and how it refills)]
 ```
 
 ### `show-creation`
@@ -2122,19 +2215,19 @@ the cray's points, status and how it refills
 the creation budget: every pool against what the sheet holds (advisory)
 
 ```
-[[show-creation [name|@all] [in=<where>] [in-story=true]  (the creation budget: every pool against what the sheet holds (advisory))]]
+[[show-creation [name|@all] [in=<where>] [in-story]  (the creation budget: every pool against what the sheet holds (advisory))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-creation]]`** replies:
+**`[[help show-creation]]`** replies:
 
 ```
-[SYSTEM: show-creation - show-creation [name|@all] [in=<where>] [in-story=true]  (the creation budget: every pool against what the sheet holds (advisory))]
+[SYSTEM: show-creation - show-creation [name|@all] [in=<where>] [in-story]  (the creation budget: every pool against what the sheet holds (advisory))]
 ```
 
 ### `show-date`
@@ -2142,19 +2235,19 @@ the creation budget: every pool against what the sheet holds (advisory)
 the story date, and the bookmarks the chronicle keeps
 
 ```
-[[show-date [name|@all] [in=<where>] [in-story=true]]]
+[[show-date [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-date]]`** replies:
+**`[[help show-date]]`** replies:
 
 ```
-[SYSTEM: show-date - show-date [name|@all] [in=<where>] [in-story=true]  (the story date, and the bookmarks the chronicle keeps)]
+[SYSTEM: show-date - show-date [name|@all] [in=<where>] [in-story]  (the story date, and the bookmarks the chronicle keeps)]
 ```
 
 ### `show-derived`
@@ -2162,19 +2255,19 @@ the story date, and the bookmarks the chronicle keeps
 what the sheet implies rather than states: Road, Willpower, generation, and why
 
 ```
-[[show-derived [name|@all] [in=<where>] [in-story=true]]]
+[[show-derived [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-derived]]`** replies:
+**`[[help show-derived]]`** replies:
 
 ```
-[SYSTEM: show-derived - show-derived [name|@all] [in=<where>] [in-story=true]  (what the sheet implies rather than states: Road, Willpower, generation, and why)]
+[SYSTEM: show-derived - show-derived [name|@all] [in=<where>] [in-story]  (what the sheet implies rather than states: Road, Willpower, generation, and why)]
 ```
 
 ### `show-eval`
@@ -2182,19 +2275,19 @@ what the sheet implies rather than states: Road, Willpower, generation, and why
 read an expression against a character (the reference system, exposed)
 
 ```
-[[show-eval [<expression>] [in=<where>] [in-story=true]  (read an expression against a character (the reference system, exposed))]]
+[[show-eval [<expression>] [in=<where>] [in-story]  (read an expression against a character (the reference system, exposed))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* ``courage + 2`` |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-eval]]`** replies:
+**`[[help show-eval]]`** replies:
 
 ```
-[SYSTEM: show-eval - show-eval [<expression>] [in=<where>] [in-story=true]  (read an expression against a character (the reference system, exposed))]
+[SYSTEM: show-eval - show-eval [<expression>] [in=<where>] [in-story]  (read an expression against a character (the reference system, exposed))]
 ```
 
 ### `show-fellowship`
@@ -2202,19 +2295,19 @@ read an expression against a character (the reference system, exposed)
 the mystic fellowships' Foundation & Pillars
 
 ```
-[[show-fellowship [name|@all] [in=<where>] [in-story=true]]]
+[[show-fellowship [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `valdaermen` |
 | `in` | named | Where to look: campaign, fellowship, current, character (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · fellowship · current` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-fellowship]]`** replies:
+**`[[help show-fellowship]]`** replies:
 
 ```
-[SYSTEM: show-fellowship - show-fellowship [name|@all] [in=<where>] [in-story=true]  (the mystic fellowships' Foundation & Pillars)]
+[SYSTEM: show-fellowship - show-fellowship [name|@all] [in=<where>] [in-story]  (the mystic fellowships' Foundation & Pillars)]
 ```
 
 ### `show-grant`
@@ -2222,19 +2315,19 @@ the mystic fellowships' Foundation & Pillars
 what a purchase really cost and where it came from
 
 ```
-[[show-grant [name|@all] [in=<where>] [in-story=true]]]
+[[show-grant [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-grant]]`** replies:
+**`[[help show-grant]]`** replies:
 
 ```
-[SYSTEM: show-grant - show-grant [name|@all] [in=<where>] [in-story=true]  (what a purchase really cost and where it came from)]
+[SYSTEM: show-grant - show-grant [name|@all] [in=<where>] [in-story]  (what a purchase really cost and where it came from)]
 ```
 
 ### `show-health`
@@ -2242,39 +2335,38 @@ what a purchase really cost and where it came from
 a character's health track, penalty and what soaks what
 
 ```
-[[show-health [name|@all] [in=<where>] [in-story=true]]]
+[[show-health [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-health]]`** replies:
+**`[[help show-health]]`** replies:
 
 ```
-[SYSTEM: show-health - show-health [name|@all] [in=<where>] [in-story=true]  (a character's health track, penalty and what soaks what)]
+[SYSTEM: show-health - show-health [name|@all] [in=<where>] [in-story]  (a character's health track, penalty and what soaks what)]
 ```
 
 ### `show-help`
 
-list commands, or show one's usage
+alias of [[help]], which keeps its name - it is the one command everybody already knows
 
 ```
-[[show-help [verb|@all] [in=<where>] [in-story=true]]]
+[[show-help [[verb]] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
-| `name` | positional | What to show; @all means the whole list <br>*e.g.* `roll` |
-| `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `verb` | positional | `[verb]` <br>*e.g.* `show-merit` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-help]]`** replies:
+**`[[help show-help]]`** replies:
 
 ```
-[SYSTEM: show-help - show-help [verb|@all] [in=<where>] [in-story=true]  (list commands, or show one's usage)]
+[SYSTEM: show-help - show-help [[verb]] [in-story]  (alias of [[help]], which keeps its name - it is the one command everybody already knows)]
 ```
 
 ### `show-merit`
@@ -2282,7 +2374,7 @@ list commands, or show one's usage
 merits & flaws: what a character owns, or what the chronicle defines
 
 ```
-[[show-merit [name|@all] [in=<where>] [in-story=true]]]
+[[show-merit [name|@all] [in=<where>] [in-story]]]
 ```
 
 > in=campaign lists the definitions; a name shows one in full. NEVER lists Arcana - [[show-arcanum]] is their list
@@ -2291,12 +2383,12 @@ merits & flaws: what a character owns, or what the chronicle defines
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `iron-will` |
 | `in` | named | Where to look: campaign, template, clan, fellowship, current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · template · clan` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-merit]]`** replies:
+**`[[help show-merit]]`** replies:
 
 ```
-[SYSTEM: show-merit - show-merit [name|@all] [in=<where>] [in-story=true]  (merits & flaws: what a character owns, or what the chronicle defines; in=campaign lists the definitions; a name shows one in full. NEVER lists Arcana - [[show-arcanum]] is their list)]
+[SYSTEM: show-merit - show-merit [name|@all] [in=<where>] [in-story]  (merits & flaws: what a character owns, or what the chronicle defines; in=campaign lists the definitions; a name shows one in full. NEVER lists Arcana - [[show-arcanum]] is their list)]
 ```
 
 ### `show-player`
@@ -2304,19 +2396,19 @@ merits & flaws: what a character owns, or what the chronicle defines
 the current player (the storyteller, unless somebody took a seat)
 
 ```
-[[show-player [name|@all] [in=<where>] [in-story=true]  (the current player (the storyteller, unless somebody took a seat))]]
+[[show-player [name|@all] [in=<where>] [in-story]  (the current player (the storyteller, unless somebody took a seat))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign, player (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · player` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-player]]`** replies:
+**`[[help show-player]]`** replies:
 
 ```
-[SYSTEM: show-player - show-player [name|@all] [in=<where>] [in-story=true]  (the current player (the storyteller, unless somebody took a seat))]
+[SYSTEM: show-player - show-player [name|@all] [in=<where>] [in-story]  (the current player (the storyteller, unless somebody took a seat))]
 ```
 
 ### `show-resource`
@@ -2324,19 +2416,19 @@ the current player (the storyteller, unless somebody took a seat)
 a character's live pools and trackers (and what they cannot use)
 
 ```
-[[show-resource [name|@all] [in=<where>] [in-story=true]  (a character's live pools and trackers (and what they cannot use))]]
+[[show-resource [name|@all] [in=<where>] [in-story]  (a character's live pools and trackers (and what they cannot use))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-resource]]`** replies:
+**`[[help show-resource]]`** replies:
 
 ```
-[SYSTEM: show-resource - show-resource [name|@all] [in=<where>] [in-story=true]  (a character's live pools and trackers (and what they cannot use))]
+[SYSTEM: show-resource - show-resource [name|@all] [in=<where>] [in-story]  (a character's live pools and trackers (and what they cannot use))]
 ```
 
 ### `show-roll`
@@ -2344,19 +2436,19 @@ a character's live pools and trackers (and what they cannot use)
 the chronicle's saved rolls, or one in full
 
 ```
-[[show-roll [name|@all] [in=<where>] [in-story=true]]]
+[[show-roll [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `sword-strike` |
 | `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-roll]]`** replies:
+**`[[help show-roll]]`** replies:
 
 ```
-[SYSTEM: show-roll - show-roll [name|@all] [in=<where>] [in-story=true]  (the chronicle's saved rolls, or one in full)]
+[SYSTEM: show-roll - show-roll [name|@all] [in=<where>] [in-story]  (the chronicle's saved rolls, or one in full)]
 ```
 
 ### `show-roll-status`
@@ -2364,19 +2456,19 @@ the chronicle's saved rolls, or one in full
 an extended action's progress
 
 ```
-[[show-roll-status [name|@all] [in=<where>] [in-story=true]]]
+[[show-roll-status [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-roll-status]]`** replies:
+**`[[help show-roll-status]]`** replies:
 
 ```
-[SYSTEM: show-roll-status - show-roll-status [name|@all] [in=<where>] [in-story=true]  (an extended action's progress)]
+[SYSTEM: show-roll-status - show-roll-status [name|@all] [in=<where>] [in-story]  (an extended action's progress)]
 ```
 
 ### `show-scene`
@@ -2384,19 +2476,19 @@ an extended action's progress
 the chronicle's scenes, or one in full (defaults to the open one)
 
 ```
-[[show-scene [name|@all] [in=<where>] [in-story=true]  (the chronicle's scenes, or one in full (defaults to the open one))]]
+[[show-scene [name|@all] [in=<where>] [in-story]  (the chronicle's scenes, or one in full (defaults to the open one))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign, scene (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · scene` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-scene]]`** replies:
+**`[[help show-scene]]`** replies:
 
 ```
-[SYSTEM: show-scene - show-scene [name|@all] [in=<where>] [in-story=true]  (the chronicle's scenes, or one in full (defaults to the open one))]
+[SYSTEM: show-scene - show-scene [name|@all] [in=<where>] [in-story]  (the chronicle's scenes, or one in full (defaults to the open one))]
 ```
 
 ### `show-sheet`
@@ -2404,19 +2496,19 @@ the chronicle's scenes, or one in full (defaults to the open one)
 a character's record as the engine reads it (effective values marked)
 
 ```
-[[show-sheet [name|@all] [in=<where>] [in-story=true]  (a character's record as the engine reads it (effective values marked))]]
+[[show-sheet [name|@all] [in=<where>] [in-story]  (a character's record as the engine reads it (effective values marked))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-sheet]]`** replies:
+**`[[help show-sheet]]`** replies:
 
 ```
-[SYSTEM: show-sheet - show-sheet [name|@all] [in=<where>] [in-story=true]  (a character's record as the engine reads it (effective values marked))]
+[SYSTEM: show-sheet - show-sheet [name|@all] [in=<where>] [in-story]  (a character's record as the engine reads it (effective values marked))]
 ```
 
 ### `show-specialty`
@@ -2424,19 +2516,19 @@ a character's record as the engine reads it (effective values marked)
 a character's specialties (one applies per roll, via specialty=)
 
 ```
-[[show-specialty [name|@all] [in=<where>] [in-story=true]  (a character's specialties (one applies per roll, via specialty=))]]
+[[show-specialty [name|@all] [in=<where>] [in-story]  (a character's specialties (one applies per roll, via specialty=))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-specialty]]`** replies:
+**`[[help show-specialty]]`** replies:
 
 ```
-[SYSTEM: show-specialty - show-specialty [name|@all] [in=<where>] [in-story=true]  (a character's specialties (one applies per roll, via specialty=))]
+[SYSTEM: show-specialty - show-specialty [name|@all] [in=<where>] [in-story]  (a character's specialties (one applies per roll, via specialty=))]
 ```
 
 ### `show-supernatural`
@@ -2444,19 +2536,19 @@ a character's specialties (one applies per roll, via specialty=)
 the families of power open to a character (disciplines, magic, sorcery, blood-sorcery)
 
 ```
-[[show-supernatural [name|@all] [in=<where>] [in-story=true]  (the families of power open to a character (disciplines, magic, sorcery, blood-sorcery))]]
+[[show-supernatural [name|@all] [in=<where>] [in-story]  (the families of power open to a character (disciplines, magic, sorcery, blood-sorcery))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `disciplines` |
 | `in` | named | Where to look: current, character (default current); a bare name is worked out, kind::name is explicit <br>*e.g.* `current · character` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-supernatural]]`** replies:
+**`[[help show-supernatural]]`** replies:
 
 ```
-[SYSTEM: show-supernatural - show-supernatural [name|@all] [in=<where>] [in-story=true]  (the families of power open to a character (disciplines, magic, sorcery, blood-sorcery))]
+[SYSTEM: show-supernatural - show-supernatural [name|@all] [in=<where>] [in-story]  (the families of power open to a character (disciplines, magic, sorcery, blood-sorcery))]
 ```
 
 ### `show-table`
@@ -2464,7 +2556,7 @@ the families of power open to a character (disciplines, magic, sorcery, blood-so
 success tables, grouped by category, or one laid out in full
 
 ```
-[[show-table [name|@all] [in=<where>] [category=".."] [in-story=true]]]
+[[show-table [name|@all] [in=<where>] [category=".."] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -2472,12 +2564,12 @@ success tables, grouped by category, or one laid out in full
 | `name` | positional | What to show; @all means the whole list |
 | `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
 | `category` | named | Only this table category |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-table]]`** replies:
+**`[[help show-table]]`** replies:
 
 ```
-[SYSTEM: show-table - show-table [name|@all] [in=<where>] [category=".."] [in-story=true]  (success tables, grouped by category, or one laid out in full)]
+[SYSTEM: show-table - show-table [name|@all] [in=<where>] [category=".."] [in-story]  (success tables, grouped by category, or one laid out in full)]
 ```
 
 ### `show-template`
@@ -2485,19 +2577,19 @@ success tables, grouped by category, or one laid out in full
 the templates this chronicle knows, and what each is made of
 
 ```
-[[show-template [name|@all] [in=<where>] [in-story=true]]]
+[[show-template [name|@all] [in=<where>] [in-story]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | positional | What to show; @all means the whole list <br>*e.g.* `vampire` |
 | `in` | named | Where to look: campaign, template, current, character (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign · template · current` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-template]]`** replies:
+**`[[help show-template]]`** replies:
 
 ```
-[SYSTEM: show-template - show-template [name|@all] [in=<where>] [in-story=true]  (the templates this chronicle knows, and what each is made of)]
+[SYSTEM: show-template - show-template [name|@all] [in=<where>] [in-story]  (the templates this chronicle knows, and what each is made of)]
 ```
 
 ### `show-time-between`
@@ -2505,7 +2597,7 @@ the templates this chronicle knows, and what each is made of
 measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)
 
 ```
-[[show-time-between [name|@all] [in=<where>] [<date|name>] [[date|name]] [in-story=true]  (measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh))]]
+[[show-time-between [name|@all] [in=<where>] [<date|name>] [[date|name]] [in-story]  (measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh))]]
 ```
 
 | argument | kind | meaning |
@@ -2514,12 +2606,12 @@ measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)
 | `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
 | `from` | positional | `<date\|name>` <br>*e.g.* `story-start` |
 | `to` | positional | `[date\|name]` <br>*e.g.* `now` |
-| `in-story` | named `enum` | Keep this reply in the story for the AI to read (default: hidden from context) — one of `true` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help show-time-between]]`** replies:
+**`[[help show-time-between]]`** replies:
 
 ```
-[SYSTEM: show-time-between - show-time-between [name|@all] [in=<where>] [<date|name>] [[date|name]] [in-story=true]  (measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh))]
+[SYSTEM: show-time-between - show-time-between [name|@all] [in=<where>] [<date|name>] [[date|name]] [in-story]  (measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh))]
 ```
 
 ### `specialty`
@@ -2527,18 +2619,19 @@ measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)
 add a specialty to a trait (labels keep their case)
 
 ```
-[[specialty <trait> `<Label>`  (add a specialty to a trait (labels keep their case))]]
+[[specialty <trait> `<Label>` [in-story]  (add a specialty to a trait (labels keep their case))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `trait` | positional **required** | `<trait>` |
 | `label` | positional `literal` **required** | ``<Label>`` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help specialty]]`** replies:
+**`[[help specialty]]`** replies:
 
 ```
-[SYSTEM: specialty - specialty <trait> `<Label>`  (add a specialty to a trait (labels keep their case))]
+[SYSTEM: specialty - specialty <trait> `<Label>` [in-story]  (add a specialty to a trait (labels keep their case))]
 ```
 
 ### `spend`
@@ -2546,7 +2639,7 @@ add a specialty to a trait (labels keep their case)
 spend a resource / fire a named effect outside a roll
 
 ```
-[[spend <resource[::effect]> [[target]] [[amount]] [reason=".."]]]
+[[spend <resource[::effect]> [[target]] [[amount]] [reason=".."] [in-story]]]
 ```
 
 | argument | kind | meaning |
@@ -2555,11 +2648,12 @@ spend a resource / fire a named effect outside a roll
 | `target` | positional | `[target]` |
 | `amount` | positional | `[amount]` |
 | `reason` | named `literal` | Why (echoed in the note) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help spend]]`** replies:
+**`[[help spend]]`** replies:
 
 ```
-[SYSTEM: spend - spend <resource[::effect]> [[target]] [[amount]] [reason=".."]  (spend a resource / fire a named effect outside a roll)]
+[SYSTEM: spend - spend <resource[::effect]> [[target]] [[amount]] [reason=".."] [in-story]  (spend a resource / fire a named effect outside a roll)]
 ```
 
 ### `story-start`
@@ -2567,17 +2661,18 @@ spend a resource / fire a named effect outside a roll
 set when the story begins (yyyy-mm-dd-hh)
 
 ```
-[[story-start yyyy-mm-dd-hh  (set when the story begins (yyyy-mm-dd-hh))]]
+[[story-start yyyy-mm-dd-hh [in-story]  (set when the story begins (yyyy-mm-dd-hh))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `date` | positional **required** | `yyyy-mm-dd-hh` <br>*e.g.* `1197-03-15-08` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help story-start]]`** replies:
+**`[[help story-start]]`** replies:
 
 ```
-[SYSTEM: story-start - story-start yyyy-mm-dd-hh  (set when the story begins (yyyy-mm-dd-hh))]
+[SYSTEM: story-start - story-start yyyy-mm-dd-hh [in-story]  (set when the story begins (yyyy-mm-dd-hh))]
 ```
 
 ### `table-alias`
@@ -2585,18 +2680,19 @@ set when the story begins (yyyy-mm-dd-hh)
 define a table alias, or list them (no args); table=@alias resolves it
 
 ```
-[[table-alias [<@alias>] ["<[sub::]name>"]  (define a table alias, or list them (no args); table=@alias resolves it)]]
+[[table-alias [<@alias>] ["<[sub::]name>"] [in-story]  (define a table alias, or list them (no args); table=@alias resolves it)]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `token` | positional | `<@alias>` |
 | `target` | positional | `"<[sub::]name>"` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help table-alias]]`** replies:
+**`[[help table-alias]]`** replies:
 
 ```
-[SYSTEM: table-alias - table-alias [<@alias>] ["<[sub::]name>"]  (define a table alias, or list them (no args); table=@alias resolves it)]
+[SYSTEM: table-alias - table-alias [<@alias>] ["<[sub::]name>"] [in-story]  (define a table alias, or list them (no args); table=@alias resolves it)]
 ```
 
 ### `take-arcanum`
@@ -2604,7 +2700,7 @@ define a table alias, or list them (no args); table=@alias resolves it
 take an arcanum or taint (needs the arcana capability - [[attune]])
 
 ```
-[[take-arcanum <name[::param]> [[points]] [paid=".."] [waive=true]  (take an arcanum or taint (needs the arcana capability - [[attune]]))]]
+[[take-arcanum <name[::param]> [[points]] [paid=".."] [waive] [in-story]  (take an arcanum or taint (needs the arcana capability - [[attune]]))]]
 ```
 
 | argument | kind | meaning |
@@ -2612,12 +2708,13 @@ take an arcanum or taint (needs the arcana capability - [[attune]])
 | `name` | positional **required** | `<name[::param]>` |
 | `points` | positional | `[points]` |
 | `paid` | named | What it REALLY cost (0 = the Storyteller granted it) |
-| `waive` | named `enum` | Waive prerequisites / template limits / the capability gate — one of `true` |
+| `waive` | named `bool` | Waive prerequisites / template limits / the capability gate |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help take-arcanum]]`** replies:
+**`[[help take-arcanum]]`** replies:
 
 ```
-[SYSTEM: take-arcanum - take-arcanum <name[::param]> [[points]] [paid=".."] [waive=true]  (take an arcanum or taint (needs the arcana capability - [[attune]]))]
+[SYSTEM: take-arcanum - take-arcanum <name[::param]> [[points]] [paid=".."] [waive] [in-story]  (take an arcanum or taint (needs the arcana capability - [[attune]]))]
 ```
 
 ### `take-merit`
@@ -2625,7 +2722,7 @@ take an arcanum or taint (needs the arcana capability - [[attune]])
 take a merit/flaw; parameterized defs take name::param instances
 
 ```
-[[take-merit <name[::param]> [[points]] [paid=".."] [waive=true]]]
+[[take-merit <name[::param]> [[points]] [paid=".."] [waive] [in-story]]]
 ```
 
 > Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]]
@@ -2635,12 +2732,13 @@ take a merit/flaw; parameterized defs take name::param instances
 | `name` | positional **required** | `<name[::param]>` |
 | `points` | positional | `[points]` |
 | `paid` | named | What it REALLY cost (0 = the Storyteller granted it) |
-| `waive` | named `enum` | Waive unmet prerequisites — one of `true` |
+| `waive` | named `bool` | Waive unmet prerequisites |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help take-merit]]`** replies:
+**`[[help take-merit]]`** replies:
 
 ```
-[SYSTEM: take-merit - take-merit <name[::param]> [[points]] [paid=".."] [waive=true]  (take a merit/flaw; parameterized defs take name::param instances; Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]])]
+[SYSTEM: take-merit - take-merit <name[::param]> [[points]] [paid=".."] [waive] [in-story]  (take a merit/flaw; parameterized defs take name::param instances; Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]])]
 ```
 
 ### `toggle`
@@ -2648,18 +2746,19 @@ take a merit/flaw; parameterized defs take name::param instances
 switch a togglable passive off, or back on (the power is not lost either way)
 
 ```
-[[toggle <affliction> [on=<name|@alias>]  (switch a togglable passive off, or back on (the power is not lost either way))]]
+[[toggle <affliction> [on=<name|@alias>] [in-story]  (switch a togglable passive off, or back on (the power is not lost either way))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `affliction` | positional **required** | `<affliction>` |
 | `on` | named | Who (default: the current character) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help toggle]]`** replies:
+**`[[help toggle]]`** replies:
 
 ```
-[SYSTEM: toggle - toggle <affliction> [on=<name|@alias>]  (switch a togglable passive off, or back on (the power is not lost either way))]
+[SYSTEM: toggle - toggle <affliction> [on=<name|@alias>] [in-story]  (switch a togglable passive off, or back on (the power is not lost either way))]
 ```
 
 ### `turn`
@@ -2667,17 +2766,18 @@ switch a togglable passive off, or back on (the power is not lost either way)
 advance the current scene by one turn (moves the clock by its turn length)
 
 ```
-[[turn [[n]]  (advance the current scene by one turn (moves the clock by its turn length))]]
+[[turn [[n]] [in-story]  (advance the current scene by one turn (moves the clock by its turn length))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `count` | positional `int` | How many turns (default 1) |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help turn]]`** replies:
+**`[[help turn]]`** replies:
 
 ```
-[SYSTEM: turn - turn [[n]]  (advance the current scene by one turn (moves the clock by its turn length))]
+[SYSTEM: turn - turn [[n]] [in-story]  (advance the current scene by one turn (moves the clock by its turn length))]
 ```
 
 ### `win-afflict`
@@ -2685,15 +2785,17 @@ advance the current scene by one turn (moves the clock by its turn length)
 open a window to apply an affliction (its binding slots appear on pick)
 
 ```
-[[win-afflict  (open a window to apply an affliction (its binding slots appear on pick))]]
+[[win-afflict [in-story]  (open a window to apply an affliction (its binding slots appear on pick))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help win-afflict]]`** replies:
+**`[[help win-afflict]]`** replies:
 
 ```
-[SYSTEM: win-afflict - win-afflict  (open a window to apply an affliction (its binding slots appear on pick))]
+[SYSTEM: win-afflict - win-afflict [in-story]  (open a window to apply an affliction (its binding slots appear on pick))]
 ```
 
 ### `win-affliction`
@@ -2701,15 +2803,17 @@ _No arguments._
 open a window to define an affliction (then/mirror have pickers)
 
 ```
-[[win-affliction  (open a window to define an affliction (then/mirror have pickers))]]
+[[win-affliction [in-story]  (open a window to define an affliction (then/mirror have pickers))]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help win-affliction]]`** replies:
+**`[[help win-affliction]]`** replies:
 
 ```
-[SYSTEM: win-affliction - win-affliction  (open a window to define an affliction (then/mirror have pickers))]
+[SYSTEM: win-affliction - win-affliction [in-story]  (open a window to define an affliction (then/mirror have pickers))]
 ```
 
 ### `win-constraint`
@@ -2717,15 +2821,17 @@ _No arguments._
 open a window to define a constraint group
 
 ```
-[[win-constraint]]
+[[win-constraint [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help win-constraint]]`** replies:
+**`[[help win-constraint]]`** replies:
 
 ```
-[SYSTEM: win-constraint - win-constraint  (open a window to define a constraint group)]
+[SYSTEM: win-constraint - win-constraint [in-story]  (open a window to define a constraint group)]
 ```
 
 ### `win-roll`
@@ -2733,15 +2839,17 @@ _No arguments._
 open a window to build, roll, and save rolls
 
 ```
-[[win-roll]]
+[[win-roll [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help win-roll]]`** replies:
+**`[[help win-roll]]`** replies:
 
 ```
-[SYSTEM: win-roll - win-roll  (open a window to build, roll, and save rolls)]
+[SYSTEM: win-roll - win-roll [in-story]  (open a window to build, roll, and save rolls)]
 ```
 
 ### `win-table`
@@ -2749,14 +2857,16 @@ _No arguments._
 open a window to define a success table
 
 ```
-[[win-table]]
+[[win-table [in-story]]]
 ```
 
-_No arguments._
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
 
-**`[[show-help win-table]]`** replies:
+**`[[help win-table]]`** replies:
 
 ```
-[SYSTEM: win-table - win-table  (open a window to define a success table)]
+[SYSTEM: win-table - win-table [in-story]  (open a window to define a success table)]
 ```
 

@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `e63dec7`** ("One way to look at
-> anything: show-* verbs, seven scopes, and none of it in context").
+> **Last synced with the code as of commit `147a55f`** ("A flag with no
+> value means yes, and in-story belongs to every command").
+> Prior: `e63dec7` ("One way to look at anything: show-* verbs, seven scopes,
+> and none of it in context").
 > Prior: `70892be` ("An arcanum is not a merit: its own type, its own list, its
 > own gate").
 > Prior: `0ecd2c3` ("A command reference that writes itself").
@@ -3677,6 +3679,55 @@ and `prefill` are mocked/available but not yet written.
       it, and `[[alias @all …]]` says so at the door.
     - 93 stale `[[old-verb]]` pointers inside reply text were rewritten to the
       current names, and `PowerFamily.verbs.list/info` now name the show verbs.
+
+
+74. **The flag, generalized** (owner, four things at once: *"Do we currently have
+    a command to show in-game time? / We should consider this `in-story` thing as
+    valid for all commands. Some commands have this as true by default, others as
+    default false. / Any Boolean argument to a command should be considered true
+    if it has no value. For example, `[[... in-story]]` means `in-story=true`. /
+    `help` commands are the exception to this 'show-<thing>' we just implemented.
+    `[[help]]` and its more specific cases are not deprecated. `[[show-help]]`
+    can be an alias, I guess."*).
+
+    1. **YES** - `[[show-date]]` (§7.73's merge of `story-date` + `dates`) prints
+       the in-game date AND time to the minute, elapsed-since-start, the next
+       full moon, and every bookmark. No new verb needed.
+    2. **`in-story` IS UNIVERSAL, AND RUNS BOTH WAYS.** `CommandRouter.register`
+       attaches `IN_STORY_PARAM` to EVERY spec - declaring it 130 times would be
+       130 chances to forget, and a knob missing from its spec does not exist.
+       `wantsInStory` is now a three-step resolver: what the player said on this
+       call → `CommandSpec.inStory` (a verb whose default is not what its name
+       implies) → `!isQuietVerb`. So `[[show-sheet in-story]]` shows a listing to
+       the AI and **`[[roll stealth in-story=false]]` is a roll behind the
+       Storyteller's screen** - the second direction did not exist before and is
+       the more interesting one. It still does NOT touch `stopGeneration`
+       (§7.73's ruling stands).
+    3. **A FLAG WITH NO VALUE CAN ONLY MEAN ONE THING.** New `ParamType "bool"`,
+       and `promoteBareFlags` turns a bare positional matching a declared flag
+       into `key=true`. **Placed in `CommandRouter.parse`, not `CommandParser`**:
+       the parser is spec-agnostic by design (it only tokenizes), and the router
+       is the layer that knows what a verb declares. `processAdventureInput` was
+       switched to `CommandRouter.parse` so the promotion is identical on both
+       paths. `readBool` accepts true/yes/y/on/1 and false/no/n/off/0, and
+       **returns `undefined` for anything else - a mistyped flag reads as ABSENT,
+       never as false**, so a typo cannot silently mean "no". Only an exact match
+       on a declared bool is promoted, so `[[show-merit iron-will]]` keeps its
+       name. Every param whose whole vocabulary was `["true"]` or
+       `["true","false"]` (waive, extended, ongoing, pay, add, default, set,
+       awakened, has-virtues) became a `bool`, and the six hand-rolled
+       `=== "true"` comparisons scattered through game.ts became `flagOf`.
+       Help renders a flag BARE when optional and `key=true|false` when required
+       (creator-mode's `set` must teach both directions); windows render one as
+       a three-way selector - true / false / (default).
+    4. **`[[help]]` KEEPS ITS NAME.** §7.73 renamed it to `show-help` and left
+       `help` as a visible alias, which was backwards: help is the one command a
+       player types before they know anything at all, in this engine and every
+       other. It is no longer deprecated, it is listed in `QUIET_VERBS` (having
+       no `show-` prefix to be quiet by), and **`show-help` is registered as the
+       alias** for players who now reasonably guess it. The 93-pointer sweep of
+       §7.73 had rewritten `[[help]]` to `[[show-help]]` in reply prose; that
+       part is reverted.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

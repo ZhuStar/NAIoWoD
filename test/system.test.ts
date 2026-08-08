@@ -57,7 +57,7 @@ import {
   parseStoryDate, formatStoryDate, parseDuration, addDuration, diffCalendar, formatCalendarSpan,
   StoryClock, DateBook, DEFAULT_STORY_START,
   extractHideBlocks, processGeneratedText, init,
-  processContextBuilt, stripCtxSkip, GenCounter, isQuietVerb,
+  processContextBuilt, stripCtxSkip, GenCounter, isQuietVerb, SHOW_SUBJECT_VERBS, readBool,
   processGenerationEnd, stripAgedCtxSkip,
   parseCardText, formatCardText, characterToCard, characterFromCard,
   asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
@@ -7458,14 +7458,18 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
   // THE STRUCTURAL TEST: a subject cannot be half-wired. Adding one to
   // SHOW_SUBJECTS without its knobs, or pointing a deprecation at a verb that
   // does not exist, fails here rather than in play.
-  test("every show verb declares name/in/in-story, and every old name points somewhere real", () => {
-    const shown = CommandRouter.verbs({ includeHidden: true }).filter(v => v.startsWith("show-"));
-    expect(shown.length).toBeGreaterThan(25);
-    for (const verb of shown) {
+  test("every show subject declares name+in, EVERY verb declares in-story, and old names point somewhere real", () => {
+    expect(SHOW_SUBJECT_VERBS.length).toBeGreaterThan(25);
+    for (const verb of SHOW_SUBJECT_VERBS) {
       const keys = (CommandRouter.specFor(verb)!.params ?? []).map(p => p.key);
       expect([verb, keys.includes("name")]).toEqual([verb, true]);
       expect([verb, keys.includes("in")]).toEqual([verb, true]);
-      expect([verb, keys.includes("in-story")]).toEqual([verb, true]);
+    }
+    // in-story is UNIVERSAL: CommandRouter.register attaches it, so there is no
+    // command whose context placement the player cannot override.
+    for (const verb of CommandRouter.verbs({ includeHidden: true })) {
+      const p = (CommandRouter.specFor(verb)!.params ?? []).find(x => x.key === "in-story");
+      expect([verb, p?.type]).toEqual([verb, "bool"]);
     }
     const registered = new Set(CommandRouter.verbs({ includeHidden: true }));
     for (const { verb, replacedBy } of CommandRouter.deprecatedVerbs()) {
@@ -7495,6 +7499,34 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
     expect(isQuietVerb("roll")).toBe(false);           // an ACTION generates
     expect((await processAdventureInput("[[merits]]"))!.inputText!).toContain("wod:ctx-skip");
     expect((await processAdventureInput("[[merits in-story=true]]"))!.inputText!).not.toContain("wod:ctx-skip");
+  });
+
+  test("a flag with no value can only mean one thing: [[... in-story]] is in-story=true", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    // The bare word is promoted by the ROUTER, which knows what the verb
+    // declares - the parser stays spec-agnostic and files it as a positional.
+    expect(CommandParser.parse("show-budget in-story").positional).toEqual(["in-story"]);
+    expect(CommandRouter.parse("show-budget in-story").named["in-story"]).toBe("true");
+    expect(CommandRouter.parse("show-budget in-story").positional).toEqual([]);
+    expect((await processAdventureInput("[[show-budget in-story]]"))!.inputText!).not.toContain("wod:ctx-skip");
+    // A real positional is never eaten: only an exact match on a declared flag.
+    expect(CommandRouter.parse("show-merit iron-will").positional).toEqual(["iron-will"]);
+    // ...and every spelling of yes and no is understood, either way.
+    expect(readBool("yes")).toBe(true);
+    expect(readBool("off")).toBe(false);
+    expect(readBool("")).toBe(true);            // `key=` is still the flag being set
+    expect(readBool("perhaps")).toBeUndefined(); // a typo reads as ABSENT, never as false
+  });
+
+  test("in-story runs BOTH ways: an action can be hidden, a listing can be shown", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    // A roll normally reaches the AI...
+    expect((await processAdventureInput("[[roll strength]]"))!.inputText!).not.toContain("wod:ctx-skip");
+    // ...and in-story=false is the roll behind the Storyteller's screen.
+    expect((await processAdventureInput("[[roll strength in-story=false]]"))!.inputText!).toContain("wod:ctx-skip");
+    // A listing is the mirror image of that.
+    expect((await processAdventureInput("[[show-sheet]]"))!.inputText!).toContain("wod:ctx-skip");
+    expect((await processAdventureInput("[[show-sheet in-story]]"))!.inputText!).not.toContain("wod:ctx-skip");
   });
 
   test("@all is reserved, so an alias can never shadow the wildcard", async () => {
@@ -7563,13 +7595,17 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
     expect(old).toContain("[[merits]] is now [[show-merit]]");
   });
 
-  test("[[show-help]] lists the current vocabulary and hides the old names", async () => {
-    const help = await CommandRouter.route("show-help");
+  test("[[help]] keeps its name, lists the current vocabulary, and hides the old ones", async () => {
+    const help = await CommandRouter.route("help");
     expect(help).toContain("show-merit");
     expect(help).not.toContain(", merits,");                  // deprecated: not listed
     expect(help).toContain("older names still work");
-    // help itself stays VISIBLE - it is what a player who knows nothing types.
-    expect(help).toContain("help");
+    // help is NOT one of the renamed verbs: it is what everybody already knows.
+    expect(CommandRouter.specFor("help")!.deprecated).toBeUndefined();
+    expect(CommandRouter.verbs()).toContain("help");
+    // ...and show-help is the alias, for players who now reasonably guess it.
+    expect(await CommandRouter.route("show-help")).toContain("show-merit");
     expect(await CommandRouter.route("show-help merits")).toContain("merits is now [[show-merit]]");
+    expect(await CommandRouter.route("help merits")).toContain("merits is now [[show-merit]]");
   });
 });

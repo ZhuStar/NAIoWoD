@@ -6952,7 +6952,10 @@ class CommandRouter {
 // A frozen enum rather than four bare strings, so a request can NAME its store
 // and be checked. There are four, and only two are ours to write:
 //
-//   story    persistent, per story, SHARED BY EVERY SCRIPT - the engine's home
+//   story    persistent, per story, and PER SCRIPT - measured, not assumed
+//            (§7.90). Two probe slots each listed this store and saw only
+//            their own keys. No prefix can bridge that, which is exactly why
+//            one script has to OWN the state and serve the rest.
 //   temp     session scratch, cleared when the story closes
 //   history  undo-aware; reserved for mechanical state, unused today
 //   account  api.v1.storage - ACCOUNT-level, shared across every story. The
@@ -7014,15 +7017,22 @@ const KEY = Object.freeze({
   lorebookBackup: (category: string, entry: string) => `lb:backup:${category}/${entry}`,
 } as const);
 
-// --- THE ONE KEY THAT CANNOT LIVE BEHIND A SCRIPT ID ------------------------
-// ScopedStorage prefixes every key with the script's OWN id, so script B cannot
-// read what script A wrote unless it already knows A's id - and learning A's id
-// is precisely what this key is for. So the directory lives at a FIXED prefix
-// every unit can compute while knowing nothing at all.
+// --- EACH SCRIPT'S PRIVATE ADDRESS BOOK -------------------------------------
+// CORRECTED BY MEASUREMENT (§7.90). This was written believing storyStorage was
+// shared, so that a fixed prefix would let every unit read ONE directory. It is
+// not shared - it is per script - so no prefix can do that, and this is not a
+// shared registry at all.
 //
-// Nothing moves: this is a NEW key at a NEW prefix, so there is no migration
-// here and no live save at risk. It is also the pattern the shared game state
-// will eventually want, proved out somewhere it costs nothing.
+// What it IS, and still usefully: each script's OWN note of which peers it has
+// met, so the next load can `send` to a remembered address instead of
+// broadcasting and waiting a tick for the answer. Every script keeps its own
+// copy and fills it in by hearing hellos. That works exactly as built - only
+// the reason it works has changed.
+//
+// The fixed prefix is now merely tidy rather than load-bearing: per-script
+// storage already isolates us from other scripts, so this could equally be the
+// script id. It stays constant because a stable name is easier to find in a
+// store dump than a uuid.
 const REGISTRY_PREFIX = "naiowod";
 const DIRECTORY_KEY = "scripts";
 // A cached address is dropped if nothing has confirmed it for this long, so a
@@ -7048,11 +7058,18 @@ const DIRECTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // only when nothing nearer answered. That is the seam the storage script slots
 // into, and it is why `served` is a flag on the request rather than a return.
 //
-// WHAT IS NOT DECIDED HERE: whether a cross-script read can answer INSIDE an
-// awaiting input hook. That is probe Q5, still never run (§63), and it decides
-// whether the remote transport can be request/reply at all or has to be a local
-// mirror kept fresh by write-through. Either way callers do not change, which
-// is the point of putting the counter here first.
+// AND THE COUNTER IS NOW MANDATORY, not stylistic. storyStorage turned out to
+// be PER SCRIPT (§7.90), so routing every access through one owner is the only
+// way N scripts can ever see one game state - there is no prefix, and no shared
+// store, that would let them do it directly.
+//
+// WHAT IS STILL NOT DECIDED HERE: whether a cross-script read can answer INSIDE
+// an awaiting input hook. That is probe Q5, run but not yet reached (the run of
+// 2026-08-08 covered Q1-Q4, S1, S2 and H1; Q5 and H2 were not triggered). It
+// decides whether the remote transport can be request/reply at all, or has to
+// be each satellite keeping a local MIRROR in its own per-script storage, kept
+// fresh by write-through from the owner. Either way callers do not change,
+// which is the point of putting the counter here first.
 const STORAGE_CHANNEL = "naiowod:storage";
 
 interface StorageRequest {

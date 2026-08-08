@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `7c11cdf`** ("The probe was going
-> to lie").
+> **Last synced with the code as of commit `f04e551`** ("storyStorage is not
+> shared").
+> Prior: `7c11cdf` ("The probe was going to lie").
 > Prior: `08351c6` ("One counter, and nobody reaches past it").
 > Prior: `5e584e4` ("Addresses persist, interest does not").
 > Prior: `af756c8` ("Every key in one place").
@@ -273,7 +274,21 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   `storyStorage` is SHARED between scripts, N scripts seeing one game state is a
   **one-line change**: `ScopedStorage`'s prefix is already a constructor
   parameter (services.ts:27) defaulting to `api.v1.script.id`, so a fixed
-  `"naiowod"` makes every unit read the same keys. **ANSWERED 2026-08-08 by the
+  `"naiowod"` makes every unit read the same keys.
+
+  > ### ⛔ MEASURED 2026-08-08, AND THE ANSWER IS **NO** (§7.90)
+  > **`storyStorage` is NOT shared. It is per-script.** Two probe slots each
+  > wrote a key and listed the store; each saw only its own:
+  > `["naiowod-probe-story","probe-s1-one"]` vs `["probe-s1-two"]`. This
+  > **overturns the previous entry here**, which recorded the owner's
+  > recollection that storyStorage was shared and was then built on. A fixed
+  > prefix changes NOTHING across scripts — no prefix can make one script's
+  > store visible to another. The consequence is not a setback: it makes the
+  > storage-script design **mandatory rather than stylistic**, because routing
+  > through one owner is now the ONLY way N scripts can see one game state.
+
+  ~~The superseded reasoning, kept because it is what several later entries were
+  built on:~~ **ANSWERED 2026-08-08 by the
   owner: storyStorage IS shared across all scripts** — hence the community habit
   of prefixing keys with a UUID, which is what `ScopedStorage` already does with
   `api.v1.script.id`. So the multi-script split is unblocked, and the remaining
@@ -4551,6 +4566,75 @@ and `prefill` are mocked/available but not yet written.
       will otherwise mistake for a broken probe.
     - Output is `api.v1.log`, tagged `[probe:one]` / `[probe:two]`; nothing
       reaches the story text, since every probe input returns `stopGeneration`.
+
+90. **THE PROBE WAS RUN (2026-08-08), and it overturned the fact the storage
+    architecture was resting on.** Two slots, ids `40d05165…` and `2e8718eb…`.
+    Q1–Q4, S1, S2 and H1 answered; **Q5 and H2 not triggered** (they need
+    `probe-reply` and `probe-hooks stop` typed separately).
+
+    **S1 — `storyStorage` is NOT SHARED. It is PER SCRIPT.** Decisive: each slot
+    listed the store and saw only its own key — `["naiowod-probe-story",
+    "probe-s1-one"]` against `["probe-s1-two"]`. (`naiowod-probe-story` is
+    residue from `probe-window-field.ts` in that same slot, which independently
+    shows keys persist per script id.) This **reverses §4's recorded answer**,
+    which was the owner's recollection and was built on. Consequences:
+
+    - **No prefix can bridge scripts.** §7.86's "several units sharing one game
+      state must agree on a prefix" and §7.87's "a fixed prefix every unit can
+      compute" were both reasoning from the wrong fact. Corrected in place.
+    - **§7.87's directory still works, for a different reason.** It is not a
+      shared registry — it is each script's OWN address book of peers it has
+      met, filled in by hearing hellos. The code needed no change; only the
+      comment did.
+    - **§7.88's counter becomes MANDATORY rather than stylistic.** Routing every
+      access through one owner is now the ONLY way N scripts see one state.
+      The owner's design was right for a reason neither of us had measured yet.
+    - **The migration worry in §7.86 evaporates.** There is no move to a shared
+      prefix to make, because there is no shared store to move to.
+
+    **S2** — `api.v1.storage` likewise per-script, as documented.
+
+    **Q1 — `send()` TO YOUR OWN SCRIPT ID DELIVERS.** Undocumented; now known.
+    Only `broadcast` excludes the sender ("own broadcast heard? no").
+
+    **Q2** — order preserved (1, 2, 3 arrived in order).
+
+    **Q3** — delivery is **never synchronous**; always a later tick. The
+    assumption the bus was built on holds.
+
+    **Q4 — messaging spans scripts, but the load-time broadcast RACED.** One
+    heard two; two did **not** hear one. One loaded first and broadcast before
+    two was listening. So **a load-time broadcast can be missed by a script that
+    has not loaded yet** — which is precisely why §7.84's handshake replies to
+    an arriving hello instead of only broadcasting its own. Without that reply
+    the early script would never learn the late one exists. Measured
+    vindication of a design decision that was until now only reasoned.
+
+    **H1 — the hook chain DOES pass modified `inputText` down**, and slot order
+    is execution order: two received `"You probe-hooks. <seen-by:one>"`.
+
+    **NEW, and not a question anyone had asked: `inputText` ≠ `rawInputText`.**
+    The host hands the hook a *parsed* `inputText` (`"You probe-hooks."` — the
+    typed text wrapped as narration) alongside the raw text. The engine reads
+    `rawInputText` and is therefore correct today. But
+    `OnTextAdventureInputReturnValue` can only return `inputText` — **there is
+    no way to modify what a downstream script sees as `rawInputText`.** So the
+    chain can transform what lands in the document, but every script parses the
+    same original user input independently. That is fine, arguably better, and
+    it is a constraint on any plan to have one unit pre-process commands for the
+    others.
+
+    **A KNOWN FIDELITY GAP IN THE MOCK.** `src/host-mock.ts` models one
+    storyStorage, which is exactly right while the engine is one script and
+    exactly wrong the moment it is not. It needs per-script isolation (a store
+    per script id, with `__asScript(id)` or similar) before any test can
+    honestly exercise two units — otherwise the suite will keep proving that a
+    design works under an assumption the host has now been measured to break.
+
+    **STILL UNANSWERED: Q5.** Now the question that shapes the transport, since
+    per-script storage means a satellite MUST ask the owner for state. If a
+    reply cannot arrive while a hook awaits, satellites need a local mirror in
+    their own storage, kept fresh by write-through.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

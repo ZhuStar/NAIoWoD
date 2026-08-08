@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `08351c6`** ("One counter, and
-> nobody reaches past it").
+> **Last synced with the code as of commit `7c11cdf`** ("The probe was going
+> to lie").
+> Prior: `08351c6` ("One counter, and nobody reaches past it").
 > Prior: `5e584e4` ("Addresses persist, interest does not").
 > Prior: `af756c8` ("Every key in one place").
 > Prior: `0523e2d` ("A form belongs to the story").
@@ -3305,7 +3306,16 @@ and `prefill` are mocked/available but not yet written.
         distributed.
       **Q5 in `scripts/probe-messaging.ts` is that exact test** (publish inside
       the real hook, await a sibling's reply, report answered-in-Nms or TIMED
-      OUT). Nothing further should be built on B until it has been run on-host.
+      OUT). ~~Nothing further should be built on B until it has been run
+      on-host.~~ **SUPERSEDED 2026-08-08 by the owner: "latency at replying to
+      commands is not an issue... whatever the previous rule was about not using
+      messages and doing stuff in a single script, that was a necessary
+      simplification at the beginning, when we were pasting just one script. Now
+      it's the opposite. We're almost dealing with a sort of 'NovelAI Scripts as
+      microservices' thing."** So B is the direction, and Q5 is no longer a gate
+      on building - it decides the TRANSPORT SHAPE (request/reply vs a local
+      mirror kept fresh by write-through), not whether to proceed. See §7.89 for
+      the two bugs that made the probe untrustworthy until now.
 
 64. **Afflictions in time, places as afflictions, and magick with a k** (owner:
     *"our next step should be to take care of afflictions in time"*; afflictions
@@ -4509,6 +4519,38 @@ and `prefill` are mocked/available but not yet written.
     has to become a local mirror kept fresh by write-through. The counter was
     built first precisely because it is correct under EITHER answer: callers
     never change, only what serves them does.
+
+89. **The probe was going to lie about the one thing it existed to settle**
+    (owner: *"NovelAI exposes its own timeout API... it hides the regular
+    setTimeout and clearTimeout"*).
+
+    - **`api.v1.timers`** is the host's timer surface: `setTimeout(cb, ms)` and
+      `clearTimeout(id)` — both **Promise-shaped**, so the id must be awaited —
+      plus `sleep(ms)`. The probe used the hidden globals in two places. The
+      shipped engine uses no timers at all, verified by sweep, so nothing else
+      needed changing.
+    - **THE RESPONDER DID NOT EXIST.** Script two printed *"I am the responder"*
+      from inside its own hook and never subscribed to anything. Q5 could
+      therefore only ever print TIMED OUT — which is not the answer "no", it is
+      "nobody was listening", and the log cannot tell those apart. The probe
+      would have reported the OPPOSITE of the truth on the one question it was
+      written to settle, and §63 was already treating that answer as decisive.
+      Script two now replies from a LOAD-TIME subscription, which is also the
+      only correct place: a responder inside a hook could not answer while the
+      other script's hook is blocked, which is precisely what is being measured.
+    - **A second false-negative: script one asked before it listened.** The
+      question went out from inside the Promise executor while `onMessage` was
+      still being registered, so a fast responder could answer into the void.
+      Now: arm the timeout, subscribe, then ask — which also means
+      `clearTimeout` has a real id instead of the `0` the old code raced on.
+    - **A HANG IS THE THIRD RESULT, and it is not printed.** An answer means a
+      reply can cross while a hook awaits; TIMED OUT after ~2s means it cannot;
+      but if the input box hangs with no Q5 line at all, the host ran neither
+      the message nor the timer during the await — a stronger "no" than TIMED
+      OUT. The header now says so, because an unprinted outcome is one a reader
+      will otherwise mistake for a broken probe.
+    - Output is `api.v1.log`, tagged `[probe:one]` / `[probe:two]`; nothing
+      reaches the story text, since every probe input returns `stopGeneration`.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

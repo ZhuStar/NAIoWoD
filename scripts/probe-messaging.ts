@@ -7,12 +7,30 @@
 //
 // HOW TO RUN IT
 //   1. Paste this whole file into a script slot. Leave ROLE as "one".
-//   2. Paste it AGAIN into a second slot, and change ROLE to "two".
-//   3. Reload the story. The load-time findings (Q1-Q4, S1, S2) print by
-//      themselves after a few seconds.
-//   4. Type `probe-hooks` into the Text Adventure box - that runs H1/H2/H3.
-//   5. Type `probe-reply` into the box - that runs Q5.
+//   2. Paste it AGAIN into a SECOND slot, and change the ROLE line to "two".
+//      Both slots must be ENABLED - a disabled script never initializes.
+//   3. Reload the story and wait ~5s. Q1-Q4, S1 and S2 print by themselves.
+//   4. Type `probe-hooks` in the Text Adventure input box -> H1, H2, H3.
+//      Type `probe-hooks stop` to test stopFurtherScripts specifically.
+//   5. Type `probe-reply` in the same box -> Q5.
 //   6. Copy the whole log back.
+//
+// WHERE THE OUTPUT GOES: every line is api.v1.log, tagged `[probe:one]` or
+// `[probe:two]`, so it lands wherever that slot's script logs show up in the
+// NovelAI UI - not in the story text. Nothing is written into the narrative;
+// each probe input returns stopGeneration, so the AI never responds to it.
+//
+// READING Q5 - AND THE THIRD OUTCOME. Two of its answers are printed:
+// an answer means a reply CAN cross while a hook awaits; TIMED OUT after ~2s
+// means it cannot. The third outcome is not printed at all: if the input box
+// HANGS and no Q5 line ever appears, the host ran neither the message nor the
+// timer while the hook was awaiting - which is a stronger "no" than TIMED OUT,
+// and is itself the finding. Say so if it happens.
+//
+// WHAT MAKES Q5 TRUSTWORTHY NOW: script two replies from a LOAD-TIME
+// subscription, not from inside its own hook, and script one subscribes before
+// it asks. Both were wrong before, and either would have printed TIMED OUT on a
+// host where the answer is actually yes.
 //
 // The documentation is complete about the SHAPE of these APIs and silent about
 // their BEHAVIOUR, and none of it can be answered off-host: the mock in
@@ -109,7 +127,9 @@ async function atLoad(): Promise<void> {
 
   // Let the host deliver whatever it is going to deliver, and let the other
   // slot finish loading.
-  await new Promise((r) => setTimeout(r, 3000));
+  // The host hides the global setTimeout/clearTimeout and provides its own,
+  // promise-shaped: api.v1.timers.{setTimeout,clearTimeout,sleep}.
+  await api.v1.timers.sleep(3000);
 
   say(`Q1 send-to-self delivers? ${seen.some(s => s.includes("SELF")) ? "YES" : "NO"}`);
   const ordered = seen.filter(s => s.includes("probe-order"));
@@ -137,6 +157,31 @@ async function atLoad(): Promise<void> {
 }
 
 void atLoad();
+
+// =============================================================================
+// THE RESPONDER - the half of Q5 that was missing
+// -----------------------------------------------------------------------------
+// Q5 asks whether a reply can arrive while script one's hook is awaiting it, so
+// somebody has to ACTUALLY REPLY. Nothing did: script two printed "I am the
+// responder" from inside its own hook and never subscribed to anything, so Q5
+// could only ever report TIMED OUT - which is not the answer "no", it is the
+// answer "nobody was listening", and the two are indistinguishable in the log.
+// The probe would have reported the opposite of the truth on the one question it
+// was written to settle.
+//
+// This subscription is registered at LOAD and lives for the session, because the
+// question is whether a reply can cross while a hook is blocked - so the
+// responder must not itself be inside a hook.
+if (ROLE === "two") {
+  void api.v1.messaging.onMessage((m) => {
+    const data = (m.data ?? {}) as { id?: string; verb?: string };
+    if (data.verb !== "probe" || !data.id) return;
+    say(`Q5 responder: heard ${data.verb} ${data.id}, replying now`);
+    void api.v1.messaging.send(m.fromScriptId, {
+      id: data.id, text: `answered by script ${ROLE}`,
+    }, "probe-reply");
+  }, { channel: "command:probe" });
+}
 
 // =============================================================================
 // THE HOOK CHAIN: H1, H2, H3 - and Q5
@@ -175,28 +220,37 @@ api.v1.hooks.register("onTextAdventureInput", async (params: {
   // --- Q5: can a reply arrive while this hook is awaiting it? --------------
   if (text.includes(REPLY_WORD)) {
     if (ROLE === "two") {
-      // The other half of Q5: answer the moment the command arrives.
-      say(`Q5 I am the responder; waiting for a command:probe envelope.`);
+      // The reply comes from the load-time subscription above, NOT from here -
+      // a responder inside a hook could not answer while the other script's
+      // hook is blocked, which is the whole thing being measured.
+      say(`Q5 I am the responder; my load-time subscription is what answers.`);
       return { stopGeneration: true };
     }
     const started = Date.now();
+    // ARM, THEN SUBSCRIBE, THEN ASK. onMessage is async: the question used to go
+    // out from inside the Promise executor while the subscription was still
+    // being registered, so a FAST responder could answer before anyone was
+    // listening and the probe would print TIMED OUT - again reporting the
+    // opposite of the truth. Ordering it this way also means clearTimeout
+    // always has a real id rather than the 0 the old code raced on.
+    let sub = 0;
     const answer = await new Promise<string>((resolve) => {
-      let sub = 0;
-      const timer = setTimeout(() => { void api.v1.messaging.unsubscribe(sub); resolve("TIMED OUT"); }, 2000);
-      void api.v1.messaging.onMessage((m) => {
-        const data = (m.data ?? {}) as { id?: string; text?: string };
-        if (data.id !== params.continuityId) return;
-        clearTimeout(timer);
-        void api.v1.messaging.unsubscribe(sub);
-        resolve(data.text ?? "(empty)");
-      }, { channel: "probe-reply" }).then((i) => { sub = i; });
-
-      // The formalized envelope, exactly as src/command.ts defines it.
-      void api.v1.messaging.broadcast({
-        id: params.continuityId, verb: "probe", positional: [], named: {},
-        raw: text, at: Date.now(),
-      }, "command:probe");
+      void (async () => {
+        const timer = await api.v1.timers.setTimeout(() => resolve("TIMED OUT"), 2000);
+        sub = await api.v1.messaging.onMessage((m) => {
+          const data = (m.data ?? {}) as { id?: string; text?: string };
+          if (data.id !== params.continuityId) return;
+          void api.v1.timers.clearTimeout(timer);
+          resolve(data.text ?? "(empty)");
+        }, { channel: "probe-reply" });
+        // The formalized envelope, exactly as src/command.ts defines it.
+        await api.v1.messaging.broadcast({
+          id: params.continuityId, verb: "probe", positional: [], named: {},
+          raw: text, at: Date.now(),
+        }, "command:probe");
+      })();
     });
+    if (sub) void api.v1.messaging.unsubscribe(sub);
     say(`Q5 *** reply inside a hook: ${answer} (waited ${Date.now() - started}ms) ***`);
     say(`Q5 verdict: ${answer === "TIMED OUT"
       ? "commands CANNOT be distributed by message - use the hook chain"

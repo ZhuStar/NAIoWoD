@@ -1,7 +1,7 @@
 import { log } from "./host";
 import { sys } from "./command";
 import { StringUtil, Stat, Category } from "./core/traits";
-import { EventBus, BusEvent, BusHandler, BusPriority, isLocalChannel } from "./core/bus";
+import { EventBus, BusEvent, BusHandler, BusPriority, BusSubscribeOptions, busChannel, isLocalChannel } from "./core/bus";
 import {
   CardValue, CardMap, parseCardText, formatCardText, canonicalCardText,
   asMap, asNamedList, asText,
@@ -686,11 +686,82 @@ export class LorebookParser {
 // `subscribe` is the same idea from the other side: a handler registered here
 // hears local events AND anything a sibling script broadcast on that channel,
 // and `event.from` is how it tells them apart when it cares.
+//
+// NOBODY IS LISTENING, SO NOBODY IS TOLD. The owner's rule, and it removes the
+// engine's most embarrassing cost: every command used to make TWO
+// api.v1.messaging.broadcast() calls (`command` and `command:<verb>`) into an
+// empty room, because nothing else was installed. The host offers no script
+// directory - `api.v1.script.id` exists, there is no `listScripts` - so
+// interest has to be ANNOUNCED:
+//
+//   * on open(), broadcast a hello carrying {scriptId, channels};
+//   * hearing a hello, record what that script wants and `send` ours straight
+//     back to it - targeted, so a script joining late learns about the ones
+//     already running without setting off a broadcast storm;
+//   * publish() touches the wire only when some remote has declared that
+//     channel (or `*`, for a monitor that wants everything).
+//
+// Alone, the directory stays empty and the wire is never touched at all: the
+// command path goes from two awaits to none (invariants §11 counts awaits).
+// The hello itself is exempt, since it is how the directory bootstraps.
 // =============================================================================
 export const Bus = new EventBus();
 
+// Where scripts introduce themselves. Deliberately NOT `local:` - it is the one
+// message that must always cross.
+export const HELLO_CHANNEL = "naiowod:hello";
+export const INTEREST_ALL = "*";
+// `reply` is what terminates the handshake: A broadcasts a hello, B records it
+// and sends one back MARKED as a reply, and A records that without answering.
+// Two messages per pair, once, ever. Without the flag they introduce each other
+// forever.
+interface Hello { scriptId: string; channels: string[]; reply?: boolean }
+
 export class PostOffice {
   private static _wired: number | undefined;
+  // scriptId -> the channels that script says it listens on.
+  private static _remote = new Map<string, Set<string>>();
+  // The Bus version our last announcement described, so a newly-subscribed
+  // channel re-announces itself and a quiet turn costs nothing.
+  private static _announcedAt = -1;
+
+  /** Channels some OTHER script has declared. Exposed for tests and [[show-*]]. */
+  static remoteInterest(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const [id, set] of PostOffice._remote) out[id] = [...set].sort();
+    return out;
+  }
+
+  private static wanted(channel: string): boolean {
+    for (const set of PostOffice._remote.values()) {
+      if (set.has(INTEREST_ALL) || set.has(channel)) return true;
+    }
+    return false;
+  }
+
+  // What we tell the others: every channel we listen on that could ever cross.
+  private static ourChannels(): string[] {
+    return Bus.channels().filter(c => !isLocalChannel(c) && c !== HELLO_CHANNEL);
+  }
+
+  // Say hello. `to` targets one script (the reply to an arriving hello);
+  // omitted, it goes to everybody.
+  private static async announce(to?: string): Promise<void> {
+    const messaging = (api as { v1?: { messaging?: {
+      broadcast?: (data: unknown, channel?: string) => Promise<void>;
+      send?: (toScriptId: string, data: unknown, channel?: string) => Promise<void>;
+    } } }).v1?.messaging;
+    if (!messaging) return;
+    const hello: Hello = {
+      scriptId: api.v1.script.id, channels: PostOffice.ourChannels(),
+      ...(to ? { reply: true } : {}),
+    };
+    PostOffice._announcedAt = Bus.version;
+    try {
+      if (to) await messaging.send?.(to, hello, HELLO_CHANNEL);
+      else await messaging.broadcast?.(hello, HELLO_CHANNEL);
+    } catch { /* a host without messaging is not an error */ }
+  }
 
   // Start listening to the wire. Idempotent: calling it twice keeps the one
   // subscription, so init() may call it without bookkeeping.
@@ -703,10 +774,22 @@ export class PostOffice {
     PostOffice._wired = await messaging.onMessage((raw: unknown) => {
       const m = (raw ?? {}) as { fromScriptId?: string; channel?: string; data?: unknown; timestamp?: number };
       if (!m.channel) return;
+      // A hello is directory traffic, not an event: record what they want, tell
+      // them what we want, and do not put it on the bus.
+      if (busChannel(m.channel) === HELLO_CHANNEL) {
+        const hello = (m.data ?? {}) as Partial<Hello>;
+        const who = hello.scriptId ?? m.fromScriptId;
+        if (!who || who === api.v1.script.id) return;
+        PostOffice._remote.set(who, new Set((hello.channels ?? []).map(busChannel)));
+        // Answer an opening hello; never answer an answer.
+        if (!hello.reply && m.fromScriptId) void PostOffice.announce(m.fromScriptId);
+        return;
+      }
       // Arrived from outside, so it is announced with `from` set - and it is
       // NOT relayed onward: this script is a subscriber, not a repeater.
       Bus.emit(m.channel, m.data, { from: m.fromScriptId, at: m.timestamp });
     });
+    await PostOffice.announce();
   }
 
   static async close(): Promise<void> {
@@ -718,6 +801,11 @@ export class PostOffice {
       try { await messaging?.unsubscribe?.(PostOffice._wired); } catch { /* already gone */ }
     }
     PostOffice._wired = undefined;
+    // The directory is only true while we are listening. Keeping it across a
+    // close would let a stale entry keep the wire alive for a script that is no
+    // longer there.
+    PostOffice._remote.clear();
+    PostOffice._announcedAt = -1;
   }
 
   // Announce something. Local handlers have all run by the time this resolves;
@@ -733,6 +821,15 @@ export class PostOffice {
       for (const r of settled) if (r.status === "rejected") event.errors.push(`handler: ${String(r.reason)}`);
     }
     if (event.stopped || isLocalChannel(channel)) return event;
+    // We only ever announced the channels we had at the time. Picking up a new
+    // subscription since then means the others' picture of us is stale, so say
+    // hello again - guarded by the Bus version, so a quiet turn costs nothing.
+    if (PostOffice._wired !== undefined && Bus.version !== PostOffice._announcedAt) {
+      await PostOffice.announce();
+    }
+    // NOBODY IS LISTENING, SO NOBODY IS TOLD. The whole point: alone, this
+    // returns here and the wire is never touched.
+    if (!PostOffice.wanted(event.channel)) return event;
     const messaging = (api as { v1?: { messaging?: {
       broadcast?: (data: unknown, channel?: string) => Promise<void>;
     } } }).v1?.messaging;
@@ -745,8 +842,14 @@ export class PostOffice {
     return event;
   }
 
-  static subscribe<T = unknown>(channel: string, handler: BusHandler<T>, priority: BusPriority = "normal"): number {
-    return Bus.on(channel, handler, priority);
+  // A bare priority still works and still means the `on` phase; pass
+  // `{ phase: "before" }` to veto, `{ phase: "after" }` to react.
+  static subscribe<T = unknown>(
+    channel: string,
+    handler: BusHandler<T>,
+    opts: BusPriority | BusSubscribeOptions = "normal",
+  ): number {
+    return Bus.on(channel, handler, opts);
   }
   static unsubscribe(id: number): boolean { return Bus.off(id); }
 }

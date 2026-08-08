@@ -2145,6 +2145,25 @@ function formatMoon(m: MoonState): string {
 const BUS_PRIORITIES = ["first", "early", "normal", "late", "last", "monitor"] as const;
 type BusPriority = typeof BUS_PRIORITIES[number];
 
+// THREE PHASES, and they are not the same axis as priority. Priority orders the
+// handlers that all want to do the same KIND of thing; a phase says WHICH KIND:
+//
+//   before  - the veto. Runs first, and cancelling here means the thing does not
+//             happen: `on` and `after` are skipped. This is where a rule that
+//             forbids something belongs.
+//   on      - the thing itself. The default, and where everything written before
+//             phases existed already sits.
+//   after   - it happened. Cannot un-happen it (a cancel from `before` or `on`
+//             means `after` never runs at all), so this is the ledger's slot,
+//             the reply note's, the cache invalidation's.
+//
+// WITHIN a phase, `cancelled` stays what it always was - a flag later handlers
+// may honour or ignore. BETWEEN phases it is binding. That is the whole
+// difference, and it is why a veto needs its own phase rather than a priority:
+// `first` could always be out-voted by someone who simply did not check.
+const BUS_PHASES = ["before", "on", "after"] as const;
+type BusPhase = typeof BUS_PHASES[number];
+
 // A channel whose name starts with this NEVER leaves the script: the post
 // office recognises it and simply hands it back down the hall. Anything else is
 // relayed. (The owner's "loco" prefix, spelled the way the rest of the engine
@@ -2204,35 +2223,57 @@ interface BusEvent<T = unknown> {
 interface BusVerdict { cancel?: boolean; stop?: boolean }
 type BusHandler<T = unknown> = (event: BusEvent<T>) => BusVerdict | void;
 
-interface Subscription { id: number; channel: string; priority: BusPriority; handler: BusHandler }
+// Third argument to `on`. A bare priority still works and still means the `on`
+// phase, so nothing written before phases existed has to move.
+interface BusSubscribeOptions { phase?: BusPhase; priority?: BusPriority }
+
+interface Subscription {
+  id: number; channel: string; phase: BusPhase; priority: BusPriority; handler: BusHandler;
+}
 
 class EventBus {
   private _subs: Subscription[] = [];
   private _next = 1;
+  // Bumped on every subscribe/unsubscribe. The post office watches it to know
+  // when its announced interests have gone stale, which is cheaper and more
+  // exact than diffing the channel list on every publish.
+  private _version = 0;
+  get version(): number { return this._version; }
 
   // Subscribe. The number back is the handle `off` takes - the same shape
   // api.v1.messaging.onMessage uses, so the two layers read alike.
-  on<T = unknown>(channel: string, handler: BusHandler<T>, priority: BusPriority = "normal"): number {
+  on<T = unknown>(
+    channel: string,
+    handler: BusHandler<T>,
+    opts: BusPriority | BusSubscribeOptions = "normal",
+  ): number {
+    const { phase = "on", priority = "normal" } = typeof opts === "string" ? { priority: opts } : opts;
     const id = this._next++;
-    this._subs.push({ id, channel: busChannel(channel), priority, handler: handler as BusHandler });
+    this._subs.push({ id, channel: busChannel(channel), phase, priority, handler: handler as BusHandler });
+    this._version++;
     return id;
   }
 
   off(id: number): boolean {
     const before = this._subs.length;
     this._subs = this._subs.filter(s => s.id !== id);
-    return this._subs.length < before;
+    if (this._subs.length < before) { this._version++; return true; }
+    return false;
   }
 
-  // Every handler on a channel, in the order they will run: by priority, then
-  // by registration. Exposed because "who is listening to this, and when" is a
-  // question worth being able to answer out loud.
-  listeners(channel: string): Array<{ id: number; priority: BusPriority }> {
+  // Every handler on a channel, in the order they will run: by phase, then by
+  // priority, then by registration. Exposed because "who is listening to this,
+  // and when" is a question worth being able to answer out loud. Pass a phase
+  // to ask about just that one.
+  listeners(channel: string, phase?: BusPhase): Array<{ id: number; phase: BusPhase; priority: BusPriority }> {
     const key = busChannel(channel);
     return this._subs
-      .filter(s => s.channel === key)
-      .sort((a, b) => BUS_PRIORITIES.indexOf(a.priority) - BUS_PRIORITIES.indexOf(b.priority) || a.id - b.id)
-      .map(s => ({ id: s.id, priority: s.priority }));
+      .filter(s => s.channel === key && (phase === undefined || s.phase === phase))
+      .sort((a, b) =>
+        BUS_PHASES.indexOf(a.phase) - BUS_PHASES.indexOf(b.phase) ||
+        BUS_PRIORITIES.indexOf(a.priority) - BUS_PRIORITIES.indexOf(b.priority) ||
+        a.id - b.id)
+      .map(s => ({ id: s.id, phase: s.phase, priority: s.priority }));
   }
 
   channels(): string[] { return [...new Set(this._subs.map(s => s.channel))].sort(); }
@@ -2240,6 +2281,11 @@ class EventBus {
   // Announce something. SYNCHRONOUS: by the time this returns, every local
   // handler has run and the event carries their verdicts - which is exactly
   // what lets a caller ask "was this cancelled?" and act on the answer.
+  //
+  // The three phases run in order and a cancel BETWEEN them is binding: veto in
+  // `before` and neither `on` nor `after` happens; cancel in `on` and `after` is
+  // skipped. Within a phase nothing changes - `cancelled` is still the flag it
+  // always was.
   emit<T = unknown>(channel: string, data: T, meta: { from?: string; at?: number } = {}): BusEvent<T> {
     const event: BusEvent<T> = {
       channel: busChannel(channel), data,
@@ -2247,7 +2293,16 @@ class EventBus {
       at: meta.at ?? Date.now(),
       cancelled: false, stopped: false, errors: [], pending: [],
     };
-    for (const { id } of this.listeners(event.channel)) {
+    for (const phase of BUS_PHASES) {
+      // A veto earlier in the chain means the later phases simply do not run.
+      if (event.stopped || event.cancelled) break;
+      this._runPhase(event, phase);
+    }
+    return event;
+  }
+
+  private _runPhase<T>(event: BusEvent<T>, phase: BusPhase): void {
+    for (const { id } of this.listeners(event.channel, phase)) {
       if (event.stopped) break;
       const sub = this._subs.find(s => s.id === id);
       if (!sub) continue;   // a handler that unsubscribed a handler mid-emit
@@ -2261,7 +2316,6 @@ class EventBus {
         event.errors.push(`${event.channel} handler #${id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    return event;
   }
 }
 //#endregion src/core/bus.ts
@@ -7504,11 +7558,82 @@ class LorebookParser {
 // `subscribe` is the same idea from the other side: a handler registered here
 // hears local events AND anything a sibling script broadcast on that channel,
 // and `event.from` is how it tells them apart when it cares.
+//
+// NOBODY IS LISTENING, SO NOBODY IS TOLD. The owner's rule, and it removes the
+// engine's most embarrassing cost: every command used to make TWO
+// api.v1.messaging.broadcast() calls (`command` and `command:<verb>`) into an
+// empty room, because nothing else was installed. The host offers no script
+// directory - `api.v1.script.id` exists, there is no `listScripts` - so
+// interest has to be ANNOUNCED:
+//
+//   * on open(), broadcast a hello carrying {scriptId, channels};
+//   * hearing a hello, record what that script wants and `send` ours straight
+//     back to it - targeted, so a script joining late learns about the ones
+//     already running without setting off a broadcast storm;
+//   * publish() touches the wire only when some remote has declared that
+//     channel (or `*`, for a monitor that wants everything).
+//
+// Alone, the directory stays empty and the wire is never touched at all: the
+// command path goes from two awaits to none (invariants §11 counts awaits).
+// The hello itself is exempt, since it is how the directory bootstraps.
 // =============================================================================
 const Bus = new EventBus();
 
+// Where scripts introduce themselves. Deliberately NOT `local:` - it is the one
+// message that must always cross.
+const HELLO_CHANNEL = "naiowod:hello";
+const INTEREST_ALL = "*";
+// `reply` is what terminates the handshake: A broadcasts a hello, B records it
+// and sends one back MARKED as a reply, and A records that without answering.
+// Two messages per pair, once, ever. Without the flag they introduce each other
+// forever.
+interface Hello { scriptId: string; channels: string[]; reply?: boolean }
+
 class PostOffice {
   private static _wired: number | undefined;
+  // scriptId -> the channels that script says it listens on.
+  private static _remote = new Map<string, Set<string>>();
+  // The Bus version our last announcement described, so a newly-subscribed
+  // channel re-announces itself and a quiet turn costs nothing.
+  private static _announcedAt = -1;
+
+  /** Channels some OTHER script has declared. Exposed for tests and [[show-*]]. */
+  static remoteInterest(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const [id, set] of PostOffice._remote) out[id] = [...set].sort();
+    return out;
+  }
+
+  private static wanted(channel: string): boolean {
+    for (const set of PostOffice._remote.values()) {
+      if (set.has(INTEREST_ALL) || set.has(channel)) return true;
+    }
+    return false;
+  }
+
+  // What we tell the others: every channel we listen on that could ever cross.
+  private static ourChannels(): string[] {
+    return Bus.channels().filter(c => !isLocalChannel(c) && c !== HELLO_CHANNEL);
+  }
+
+  // Say hello. `to` targets one script (the reply to an arriving hello);
+  // omitted, it goes to everybody.
+  private static async announce(to?: string): Promise<void> {
+    const messaging = (api as { v1?: { messaging?: {
+      broadcast?: (data: unknown, channel?: string) => Promise<void>;
+      send?: (toScriptId: string, data: unknown, channel?: string) => Promise<void>;
+    } } }).v1?.messaging;
+    if (!messaging) return;
+    const hello: Hello = {
+      scriptId: api.v1.script.id, channels: PostOffice.ourChannels(),
+      ...(to ? { reply: true } : {}),
+    };
+    PostOffice._announcedAt = Bus.version;
+    try {
+      if (to) await messaging.send?.(to, hello, HELLO_CHANNEL);
+      else await messaging.broadcast?.(hello, HELLO_CHANNEL);
+    } catch { /* a host without messaging is not an error */ }
+  }
 
   // Start listening to the wire. Idempotent: calling it twice keeps the one
   // subscription, so init() may call it without bookkeeping.
@@ -7521,10 +7646,22 @@ class PostOffice {
     PostOffice._wired = await messaging.onMessage((raw: unknown) => {
       const m = (raw ?? {}) as { fromScriptId?: string; channel?: string; data?: unknown; timestamp?: number };
       if (!m.channel) return;
+      // A hello is directory traffic, not an event: record what they want, tell
+      // them what we want, and do not put it on the bus.
+      if (busChannel(m.channel) === HELLO_CHANNEL) {
+        const hello = (m.data ?? {}) as Partial<Hello>;
+        const who = hello.scriptId ?? m.fromScriptId;
+        if (!who || who === api.v1.script.id) return;
+        PostOffice._remote.set(who, new Set((hello.channels ?? []).map(busChannel)));
+        // Answer an opening hello; never answer an answer.
+        if (!hello.reply && m.fromScriptId) void PostOffice.announce(m.fromScriptId);
+        return;
+      }
       // Arrived from outside, so it is announced with `from` set - and it is
       // NOT relayed onward: this script is a subscriber, not a repeater.
       Bus.emit(m.channel, m.data, { from: m.fromScriptId, at: m.timestamp });
     });
+    await PostOffice.announce();
   }
 
   static async close(): Promise<void> {
@@ -7536,6 +7673,11 @@ class PostOffice {
       try { await messaging?.unsubscribe?.(PostOffice._wired); } catch { /* already gone */ }
     }
     PostOffice._wired = undefined;
+    // The directory is only true while we are listening. Keeping it across a
+    // close would let a stale entry keep the wire alive for a script that is no
+    // longer there.
+    PostOffice._remote.clear();
+    PostOffice._announcedAt = -1;
   }
 
   // Announce something. Local handlers have all run by the time this resolves;
@@ -7551,6 +7693,15 @@ class PostOffice {
       for (const r of settled) if (r.status === "rejected") event.errors.push(`handler: ${String(r.reason)}`);
     }
     if (event.stopped || isLocalChannel(channel)) return event;
+    // We only ever announced the channels we had at the time. Picking up a new
+    // subscription since then means the others' picture of us is stale, so say
+    // hello again - guarded by the Bus version, so a quiet turn costs nothing.
+    if (PostOffice._wired !== undefined && Bus.version !== PostOffice._announcedAt) {
+      await PostOffice.announce();
+    }
+    // NOBODY IS LISTENING, SO NOBODY IS TOLD. The whole point: alone, this
+    // returns here and the wire is never touched.
+    if (!PostOffice.wanted(event.channel)) return event;
     const messaging = (api as { v1?: { messaging?: {
       broadcast?: (data: unknown, channel?: string) => Promise<void>;
     } } }).v1?.messaging;
@@ -7563,8 +7714,14 @@ class PostOffice {
     return event;
   }
 
-  static subscribe<T = unknown>(channel: string, handler: BusHandler<T>, priority: BusPriority = "normal"): number {
-    return Bus.on(channel, handler, priority);
+  // A bare priority still works and still means the `on` phase; pass
+  // `{ phase: "before" }` to veto, `{ phase: "after" }` to react.
+  static subscribe<T = unknown>(
+    channel: string,
+    handler: BusHandler<T>,
+    opts: BusPriority | BusSubscribeOptions = "normal",
+  ): number {
+    return Bus.on(channel, handler, opts);
   }
   static unsubscribe(id: number): boolean { return Bus.off(id); }
 }

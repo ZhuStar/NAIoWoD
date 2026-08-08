@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `bd60c4f`** ("The moon has
-> phases and the week has days").
+> **Last synced with the code as of commit `1216053`** ("Nobody is
+> listening, so nobody is told").
+> Prior: `bd60c4f` ("The moon has phases and the week has days").
 > Prior: `a62c201` ("Afflictions are named role first, and Majesty is the
 > pair").
 > Prior: `dae9f8a` ("Held down is not gone: lift, restore and remove are three
@@ -600,6 +601,18 @@ at, cancelled, stopped, errors}`**, `BusVerdict {cancel?, stop?}`, `BusHandler`,
 and **`class EventBus`** (`on`/`off`/`emit`/`listeners`/`channels`). `emit` is
 SYNCHRONOUS and a throwing handler is recorded on `event.errors` rather than
 ending the run.
+- **§7.81 additions — phases.** **`BUS_PHASES`** (`before`/`on`/`after`) is a
+  SECOND axis, not more priorities: priority orders handlers that want the same
+  KIND of say, a phase says which kind. `emit` runs the three in order and a
+  cancel **between** phases is BINDING (veto in `before` → neither `on` nor
+  `after` runs; cancel in `on` → no `after`); **within** a phase `cancelled` is
+  the same advisory flag it always was. That is why a veto needs a phase rather
+  than the `first` priority — `first` can always be out-voted by a handler that
+  simply never checked the flag. `on(ch, h, opts)` takes a bare `BusPriority`
+  (still meaning phase `on`, so nothing older moved) or
+  `BusSubscribeOptions {phase?, priority?}`; `listeners(ch, phase?)` filters;
+  and **`EventBus.version`** bumps on every subscribe/unsubscribe, which is how
+  the post office knows its announced interests have gone stale.
 
 - **§7.60 additions — purses, capabilities, affinity**: **`BudgetDef {allows?,
   freebie?, experience?, note?}`** + `BudgetEntry = string | BudgetDef` +
@@ -4098,6 +4111,50 @@ and `prefill` are mocked/available but not yet written.
     - Arithmetic trap worth keeping: the slice index uses `Math.floor`, never
       `%`. Every story date is ~800 years BEFORE the 2000-01-06 reference, and a
       modulo would flip sign on all of them.
+
+
+81. **Nobody is listening, so nobody is told** (owner: *"suppose you have to
+    register to receive a certain type of event. If that event is fired and no
+    one is registered to receive it, we don't even broadcast it, which solves
+    the problem you were mentioning. We might want to make use of before, on,
+    and after event types for some occasions"* — Phase 1 of the multi-script
+    plan).
+
+    The problem it solves was measured, not guessed: every command made **two
+    `api.v1.messaging.broadcast()` calls into an empty room** (`command` and
+    `command:<verb>`), because nothing else was ever installed. Now: **0 wire
+    calls when alone**, and with one peer declaring `command` + `command:roll`,
+    exactly the 3 calls somebody actually asked for across a roll and a
+    show-sheet.
+
+    - **The directory has to be announced**, because the host has none —
+      `api.v1.script.id` exists, there is no `listScripts`. `open()` broadcasts
+      a hello of `{scriptId, channels}` on `naiowod:hello`; hearing one records
+      it and `send`s ours back **to that script only**.
+    - **`reply: true` is what terminates the handshake.** A reply is itself a
+      hello, so without the flag two scripts introduce each other forever. Two
+      messages per pair, once. This was a real bug in the first draft, caught by
+      reading it back rather than by a test.
+    - **`EventBus.version`** rather than diffing channel lists: `publish`
+      re-announces only when a subscription has been taken since the last hello,
+      so a quiet turn costs nothing.
+    - **`local:` still wins over any declared interest** — a remote asking for
+      `*` gets everything except that prefix.
+    - `close()` clears the directory: it is only true while we are listening,
+      and a stale entry would keep the wire alive for a script that has gone.
+
+    **Phases** (`before`/`on`/`after`) landed with it — see §5's bus entry for
+    the mechanism. The reason they are not just three more priorities: a veto
+    must be BINDING, and `first` can always be out-voted by a handler that never
+    checked `cancelled`. Between phases the flag is binding; within one it is
+    still advisory, so nothing written before phases existed changed behaviour.
+
+    Testing note that cost time: **a test asserting "this reached the wire" must
+    first deliver a hello declaring that channel**, or nothing is sent and the
+    assertion passes vacuously. And `open()` itself puts a hello on the wire, so
+    `__sentMessages()` is never empty after opening — the suite filters it with
+    `wireTraffic()`. Three existing tests changed for exactly these reasons;
+    that is the behaviour change, not a regression.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

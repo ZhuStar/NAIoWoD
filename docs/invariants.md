@@ -254,6 +254,29 @@ every messaging call is a Promise, so an event that leaves and returns arrives o
 a *later tick*. That is why `EventBus.emit` is a direct synchronous call and the
 post office relays *afterwards* — a correctness choice, not a performance one.
 
+**Nobody is listening, so nobody is told.** `publish` touches the wire only when
+another script has *declared* that channel. The host has no script directory
+(`api.v1.script.id` exists; there is no `listScripts`), so interest is announced:
+`open()` broadcasts a hello of `{scriptId, channels}`, and hearing one records it
+and `send`s ours **back to that script only** — marked `reply: true`, which is
+what stops two scripts introducing each other forever. Alone, the directory is
+empty and the wire is never touched at all.
+
+Consequences worth knowing before you write a test:
+
+- A test asserting "this reached the wire" must **first deliver a hello** that
+  declares the channel, or nothing will be sent and the assertion is vacuous.
+- `open()` itself puts one hello on the wire, so `__sentMessages()` is never
+  empty after opening. Filter it out (`wireTraffic()` in the suite) when the
+  question is about events.
+- `local:` still wins over any declared interest. A remote asking for `*` gets
+  everything *except* `local:`, because that prefix means it never leaves.
+
+**Commands are distributed by the HOOK CHAIN, not by messages.** `docs/hooks.md`:
+scripts run their hooks in User-Scripts-modal order, each may rewrite
+`inputText`, any may set `stopFurtherScripts`. That is already an ordered,
+synchronous, cancellable bus. Messaging carries fire-and-forget events only.
+
 ---
 
 ## 11. Performance — count awaits, not milliseconds

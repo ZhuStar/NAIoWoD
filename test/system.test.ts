@@ -2,6 +2,13 @@ import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
 import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage } from "../src/host-mock";
+
+// What actually left this script as an EVENT. The hello handshake is directory
+// traffic - it says who wants what - so a test asking "did this reach the wire"
+// means everything except that.
+function wireTraffic(): Array<{ toScriptId?: string; data: unknown; channel?: string }> {
+  return __sentMessages().filter(m => m.channel !== HELLO_CHANNEL);
+}
 import {
   type Rng,
   StringUtil, Category, PointSource, Stat, Tracker,
@@ -41,7 +48,8 @@ import {
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   WEEKDAYS, weekdayOf, weekdayName, formatStoryDay, MOON_PHASES, moonAt, nextMoonPhase,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
-  EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, LOCAL_PREFIX,
+  EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, BUS_PHASES, LOCAL_PREFIX,
+  HELLO_CHANNEL, INTEREST_ALL,
   commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
   rollSpendsCharge, expiryElapsed, makeAfflictionExpiry, describeExpiry,
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
@@ -6911,6 +6919,71 @@ describe("the event bus: priority, cancel, and stopping the spread", () => {
       .toEqual(["first", "normal", "normal", "last", "monitor"]);
   });
 
+  test("before / on / after run in that order, whatever their priorities say", () => {
+    const bus = new EventBus();
+    const order: string[] = [];
+    // Deliberately perverse priorities: `after` claims `first`, `before` claims
+    // `last`. The PHASE still wins, because it is a different axis.
+    bus.on("thing", () => { order.push("after"); }, { phase: "after", priority: "first" });
+    bus.on("thing", () => { order.push("on"); });
+    bus.on("thing", () => { order.push("before"); }, { phase: "before", priority: "last" });
+    bus.emit("thing", {});
+    expect(order).toEqual(["before", "on", "after"]);
+    expect(bus.listeners("thing").map(l => l.phase)).toEqual(["before", "on", "after"]);
+    expect(bus.listeners("thing", "on")).toHaveLength(1);
+  });
+
+  test("a veto in `before` is BINDING - it is why the phase exists", () => {
+    const bus = new EventBus();
+    const ran: string[] = [];
+    bus.on("strike", () => ({ cancel: true }), { phase: "before" });
+    // Within `before`, cancel is still only a flag: this one still runs.
+    bus.on("strike", () => { ran.push("before-2"); }, { phase: "before", priority: "last" });
+    bus.on("strike", () => { ran.push("on"); });
+    bus.on("strike", () => { ran.push("after"); }, { phase: "after" });
+    const e = bus.emit("strike", {});
+    expect(e.cancelled).toBe(true);
+    expect(ran).toEqual(["before-2"]);        // `on` and `after` never happened
+  });
+
+  test("`after` does not run when `on` cancelled - it is the slot for what DID happen", () => {
+    const bus = new EventBus();
+    const ran: string[] = [];
+    bus.on("spend", () => { ran.push("on"); return { cancel: true }; });
+    bus.on("spend", () => { ran.push("after"); }, { phase: "after" });
+    expect(bus.emit("spend", {}).cancelled).toBe(true);
+    expect(ran).toEqual(["on"]);
+
+    // Uncancelled, the ledger gets its turn.
+    const ok = new EventBus();
+    const seen: string[] = [];
+    ok.on("spend", () => { seen.push("on"); });
+    ok.on("spend", () => { seen.push("after"); }, { phase: "after", priority: "monitor" });
+    ok.emit("spend", {});
+    expect(seen).toEqual(["on", "after"]);
+  });
+
+  test("a bare priority still means the `on` phase, so nothing older has to move", () => {
+    const bus = new EventBus();
+    bus.on("legacy", () => undefined, "first");
+    bus.on("legacy", () => undefined);
+    expect(bus.listeners("legacy").map(l => l.phase)).toEqual(["on", "on"]);
+    expect(BUS_PHASES).toEqual(["before", "on", "after"]);
+  });
+
+  test("subscribing and unsubscribing bumps the version the post office watches", () => {
+    const bus = new EventBus();
+    const v0 = bus.version;
+    const id = bus.on("x", () => undefined);
+    expect(bus.version).toBeGreaterThan(v0);
+    const v1 = bus.version;
+    expect(bus.off(id)).toBe(true);
+    expect(bus.version).toBeGreaterThan(v1);
+    const v2 = bus.version;
+    expect(bus.off(id)).toBe(false);          // already gone
+    expect(bus.version).toBe(v2);             // ...and that is not a change
+  });
+
   test("cancel is a FLAG later handlers may honour or ignore; stop ends the run", () => {
     const bus = new EventBus();
     const saw: string[] = [];
@@ -6994,15 +7067,89 @@ describe("the post office: local delivery, and the wire", () => {
     await LorebookManager.bootstrap();
   });
 
-  test("publish delivers locally AND relays - the publisher cannot tell which mattered", async () => {
+  test("publish delivers locally, and ALONE it never touches the wire", async () => {
     const heard: unknown[] = [];
     const id = PostOffice.subscribe("resources", (e) => { heard.push(e.data); });
     const event = await PostOffice.publish("resources", { spent: 2, of: "resolve" });
     // Local handlers have already run by the time publish resolves.
     expect(heard).toEqual([{ spent: 2, of: "resolve" }]);
     expect(event.cancelled).toBe(false);
-    // ...and it went out on the wire too.
-    expect(__sentMessages()).toEqual([{ data: { spent: 2, of: "resolve" }, channel: "resources" }]);
+    // NOBODY IS LISTENING, SO NOBODY IS TOLD: no other script has declared this
+    // channel, so the broadcast that used to happen here does not.
+    expect(wireTraffic()).toEqual([]);
+    PostOffice.unsubscribe(id);
+  });
+
+  test("a declared remote interest puts it on the wire - exactly once", async () => {
+    await PostOffice.open();
+    // The other script introduces itself and says what it listens to.
+    await __deliverMessage({
+      fromScriptId: "sheet-script", channel: HELLO_CHANNEL,
+      data: { scriptId: "sheet-script", channels: ["resources"] },
+    });
+    expect(PostOffice.remoteInterest()).toEqual({ "sheet-script": ["resources"] });
+
+    await PostOffice.publish("resources", { spent: 2 });
+    expect(wireTraffic()).toEqual([{ data: { spent: 2 }, channel: "resources" }]);
+
+    // A channel that script did NOT declare still stays home.
+    await PostOffice.publish("rolls", { pool: 5 });
+    expect(wireTraffic()).toHaveLength(1);
+  });
+
+  test("`*` is how a monitor script asks for everything", async () => {
+    await PostOffice.open();
+    await __deliverMessage({
+      fromScriptId: "logger", channel: HELLO_CHANNEL,
+      data: { scriptId: "logger", channels: [INTEREST_ALL] },
+    });
+    await PostOffice.publish("anything-at-all", { n: 1 });
+    await PostOffice.publish("something-else", { n: 2 });
+    expect(wireTraffic().map(m => m.channel)).toEqual(["anything-at-all", "something-else"]);
+    // ...but `local:` still means local, whatever anybody claims to want.
+    await PostOffice.publish(`${LOCAL_PREFIX}private`, { n: 3 });
+    expect(wireTraffic()).toHaveLength(2);
+  });
+
+  test("the hello handshake terminates: an answer is not itself answered", async () => {
+    await PostOffice.open();
+    // open() introduces us to the room.
+    const opening = __sentMessages().filter(m => m.channel === HELLO_CHANNEL);
+    expect(opening).toHaveLength(1);
+    expect(opening[0].toScriptId).toBeUndefined();      // a broadcast, not targeted
+
+    // Their opening hello gets a targeted reply...
+    await __deliverMessage({
+      fromScriptId: "other", channel: HELLO_CHANNEL,
+      data: { scriptId: "other", channels: ["rolls"] },
+    });
+    const replies = __sentMessages().filter(m => m.channel === HELLO_CHANNEL && m.toScriptId === "other");
+    expect(replies).toHaveLength(1);
+
+    // ...and THEIR reply to ours gets none, which is what stops the ping-pong.
+    await __deliverMessage({
+      fromScriptId: "other", channel: HELLO_CHANNEL,
+      data: { scriptId: "other", channels: ["rolls"], reply: true },
+    });
+    expect(__sentMessages().filter(m => m.channel === HELLO_CHANNEL && m.toScriptId === "other")).toHaveLength(1);
+  });
+
+  test("subscribing to a NEW channel re-announces, so the others' picture is never stale", async () => {
+    await PostOffice.open();
+    await __deliverMessage({
+      fromScriptId: "other", channel: HELLO_CHANNEL,
+      data: { scriptId: "other", channels: [INTEREST_ALL] },
+    });
+    const before = __sentMessages().filter(m => m.channel === HELLO_CHANNEL).length;
+    // A publish with no new subscription says hello no more times.
+    await PostOffice.publish("rolls", {});
+    expect(__sentMessages().filter(m => m.channel === HELLO_CHANNEL)).toHaveLength(before);
+    // Take a new subscription, and the next publish re-introduces us.
+    const id = PostOffice.subscribe("brand-new-channel", () => undefined);
+    await PostOffice.publish("rolls", {});
+    const after = __sentMessages().filter(m => m.channel === HELLO_CHANNEL);
+    expect(after.length).toBe(before + 1);
+    expect((after[after.length - 1].data as { channels: string[] }).channels).toContain("brand-new-channel");
     PostOffice.unsubscribe(id);
   });
 
@@ -7033,8 +7180,9 @@ describe("the post office: local delivery, and the wire", () => {
     await __deliverMessage({ fromScriptId: "other-script", channel: "rolls", data: { net: 3 } });
     expect(heard).toEqual([{ from: "other-script", data: { net: 3 } }]);
     // A relayed event is NOT repeated onward - this script subscribes, it does
-    // not act as a repeater.
-    expect(__sentMessages()).toEqual([]);
+    // not act as a repeater. (The hello open() sent is directory traffic, not
+    // an event, which is what wireTraffic() filters out.)
+    expect(wireTraffic()).toEqual([]);
     PostOffice.unsubscribe(id);
   });
 
@@ -7644,11 +7792,22 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
   test("system channels are local: they never reach the wire", async () => {
     expect(SYSTEM.powerTaken.startsWith(LOCAL_PREFIX)).toBe(true);
     expect(isLocalChannel(SYSTEM.powerLost)).toBe(true);
+    // close() first: this block's beforeEach resets the messaging mock, which
+    // invalidates the host subscription open() is holding without telling it.
+    await PostOffice.close();
+    await PostOffice.open();
+    // Somebody outside is listening for applied afflictions, so that one is
+    // allowed onto the wire; nothing can subscribe a `local:` channel from
+    // outside, whatever it declares.
+    await __deliverMessage({
+      fromScriptId: "ledger", channel: HELLO_CHANNEL,
+      data: { scriptId: "ledger", channels: ["affliction:applied", SYSTEM.powerTaken] },
+    });
     await CommandRouter.route("set-trait potence 1 group=discipline");
-    // The OUTSIDE channel went out; the system one did not.
-    const channels = __sentMessages().map(m => m.channel);
+    const channels = wireTraffic().map(m => m.channel);
     expect(channels).toContain("affliction:applied");
     expect(channels.some(c => (c ?? "").startsWith(LOCAL_PREFIX))).toBe(false);
+    await PostOffice.close();
   });
 
   test("the command publishes and the HANDLER applies - remove the handler, nothing happens", async () => {

@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage, __uiTypeInto, __uiFieldValue, __uiFields } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage, __uiTypeInto, __uiFieldValue, __uiFields, __accountStorage } from "../src/host-mock";
 
 // What actually left this script as an EVENT. The hello handshake is directory
 // traffic - it says who wants what - so a test asking "did this reach the wire"
@@ -8682,5 +8682,66 @@ describe("every shipped def survives the trip through its own lorebook card", ()
     const back = asNamedList(parseCardText(text));
     const read = meritFlawFromCard(back[0].name, back[0].body);
     expect(read?.requires?.choices).toEqual(exclusive!.requires!.choices!);
+  });
+});
+
+
+// =============================================================================
+// NO FIELD MAY LEAK OUT OF THE STORY
+// -----------------------------------------------------------------------------
+// Measured on-host (scripts/probe-window-field.ts): an UNPREFIXED storageKey is
+// filed in `api.v1.storage`, and for an account script that store is
+// ACCOUNT-level - shared across every story on the account. So a bare
+// storageKey does not merely fail to read back (§7.83); it carries one
+// chronicle's answers into the next. Every window is opened here and every
+// field it binds must name the story explicitly.
+// =============================================================================
+describe("no window field escapes the story it belongs to", () => {
+  const WINDOW_VERBS = [
+    "win-constraint", "win-table", "win-merit", "win-arcanum",
+    "win-affliction", "win-afflict", "win-roll",
+  ];
+
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock(); __resetUiMock();
+    await LorebookManager.bootstrap();
+    await reloadAllConfigStores();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Marius" templates=mage');
+  });
+
+  for (const verb of WINDOW_VERBS) {
+    test(`${verb} binds every field to the story, never to the account`, async () => {
+      __resetUiMock();
+      await CommandRouter.route(verb);
+      const keys = Object.keys(__uiFields());
+      expect(keys.length).toBeGreaterThan(0);
+      // `story:` or `history:`; a bare key means api.v1.storage, which outlives
+      // the story and is therefore always wrong for a form.
+      const bare = keys.filter(k => !k.startsWith("story:") && !k.startsWith("history:"));
+      expect(bare).toEqual([]);
+    });
+  }
+
+  test("opening and filling every window leaves the ACCOUNT store untouched", async () => {
+    for (const verb of WINDOW_VERBS) {
+      __resetUiMock();
+      await CommandRouter.route(verb);
+      // Type into everything the window offers, then submit what it offers.
+      for (const key of Object.keys(__uiFields())) await __uiTypeInto(key, "probe");
+      for (const label of ["Create", "Roll", "Save", "Afflict", "Create & define"]) {
+        if (await __uiClickButton(label)) break;
+      }
+    }
+    expect(__accountStorage()).toEqual({});
+  });
+
+  test("the engine writes storyStorage, so a second story starts clean", async () => {
+    await CommandRouter.route("win-roll");
+    await __uiTypeInto("story:win:roll:pool", "strength+brawl");
+    expect(__uiFieldValue("story:win:roll:pool")).toBe("strength+brawl");
+    // A new story clears storyStorage; the field goes with it, as it should.
+    __resetStorageMock();
+    expect(__uiFieldValue("story:win:roll:pool")).toBe("");
   });
 });

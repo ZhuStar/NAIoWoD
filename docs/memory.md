@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `55c05b7`** ("Measured, so the
-> fallback comes out").
+> **Last synced with the code as of commit `0523e2d`** ("A form belongs to
+> the story").
+> Prior: `55c05b7` ("Measured, so the fallback comes out").
 > Prior: `bab02c8` ("A cray asks its own time").
 > Prior: `abd2179` ("The Roll button never rolled").
 > Prior: `e7a7bdc` ("A card must carry a def all the way home").
@@ -224,9 +225,13 @@ config registry in one sweep), logs a summary with per-entry counts, returns
 `types/novelai/script-types.d.ts`; prose in `docs/novelai-api.md` + `docs/*.html`)
 
 - Four storage stores share `get/set/remove/list/has/getOrDefault/setIfAbsent`
-  (all async): `api.v1.storage` (per script), `storyStorage` (per story — **we
-  use this**, via `ScopedStorage`), `historyStorage` (story + undo-aware —
-  planned home for mechanical state), `tempStorage` (session, self-clearing).
+  (all async): `api.v1.storage` (**ACCOUNT-level for an account script — shared
+  across every story, so the engine NEVER writes it**; owner's ruling
+  2026-08-08, and reserved for something that belongs to the player rather than
+  the chronicle), `storyStorage` (per story, **shared by all scripts** — what we
+  use, via `ScopedStorage`, and what window fields bind to with a `story:`
+  prefix), `historyStorage` (story + undo-aware — planned home for mechanical
+  state), `tempStorage` (session, self-clearing).
   NOTE: the real host DOES expose `setIfAbsent`/`has`/`getOrDefault` (the d.ts
   confirms) — an earlier memory said otherwise. `ScopedStorage` predates that
   and still emulates `setIfAbsent` over `get/set`; harmless, not worth reworking.
@@ -4320,6 +4325,32 @@ and `prefill` are mocked/available but not yet written.
     `` `<op>[:<tag>] [+N|-N]` `` — the part after the colon is the TARGET and the
     signed number is the AMOUNT. Writing `ritual-time:-50` silently files −50 as
     the target and the op does nothing, which is exactly what happened first.
+
+
+85. **A form belongs to the story, not to the account** (owner: *"We shouldn't
+    use `api.v1.storage`, unless it's something very important. That is shared
+    across stories. `storyStorage` is where these things should go."*).
+
+    §7.83 fixed the window fields by naming a store; the probe then measured
+    WHICH store an unprefixed key goes to — **`api.v1.storage`** — and this
+    ruling says what that means. For an ACCOUNT script that store is
+    account-level, **shared across every story on the account**. So a bare
+    `storageKey` was never merely a failure to read back: it carried one
+    chronicle's answers into the next one the player opened. Two bugs in one
+    line, and only the visible half had been diagnosed.
+
+    - **The engine writes `api.v1.storage` nowhere.** Audited: it appears in
+      `src/` only in comments. `ScopedStorage` was always on `storyStorage`, and
+      window fields now bind `story:`.
+    - **Guarded rather than merely intended.** All seven window verbs
+      (`win-constraint`, `win-table`, `win-merit`, `win-arcanum`,
+      `win-affliction`, `win-afflict`, `win-roll`) are opened in the suite and
+      every field each binds must start with `story:` or `history:`; a second
+      test fills and submits all seven and asserts `__accountStorage()` is still
+      empty. Verified by dropping the prefix: nine tests fail, one per window
+      plus the leak check.
+    - The store is not banned, it is RESERVED — for something that belongs to
+      the player rather than the chronicle. Nothing today qualifies.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

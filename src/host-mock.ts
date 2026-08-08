@@ -159,6 +159,14 @@ export function __uiFields(): Record<string, string> {
   }
   return out;
 }
+// Everything that ended up in api.v1.storage - the ACCOUNT-level store, shared
+// across every story. The engine must never write it (a chronicle's data would
+// follow the player into the next chronicle), so a test asserts this is empty
+// after exercising the windows.
+export function __accountStorage(): Record<string, unknown> {
+  return Object.fromEntries(__mockScriptStore);
+}
+
 // Read one field the way the host stores it (prefix selects the store).
 export function __uiFieldValue(storageKey: string): string {
   return String(__uiReadField(storageKey) ?? "");

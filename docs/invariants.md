@@ -308,11 +308,20 @@ that never meet, so **every window field was permanently empty**:
 `[[win-roll]]`'s Roll button answered "Needs a pool" forever, and the other
 windows submitted their command with every knob blank.
 
+- **The engine never writes `api.v1.storage`.** For an account script that
+  store is **account-level — shared across every story on the account**, so an
+  unprefixed key does not merely fail to read back: it carries one chronicle's
+  data into the next. It is reserved for something that genuinely belongs to the
+  player rather than the story, and nothing today qualifies.
 - Fields are bound with **`story:`** (`fieldKey`) and read with `readField`,
   which tests **presence, not truthiness** — a field the player cleared reads as
   cleared, not as absent. `story:` is the *right* store and not merely a working
   one: a form belongs to the **story** being played, not to the script that drew
   it, which is also what makes it survive the multi-script split.
+- **Guarded, not merely intended**: every window verb is opened in the suite and
+  each field it binds must start with `story:` or `history:`, and filling and
+  submitting all seven must leave the account store empty (`__accountStorage()`).
+  Both fail if the prefix is dropped.
 - **Never touch `api.v1.tempStorage` directly for a form field.** Use
   `fieldKey` / `readField` / `writeField`; the picker modal and the input it
   belongs to must agree, and one pair of helpers is what keeps them agreeing.

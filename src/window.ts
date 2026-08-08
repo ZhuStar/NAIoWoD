@@ -9,7 +9,8 @@
 // a bare string literal reappears in a part tree here.
 //
 // A wizard-window is a UI over the command layer: it renders a form with UI
-// Parts, binds fields to tempStorage via storageKey, and on submit composes a
+// Parts, binds each field to STORY storage via a `story:`-prefixed storageKey
+// (see WHERE A FORM FIELD ACTUALLY LIVES below), and on submit composes a
 // [[command]] string and routes it through the SAME CommandRouter every other
 // command uses. The form itself is DERIVED from the verb's CommandSpec - the
 // window duplicates no grammar: enum params render as button rows (from the
@@ -49,10 +50,16 @@ const WKEY = (verb: string, key: string): string => `win:${verb}:${key}`;
 // Roll button read an empty pool and refused, and the other windows composed
 // their command with every knob blank.
 //
-// `story:` is the right store rather than merely a working one: a form belongs
-// to the STORY being played, not to the script that drew it - which also means
-// it survives the multi-script split, where several units share one storyStorage
-// and a window opened by one unit is readable by the unit that owns the verb.
+// `story:` is the right store rather than merely a working one, and the wrong
+// one is actively harmful. `api.v1.storage` is where an UNPREFIXED key goes,
+// and for an ACCOUNT script that store is account-level - shared across every
+// story on the account. A form field left unprefixed would therefore leak one
+// chronicle's answers into the next. A form belongs to the STORY being played,
+// not to the script that drew it, and storyStorage is also what makes window
+// state survive the multi-script split, where several units share one store and
+// a window opened by one unit is readable by the unit that owns the verb.
+//
+// So: the engine NEVER writes api.v1.storage. A test asserts it stays empty.
 const UI_FIELD_STORE = "story:";
 const fieldKey = (key: string): string => `${UI_FIELD_STORE}${key}`;
 
@@ -83,7 +90,7 @@ const labelOf = (spec: CommandSpec | undefined, key: string): string => {
 };
 
 // A row of buttons behaving as a single-select: the current value is marked
-// with a bullet; clicking one writes it to tempStorage and re-renders.
+// with a bullet; clicking one writes it to STORY storage and re-renders.
 // What a flag offers in a window. "" is the third answer - say nothing and let
 // the verb's own default stand - and it composes to nothing.
 const BOOL_OPTIONS = ["true", "false", ""];
@@ -100,7 +107,7 @@ function selectorRow(part: UiPartHelpers, verb: string, p: ParamSpec, current: s
 // A dropdown substitute for lists too long to inline: a text input (typing
 // stays live - mode 3) next to a "Choose <key>…" button that opens a MODAL
 // with one button per option; the current value's button is marked ✅;
-// picking writes the field's tempStorage key, closes the modal, and
+// picking writes the field through writeField, closes the modal, and
 // re-renders the window. `options` is a thunk so dynamic lists (affliction
 // registry, tables) are read at open time.
 export interface PickerOption { value: string; label?: string }
@@ -142,7 +149,7 @@ export function pickerField(part: UiPartHelpers, opts: {
   ] });
 }
 
-// Read the form's tempStorage fields, compose the command, route it, and show
+// Read the form's story-storage fields, compose the command, route it, and show
 // the OOC reply in-window.
 async function submitCommand(verb: string, spec: CommandSpec, rerender: (result?: string) => Promise<void>): Promise<void> {
   const values: Record<string, string> = {};

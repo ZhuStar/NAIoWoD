@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `70892be`** ("An arcanum is not
-> a merit: its own type, its own list, its own gate").
+> **Last synced with the code as of commit `e63dec7`** ("One way to look at
+> anything: show-* verbs, seven scopes, and none of it in context").
+> Prior: `70892be` ("An arcanum is not a merit: its own type, its own list, its
+> own gate").
 > Prior: `0ecd2c3` ("A command reference that writes itself").
 > Prior: `dc271c4` ("The event does the work, and a passive you can
 > switch off").
@@ -225,7 +227,7 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   centralized (§7.26) → `[SYSTEM: ...]` (§7.27). The init setup banner is
   `[SYSTEM: Storyteller setup]` (multi-line — not through the hook).
   `stopGeneration` is set when the input was command-ONLY OR any command was a
-  read-only query (`QUIET_VERBS`, §7.27) — the hook's cancel-the-turn lever.
+  read-only query (`isQuietVerb` — the `show-` prefix since §7.73) — the hook's cancel-the-turn lever.
 - `api.v1.uuid()`, `api.v1.generate` (future Storyteller loop), UI extension
   API (`api.v1.ui.*` — future wizard renderer), permissions for document edit.
 
@@ -1182,7 +1184,7 @@ added to the array. Parser/router/spec machinery itself lives in
 
 **`processAdventureInput(rawInputText)`** — extracts every `[[...]]`, routes
 each, replaces with single-line `[SYSTEM: ...]` notes; `stopGeneration: true`
-when the input was command-ONLY **or** any command's verb is in **`QUIET_VERBS`**
+when the input was command-ONLY **or** any command's verb is QUIET (`isQuietVerb`: the `show-` prefix, §7.73)
 (the game-layer set of read-only query commands — help/characters/sheet/
 resources/health/merits/tables/… — kept OUT of the pure CommandSpec; it uses
 `CommandParser.parse(body).name` to test each match); non-command input →
@@ -1700,7 +1702,11 @@ and `prefill` are mocked/available but not yet written.
     `processAdventureInput`, NOT a `CommandSpec.quiet` flag — generation-
     suppression is a turn/game POLICY, and CommandSpec must stay pure grammar
     (it feeds help + windows, lower layers). `processAdventureInput` tests each
-    match with `CommandParser.parse(body).name`. Querying the system never makes
+    match with `CommandParser.parse(body).name`.
+    **SUPERSEDED IN PART by §7.73**: the placement decision stands (still a
+    game-layer policy, still not on CommandSpec), but the SET is gone — quiet is
+    now the `show-` prefix, because a hand-maintained register is a thing new
+    verbs get forgotten from, and they did. Querying the system never makes
     the AI narrate; an in-fiction action wrapped in prose still generates.
     **§7.54 caught a drift here**: a set is a list somebody has to remember to
     add to, and four passes of listings (`budget`, `paid`, `costs`,
@@ -1825,7 +1831,7 @@ and `prefill` are mocked/available but not yet written.
     §7.19; the two MERGE when the turn system makes advancing time process
     affliction/effect durations), **`story-date`**, **`save-date`**/`forget-date`/
     `dates`, **`time-between`** (each endpoint a saved name / `now` / `start` /
-    ad-hoc `yyyy-mm-dd-hh`). The query verbs join `QUIET_VERBS`. This is the
+    ad-hoc `yyyy-mm-dd-hh`). The query verbs are quiet (`show-*` since §7.73). This is the
     substrate roadmap #1 (the turn/time system) will build Scenes and turn-length
     on; advancing is a manual ST action until then.
 31. **Scenes — the named unit of play on the clock** (user, opening the
@@ -3608,6 +3614,69 @@ and `prefill` are mocked/available but not yet written.
       **Pillars are the same kind of thing** - a category belonging to mages.
       They are not modelled as owned powers yet (they are rated traits the
       fellowship names), and when they are, `PowerFamily` is the shape.
+
+
+73. **One way to look at anything** (owner: *"All of our commands that just show
+    things on screen, just list things for the player, the result of all of those
+    should be something that, with the markers, will be removed from context by
+    default. The player can overwrite this default by appending an argument
+    `in-story=true`. These commands should all start with 'show'. For example,
+    show-merit. We should then have a name argument for the merit and then a
+    scope as a 'in' or 'from' or whatever argument. If the name is '@all' it
+    means show all merits. As for scopes, we have: the campaign / any character,
+    identifiable by name / the current character being played / a template. I
+    think these are all the instances of scopes, but do correct me if I'm
+    wrong."*).
+
+    Forty verbs only reported, and they had arrived one at a time: `merits` vs
+    `merit`, `scenes` vs `scene-info`, `arcana` vs `arcanum`, `list-rolls` vs
+    `roll-info`. **The singular/plural split was a SCOPE distinction nobody had
+    declared** - `merit` meant "what the chronicle defines", `merits` meant "what
+    this character owns". Two names for one question asked of two places.
+
+    - **THE NAME IS THE POLICY.** `isQuietVerb` reads the `show-` prefix, so a
+      listing is hidden from the AI's context BY BEING CALLED THAT. The old
+      `QUIET_VERBS` set was a hand-maintained register that new verbs kept being
+      forgotten from; what is left in it is the two read-only verbs that are not
+      listings (`flush-context`, `convert-cards`). A deprecated alias is as quiet
+      as the verb that replaced it.
+    - **`in-story=true` is context ONLY** (his ruling when asked): it strips the
+      ctx-skip marker and leaves `stopGeneration` alone. Looking something up is
+      still not an action, so the reply sits in the story and is read on the NEXT
+      generation rather than prompting one now.
+    - **SEVEN SCOPES, not four.** His four were right; three more exist in this
+      codebase and are not reducible to a template, which he asked to be
+      corrected on: **clan** and **fellowship** are CHOICES (§7.54) that
+      exclusive merits gate on - `in=clan::nosferatu` answers "what may a
+      Nosferatu take", which was previously unaskable - plus **scene** and
+      **player**. A bare name is resolved character -> template -> clan ->
+      fellowship -> scene -> player; a name meaning two things REPORTS the
+      collision and names both `kind::name` forms rather than guessing.
+    - **The scope actually FILTERS.** `openToScope` re-uses the gate
+      `[[take-merit]]` enforces at the door (`requires.templates`,
+      `requires.choices` with clan-family matching, `meritCostFor` availability),
+      and a family with a capability requirement answers "a vampire has no Arcana
+      at all" for a template scope, not a catalogue he can never buy from.
+      Advisory, like everything creation-side.
+    - **`SHOW_SUBJECTS` is one table** (the same bet as `PowerFamily`, §7.72):
+      declaring a subject registers the verb, its `name`/`in`/`in-story` params
+      and the deprecation pointer on every old name it replaces. A test walks
+      the registry and fails if any show verb is missing a knob or any
+      deprecation points at an unregistered verb. `render` mostly DELEGATES to
+      the handler that already existed - this is a re-naming and re-scoping pass,
+      not a rewrite of thirty reports (eight handlers grew an optional
+      `forChar` so a show verb can ask them about somebody else).
+    - **`CommandSpec.deprecated`** + `CommandRouter.deprecate()`: old names route
+      exactly as before and `route()` appends "⚠ [[merits]] is now
+      [[show-merit]]" from ONE place, so a deprecation cannot be declared without
+      the pointer. They are hidden from `[[show-help]]` and filed in their own
+      section of `docs/commands.md` - except `help` itself, which stays visible
+      because it is what a player who knows nothing else types.
+    - **`@all` had to be RESERVED.** `@` is the alias sigil, so an alias named
+      "all" would shadow the wildcard on every listing; `parseAliasToken` refuses
+      it, and `[[alias @all …]]` says so at the door.
+    - 93 stale `[[old-verb]]` pointers inside reply text were rewritten to the
+      current names, and `PowerFamily.verbs.list/info` now name the show verbs.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

@@ -108,7 +108,26 @@ ops, per-template prices, instance caps, `PassiveGrant`) and nothing more.
 
 ---
 
-## 6. What crosses a wire
+## 6. Read-only verbs are called `show-*`, and that IS the policy
+
+A verb that only reports is named `show-<thing>`. The prefix is not a
+convention — `isQuietVerb` reads it, so the reply is stripped from the AI's
+context before generation (`markCtxSkip` / `processContextBuilt`).
+
+- **A listing that is not called `show-*` will leak into the model's context.**
+  The old `QUIET_VERBS` set was hand-maintained and new verbs were forgotten
+  from it; what remains there is only read-only verbs that are not listings.
+- **`in-story=true` overrides the hiding, and nothing else.** The turn stays
+  quiet: looking something up is not an action, so the reply is read on the
+  NEXT generation rather than prompting one now.
+- **`@all` is reserved in `parseAliasToken`.** `@` is the alias sigil, so an
+  alias named "all" would shadow the wildcard on every listing.
+- A scope a subject does not declare is answered with a CORRECTION naming the
+  scopes it does, never with an empty list.
+
+---
+
+## 7. What crosses a wire
 
 `api.v1.messaging` **serializes**. Only plain data survives.
 
@@ -127,7 +146,7 @@ post office relays *afterwards* — a correctness choice, not a performance one.
 
 ---
 
-## 7. Performance — count awaits, not milliseconds
+## 8. Performance — count awaits, not milliseconds
 
 CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
@@ -148,7 +167,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 8. Policies that look like bugs but are not
+## 9. Policies that look like bugs but are not
 
 - **Advisory, not enforced.** Everything creation-side reports and lets the
   Storyteller decide. `[[creation]]`, `[[budget]]`, constraints, instance caps —
@@ -167,7 +186,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 9. The verification battery — run ALL of it before pushing
+## 10. The verification battery — run ALL of it before pushing
 
 ```bash
 bun run build          # dist/naiowod.ts is COMMITTED; the suite checks it is in sync
@@ -188,12 +207,13 @@ Then a live `init()` smoke reproducing whatever the change was about.
 
 ---
 
-## 10. Where to look when something is wrong
+## 11. Where to look when something is wrong
 
 | Symptom | Look at |
 |---|---|
 | "the command doesn't exist" | The pasted `dist/naiowod.ts` is stale. Rebuild. |
 | A knob works but nobody can find it | It is missing from its `CommandSpec`. A knob the parser honours and the spec omits **does not exist** (`bd6bf50`). |
+| A listing is cluttering the AI's context | Its verb is not named `show-*`. §6. |
 | A name resolves to 0 | `::` folding, or the hyphen rule, or a bare name not reaching the extension. |
 | A duration is wildly wrong | Seconds vs milliseconds. §1. |
 | An arcanum shows up as a merit (or vice versa) | Something asked the wrong registry, or a report walk used `ownedPowerInstances`. §5. |

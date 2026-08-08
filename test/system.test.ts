@@ -57,7 +57,7 @@ import {
   parseStoryDate, formatStoryDate, parseDuration, addDuration, diffCalendar, formatCalendarSpan,
   StoryClock, DateBook, DEFAULT_STORY_START,
   extractHideBlocks, processGeneratedText, init,
-  processContextBuilt, stripCtxSkip, GenCounter,
+  processContextBuilt, stripCtxSkip, GenCounter, isQuietVerb,
   processGenerationEnd, stripAgedCtxSkip,
   parseCardText, formatCardText, characterToCard, characterFromCard,
   asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
@@ -7112,7 +7112,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
     await CommandRouter.route("advance-time 40 days");
     // full-moons-since(the wedding, now) - the explicit two-date form.
     const r = await CommandRouter.route(
-      "eval `system::time::full-moons-since(system::time::date:the-wedding, system::time::now)`");
+      "show-eval `system::time::full-moons-since(system::time::date:the-wedding, system::time::now)`");
     expect(r).not.toContain("⚠");
     expect(r).toMatch(/= [1-9]/);
     // days-since is the same shape.
@@ -7442,5 +7442,134 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
 
   test("invoke refuses what nobody offers", async () => {
     expect(await CommandRouter.route("invoke nonesuch")).toContain("Nothing Vlad has offers");
+  });
+});
+
+// =============================================================================
+// SHOW - one way to look at anything, and none of it reaches the AI (§7.73)
+// =============================================================================
+describe("show-*: the read-only surface, its scopes, and the context marker", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores();
+    await LorebookManager.bootstrap();
+  });
+
+  // THE STRUCTURAL TEST: a subject cannot be half-wired. Adding one to
+  // SHOW_SUBJECTS without its knobs, or pointing a deprecation at a verb that
+  // does not exist, fails here rather than in play.
+  test("every show verb declares name/in/in-story, and every old name points somewhere real", () => {
+    const shown = CommandRouter.verbs({ includeHidden: true }).filter(v => v.startsWith("show-"));
+    expect(shown.length).toBeGreaterThan(25);
+    for (const verb of shown) {
+      const keys = (CommandRouter.specFor(verb)!.params ?? []).map(p => p.key);
+      expect([verb, keys.includes("name")]).toEqual([verb, true]);
+      expect([verb, keys.includes("in")]).toEqual([verb, true]);
+      expect([verb, keys.includes("in-story")]).toEqual([verb, true]);
+    }
+    const registered = new Set(CommandRouter.verbs({ includeHidden: true }));
+    for (const { verb, replacedBy } of CommandRouter.deprecatedVerbs()) {
+      expect([verb, registered.has(replacedBy)]).toEqual([verb, true]);
+    }
+  });
+
+  test("a show reply is stripped from context; in-story=true keeps it, and the turn stays quiet either way", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const hidden = await processAdventureInput("[[show-budget]]");
+    expect(hidden!.inputText!).toContain("wod:ctx-skip");
+    expect(stripCtxSkip(hidden!.inputText!).trim()).toBe("");    // the AI reads nothing
+    expect(hidden!.stopGeneration).toBe(true);
+
+    const kept = await processAdventureInput("[[show-budget in-story=true]]");
+    expect(kept!.inputText!).not.toContain("wod:ctx-skip");
+    expect(kept!.inputText!).toContain("budgets");
+    // Looking something up is still not an action: the reply is there to be
+    // read NEXT generation, it does not prompt one now.
+    expect(kept!.stopGeneration).toBe(true);
+  });
+
+  test("quiet is the NAME, not a register: a deprecated alias is as quiet as what replaced it", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    expect(isQuietVerb("show-anything-at-all")).toBe(true);
+    expect(isQuietVerb("merits")).toBe(true);          // deprecated -> show-merit
+    expect(isQuietVerb("roll")).toBe(false);           // an ACTION generates
+    expect((await processAdventureInput("[[merits]]"))!.inputText!).toContain("wod:ctx-skip");
+    expect((await processAdventureInput("[[merits in-story=true]]"))!.inputText!).not.toContain("wod:ctx-skip");
+  });
+
+  test("@all is reserved, so an alias can never shadow the wildcard", async () => {
+    expect(parseAliasToken("@all")).toBeUndefined();
+    expect(await CommandRouter.route('alias @all "Kvar"')).toContain("Malformed alias");
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("take-merit iron-will 3");
+    // ...and @all means the list, never a lookup of something called "all".
+    expect(await CommandRouter.route("show-merit @all in=campaign")).toContain("acute-senses");
+  });
+
+  test("the seven scopes: campaign, current, a character, a template, a clan, a fellowship, a scene", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    await CommandRouter.route('play name="Kvar"');
+    await CommandRouter.route("take-merit iron-will 3");
+
+    expect(await CommandRouter.route("show-merit")).toContain("iron-will (3)");             // current
+    expect(await CommandRouter.route("show-sheet in=Aldous")).toContain("Aldous");           // a character
+    expect(await CommandRouter.route("show-merit @all in=campaign")).toContain("Defined");   // the chronicle
+    // A TEMPLATE narrows the definitions to what that kind of creature may take.
+    const mage = await CommandRouter.route("show-merit @all in=template::mage");
+    expect(mage).toContain("open to Mage (template)");
+    expect(mage).not.toContain("eat-food");           // a vampire merit
+    // A CLAN is not a template - this is the question that could not be asked.
+    const nos = await CommandRouter.route("show-merit @all in=clan::nosferatu");
+    expect(nos).toContain("nosferatu-exclusive-merit");
+    expect(nos).not.toContain("tremere-exclusive-merit");
+    expect(await CommandRouter.route("show-merit @all in=fellowship::valdaermen"))
+      .toContain("valdaermen-exclusive-merit");
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route('scene "The Feast"');
+    expect(await CommandRouter.route("show-scene in=scene::the-feast")).toContain("Feast");
+    expect(await CommandRouter.route("show-scene @all")).toContain("The Feast (open)");
+  });
+
+  test("a scope a subject does not understand is a correction, not an empty list", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    expect(await CommandRouter.route("show-health in=campaign")).toContain("only asked of");
+    expect(await CommandRouter.route("show-merit @all in=nowhere-at-all")).toContain('Nothing named "nowhere-at-all"');
+    expect(await CommandRouter.route("show-merit @all in=wrong::thing")).toContain("is not a scope");
+  });
+
+  test("a name that means two things reports the collision instead of guessing", async () => {
+    // A character actually named after a clan: both readings are real.
+    await CommandRouter.route('create-playable name="Nosferatu" templates=vampire');
+    const r = await CommandRouter.route("show-merit @all in=nosferatu");
+    expect(r).toContain("is a character AND a clan");
+    expect(r).toContain("in=character::nosferatu");
+    expect(r).toContain("in=clan::nosferatu");
+    // ...and the explicit form answers.
+    expect(await CommandRouter.route("show-merit @all in=clan::nosferatu")).toContain("open to Nosferatu (clan)");
+  });
+
+  test("the collapsed pairs still say what each old verb said", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("take-merit iron-will 3");
+    const owned = await CommandRouter.route("show-merit");
+    const defined = await CommandRouter.route("show-merit @all in=campaign");
+    expect(owned).toContain("iron-will (3)");                 // what [[merits]] said
+    expect(defined).toContain("Defined Merits & Flaws");      // what [[merit]] said
+    expect(owned).not.toContain("Defined Merits & Flaws");
+    // An old name still routes, and says where it went.
+    const old = await CommandRouter.route("merits");
+    expect(old).toContain("iron-will (3)");
+    expect(old).toContain("[[merits]] is now [[show-merit]]");
+  });
+
+  test("[[show-help]] lists the current vocabulary and hides the old names", async () => {
+    const help = await CommandRouter.route("show-help");
+    expect(help).toContain("show-merit");
+    expect(help).not.toContain(", merits,");                  // deprecated: not listed
+    expect(help).toContain("older names still work");
+    // help itself stays VISIBLE - it is what a player who knows nothing types.
+    expect(help).toContain("help");
+    expect(await CommandRouter.route("show-help merits")).toContain("merits is now [[show-merit]]");
   });
 });

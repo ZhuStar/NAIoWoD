@@ -36,7 +36,7 @@ import {
   rollFloorFrom,
   advancementCostsFrom, CostTable, COST_PURSES,
   BackgroundDef, makeBackgroundDef, backgroundTierAt, TraitGrant,
-  CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, fellowshipByName, ATTRIBUTES,
+  CreationBudget, creationBudgetFor, TraitLimit, CLANS, clanByName, clanFamilyOf, clanFamilies, fellowshipByName, ATTRIBUTES,
   BudgetDef, BudgetEntry, budgetDef, budgetBuyable, NOT_PURCHASABLE,
   GRANT_SOURCES, sourceDrawsOnPurse, grantSourceNote, CreationGrant, describeCreationGrant,
   CAPABILITIES, capabilityNote, affinityDisciplines, AFFINITY_SOURCES,
@@ -69,7 +69,7 @@ import {
 } from "./wizard";
 import {
   ParsedCommand, CommandParser, CommandContext, CommandHandler, CommandRouter, ParamSpec, sys,
-  commandEnvelope, commandChannel, COMMAND_CHANNEL,
+  commandEnvelope, commandChannel, COMMAND_CHANNEL, sysNote, stripSys,
 } from "./command";
 import {
   PlayableCharacter, CharacterStore, PLAYER_CHARACTERS_CATEGORY, characterToCard,
@@ -77,7 +77,7 @@ import {
   BackgroundRegistry, grantedTraitsOf, effectiveTraitOf, BACKGROUNDS_ENTRY,
   NamedRollStore, ExtendedRollStore, ExtendedContestStore,
   StoryClock, DateBook, Scene, SceneStore, GenCounter,
-  PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry,
+  PlayerStore, AliasScope, AliasRef, parseAliasToken, AliasRegistry, SHOW_ALL_TOKEN,
   resolveTraitFromRecord, ownedMeritInstances, ownedArcanumInstances, ownedPowerInstances,
   OwnedPowerInstance, enhancementsFor, SavedRoll, ExtendedSavedConfig,
   OpposedSavedConfig, ProcedureStep, ProcedureCondition,
@@ -650,7 +650,7 @@ async function applySpend(char: PlayableCharacter, cmd: ParsedCommand, ctx: Comm
   if (r.insufficient) return mandatory ? { note: "", refuse: r.insufficient } : { note: `${r.insufficient} - spent nothing` };
   if (r.refuse) return { note: "", refuse: r.refuse };
   // What the spend DID, not what the resource IS. The effect's label is a
-  // paragraph of rules prose - it belongs to [[resources]], not to the tail of
+  // paragraph of rules prose - it belongs to [[show-resource]], not to the tail of
   // every punch. What the dice actually got is already on the roll line
   // ("+2 auto +1 sure vs diff 2"); these notes carry what that line cannot say:
   // how many points left the pool, and anything that capped or skipped an op.
@@ -817,7 +817,7 @@ function resolveSpecialty(char: PlayableCharacter, ref: string, poolTraits: stri
     for (const [t, labels] of Object.entries(specs)) {
       for (const l of labels) if (StringUtil.normalize(l) === want) hits.push({ trait: t, label: l });
     }
-    if (hits.length === 0) return { note: `no specialty "${ref}" (see [[specialties]])` };
+    if (hits.length === 0) return { note: `no specialty "${ref}" (see [[show-specialty]])` };
     if (hits.length > 1) return { note: `specialty "${ref}" is ambiguous (${hits.map(h => h.trait).join(", ")}) - use the trait` };
     trait = hits[0].trait;
     label = hits[0].label;
@@ -860,7 +860,7 @@ async function lookupTable(raw: string): Promise<{ table?: SuccessTable; note?: 
   const ref = await resolveTableRef(raw);
   if (ref.error) return { note: ref.error };
   const table = SuccessTableRegistry.get(ref.key!);
-  return table ? { table } : { note: `unknown table "${ref.key}" (see [[tables]])` };
+  return table ? { table } : { note: `unknown table "${ref.key}" (see [[show-table]])` };
 }
 
 async function tableNote(raw: string | undefined, outcome: RollOutcomeKind, successes: number): Promise<string> {
@@ -963,7 +963,7 @@ async function rollAndReport(char: PlayableCharacter, cmd: ParsedCommand, ctx: C
     // never overridden, so passing `args` straight through to overrideSpec is safe).
     const name = StringUtil.normalize(args.pool.slice(1));
     const base = await NamedRollStore.get(name);
-    if (!base) return sys(`No saved roll named "${name}". Try [[list-rolls]] or [[name-roll ${name} <pool> ...]].`);
+    if (!base) return sys(`No saved roll named "${name}". Try [[show-roll]] or [[name-roll ${name} <pool> ...]].`);
     // A saved EXTENDED roll (a "named procedure") launches an extended action
     // instead of a single roll - the target is play-time input, not baked in.
     // An OPPOSED saved roll launches a contest; an EXTENDED one an extended
@@ -1076,7 +1076,7 @@ function surfaceSteps(steps: ProcedureStep[] | undefined, outcome: RollOutcomeKi
   return ` Next: ${items}.`;
 }
 
-// A procedure's full step list (for [[roll-info]]) - every step, condition first.
+// A procedure's full step list (for [[show-roll]]) - every step, condition first.
 function describeSteps(steps: ProcedureStep[]): string {
   return steps.map((s, i) => `${i + 1}. ${s.when}: [[roll ${s.roll}]]${s.note ? ` - ${s.note}` : ""}`).join("; ");
 }
@@ -1152,18 +1152,18 @@ async function cmdListRolls(): Promise<string> {
     const sidecars = describeSidecars(map[n]);
     return `${n} (${describeSpec(map[n])}${sidecars ? `, ${sidecars}` : ""})`;
   }).join("; ");
-  return sys(`Saved rolls: ${items}. [[roll-info <name>]] for detail.`);
+  return sys(`Saved rolls: ${items}. [[show-roll <name>]] for detail.`);
 }
 
 // Full detail of one saved roll: spec, sidecars, and the rules description.
 async function cmdRollInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return sys(`roll-info needs a name, e.g. [[roll-info climbing]]. [[list-rolls]] lists them.`);
+  if (!name) return sys(`roll-info needs a name, e.g. [[show-roll climbing]]. [[show-roll]] lists them.`);
   // "@name" is how a roll is INVOKED, so accept it here too rather than
   // refusing the spelling the player just used.
   const key = StringUtil.normalize(name.startsWith("@") ? name.slice(1) : name);
   const saved = await NamedRollStore.get(key);
-  if (!saved) return sys(`No saved roll named "${key}". See [[list-rolls]].`);
+  if (!saved) return sys(`No saved roll named "${key}". See [[show-roll]].`);
   const sidecars = describeSidecars(saved);
   const parts = [`${key} = ${describeSpec(saved)}${sidecars ? `, ${sidecars}` : ""}`];
   if (saved.description) parts.push(saved.description);
@@ -1192,7 +1192,7 @@ async function cmdAddStep(cmd: ParsedCommand): Promise<string> {
   if (note) step.note = note;
   saved.steps = [...(saved.steps ?? []), step];
   await NamedRollStore.save(key, saved);
-  return sys(`Added step ${saved.steps.length} to "${key}": ${when} -> [[roll ${roll}]]${note ? ` (${note})` : ""}. Now a ${saved.steps.length}-step procedure - [[roll-info ${key}]] for the whole sequence.`);
+  return sys(`Added step ${saved.steps.length} to "${key}": ${when} -> [[roll ${roll}]]${note ? ` (${note})` : ""}. Now a ${saved.steps.length}-step procedure - [[show-roll ${key}]] for the whole sequence.`);
 }
 
 // Drop all follow-up steps from a saved procedure (its entry roll is untouched).
@@ -1290,8 +1290,8 @@ async function cmdCancelRoll(cmd: ParsedCommand): Promise<string> {
   return sys(`Cancelled extended action${action.label ? ` "${action.label}"` : ""} (was ${action.accumulated}/${action.target}).`);
 }
 
-async function cmdResources(): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdResources(forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const views = await CharacterResources.all(char);
   if (!views.length) return sys(`${disp(char.name)} has no resources.`);
@@ -1326,8 +1326,8 @@ async function cmdResources(): Promise<string> {
 // attune [<capability>] [off] - what this character can actually USE. A pool is
 // a thing you hold; using it is a thing you are able to do, and the two come
 // apart the moment an object hands someone a Resolve pool he cannot channel.
-async function cmdAttune(cmd: ParsedCommand): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdAttune(cmd: ParsedCommand, forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const raw = (cmd.named["capability"] ?? cmd.positional[0])?.trim();
   const fromTemplates = char.templates.flatMap(t => TEMPLATES[StringUtil.normalize(t)]?.Capabilities ?? []);
@@ -1380,9 +1380,9 @@ interface PillarReq { name: string; required: number; own: number }
 // where the player hits it, not just in the docs.
 async function staleSheetHint(): Promise<string> {
   return (await CreatorMode.enabled())
-    ? ` ([[sheet]] shows what the engine has.)`
+    ? ` ([[show-sheet]] shows what the engine has.)`
     : ` If you just edited the sheet in the lorebook, it has NOT synced yet - `
-      + `[[creator-mode set=true]] pulls it in on the next command ([[sheet]] shows what the engine has).`;
+      + `[[creator-mode set=true]] pulls it in on the next command ([[show-sheet]] shows what the engine has).`;
 }
 
 // "warrior:4,chieftain:2" -> requirements, with the caster's own ratings.
@@ -1706,7 +1706,7 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   }
   if (!entries.length) return sys(`No fellowships defined.`);
   const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
-  return sys(`Fellowships - ${items}. Detail with [[fellowships <name>]].`);
+  return sys(`Fellowships - ${items}. Detail with [[show-fellowship <name>]].`);
 }
 
 // =============================================================================
@@ -1716,7 +1716,7 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
 // as merits would make a legal character look overspent. A budget is an
 // EXPRESSION ("25", and later one written in terms of another), declared on the
 // template and overridable on the sheet. Everything here is ADVISORY - there is
-// no creation engine yet, so [[budget]] reports and the Storyteller decides.
+// no creation engine yet, so [[show-budget]] reports and the Storyteller decides.
 // =============================================================================
 
 // Every purse this character has a budget for: the creation pools first, then
@@ -1728,8 +1728,8 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
 // experience. A template says otherwise when its creature is otherwise: the
 // Ouroboros' Arcana are NOT_PURCHASABLE from either.
 function budgetsOf(char: PlayableCharacter): Record<string, BudgetDef> {
-  // The creation budget already answers three of these purses; [[budget]] and
-  // [[creation]] must not disagree about how many Background dots you get.
+  // The creation budget already answers three of these purses; [[show-budget]] and
+  // [[show-creation]] must not disagree about how many Background dots you get.
   const creation = creationBudgetFor(char.templates);
   const out: Record<string, BudgetDef> = {
     background: { allows: String(creation.backgrounds) },
@@ -1759,7 +1759,7 @@ function budgetsOf(char: PlayableCharacter): Record<string, BudgetDef> {
   // The default price of a dot is what the chronicle's table says a dot of that
   // kind costs - the purses whose names ARE the kind ("background",
   // "discipline", "virtue"). A purse the table has never heard of keeps its
-  // silence, and [[budget]] reports it as the Storyteller's call.
+  // silence, and [[show-budget]] reports it as the Storyteller's call.
   const table = advancementCostsFrom(AdvancementCosts.current() as CostTable);
   for (const [purse, def] of Object.entries(out)) {
     const priced = table[purse];
@@ -1782,7 +1782,7 @@ function budgetAllowance(char: PlayableCharacter, def: BudgetDef | undefined): n
   return def?.allows === undefined ? undefined : evalBudget(char, def.allows);
 }
 
-// The two prices, said the way [[budget]] and [[costs]] both want them.
+// The two prices, said the way [[show-budget]] and [[show-cost]] both want them.
 function budgetPrices(def: BudgetDef): string {
   const bits = (["freebie", "experience"] as const)
     .filter(p => def[p] !== undefined)
@@ -1915,8 +1915,8 @@ async function cmdBudget(cmd: ParsedCommand): Promise<string> {
 //                                            the chronicle ADDS to a purse
 // The second is the ruling he described: Flaws past the cap that still pay,
 // recorded as a bonus with its reason rather than as a silently larger budget.
-async function cmdGrant(cmd: ParsedCommand): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdGrant(cmd: ParsedCommand, forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const key = StringUtil.normalize(cmd.positional[0] ?? "");
   const source = StringUtil.normalize(cmd.named["source"] ?? "storyteller");
@@ -1941,13 +1941,13 @@ async function cmdGrant(cmd: ParsedCommand): Promise<string> {
     ];
     await CharacterStore.save(char);
     return sys(`${disp(char.name)}: ${key} purse +${points} (${source}${note ? ` - ${note}` : ""}). `
-      + `[[budget]] counts it, with the reason attached.`);
+      + `[[show-budget]] counts it, with the reason attached.`);
   }
   // A TRAIT or merit instance: it costs the purse nothing, and this says why.
   char.source = { ...(char.source ?? {}), [key]: source };
   await CharacterStore.save(char);
   return sys(`${disp(char.name)}: ${disp(key)} is ${source} - ${grantSourceNote(source)}. `
-    + `It costs no creation purse${sourceDrawsOnPurse(source) ? " differently than before" : ""}; [[budget]] shows it.`);
+    + `It costs no creation purse${sourceDrawsOnPurse(source) ? " differently than before" : ""}; [[show-budget]] shows it.`);
 }
 
 async function cmdUngrant(cmd: ParsedCommand): Promise<string> {
@@ -1995,7 +1995,7 @@ async function cmdPaid(cmd: ParsedCommand): Promise<string> {
   const { resolver } = await characterRollEnv(char);
   const value = evalBudget(char, expr);
   return sys(`${key} cost ${value}${expr !== String(value) ? ` (${expr})` : ""}${value === 0 ? " - granted, not bought" : ""}. `
-    + `[[budget]] counts it.`);
+    + `[[show-budget]] counts it.`);
 }
 
 // =============================================================================
@@ -2068,7 +2068,7 @@ async function cmdChoose(cmd: ParsedCommand): Promise<string> {
     const families = AFFINITY_SOURCES.filter(s => s.choice !== "clan")
       .map(s => `[[choose ${s.choice} <name>]]${Object.keys(s.families).length ? "" : " (none defined yet)"}`);
     return sys(`${disp(char.name)} - ${made.length ? made.join(", ") : "nothing chosen yet"}. `
-      + `[[choose clan <name>]] ([[clans]]), [[choose fellowship <name>]] ([[fellowships]]), `
+      + `[[choose clan <name>]] ([[show-clan]]), [[choose fellowship <name>]] ([[show-fellowship]]), `
       + `[[choose road <name>]] (${Object.values(ROADS).map(r => r.name).join(", ")}), `
       + `[[choose attributes physical,social,mental]] (primary, secondary, tertiary), `
       + `${families.join(", ")}.`);
@@ -2085,7 +2085,7 @@ async function cmdChoose(cmd: ParsedCommand): Promise<string> {
     char.priorities = { ...(char.priorities ?? {}) };
     (["primary", "secondary", "tertiary"] as const).forEach((slot, i) => { char.priorities![`${what}-${slot}`] = order[i]; });
     await CharacterStore.save(char);
-    return sys(`${disp(char.name)} ${what}: ${order.map((o, i) => `${["primary", "secondary", "tertiary"][i]} ${disp(o)}`).join(", ")}. [[creation]] checks the pools.`);
+    return sys(`${disp(char.name)} ${what}: ${order.map((o, i) => `${["primary", "secondary", "tertiary"][i]} ${disp(o)}`).join(", ")}. [[show-creation]] checks the pools.`);
   }
   if (!value) return sys(`[[choose ${what} <value>]] needs a value.`);
   if (what === "road") {
@@ -2094,11 +2094,11 @@ async function cmdChoose(cmd: ParsedCommand): Promise<string> {
     char.choices = { ...(char.choices ?? {}), road: StringUtil.normalize(road.name) };
     await CharacterStore.save(char);
     return sys(`${disp(char.name)} walks the ${road.name}. Virtues: ${road.virtues.map(v => disp(v)).join(", ")}; `
-      + `the rating is ${road.ratingVirtues.map(v => disp(v)).join(" + ")}. [[derived]] shows what follows.`);
+      + `the rating is ${road.ratingVirtues.map(v => disp(v)).join(" + ")}. [[show-derived]] shows what follows.`);
   }
   if (what === "clan") {
     const clan = clanByName(value);
-    if (!clan) return sys(`No clan "${value}". [[clans]] lists them.`);
+    if (!clan) return sys(`No clan "${value}". [[show-clan]] lists them.`);
     char.choices = { ...(char.choices ?? {}), clan: clan.id };
     await CharacterStore.save(char);
     const bounds = Object.values(clan.limits ?? {}).map(l => l.note).filter(Boolean).join(" ");
@@ -2107,7 +2107,7 @@ async function cmdChoose(cmd: ParsedCommand): Promise<string> {
   }
   if (what === "fellowship") {
     const f = fellowshipByName(value);
-    if (!f) return sys(`No fellowship "${value}". [[fellowships]] lists them.`);
+    if (!f) return sys(`No fellowship "${value}". [[show-fellowship]] lists them.`);
     char.choices = { ...(char.choices ?? {}), fellowship: f.id };
     await CharacterStore.save(char);
     return sys(`${disp(char.name)} follows the ${f.name}${f.theme ? ` (${f.theme})` : ""}. `
@@ -2130,7 +2130,7 @@ async function cmdClans(cmd: ParsedCommand): Promise<string> {
       + `${limits.length ? `; ${limits.join("; ")}` : ""}. [[choose clan ${clan.id}]] picks it.`);
   }
   return sys(`Clans: ${Object.values(CLANS).map(c => `${c.name} (${c.disciplines.map(d => disp(d)).join("/")})`).join("; ")}. `
-    + `[[clan <name>]] for one; [[choose clan <name>]] picks it.`);
+    + `[[show-clan <name>]] for one; [[choose clan <name>]] picks it.`);
 }
 
 // creation - every pool, against what the sheet actually holds.
@@ -2180,7 +2180,7 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
     lines.push(`${kind}: ${bits.join(", ")}${stray.length ? ` ⚠ uncounted: ${stray.join(", ")}` : ""}`);
   }
 
-  // ONE ledger, so [[creation]] and [[budget]] can never disagree about what a
+  // ONE ledger, so [[show-creation]] and [[show-budget]] can never disagree about what a
   // Background cost. (They used to: this counted `paid` with parseInt while the
   // ledger evaluated it as an expression.)
   const bgSpent = purseLedger(char, (n) => traitValueOf(char, n))["background"]?.spent ?? 0;
@@ -2203,7 +2203,7 @@ async function cmdCreation(cmd: ParsedCommand): Promise<string> {
     const spent = Object.values(char.virtues ?? {}).reduce((a, b) => a + b, 0) - free * Object.keys(char.virtues ?? {}).length;
     lines.push(`virtues: ${Math.max(0, spent)}/${num(budget.virtues, 0)} (over ${free} free dot each)`);
   }
-  lines.push(`freebies: ${num(budget.freebies, 15)} to spend ([[costs]] prices them)`
+  lines.push(`freebies: ${num(budget.freebies, 15)} to spend ([[show-cost]] prices them)`
     + `${budget.flawMax !== undefined ? `, Flaws pay up to ${num(budget.flawMax, 7)}` : ""}`);
   // What the TEMPLATE hands out free. Reported, never auto-applied: a ghoul's
   // dot is usually Potence and sometimes Fortitude, and that is the player's
@@ -2255,7 +2255,7 @@ async function cmdDerived(cmd: ParsedCommand): Promise<string> {
   const derived = derivedValuesOf(char, purseScope(char));
   if (!derived.length) {
     return sys(`${disp(char.name)} derives nothing - this template states every number outright. `
-      + `[[eval <expression>]] still reads the sheet.`);
+      + `[[show-eval <expression>]] still reads the sheet.`);
   }
   const lines = derived.map(d => {
     const kind = d.when === "always" ? "always" : d.overridden !== undefined ? "started here, now the sheet's" : "starts here";
@@ -2267,19 +2267,19 @@ async function cmdDerived(cmd: ParsedCommand): Promise<string> {
 
 // eval <expression> - the whole reference system, exposed. This is how you find
 // out what the engine thinks a name means without guessing from a report.
-async function cmdEval(cmd: ParsedCommand): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdEval(cmd: ParsedCommand, forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const expr = (cmd.named["expression"] ?? cmd.positional.join(" ")).trim();
   if (!expr) {
-    return sys(`[[eval <expression>]] reads an expression against ${disp(char.name)}. `
+    return sys(`[[show-eval <expression>]] reads an expression against ${disp(char.name)}. `
       + `Names are traits (\`courage\`, \`self-control\`); a path asks one place (\`background:generation\`, `
       + `\`derived:willpower\`, \`granted:sanctum\`, \`budget:freebie\`, \`spent:freebie\`, \`left:freebie\`, `
       + `\`resource:quintessence:max\` for that pool by name, \`role:willpower\` for whatever fills that role here). `
       + `Arithmetic is + - * / and ( ); functions are ${BUILTIN_FUNCTIONS.join(", ")}, trait-max, blood-max, road-virtues. `
       + `Mind the hyphen: \`a - b\` needs the spaces, \`self-control\` does not.`);
   }
-  // [[eval]] sees everything a rules expression sees, INCLUDING the clock - it
+  // [[show-eval]] sees everything a rules expression sees, INCLUDING the clock - it
   // is where you test an affliction's until-condition before writing it onto a
   // card. Elapsed time is measured from the story's start, since a bare
   // expression has no "when this began".
@@ -2349,7 +2349,7 @@ async function cmdTemplates(cmd: ParsedCommand): Promise<string> {
   const listed = Object.keys(TEMPLATES).sort().map(k => `${k}${written.has(k) ? "*" : ""}`);
   const problems = lastTemplateProblems.length ? ` ⚠ ${lastTemplateProblems.join("; ")}` : "";
   return sys(`Templates: ${listed.join(", ")} (* = written as data, editable). `
-    + `[[templates <name>]] details one; [[extend-template]] makes a new one from an old one.${problems}`);
+    + `[[show-template <name>]] details one; [[extend-template]] makes a new one from an old one.${problems}`);
 }
 
 // "a=b,c=d" -> {a: "b", c: "d"}. The one place a command carries a small map,
@@ -2474,12 +2474,12 @@ async function cmdExtendTemplate(cmd: ParsedCommand): Promise<string> {
   const built = TEMPLATES[def.name];
   return sys(`Template "${disp(def.name)}"${def.extends ? ` extends ${disp(def.extends)}` : ""} - `
     + `resources: ${built?.Pools.map(p => disp(p.name)).join(", ") || "none"}. `
-    + `[[templates ${def.name}]] shows it.${problems}`);
+    + `[[show-template ${def.name}]] shows it.${problems}`);
 }
 
 async function cmdForgetTemplate(cmd: ParsedCommand): Promise<string> {
   const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
-  if (!name) return sys(`forget-template needs a name. [[templates]] lists them.`);
+  if (!name) return sys(`forget-template needs a name. [[show-template]] lists them.`);
   if (!TemplateRegistry.get(name)) return sys(`No chronicle template "${name}" to forget (the built-ins cannot be removed).`);
   await TemplateRegistry.remove(name);
   return sys(`Forgot the chronicle's "${disp(name)}"${TEMPLATES[name] ? ` - the shipped one resurfaces` : ""}.`);
@@ -2537,7 +2537,7 @@ async function cmdBackgrounds(): Promise<string> {
   const parts = [`Defined: ${defs.map(d => d.name).join(", ")}`];
   if (mine.length) parts.push(`${disp(char!.name)} holds: ${mine.join(", ")}`);
   if (conferred.length) parts.push(`Conferred: ${conferred.join(", ")}`);
-  return sys(`${parts.join(". ")}. [[background <name>]] for one; [[set-trait <name> <n>]] rates one; `
+  return sys(`${parts.join(". ")}. [[show-background <name>]] for one; [[set-trait <name> <n>]] rates one; `
     + `[[define-background]] adds one.`);
 }
 
@@ -2545,7 +2545,7 @@ async function cmdBackground(cmd: ParsedCommand): Promise<string> {
   const raw = cmd.positional[0]?.trim();
   if (!raw) return cmdBackgrounds();
   const def = BackgroundRegistry.get(StringUtil.normalize(raw));
-  if (!def) return sys(`No background "${raw}". [[backgrounds]] lists them.`);
+  if (!def) return sys(`No background "${raw}". [[show-background]] lists them.`);
   const char = await CharacterStore.getCurrent();
   const rating = char ? char.backgrounds?.[StringUtil.normalize(def.name)] ?? 0 : 0;
   const bits = [`background "${disp(def.name)}"`, `max ${def.max ?? 5}`];
@@ -2605,8 +2605,8 @@ async function cmdForgetBackground(cmd: ParsedCommand): Promise<string> {
 // supernatural [category] - which families of power this character may have,
 // what they hold in each, and whether anything hangs from a Discipline they do
 // not have. Reports; enforces nothing.
-async function cmdSupernatural(cmd: ParsedCommand): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdSupernatural(cmd: ParsedCommand, forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const which = cmd.positional[0]?.trim();
   const cats = DEFAULT_SUPERNATURAL_CATEGORIES;
@@ -2642,7 +2642,7 @@ async function cmdSupernatural(cmd: ParsedCommand): Promise<string> {
     if (resolveTraitFromRecord(char, def.parent) <= 0) orphans.push(`${disp(name)} needs ${disp(def.parent)}`);
   }
   if (orphans.length) lines.push(`⚠ ${orphans.join("; ")} (Storyteller-adjudicated)`);
-  return sys(`${disp(char.name)} - ${lines.join("; ")}. [[supernatural <category>]] for one; `
+  return sys(`${disp(char.name)} - ${lines.join("; ")}. [[show-supernatural <category>]] for one; `
     + `set a rating with [[set-trait <name> <n>]].`);
 }
 
@@ -2664,8 +2664,8 @@ async function cmdCosts(cmd: ParsedCommand): Promise<string> {
       + `Storyteller-applied: the engine records prices, it does not spend for you.`);
   }
   const items = Object.entries(table).map(([kind, purses]) => `${disp(kind)}: ${priced(purses)}`).join("; ");
-  return sys(`Advancement costs - ${items}. [[costs <kind>]] for one; edit them in the "${COSTS_CONFIG_ENTRY}" card. `
-    + `A template may price its own purse instead ([[budget]] shows the one in force) - `
+  return sys(`Advancement costs - ${items}. [[show-cost <kind>]] for one; edit them in the "${COSTS_CONFIG_ENTRY}" card. `
+    + `A template may price its own purse instead ([[show-budget]] shows the one in force) - `
     + `"${NOT_PURCHASABLE}" there means that purse cannot be bought from at all. `
     + `🚧 maturation is recorded here and spent by nobody: there is no downtime engine yet.`);
 }
@@ -2716,7 +2716,7 @@ async function enterPlace(key: string, enter: boolean): Promise<string> {
       if (!r.error) applied.push(state);
     }
     return sys(`${disp(char.name)} enters his ${disp(key)} (${disp(place.needs)} ${rating}) - ${place.blurb}. `
-      + `Now ${applied.join(" + ")}; [[afflictions]] shows what it grants. Leave with [[exit-${key}]].`);
+      + `Now ${applied.join(" + ")}; [[show-affliction]] shows what it grants. Leave with [[exit-${key}]].`);
   }
   const lifted: string[] = [];
   for (const state of place.states) {
@@ -2744,7 +2744,7 @@ async function cmdMeasureDoor(): Promise<string> {
   }
   const when = clock ? ` Ten minutes pass (${formatStoryDate((await StoryClock.get())!.now)}).` : "";
   return sys(`${disp(char.name)} measures the door - jamb, lintel, threshold - and it opens onto the Library of the Unseen.${when} `
-    + `Now ${LIBRARY_STATES.join(" + ")}; [[afflictions]] shows what they grant. Leave with [[leave-library]].`);
+    + `Now ${LIBRARY_STATES.join(" + ")}; [[show-affliction]] shows what they grant. Leave with [[leave-library]].`);
 }
 
 async function cmdLeaveLibrary(): Promise<string> {
@@ -2766,8 +2766,8 @@ function crayLine(char: PlayableCharacter, state: CrayState): string {
   return `cray ${rating} (${state.points}/${CrayStore.capacity(char)} points${status})`;
 }
 
-async function cmdCray(): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdCray(forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   if (CrayStore.rating(char) <= 0) return sys(`${disp(char.name)} has no Cray (it is a Background - rate it on the sheet).`);
   const state = await CrayStore.get(char);
@@ -2963,8 +2963,8 @@ async function cmdDamage(cmd: ParsedCommand): Promise<string> {
   return sys(`${disp(char.name)} takes ${amount} ${severity}. Health: ${healthLine(summary)}.`);
 }
 
-async function cmdHealth(): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdHealth(forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const summary = await CharacterHealth.summary(char);
   const boosts = await CharacterBoosts.all(char);
@@ -3236,7 +3236,7 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
 // =============================================================================
 const NO_CLOCK = `No story clock yet - set when the story begins with [[story-start 1197-03-15-08]] (yyyy-mm-dd-hh).`;
 
-// Resolve a date token for [[time-between]]: a saved bookmark, "now", "start",
+// Resolve a date token for [[show-time-between]]: a saved bookmark, "now", "start",
 // or an ad-hoc yyyy-mm-dd-hh literal.
 async function resolveDateToken(tok: string): Promise<{ epoch?: number; label: string; error?: string }> {
   const t = tok.trim();
@@ -3257,7 +3257,7 @@ async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
   const parsed = parseStoryDate(cmd.positional[0]);
   if (typeof parsed !== "number") return sys(parsed.error);
   const s = await StoryClock.setStart(parsed);
-  return sys(`The story begins ${formatStoryDate(s.start)}. Move time with [[advance-time 1d]]; read it with [[story-date]].`);
+  return sys(`The story begins ${formatStoryDate(s.start)}. Move time with [[advance-time 1d]]; read it with [[show-date]].`);
 }
 
 // Clock-driven recovery: credit every character's recovery-bearing resources
@@ -3304,7 +3304,7 @@ async function timeScopeExtension(fromEpoch: number, now: number): Promise<Scope
     if (!joined.startsWith(`${TIME_PREFIX}:`)) return undefined;
     const rest = joined.slice(TIME_PREFIX.length + 1);
     if (rest in facts) return { value: facts[rest], from: TIME_PREFIX };
-    // A SAVED date by name - the same book [[dates]] lists.
+    // A SAVED date by name - the same book [[show-date]] lists.
     const named = rest.startsWith("date:") ? dates[rest.slice("date:".length)] : undefined;
     return named === undefined ? undefined : { value: named, from: "saved date" };
   };
@@ -3514,12 +3514,12 @@ async function cmdDates(): Promise<string> {
   const names = Object.keys(map);
   if (!names.length) return sys(`No saved dates yet. Save one with [[save-date <name>]] (or [[save-date <name> yyyy-mm-dd-hh]]).`);
   const items = names.map(n => `${n} (${formatStoryDate(map[n])})`).join("; ");
-  return sys(`Saved dates: ${items}. [[time-between <a> <b>]] measures any two.`);
+  return sys(`Saved dates: ${items}. [[show-time-between <a> <b>]] measures any two.`);
 }
 
 async function cmdTimeBetween(cmd: ParsedCommand): Promise<string> {
   const a = cmd.positional[0]?.trim(), b = cmd.positional[1]?.trim();
-  if (!a || !b) return sys(`time-between needs two dates, e.g. [[time-between start now]] or [[time-between siege-began 1197-12-25-00]] (each: a saved name, "now", "start", or yyyy-mm-dd-hh).`);
+  if (!a || !b) return sys(`time-between needs two dates, e.g. [[show-time-between start now]] or [[show-time-between siege-began 1197-12-25-00]] (each: a saved name, "now", "start", or yyyy-mm-dd-hh).`);
   const ra = await resolveDateToken(a);
   if (ra.error) return sys(ra.error);
   const rb = await resolveDateToken(b);
@@ -3643,7 +3643,7 @@ async function cmdScenes(): Promise<string> {
     const s = await SceneStore.get(n);
     if (s) items.push(`${disp(s.name)}${s.name === cur ? " (open)" : ""} [${formatStoryDate(s.startedAt)}, ${s.turnsElapsed} turn${s.turnsElapsed === 1 ? "" : "s"}]`);
   }
-  return sys(`Scenes: ${items.join("; ")}. [[scene-info <name>]] for detail.`);
+  return sys(`Scenes: ${items.join("; ")}. [[show-scene <name>]] for detail.`);
 }
 
 async function cmdSceneInfo(cmd: ParsedCommand): Promise<string> {
@@ -3772,7 +3772,7 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
         .map(x => x.name.slice(ref.key!.length + 1));
       return sys(`Tables in "${ref.key}": ${items.length ? items.join(", ") : "(none yet)"}. Address them as ${ref.key}::<name>.`);
     }
-    return sys(`No success table "${ref.key}". See [[tables]].`);
+    return sys(`No success table "${ref.key}". See [[show-table]].`);
   }
   const all = SuccessTableRegistry.all();
   const label = (t: SuccessTable): string => t.description ? `${t.name} (${t.description})` : t.name;
@@ -3784,7 +3784,7 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
   const aliases = await TableAliases.all();
   const aliasBit = Object.keys(aliases).length
     ? ` Aliases: ${Object.entries(aliases).map(([a, k]) => `@${a} -> ${k}`).join(", ")}.` : "";
-  return sys(`Success tables - ${groups.join(" | ")}.${aliasBit} [[tables <name|sub|sub::name>]] for detail; add table=<key|@alias> to a roll/resist/contest.`);
+  return sys(`Success tables - ${groups.join(" | ")}.${aliasBit} [[show-table <name|sub|sub::name>]] for detail; add table=<key|@alias> to a roll/resist/contest.`);
 }
 
 // Author a success table from the command line (or the win-table window): the
@@ -3793,9 +3793,9 @@ async function cmdTables(cmd: ParsedCommand): Promise<string> {
 // ride the backtick-literal channel, so their case survives.
 async function cmdDefineTable(cmd: ParsedCommand): Promise<string> {
   const rawName = cmd.named["name"]?.trim();
-  if (!rawName) return sys(`define-table needs name="..". See [[help define-table]].`);
+  if (!rawName) return sys(`define-table needs name="..". See [[show-help define-table]].`);
   const segs = StringUtil.normalize(rawName).split(":").filter(Boolean);
-  if (segs.length === 0) return sys(`define-table needs name="..". See [[help define-table]].`);
+  if (segs.length === 0) return sys(`define-table needs name="..". See [[show-help define-table]].`);
   if (segs.length > 2) return sys(`Table paths go one level deep for now (name="sub::name").`);
   const sub = segs.length === 2 ? segs[0] : undefined;
   const name = segs[segs.length - 1];
@@ -4082,14 +4082,14 @@ async function cmdConstraints(): Promise<string> {
   const all = ConstraintRegistry.all();
   if (!all.length) return sys(`No constraint groups defined. Add one with [[define-constraint ...]] or [[win-constraint]].`);
   const items = all.map(g => `${g.name} (${g.relation}/${g.domain}, ${g.members.length} member${g.members.length === 1 ? "" : "s"})`).join("; ");
-  return sys(`Constraint groups: ${items}. [[constraint <name>]] for detail.`);
+  return sys(`Constraint groups: ${items}. [[show-constraint <name>]] for detail.`);
 }
 
 async function cmdConstraint(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return sys(`constraint needs a name, e.g. [[constraint clan-only-backgrounds]]. [[constraints]] lists them.`);
+  if (!name) return sys(`constraint needs a name, e.g. [[show-constraint clan-only-backgrounds]]. [[show-constraint]] lists them.`);
   const g = ConstraintRegistry.get(name);
-  if (!g) return sys(`No constraint group "${StringUtil.normalize(name)}". See [[constraints]].`);
+  if (!g) return sys(`No constraint group "${StringUtil.normalize(name)}". See [[show-constraint]].`);
   return sys(`${describeConstraint(g)}.`);
 }
 
@@ -4102,8 +4102,8 @@ async function cmdForgetConstraint(cmd: ParsedCommand): Promise<string> {
     : sys(`No constraint group "${key}".`);
 }
 
-async function cmdCheckConstraints(): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdCheckConstraints(forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const groups = ConstraintRegistry.all();
   const violations = groups.length ? checkConstraints(groups, ownedTraitsOf(char)) : [];
@@ -4262,7 +4262,7 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
 // This is why [[define-merit]] CANNOT define an arcanum: it is not a check it
 // forgets to make, it is a different family object with different kinds, a
 // different registry and a different card. And it is why a regular vampire's
-// [[merits]] shows no Arcana: they were never in that list.
+// [[show-merit]] shows no Arcana: they were never in that list.
 // =============================================================================
 interface PowerFamily<T extends OwnedPowerDef> {
   kinds: readonly OwnedPowerKind[];
@@ -4312,7 +4312,7 @@ const MERIT_FAMILY: PowerFamily<MeritFlawDef> = {
   one: "merit/flaw",
   aOne: "a merit/flaw",
   many: "Merits & Flaws",
-  verbs: { define: "define-merit", forget: "forget-merit", take: "take-merit", drop: "drop-merit", list: "merits", info: "merit" },
+  verbs: { define: "define-merit", forget: "forget-merit", take: "take-merit", drop: "drop-merit", list: "show-merit", info: "show-merit" },
   cardHeader: [
     `Custom Merits & Flaws. Below the ${SRD_HEADER_MARKER} line each one is its NAME,`,
     "with its fields indented under it; the list is merged over the built-ins.",
@@ -4337,7 +4337,7 @@ const ARCANUM_FAMILY: PowerFamily<ArcanumDef> = {
   one: "arcanum/taint",
   aOne: "an arcanum/taint",
   many: "Arcana & Taints",
-  verbs: { define: "define-arcanum", forget: "forget-arcanum", take: "take-arcanum", drop: "drop-arcanum", list: "arcana", info: "arcanum" },
+  verbs: { define: "define-arcanum", forget: "forget-arcanum", take: "take-arcanum", drop: "drop-arcanum", list: "show-arcanum", info: "show-arcanum" },
   requires: ARCANA_CAPABILITY,
   requiresNote: "Arcana belong to the infernal: a demon has them, and so does anyone at all "
     + "who has become a demon's thrall. Nobody else has this list open.",
@@ -4621,7 +4621,7 @@ async function takeOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
     + `(${points} ${purse} point${points === 1 ? "" : "s"}${priced.from ? ` - a ${priced.from}'s price` : ""}${paidBit})`
     + `${granted ? `. ${granted}` : ""}`
     + `${priced.note ? ` - ${priced.note}` : ""}`
-    + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}. [[budget]] tracks the purse.`);
+    + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}. [[show-budget]] tracks the purse.`);
 }
 
 async function dropOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, family: PowerFamily<T>): Promise<string> {
@@ -4653,8 +4653,8 @@ async function dropOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
 }
 
 // merits / arcana - what this character OWNS from one list.
-async function ownedPowerList<T extends OwnedPowerDef>(family: PowerFamily<T>): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function ownedPowerList<T extends OwnedPowerDef>(family: PowerFamily<T>, forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const insts = family.instances(char);
   const bucket = family.bucket(char);
@@ -4683,16 +4683,16 @@ const cmdForgetMerit = (cmd: ParsedCommand): Promise<string> => forgetOwnedPower
 const cmdMeritInfo = (cmd: ParsedCommand): Promise<string> => ownedPowerInfo(cmd, MERIT_FAMILY);
 const cmdTakeMerit = (cmd: ParsedCommand): Promise<string> => takeOwnedPower(cmd, MERIT_FAMILY);
 const cmdDropMerit = (cmd: ParsedCommand): Promise<string> => dropOwnedPower(cmd, MERIT_FAMILY);
-const cmdMerits = (): Promise<string> => ownedPowerList(MERIT_FAMILY);
+const cmdMerits = (forChar?: PlayableCharacter): Promise<string> => ownedPowerList(MERIT_FAMILY, forChar);
 
 const cmdDefineArcanum = (cmd: ParsedCommand): Promise<string> => defineOwnedPower(cmd, ARCANUM_FAMILY);
 const cmdForgetArcanum = (cmd: ParsedCommand): Promise<string> => forgetOwnedPower(cmd, ARCANUM_FAMILY);
 const cmdArcanumInfo = (cmd: ParsedCommand): Promise<string> => ownedPowerInfo(cmd, ARCANUM_FAMILY);
 const cmdTakeArcanum = (cmd: ParsedCommand): Promise<string> => takeOwnedPower(cmd, ARCANUM_FAMILY);
 const cmdDropArcanum = (cmd: ParsedCommand): Promise<string> => dropOwnedPower(cmd, ARCANUM_FAMILY);
-// [[arcana]] with a name inspects it, the way [[arcana]] always has.
-const cmdArcana = (cmd: ParsedCommand): Promise<string> =>
-  cmd.positional[0]?.trim() ? ownedPowerInfo(cmd, ARCANUM_FAMILY) : ownedPowerList(ARCANUM_FAMILY);
+// [[show-arcanum]] with a name inspects it, the way [[show-arcanum]] always has.
+const cmdArcana = (cmd: ParsedCommand, forChar?: PlayableCharacter): Promise<string> =>
+  cmd.positional[0]?.trim() ? ownedPowerInfo(cmd, ARCANUM_FAMILY) : ownedPowerList(ARCANUM_FAMILY, forChar);
 
 async function cmdSpecialty(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
@@ -4716,7 +4716,7 @@ async function cmdForgetSpecialty(cmd: ParsedCommand): Promise<string> {
   const trait = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
   const label = cmd.positional[1]?.trim();
   const list = char.specialties?.[trait];
-  if (!trait || !list?.length) return sys(`No specialties under "${trait}". [[specialties]] lists them.`);
+  if (!trait || !list?.length) return sys(`No specialties under "${trait}". [[show-specialty]] lists them.`);
   let removed: string;
   if (label) {
     const i = list.findIndex(l => StringUtil.normalize(l) === StringUtil.normalize(label));
@@ -4732,8 +4732,8 @@ async function cmdForgetSpecialty(cmd: ParsedCommand): Promise<string> {
   return sys(`${disp(char.name)} forgets specialty ${removed} (${trait}).`);
 }
 
-async function cmdSpecialties(): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+async function cmdSpecialties(forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const entries = Object.entries(char.specialties ?? {}).filter(([, l]) => l.length);
   if (!entries.length) return sys(`${disp(char.name)} has no specialties. [[specialty <trait> \`<Label>\`]] adds one.`);
@@ -5067,10 +5067,10 @@ async function cmdAfflictionInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) {
     const items = AfflictionRegistry.all().map(d => d.name).join(", ");
-    return sys(`Defined afflictions: ${items}. [[affliction <name>]] for detail; [[afflictions]] shows who has what.`);
+    return sys(`Defined afflictions: ${items}. [[show-affliction <name>]] for detail; [[show-affliction]] shows who has what.`);
   }
   const def = AfflictionRegistry.get(name);
-  if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". [[affliction]] lists them.`);
+  if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". [[show-affliction]] lists them.`);
   return sys(`${describeAfflictionDef(def)}.`);
 }
 
@@ -5090,7 +5090,7 @@ async function cmdForgetAffliction(cmd: ParsedCommand): Promise<string> {
 
 async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
-  if (!name) return sys(`afflict needs an affliction, e.g. [[afflict concentrating-on target="Wolf"]]. [[affliction]] lists them.`);
+  if (!name) return sys(`afflict needs an affliction, e.g. [[afflict concentrating-on target="Wolf"]]. [[show-affliction]] lists them.`);
   const def = AfflictionRegistry.get(name);
   if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". Define it with [[define-affliction]].`);
   const subject = await afflictionSubject(cmd);
@@ -5156,7 +5156,7 @@ async function expiryFromArgs(cmd: ParsedCommand, prefix = ""): Promise<{ value?
 // the doing stay separate.
 async function cmdToggle(cmd: ParsedCommand): Promise<string> {
   const name = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
-  if (!name) return sys(`toggle needs an affliction, e.g. [[toggle potent]]. [[afflictions]] lists what is on.`);
+  if (!name) return sys(`toggle needs an affliction, e.g. [[toggle potent]]. [[show-affliction]] lists what is on.`);
   const subject = await afflictionSubject(cmd);
   if (subject.error) return sys(`${subject.error}`);
   const char = await CharacterStore.load(subject.name!);
@@ -5186,7 +5186,7 @@ async function cmdInvoke(cmd: ParsedCommand): Promise<string> {
   if (!char) return noCharacter();
   const source = passiveSourceFor(char, name);
   if (!source) {
-    return sys(`Nothing ${disp(char.name)} has offers "${name}". [[merits]], [[arcana]] and [[sheet]] show what he holds.`);
+    return sys(`Nothing ${disp(char.name)} has offers "${name}". [[show-merit]], [[show-arcanum]] and [[show-sheet]] show what he holds.`);
   }
   const said = await applyPassiveGrant(StringUtil.normalize(char.name), source.kind, source.key,
     { ...source.grant, mode: "automatic" });
@@ -5259,7 +5259,7 @@ async function cmdAfflictions(cmd: ParsedCommand): Promise<string> {
     subject = r.value!;
   } else {
     const cur = await CharacterStore.getCurrent();
-    if (!cur) return noCharacter(`or name someone: [[afflictions "Wolf"]]`);
+    if (!cur) return noCharacter(`or name someone: [[show-affliction "Wolf"]]`);
     subject = StringUtil.normalize(cur.name);
   }
   const list = await CharacterAfflictions.list(subject);
@@ -5307,7 +5307,7 @@ async function resolveCharacterRef(token: string): Promise<{ name?: string; erro
       playerKey: await PlayerStore.current(),
     });
   }
-  return target ? { name: target } : { error: `Unknown alias "@${ref.alias}". [[aliases]] lists them; [[alias @${ref.alias} "Name"]] defines it.` };
+  return target ? { name: target } : { error: `Unknown alias "@${ref.alias}". [[show-alias]] lists them; [[alias @${ref.alias} "Name"]] defines it.` };
 }
 
 // Define (or overwrite) an alias. Bare @alias defines GLOBAL; the explicit
@@ -5369,18 +5369,29 @@ async function cmdPlayer(cmd: ParsedCommand): Promise<string> {
 }
 
 // --- DISCOVERABILITY -------------------------------------------------------
-// [[help]] surfaces the command registry; [[characters]] and [[set-default]]
+// [[show-help]] surfaces the command registry; [[show-character]] and [[set-default]]
 // round out character selection (creation sets the first default; this changes it).
 async function cmdHelp(cmd: ParsedCommand): Promise<string> {
   const verb = cmd.positional[0]?.trim().toLowerCase();
   if (verb) {
+    // Asking about a name that MOVED is the most useful moment to say so.
+    const spec = CommandRouter.specFor(verb);
     const help = CommandRouter.helpFor(verb);
+    if (help && spec?.deprecated) {
+      return sys(`${verb} is now [[${spec.deprecated}]] - it still works. `
+        + `${spec.deprecated} - ${CommandRouter.helpFor(spec.deprecated)}`);
+    }
     return help
       ? sys(`${verb} - ${help}`)
-      : sys(`No command "${verb}". [[help]] lists them all.`);
+      : sys(`No command "${verb}". [[show-help]] lists them all.`);
   }
+  // The CURRENT vocabulary only. Old names still route; listing them would
+  // double the wall of text a player is reading to find out what exists.
   const verbs = CommandRouter.verbs();
-  return sys(`${verbs.length} commands: ${verbs.join(", ")}. [[help <verb>]] for one's usage.`);
+  const older = CommandRouter.deprecatedVerbs().length;
+  return sys(`${verbs.length} commands: ${verbs.join(", ")}. [[show-help <verb>]] for one's usage. `
+    + `Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context `
+    + `(add in-story=true to keep one). ${older} older name${older === 1 ? "" : "s"} still work and say what replaced them.`);
 }
 
 async function cmdCharacters(): Promise<string> {
@@ -5400,7 +5411,7 @@ async function cmdCharacters(): Promise<string> {
   return sys(`Characters: ${items.join("; ")}. [[play name="..."]] to switch.`);
 }
 
-// set-trait <name> <rating> - the writing counterpart of [[sheet]]. Merits have
+// set-trait <name> <rating> - the writing counterpart of [[show-sheet]]. Merits have
 // [[take-merit]] and specialties have [[specialty]]; every OTHER rating - an
 // Attribute, an Ability, a Background, a Discipline, a Pillar - had only the
 // lorebook card, which is fine until you want one command. The group is
@@ -5492,7 +5503,7 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
     : String(bucket[trait]);
   return sys(`${disp(char.name)} ${group === "poolStarts" ? "pool start" : StringUtil.normalize(group).replace(/ies$/, "y").replace(/s$/, "")} `
     + `${disp(trait)}: ${shown}${had !== undefined && !add ? ` (was ${had})` : ""}`
-    + `${paid !== undefined ? `, paid ${paid}` : ""}.${passiveNote} [[sheet]] shows the whole record.`);
+    + `${paid !== undefined ? `, paid ${paid}` : ""}.${passiveNote} [[show-sheet]] shows the whole record.`);
 }
 
 // --- MIGRATION: the one place that still understands the old JSON cards ------
@@ -5546,13 +5557,13 @@ async function cmdConvertCards(): Promise<string> {
   if (failed.length) bits.push(`Left alone (unreadable): ${failed.join(", ")}.`);
   if (sync.synced.length) bits.push(`Re-synced ${sync.synced.map(n => StringUtil.toTitleCase(n)).join(", ")}.`);
   if (sync.emptied.length) bits.push(`⚠ A whole group went empty: ${sync.emptied.join("; ")} - the card is the source of truth, so a group left OFF it is a group erased.`);
-  return sys(`${bits.join(" ")} Open a card to see the new format; [[sheet]] confirms what the engine reads.`);
+  return sys(`${bits.join(" ")} Open a card to see the new format; [[show-sheet]] confirms what the engine reads.`);
 }
 
 // The record as the ENGINE reads it: every numeric bucket, with the effective
 // value marked wherever enhancements/boosts change what a roll will actually
 // use. This is the verification half of the creator-mode loop: hand-edit the
-// lorebook card, run [[sheet]], see exactly what synced.
+// lorebook card, run [[show-sheet]], see exactly what synced.
 async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const raw = (cmd.named["character"] ?? cmd.positional[0])?.trim();
   let char: PlayableCharacter | undefined;
@@ -5589,12 +5600,12 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
     if (Object.keys(bucket ?? {}).length) parts.push(`${label}: ${fmt(bucket, false)}`);
   }
   if (Object.keys(char.meritsFlaws ?? {}).length) {
-    parts.push(`Merits/Flaws: ${Object.entries(char.meritsFlaws).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[merits]] for detail)`);
+    parts.push(`Merits/Flaws: ${Object.entries(char.meritsFlaws).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[show-merit]] for detail)`);
   }
   // Its own line, because it is its own category - and absent entirely from the
   // sheets of the characters (nearly all of them) who have no Arcana.
   if (Object.keys(char.arcana ?? {}).length) {
-    parts.push(`Arcana/Taints: ${Object.entries(char.arcana!).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[arcana]] for detail)`);
+    parts.push(`Arcana/Taints: ${Object.entries(char.arcana!).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[show-arcanum]] for detail)`);
   }
   const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
@@ -5615,9 +5626,9 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   const stale = Object.keys(char.poolStarts ?? {}).filter(k => !own.has(StringUtil.normalize(k)));
   if (stale.length) {
     parts.push(`⚠️ pool start${stale.length === 1 ? "" : "s"} for ${stale.join(", ")} - this character has no such resource `
-      + `(replaced or never granted). Delete the line in creator mode; [[resources]] is the truth`);
+      + `(replaced or never granted). Delete the line in creator mode; [[show-resource]] is the truth`);
   }
-  parts.push(`Live pools via [[resources]], damage via [[health]]`);
+  parts.push(`Live pools via [[show-resource]], damage via [[show-health]]`);
   return sys(`${parts.join(". ")}.`);
 }
 
@@ -5627,7 +5638,7 @@ async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
   const ref = await resolveCharacterRef(name);
   if (ref.error) return sys(`${ref.error}`);
   const c = await CharacterStore.load(ref.name!);
-  if (!c) return sys(`No character named "${ref.name}". [[characters]] lists them.`);
+  if (!c) return sys(`No character named "${ref.name}". [[show-character]] lists them.`);
   await CharacterStore.setDefault(c.name);
   return sys(`${disp(c.name)} is now the default character ([[play]] with no name selects it).`);
 }
@@ -5654,10 +5665,10 @@ CommandRouter.beforeRoute(async () => {
 
 // --- REGISTRATIONS ------------------------------------------------------------
 // Every verb registers with its CommandSpec: the ONE declarative description
-// of its arguments. [[help]] derives from it; windows render forms and compose
+// of its arguments. [[show-help]] derives from it; windows render forms and compose
 // command strings from it. Handlers stay the validators - a spec describes,
 // it never rejects.
-// `hint` is the GRAMMAR (it goes in the one-line usage [[help]] prints);
+// `hint` is the GRAMMAR (it goes in the one-line usage [[show-help]] prints);
 // `example` is what a window shows inside the empty field, so it must be
 // something a player could type. The grammar reads: a resource name, "::effect"
 // to pick one of its NAMED effects (heal, boost, fuel, cast...) instead of the
@@ -5811,8 +5822,8 @@ CommandRouter.register("cancel-roll", cmdCancelRoll, {
   summary: "cancel an extended action",
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
 });
-CommandRouter.register("resources", cmdResources, { summary: "list the current character's resources" });
-CommandRouter.register("attune", cmdAttune, {
+CommandRouter.register("resources", () => cmdResources(), { summary: "list the current character's resources" });
+CommandRouter.register("attune", cmd => cmdAttune(cmd), {
   summary: "what this character can USE (a pool he cannot use is only points)",
   params: [
     { key: "capability", kind: "positional", hint: "[awakened|vitae|resolve]" },
@@ -5842,7 +5853,7 @@ CommandRouter.register("damage", cmdDamage, {
     { key: "n", kind: "positional", hint: "[n]" },
   ],
 });
-CommandRouter.register("health", cmdHealth, { summary: "show the current character's health track" });
+CommandRouter.register("health", () => cmdHealth(), { summary: "show the current character's health track" });
 CommandRouter.register("clear-boosts", cmdClearBoosts, { summary: "clear trait boosts (the ST calls the duration)" });
 CommandRouter.register("reset-uses", cmdResetUses, { summary: "scene/turn change: clears effect-use counters" });
 CommandRouter.register("configure-resources", cmdConfigureResources, { summary: "guided resource setup; plain replies answer it" });
@@ -5951,7 +5962,7 @@ CommandRouter.register("derived", cmdDerived, {
   summary: "what the sheet implies rather than states: Road, Willpower, generation, and why",
   params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
 });
-CommandRouter.register("eval", cmdEval, {
+CommandRouter.register("eval", cmd => cmdEval(cmd), {
   summary: "read an expression against the current character (the reference system, exposed)",
   params: [{ key: "expression", kind: "positional", hint: "<expression>", example: "12 - background:generation" }],
 });
@@ -6039,7 +6050,7 @@ CommandRouter.register("forget-background", cmdForgetBackground, {
   summary: "remove a custom background (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
-CommandRouter.register("supernatural", cmdSupernatural, {
+CommandRouter.register("supernatural", cmd => cmdSupernatural(cmd), {
   summary: "the families of power open to this character (disciplines, magic, sorcery, blood-sorcery)",
   params: [{ key: "category", kind: "positional", hint: "[category]", example: "blood-sorcery" }],
 });
@@ -6047,7 +6058,7 @@ CommandRouter.register("budget", cmdBudget, {
   summary: "what each purse allows, what is spent, what is left (advisory)",
   params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
 });
-CommandRouter.register("grant", cmdGrant, {
+CommandRouter.register("grant", cmd => cmdGrant(cmd), {
   summary: "where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus",
   params: [
     { key: "what", kind: "positional", hint: "<trait|merit|purse>", example: "potence  ·  freebie" },
@@ -6090,7 +6101,7 @@ CommandRouter.register("measure-door", cmdMeasureDoor, {
 CommandRouter.register("leave-library", cmdLeaveLibrary, {
   summary: "step back through the measured door",
 });
-CommandRouter.register("cray", cmdCray, { summary: "the cray's points, status and how it refills" });
+CommandRouter.register("cray", () => cmdCray(), { summary: "the cray's points, status and how it refills" });
 CommandRouter.register("harvest", cmdHarvest, {
   summary: "draw Quintessence from the cray ritually (no roll; overdrawing costs the site a dot)",
   params: [
@@ -6223,7 +6234,7 @@ CommandRouter.register("forget-constraint", cmdForgetConstraint, {
   summary: "remove a constraint group",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
-CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts (incl. merit-instance caps)" });
+CommandRouter.register("check-constraints", () => cmdCheckConstraints(), { summary: "flag the current character's constraint conflicts (incl. merit-instance caps)" });
 CommandRouter.register("take-merit", cmdTakeMerit, {
   summary: "take a merit/flaw; parameterized defs take name::param instances",
   note: "Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]]",
@@ -6238,9 +6249,9 @@ CommandRouter.register("drop-merit", cmdDropMerit, {
   summary: "drop an owned merit/flaw instance",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
 });
-CommandRouter.register("merits", cmdMerits, {
+CommandRouter.register("merits", () => cmdMerits(), {
   summary: "list owned merits/flaws, enhancement totals and advisory issues",
-  note: "Never lists Arcana - they are not merits. [[arcana]] is their list",
+  note: "Never lists Arcana - they are not merits. [[show-arcanum]] is their list",
 });
 CommandRouter.register("define-merit", cmdDefineMerit, {
   summary: "define a merit or flaw (writes the srd:merits-flaws overlay)",
@@ -6274,8 +6285,8 @@ CommandRouter.register("forget-merit", cmdForgetMerit, {
 // Dark Ages: Devil's Due. These verbs are the merit verbs' equals, not their
 // wrappers: their own registry, their own lorebook category, their own bucket
 // on the sheet, and a list that opens only for a character bound to the
-// infernal. A vampire who types [[merits]] sees no Arcana, because he has none.
-CommandRouter.register("arcana", cmdArcana, {
+// infernal. A vampire who types [[show-merit]] sees no Arcana, because he has none.
+CommandRouter.register("arcana", cmd => cmdArcana(cmd), {
   summary: "the Arcana & Taints this character owns (bare), or one in detail",
   note: "They trade in the ARCANA purse, never freebies, and only a demon or a demon's thrall has this list at all",
   params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
@@ -6334,7 +6345,7 @@ CommandRouter.register("forget-specialty", cmdForgetSpecialty, {
     { key: "label", kind: "positional", type: "literal", hint: "[`<Label>`]" },
   ],
 });
-CommandRouter.register("specialties", cmdSpecialties, {
+CommandRouter.register("specialties", () => cmdSpecialties(), {
   summary: "list the current character's specialties",
 });
 CommandRouter.register("define-affliction", cmdDefineAffliction, {
@@ -6450,26 +6461,603 @@ CommandRouter.register("player", cmdPlayer, {
   ],
 });
 
+// =============================================================================
+// SHOW - one way to look at anything, and none of it reaches the AI
+// -----------------------------------------------------------------------------
+// Roughly forty verbs only REPORT. They arrived one at a time, so they were
+// named inconsistently (`merits` vs `merit`, `scenes` vs `scene-info`, `arcana`
+// vs `arcanum`, `list-rolls` vs `roll-info`) and the singular/plural split was
+// really a SCOPE distinction nobody had declared: `merit` meant "what the
+// chronicle defines", `merits` meant "what this character owns". Two names for
+// one question asked of two places.
+//
+// So: every read-only verb is `show-<thing>`, takes a NAME (`@all` = the whole
+// list) and a SCOPE (`in=<where to look>`), and its reply is stripped from the
+// AI's context unless the player says `in-story=true`.
+//
+// THE NAME IS THE POLICY. A verb is hidden from context because it is called
+// `show-`, not because somebody remembered to add it to a list - the old
+// QUIET_VERBS set was a hand-maintained register that a new verb was trivially
+// forgotten from. What remains in that set is only the read-only verbs that are
+// not listings at all (maintenance).
+// =============================================================================
+
+// Where to look. Seven kinds, because a chronicle has seven kinds of place a
+// question can be asked of - and the last three are NOT reducible to a template:
+// the code deliberately holds clans and fellowships apart from templates (they
+// are CHOICES a character made, and exclusive merits gate on them), a scene is
+// a record with its own clock, and a player is who is holding the dice.
+export type ShowScopeKind =
+  | "campaign"      // what the chronicle DEFINES
+  | "current"       // the character being played
+  | "character"     // a named character's sheet
+  | "template"      // what that kind of creature may have
+  | "clan"          // ...or that clan / bloodline
+  | "fellowship"    // ...or that mystic fellowship
+  | "scene"         // a scene's own records
+  | "player";       // a player's pointers and aliases
+
+export interface ResolvedScope {
+  kind: ShowScopeKind;
+  key?: string;                 // the normalized name, for every kind but campaign
+  char?: PlayableCharacter;     // loaded for `current` and `character`
+  label: string;                // how a reply should name it
+}
+
+// The words that mean "the chronicle itself" and "whoever I am playing". Both
+// spelled several ways on purpose: a player types what they think of first.
+const SCOPE_CAMPAIGN = ["campaign", "chronicle", "story", "world", "game"];
+const SCOPE_CURRENT = ["current", "me", "self", "mine", "here"];
+// An explicit `kind::name` disambiguates when a name means two things. `::`
+// folds to `:` at the boundary (docs/invariants.md §2), so both spellings work.
+const SCOPE_PREFIXES: Record<string, ShowScopeKind> = {
+  character: "character", char: "character", pc: "character",
+  template: "template", splat: "template",
+  clan: "clan", bloodline: "clan",
+  fellowship: "fellowship",
+  scene: "scene",
+  player: "player",
+  campaign: "campaign", chronicle: "campaign",
+};
+
+// The order a bare name is tried in. Characters first because a player names
+// their own characters and types those names most; a collision is REPORTED
+// rather than guessed at, so being wrong here is never silent.
+const SCOPE_SEARCH: ShowScopeKind[] = ["character", "template", "clan", "fellowship", "scene", "player"];
+
+async function scopeKindsMatching(key: string): Promise<ShowScopeKind[]> {
+  const hits: ShowScopeKind[] = [];
+  if ((await CharacterStore.listNames()).includes(key)) hits.push("character");
+  if (TEMPLATES[key] || TemplateRegistry.get(key)) hits.push("template");
+  if (CLANS[key] || clanFamilies().some(c => c.id === key)) hits.push("clan");
+  if (FELLOWSHIPS[key]) hits.push("fellowship");
+  if ((await SceneStore.names()).includes(key)) hits.push("scene");
+  if (key === PlayerStore.STORYTELLER || (await PlayerStore.known()).includes(key)) hits.push("player");
+  return SCOPE_SEARCH.filter(k => hits.includes(k));
+}
+
+// `in=<raw>` -> where to look, or a refusal that says what would have worked.
+// `allowed` is the subject's own vocabulary: health belongs to a character, and
+// "health in the campaign" is a question worth answering with a correction
+// rather than an empty list.
+export async function resolveShowScope(
+  raw: string | undefined, allowed: ShowScopeKind[], fallback: ShowScopeKind,
+): Promise<ResolvedScope | { error: string }> {
+  const asked = StringUtil.normalize(raw ?? "").replace(/::+/g, ":");
+  const wants = (kind: ShowScopeKind): string | undefined =>
+    allowed.includes(kind) ? undefined
+      : `That is a ${kind}, and this one is only asked of ${allowed.join(" / ")}.`;
+
+  // Nothing said: the subject's own default.
+  if (!asked) return finishScope(fallback, undefined, allowed);
+
+  // An explicit kind::name is never guessed at.
+  const colon = asked.indexOf(":");
+  if (colon > 0) {
+    const kind = SCOPE_PREFIXES[asked.slice(0, colon)];
+    const key = asked.slice(colon + 1);
+    if (!kind) {
+      return { error: `"${asked.slice(0, colon)}" is not a scope. Try ${Object.keys(SCOPE_PREFIXES).join(", ")}, `
+        + `or a bare name and the engine works out which it is.` };
+    }
+    const no = wants(kind);
+    if (no) return { error: no };
+    return finishScope(kind, key, allowed);
+  }
+
+  if (SCOPE_CAMPAIGN.includes(asked)) {
+    return wants("campaign") ? { error: wants("campaign")! } : finishScope("campaign", undefined, allowed);
+  }
+  if (SCOPE_CURRENT.includes(asked)) {
+    return wants("current") ? { error: wants("current")! } : finishScope("current", undefined, allowed);
+  }
+
+  // A bare name: ask every place that could hold it. Two answers is a real
+  // ambiguity - name both explicit forms rather than picking one silently.
+  const hits = await scopeKindsMatching(asked);
+  const usable = hits.filter(k => allowed.includes(k));
+  if (usable.length > 1) {
+    return { error: `"${asked}" is a ${hits.join(" AND a ")}. Say which: `
+      + usable.map(k => `in=${k}::${asked}`).join(" or ") + "." };
+  }
+  if (usable.length === 1) return finishScope(usable[0], asked, allowed);
+  if (hits.length) {
+    return { error: `"${asked}" is a ${hits.join("/")}, and this one is only asked of ${allowed.join(" / ")}.` };
+  }
+  return { error: `Nothing named "${asked}" - not a character, template, clan, fellowship, scene or player. `
+    + `[[show-character @all]] and [[show-template @all]] list two of those.` };
+}
+
+// Load what the kind needs and give it a label. Split out so every path above
+// returns the same shape.
+async function finishScope(
+  kind: ShowScopeKind, key: string | undefined, allowed: ShowScopeKind[],
+): Promise<ResolvedScope | { error: string }> {
+  if (!allowed.includes(kind)) {
+    return { error: `This one is only asked of ${allowed.join(" / ")}.` };
+  }
+  if (kind === "campaign") return { kind, label: "the chronicle" };
+  if (kind === "current") {
+    const char = await CharacterStore.getCurrent();
+    if (!char) return { error: `No current character. [[play name="..."]] picks one, or name a scope with in=.` };
+    return { kind, key: StringUtil.normalize(char.name), char, label: disp(char.name) };
+  }
+  if (kind === "character") {
+    const ref = await resolveCharacterRef(key ?? "");
+    if (ref.error) return { error: ref.error };
+    const char = await CharacterStore.load(ref.name!);
+    if (!char) return { error: `No character named "${ref.name}". [[show-character @all]] lists them.` };
+    return { kind, key: StringUtil.normalize(char.name), char, label: disp(char.name) };
+  }
+  return { kind, key: key ?? "", label: `${StringUtil.toTitleCase(key ?? "")} (${kind})` };
+}
+
+// --- THE SUBJECTS ------------------------------------------------------------
+// One entry per thing a player can look at. `render` mostly DELEGATES to the
+// handler that already exists - this pass renames and re-scopes the surface, it
+// does not rewrite thirty reports.
+type ShowRender = (name: string | undefined, scope: ResolvedScope, cmd: ParsedCommand) => Promise<string>;
+
+interface ShowSubject {
+  verb: string;                       // "show-merit"
+  summary: string;
+  note?: string;
+  nameHint?: string;                  // what a name means here (help/window)
+  nameExample?: string;
+  /** Old verbs that meant this, each with the scope it meant. */
+  replaces?: Array<{ verb: string; scope?: ShowScopeKind }>;
+  scopes: ShowScopeKind[];
+  defaultScope: ShowScopeKind;
+  extra?: ParamSpec[];                // knobs the old verb had that still apply
+  render: ShowRender;
+}
+
+// `@all` is the wildcard, and `@` is the alias sigil - state.ts reserves the
+// token so the two can never collide.
+function isShowAll(name: string | undefined): boolean {
+  return name !== undefined && StringUtil.normalize(name) === "all";
+}
+// The name a subject was asked for: undefined when absent or `@all`.
+function showName(cmd: ParsedCommand): { name?: string; all: boolean } {
+  const raw = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (!raw) return { all: false };
+  if (raw === SHOW_ALL_TOKEN || isShowAll(raw.replace(/^@/, ""))) return { all: true };
+  return { name: raw, all: false };
+}
+// A synthetic command for a delegate that reads positionals/named of its own.
+function asCmd(name: string | undefined, cmd: ParsedCommand, named: Record<string, string> = {}): ParsedCommand {
+  return {
+    ...cmd,
+    positional: name === undefined ? [] : [name],
+    named: { ...cmd.named, ...named },
+  };
+}
+// The character a character-scoped subject reports on.
+function scopeChar(scope: ResolvedScope): PlayableCharacter | undefined { return scope.char; }
+// "this subject has nothing to say about that scope" - said once, the same way.
+function notForScope(scope: ResolvedScope, what: string): string {
+  return sys(`${what} is not something ${scope.label} has. Try in=campaign or in=current.`);
+}
+
+// The scopes a sheet-bound subject understands: the character being played, or
+// any other by name. Written once because a dozen subjects want exactly this.
+const ON_A_SHEET: ShowScopeKind[] = ["current", "character"];
+// ...and what the chronicle defines, which a template/clan/fellowship narrows.
+const IN_THE_BOOKS: ShowScopeKind[] = ["campaign", "template", "clan", "fellowship", "current", "character"];
+
+const SHOW_SUBJECTS: ShowSubject[] = [
+  // --- THE CHRONICLE'S OWN VOCABULARY ---------------------------------------
+  {
+    verb: "show-help", summary: "list commands, or show one's usage",
+    // `help` stays VISIBLE: it is what a player who knows nothing else types.
+    replaces: [{ verb: "help" }], scopes: ["campaign"], defaultScope: "campaign",
+    nameHint: "verb|@all", nameExample: "roll",
+    render: async (name, _scope, cmd) => cmdHelp(asCmd(name, cmd)),
+  },
+  {
+    verb: "show-character", summary: "the chronicle's playable characters (marks current/default)",
+    replaces: [{ verb: "characters" }], scopes: ["campaign"], defaultScope: "campaign",
+    render: async () => cmdCharacters(),
+  },
+  {
+    verb: "show-template", summary: "the templates this chronicle knows, and what each is made of",
+    replaces: [{ verb: "templates" }], scopes: ["campaign", "template", "current", "character"],
+    defaultScope: "campaign", nameExample: "vampire",
+    render: async (name, scope, cmd) =>
+      cmdTemplates(asCmd(name ?? (scope.kind === "template" ? scope.key : scope.char?.templates[0]), cmd)),
+  },
+  {
+    verb: "show-clan", summary: "the clans and their Disciplines",
+    replaces: [{ verb: "clans" }, { verb: "clan" }], scopes: ["campaign", "clan", "current", "character"],
+    defaultScope: "campaign", nameExample: "nosferatu",
+    render: async (name, scope, cmd) =>
+      cmdClans(asCmd(name ?? (scope.kind === "clan" ? scope.key : scope.char?.choices?.["clan"]), cmd)),
+  },
+  {
+    verb: "show-fellowship", summary: "the mystic fellowships' Foundation & Pillars",
+    replaces: [{ verb: "fellowships" }], scopes: ["campaign", "fellowship", "current", "character"],
+    defaultScope: "campaign", nameExample: "valdaermen",
+    render: async (name, scope, cmd) =>
+      cmdFellowships(asCmd(name ?? (scope.kind === "fellowship" ? scope.key : scope.char?.choices?.["fellowship"]), cmd)),
+  },
+  {
+    verb: "show-cost", summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)",
+    replaces: [{ verb: "costs" }], scopes: ["campaign"], defaultScope: "campaign",
+    render: async (name, _scope, cmd) => cmdCosts(asCmd(name, cmd)),
+  },
+  {
+    verb: "show-table", summary: "success tables, grouped by category, or one laid out in full",
+    replaces: [{ verb: "tables" }], scopes: ["campaign"], defaultScope: "campaign",
+    extra: [{ key: "category", kind: "named", desc: "Only this table category" }],
+    render: async (name, _scope, cmd) => cmdTables(asCmd(name, cmd)),
+  },
+  {
+    verb: "show-roll", summary: "the chronicle's saved rolls, or one in full",
+    replaces: [{ verb: "list-rolls" }, { verb: "roll-info" }], scopes: ["campaign"], defaultScope: "campaign",
+    nameExample: "sword-strike",
+    render: async (name, _scope, cmd) => (name ? cmdRollInfo(asCmd(name, cmd)) : cmdListRolls()),
+  },
+  {
+    verb: "show-scene", summary: "the chronicle's scenes, or one in full (defaults to the open one)",
+    replaces: [{ verb: "scenes" }, { verb: "scene-info", scope: "scene" }],
+    scopes: ["campaign", "scene"], defaultScope: "campaign",
+    render: async (name, scope, cmd) => {
+      const which = name ?? (scope.kind === "scene" ? scope.key : undefined);
+      // Bare + campaign means the list; anything that names one means that one.
+      return which || scope.kind === "scene" ? cmdSceneInfo(asCmd(which, cmd)) : cmdScenes();
+    },
+  },
+  {
+    verb: "show-date", summary: "the story date, and the bookmarks the chronicle keeps",
+    replaces: [{ verb: "dates" }, { verb: "story-date" }], scopes: ["campaign"], defaultScope: "campaign",
+    // Bare: where we are, and every bookmark. Named: how far that one is from now.
+    render: async (name, _scope, cmd) => (name
+      ? cmdTimeBetween({ ...cmd, positional: [name, "now"] })
+      : sysNote(await cmdStoryDate(), stripSys(await cmdDates()))),
+  },
+  {
+    verb: "show-time-between", summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)",
+    replaces: [{ verb: "time-between" }], scopes: ["campaign"], defaultScope: "campaign",
+    extra: [
+      { key: "from", kind: "positional", hint: "<date|name>", example: "story-start" },
+      { key: "to", kind: "positional", hint: "[date|name]", example: "now" },
+    ],
+    render: async (_name, _scope, cmd) => cmdTimeBetween(cmd),
+  },
+  {
+    verb: "show-alias", summary: "every alias, grouped by scope",
+    replaces: [{ verb: "aliases" }], scopes: ["campaign", "player", "character", "current"],
+    defaultScope: "campaign",
+    render: async () => cmdAliases(),
+  },
+  {
+    verb: "show-player", summary: "the current player (the storyteller, unless somebody took a seat)",
+    scopes: ["campaign", "player"], defaultScope: "campaign",
+    render: async (_name, _scope, cmd) => cmdPlayer({ ...cmd, positional: [], named: {} }),
+  },
+  {
+    verb: "show-constraint", summary: "the story's constraint groups, and what the character breaks",
+    replaces: [{ verb: "constraints" }, { verb: "constraint" }, { verb: "check-constraints", scope: "current" }],
+    scopes: IN_THE_BOOKS, defaultScope: "campaign", nameExample: "clan-only-backgrounds",
+    render: async (name, scope, cmd) => {
+      if (name) return cmdConstraint(asCmd(name, cmd));
+      // Asked of a CHARACTER, the question is "what do I break", which is the
+      // report [[show-constraint]] used to be.
+      return scopeChar(scope) ? cmdCheckConstraints(scopeChar(scope)) : cmdConstraints();
+    },
+  },
+
+  // --- WHAT A CHARACTER HAS -------------------------------------------------
+  {
+    verb: "show-sheet", summary: "a character's record as the engine reads it (effective values marked)",
+    replaces: [{ verb: "sheet" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdSheet(asCmd(scope.key, cmd)),
+  },
+  {
+    verb: "show-merit", summary: "merits & flaws: what a character owns, or what the chronicle defines",
+    note: "in=campaign lists the definitions; a name shows one in full. NEVER lists Arcana - [[show-arcanum]] is their list",
+    replaces: [{ verb: "merits", scope: "current" }, { verb: "merit", scope: "campaign" }],
+    scopes: IN_THE_BOOKS, defaultScope: "current", nameExample: "iron-will",
+    // A NAME shows one; a SHEET scope shows what that character owns; anything
+    // else (campaign, template, clan, fellowship) shows what is open there.
+    render: async (name, scope, cmd) =>
+      name ? cmdMeritInfo(asCmd(name, cmd))
+        : scopeChar(scope) ? cmdMerits(scopeChar(scope))
+          : scopedPowerDefs(MERIT_FAMILY, scope),
+  },
+  {
+    verb: "show-arcanum", summary: "arcana & taints: what a character owns, or what the chronicle defines",
+    note: "Their own category - not merits, and only a demon or a demon's thrall has this list at all",
+    replaces: [{ verb: "arcana", scope: "current" }, { verb: "arcanum", scope: "campaign" }],
+    scopes: IN_THE_BOOKS, defaultScope: "current", nameExample: "celestial-radiance",
+    render: async (name, scope, cmd) =>
+      name ? cmdArcanumInfo(asCmd(name, cmd))
+        : scopeChar(scope) ? cmdArcana(asCmd(undefined, cmd), scopeChar(scope))
+          : scopedPowerDefs(ARCANUM_FAMILY, scope),
+  },
+  {
+    verb: "show-background", summary: "backgrounds: what a character holds and confers, or what the chronicle defines",
+    replaces: [{ verb: "backgrounds", scope: "current" }, { verb: "background", scope: "campaign" }],
+    scopes: IN_THE_BOOKS, defaultScope: "current", nameExample: "fount",
+    render: async (name, scope, cmd) =>
+      name ? cmdBackground(asCmd(name, cmd))
+        : scopeChar(scope) ? cmdBackgrounds() : scopedBackgroundDefs(scope),
+  },
+  {
+    verb: "show-affliction", summary: "afflictions on a character, or the ones the chronicle defines",
+    replaces: [{ verb: "afflictions", scope: "current" }, { verb: "affliction", scope: "campaign" }],
+    scopes: ["campaign", "current", "character", "scene"], defaultScope: "current",
+    nameExample: "in-sanctum",
+    render: async (name, scope, cmd) =>
+      name ? cmdAfflictionInfo(asCmd(name, cmd))
+        : scope.kind === "campaign" ? cmdAfflictionInfo(asCmd(undefined, cmd))
+          : cmdAfflictions(asCmd(scope.key, cmd)),
+  },
+  {
+    verb: "show-specialty", summary: "a character's specialties (one applies per roll, via specialty=)",
+    replaces: [{ verb: "specialties" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope) => cmdSpecialties(scopeChar(scope)),
+  },
+  {
+    verb: "show-resource", summary: "a character's live pools and trackers (and what they cannot use)",
+    replaces: [{ verb: "resources" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope) => cmdResources(scopeChar(scope)),
+  },
+  {
+    verb: "show-capability", summary: "what a character can USE (a pool he cannot use is only points)",
+    scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdAttune({ ...cmd, positional: [], named: {} }, scopeChar(scope)),
+  },
+  {
+    verb: "show-health", summary: "a character's health track, penalty and what soaks what",
+    replaces: [{ verb: "health" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope) => cmdHealth(scopeChar(scope)),
+  },
+  {
+    verb: "show-budget", summary: "what each purse allows, what is spent, what is left (advisory)",
+    replaces: [{ verb: "budget" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdBudget(asCmd(scope.key, cmd)),
+  },
+  {
+    verb: "show-grant", summary: "what a purchase really cost and where it came from",
+    scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdGrant({ ...cmd, positional: [], named: {} }, scopeChar(scope)),
+  },
+  {
+    verb: "show-creation", summary: "the creation budget: every pool against what the sheet holds (advisory)",
+    replaces: [{ verb: "creation" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdCreation(asCmd(scope.key, cmd)),
+  },
+  {
+    verb: "show-derived", summary: "what the sheet implies rather than states: Road, Willpower, generation, and why",
+    replaces: [{ verb: "derived" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdDerived(asCmd(scope.key, cmd)),
+  },
+  {
+    verb: "show-supernatural", summary: "the families of power open to a character (disciplines, magic, sorcery, blood-sorcery)",
+    replaces: [{ verb: "supernatural" }], scopes: ON_A_SHEET, defaultScope: "current",
+    nameExample: "disciplines",
+    render: async (name, scope, cmd) => cmdSupernatural(asCmd(name, cmd), scopeChar(scope)),
+  },
+  {
+    verb: "show-cray", summary: "the cray's points, status and how it refills",
+    replaces: [{ verb: "cray" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope) => cmdCray(scopeChar(scope)),
+  },
+  {
+    verb: "show-eval", summary: "read an expression against a character (the reference system, exposed)",
+    replaces: [{ verb: "eval" }], scopes: ON_A_SHEET, defaultScope: "current",
+    nameHint: "<expression>", nameExample: "`courage + 2`",
+    render: async (_name, scope, cmd) => cmdEval(cmd, scopeChar(scope)),
+  },
+  {
+    verb: "show-roll-status", summary: "an extended action's progress",
+    replaces: [{ verb: "roll-status" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdRollStatus(asCmd(scope.key, cmd)),
+  },
+  {
+    verb: "show-contest-status", summary: "an extended contest's progress",
+    replaces: [{ verb: "contest-status" }], scopes: ON_A_SHEET, defaultScope: "current",
+    render: async (_name, scope, cmd) => cmdContestStatus(asCmd(scope.key, cmd)),
+  },
+];
+
+// --- ASKING A LIST OF A PLACE ------------------------------------------------
+// The point of a scope on a DEFINITION list: "what may a Nosferatu take" was
+// unaskable before, because clan-exclusive merits gate on a CHOICE and nothing
+// filtered by one. `in=clan::nosferatu` now means it.
+//
+// The rule is the same one [[take-merit]] enforces at the door: a definition is
+// open to a place if the place meets its `requires` and its per-template price
+// admits it. Advisory, like everything creation-side - this REPORTS what is
+// open, it does not stop anyone.
+function scopeTemplates(scope: ResolvedScope): string[] {
+  if (scope.kind === "template") return [scope.key!];
+  return scope.char?.templates ?? [];
+}
+function scopeChoices(scope: ResolvedScope): Record<string, string> {
+  if (scope.kind === "clan") return { clan: scope.key! };
+  if (scope.kind === "fellowship") return { fellowship: scope.key! };
+  return scope.char?.choices ?? {};
+}
+// Does this definition's `requires` admit the place? Only the parts the place
+// can answer are checked - a clan scope knows nothing about tags, and refusing
+// on what it cannot know would hide everything.
+function openToScope(def: OwnedPowerDef, scope: ResolvedScope): boolean {
+  if (scope.kind === "campaign") return true;
+  const templates = scopeTemplates(scope);
+  const choices = scopeChoices(scope);
+  const req = def.requires;
+  if (req?.templates?.length && templates.length
+    && !req.templates.some(t => templates.includes(StringUtil.normalize(t)))) return false;
+  for (const [what, want] of Object.entries(req?.choices ?? {})) {
+    const key = StringUtil.normalize(what);
+    const has = StringUtil.normalize(choices[key] ?? "");
+    if (!has) return false;                      // gated on a choice this place has not made
+    const asked = StringUtil.normalize(want);
+    const met = key === "clan" ? clanFamilyOf(has) === clanFamilyOf(asked) : has === asked;
+    if (!met) return false;
+  }
+  // A printed "(7/5)" names everyone who may have it; a place outside that list
+  // is not admitted (meritCostFor is the same call take-merit makes).
+  if (templates.length && !meritCostFor(def, templates).available) return false;
+  return true;
+}
+
+// What a place can USE - the capability roster, so a list that is closed to a
+// kind of creature says so instead of pricing things for someone who cannot
+// have any of them. A clan or fellowship is NOT a template and settles nothing
+// here (a Nosferatu may perfectly well be a demon's thrall), so it is skipped.
+function scopeCapabilities(scope: ResolvedScope): string[] | undefined {
+  if (scope.char) return CharacterResources.capabilities(scope.char);
+  if (scope.kind === "template") return [...(TEMPLATES[scope.key!]?.Capabilities ?? [])];
+  return undefined;
+}
+
+// The definition list of one owned-power family, narrowed to a place.
+function scopedPowerDefs<T extends OwnedPowerDef>(family: PowerFamily<T>, scope: ResolvedScope): string {
+  // Is the LIST open to this place at all? Asked first, because "a vampire has
+  // no Arcana" is a truer answer than a priced catalogue he can never buy from.
+  const caps = family.requires ? scopeCapabilities(scope) : undefined;
+  if (family.requires && caps && !caps.includes(family.requires)) {
+    return sys(`${scope.label} has no ${family.many} at all. ${family.requiresNote ?? ""} `
+      + `[[${family.verbs.list} @all in=campaign]] lists them anyway.`);
+  }
+  const open = family.registry.all().filter(d => openToScope(d, scope));
+  if (!open.length) {
+    return sys(`Nothing in ${family.many} is open to ${scope.label}. `
+      + `[[${family.verbs.list} @all in=campaign]] lists every definition.`);
+  }
+  const items = open.map(d => `${StringUtil.normalize(d.name)}${d.kind === family.defaultKind ? "" : ` (${d.kind})`}`);
+  const heading = scope.kind === "campaign"
+    ? `Defined ${family.many}`
+    : `${family.many} open to ${scope.label}`;
+  return sys(`${heading}: ${items.join(", ")}. `
+    + `[[${family.verbs.info} <name>]] for detail; [[${family.verbs.define}]] adds one.`);
+}
+
+// ...and the backgrounds, whose gate is a plain template list.
+function scopedBackgroundDefs(scope: ResolvedScope): string {
+  const templates = scopeTemplates(scope).map(t => StringUtil.normalize(t));
+  const open = BackgroundRegistry.all().filter(d => {
+    if (scope.kind === "campaign" || !d.templates?.length || !templates.length) return true;
+    return d.templates.some(t => templates.includes(StringUtil.normalize(t)));
+  });
+  if (!open.length) return sys(`No backgrounds are open to ${scope.label}.`);
+  const where = scope.kind === "campaign" ? "" : ` open to ${scope.label}`;
+  return sys(`Backgrounds${where}: ${open.map(d => d.name).join(", ")}. `
+    + `[[show-background <name>]] for one; [[set-trait <name> <n>]] rates one; [[define-background]] adds one.`);
+}
+
+// --- REGISTRATION ------------------------------------------------------------
+// Every show verb, and every old name that meant it, from the one table. A
+// subject cannot be half-wired: declaring it registers the verb, its `in=` and
+// `in-story=` knobs, and the deprecation pointer on each name it replaces.
+export const SHOW_VERB_PREFIX = "show-";
+const SHOW_ALL_HINT = "name|@all";
+
+// THE override. A show reply is stripped from the AI's context; this puts it
+// back. Declared on every show verb because a knob missing from its CommandSpec
+// does not exist (docs/invariants.md §10).
+const IN_STORY_PARAM: ParamSpec = {
+  key: "in-story", kind: "named", type: "enum", options: ["true"],
+  desc: "Keep this reply in the story for the AI to read (default: hidden from context)",
+};
+
+function showParams(subject: ShowSubject): ParamSpec[] {
+  return [
+    { key: "name", kind: "positional", hint: subject.nameHint ?? SHOW_ALL_HINT,
+      example: subject.nameExample,
+      desc: `What to show; ${SHOW_ALL_TOKEN} means the whole list` },
+    { key: "in", kind: "named", hint: "<where>", example: subject.scopes.slice(0, 3).join(" · "),
+      desc: `Where to look: ${subject.scopes.join(", ")} (default ${subject.defaultScope}); `
+        + `a bare name is worked out, kind::name is explicit` },
+    ...(subject.extra ?? []),
+    IN_STORY_PARAM,
+  ];
+}
+
+for (const subject of SHOW_SUBJECTS) {
+  const handler: CommandHandler = async (cmd) => {
+    const { name } = showName(cmd);
+    const scope = await resolveShowScope(cmd.named["in"] ?? cmd.named["from"], subject.scopes, subject.defaultScope);
+    if ("error" in scope) return sys(scope.error);
+    return subject.render(name, scope, cmd);
+  };
+  CommandRouter.register(subject.verb, handler, {
+    summary: subject.summary,
+    note: subject.note,
+    params: showParams(subject),
+  });
+}
+
+// ...and every name that used to mean it now says so. ONE table, so a rename
+// cannot leave a dangling pointer: an unregistered verb here fails the suite.
+export const SHOW_DEPRECATIONS: Array<{ from: string; to: string; hidden?: boolean }> =
+  SHOW_SUBJECTS.flatMap(s => (s.replaces ?? []).map(r => ({ from: r.verb, to: s.verb })));
+for (const { from, to } of SHOW_DEPRECATIONS) {
+  // [[show-help]] is the exception that stays LISTED: it is the one verb a player
+  // who knows nothing else will type, and hiding it would hide the way in.
+  CommandRouter.deprecate(from, to, from === "help" ? { hidden: false } : {});
+}
+
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
-// "Quiet" verbs: read-only commands that only REPORT (list / show / query).
-// Issuing one suppresses AI generation for the turn even amid prose - the
-// player is querying the system, not narrating an action the Storyteller should
-// continue. (Generation belongs to in-fiction ACTIONS - rolls, spends, damage,
-// afflicting - not to operating the machine.) This is the game-layer "quiet the
-// turn" policy; it stays OUT of the pure CommandSpec (which describes grammar).
-// To silence another command's turn, add its verb here.
+// QUIET: a verb whose reply is for the PLAYER, not the AI. Issuing one
+// suppresses generation for the turn even amid prose - the player is querying
+// the system, not narrating an action the Storyteller should continue.
+// (Generation belongs to in-fiction ACTIONS: rolls, spends, damage, afflicting.)
+//
+// THE NAME IS THE POLICY. Every `show-*` verb is quiet by construction, so a
+// new listing cannot be forgotten from a register - which is exactly what the
+// old hand-maintained set kept happening to. What is left below is the handful
+// of read-only verbs that are not listings at all, plus the deprecated aliases,
+// which are quiet because the verb they now point at is.
+//
+// This is the game-layer "quiet the turn" policy; it stays OUT of the pure
+// CommandSpec (which describes grammar).
 const QUIET_VERBS = new Set<string>([
-  "help", "characters", "sheet", "list-rolls", "roll-info", "roll-status", "contest-status",
-  "resources", "health", "tables", "constraints", "constraint",
-  "check-constraints", "merits", "merit", "specialties", "affliction", "afflictions",
-  "story-date", "dates", "time-between", "scenes", "scene-info", "fellowships", "cray",
-  // The creation-side listings: all read-only, all for the player's eyes.
-  "creation", "clans", "clan", "budget", "paid", "costs", "backgrounds", "background",
-  "arcana", "arcanum", "supernatural", "derived", "eval", "templates", "attune",
   // Maintenance: the player operating the machine, never a story beat.
-  "flush-context",
+  "flush-context", "convert-cards",
 ]);
+
+export function isQuietVerb(verb: string): boolean {
+  const v = verb.toLowerCase();
+  if (v.startsWith(SHOW_VERB_PREFIX)) return true;
+  if (QUIET_VERBS.has(v)) return true;
+  // A deprecated name is as quiet as what replaced it.
+  const replacedBy = CommandRouter.specFor(v)?.deprecated;
+  return replacedBy !== undefined && (replacedBy.startsWith(SHOW_VERB_PREFIX) || QUIET_VERBS.has(replacedBy));
+}
+
+// THE OVERRIDE. A quiet reply is stripped from the AI's context; `in-story=true`
+// leaves it in, for the player who wants the Storyteller to have read their
+// sheet. It does NOT re-enable generation for the turn: looking something up is
+// still not an action, so the reply sits in the story and is read on the next
+// generation rather than prompting one now.
+export function wantsInStory(cmd: ParsedCommand): boolean {
+  return StringUtil.normalize(cmd.named["in-story"] ?? "") === "true";
+}
 
 // =============================================================================
 // CONTEXT HYGIENE - keep engine noise out of the AI's context (§7.32)
@@ -6611,7 +7199,7 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
   for (const m of matches) {
     out += rawInputText.slice(cursor, m.index);
     const parsed = CommandParser.parse(m[1]);
-    const quiet = QUIET_VERBS.has(parsed.name);
+    const quiet = isQuietVerb(parsed.name);
     if (quiet) anyQuiet = true;
     // EVERY command is announced on the bus, in the formalized envelope, on
     // both the catch-all channel and its own verb's. Locally this costs a
@@ -6624,7 +7212,9 @@ export async function processAdventureInput(rawInputText: string): Promise<OnTex
     await PostOffice.publish(COMMAND_CHANNEL, envelope);
     await PostOffice.publish(commandChannel(parsed.name), envelope);
     const reply = await CommandRouter.route(m[1]);
-    out += quiet ? await markCtxSkip(reply) : reply;   // quiet replies are noise the AI shouldn't read
+    // Quiet replies are noise the AI shouldn't read - unless the player says
+    // otherwise. The turn stays quiet either way.
+    out += quiet && !wantsInStory(parsed) ? await markCtxSkip(reply) : reply;
     cursor = (m.index ?? 0) + m[0].length;
   }
   out += rawInputText.slice(cursor);

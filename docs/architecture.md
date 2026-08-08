@@ -87,9 +87,11 @@ reconciliation, and **`PostOffice`** (the bus wired to `api.v1.messaging`).
 `CharacterAfflictions`, `CharacterCooldowns`, `StoryClock`, `SceneStore`, …), and
 **`buildScope`** — the character scope every expression reads through.
 
-### `src/game.ts` (~5,900 lines)
+### `src/game.ts` (~6,500 lines)
 Every command handler. The largest file and the one most worth splitting when the
-engine is distributed across scripts.
+engine is distributed across scripts. Two tables carry most of its structure:
+**`SHOW_SUBJECTS`** (every read-only verb, its scopes and the old names it
+replaced) and **`PowerFamily`** (merits vs arcana).
 
 ### `src/window.ts` / `src/ui-text.ts`
 Windows are **generated from CommandSpecs**, so adding a param to a verb adds a
@@ -108,6 +110,9 @@ field to its window for free.
    this sheet". Reports, rolls, budgets and conditions all read through it.
 4. **One declarative spec per verb.** Help text and windows are derived, never
    written twice.
+4b. **The name is the policy.** A read-only verb is called `show-*`, and that
+   prefix — not a hand-maintained list — is what keeps its reply out of the AI's
+   context. `SHOW_SUBJECTS` is the one table; a subject cannot be half-wired.
 5. **Afflictions are the common currency.** An arcanum, a spell, a Discipline and
    a botched roll all express "something is on you" the same way — with a source,
    an expiry, a cooldown and an orphan policy.
@@ -155,8 +160,9 @@ for a chronicle that says otherwise.
 | a new knob on an existing verb | add the `ParamSpec` — help and windows follow |
 | a new kind of always-on power | give its def a `PassiveGrant` + an `AfflictionDef` |
 | a new CATEGORY of owned power | a type over `OwnedPowerDef`, its own registry + lorebook category, and a `PowerFamily` in `game.ts` — the verbs come for free |
+| a new thing to LOOK at | a `ShowSubject` in `game.ts`'s `SHOW_SUBJECTS` — the verb, its `name`/`in`/`in-story` knobs, its deprecated aliases and its context-hiding all follow |
 | a new expression name | a scope extension, or `scopeFunctions` in `state.ts` |
 | a new persistent thing | a store class in `state.ts` over `ScopedStorage` |
 
 Then: tests in `test/system.test.ts`, update **`docs/memory.md` in the same
-commit**, and run the whole battery in `docs/invariants.md` §9.
+commit**, and run the whole battery in `docs/invariants.md` §10.

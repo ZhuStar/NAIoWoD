@@ -1799,6 +1799,18 @@ export class PlayerStore {
     return (await PlayerStore._storage.getOrDefault(PlayerStore.DEFAULT_KEY, PlayerStore.STORYTELLER)) as string;
   }
   static async setDefault(name: string): Promise<void> { await PlayerStore._storage.set(PlayerStore.DEFAULT_KEY, StringUtil.normalize(name)); }
+
+  // Every player id this story has heard of: the Storyteller (always), whoever
+  // is current or default, and anyone with aliases of their own. There is no
+  // player ROSTER - a player exists by being named - so this gathers the places
+  // a name can have been left, which is what `in=<player>` needs to check.
+  static async known(): Promise<string[]> {
+    const out = new Set<string>([PlayerStore.STORYTELLER]);
+    out.add(await PlayerStore.current());
+    out.add(await PlayerStore.getDefault());
+    for (const id of Object.keys((await AliasRegistry.all()).players)) out.add(id);
+    return [...out].filter(Boolean);
+  }
 }
 
 // =============================================================================
@@ -1825,12 +1837,19 @@ export interface AliasMap {
 }
 export interface AliasRef { scope?: AliasScope; owner?: string; alias: string }
 
+// `@all` means EVERY one of them to the show-* verbs, and `@` is the alias
+// sigil, so the two would collide: an alias called "all" would shadow the
+// wildcard on every listing in the engine. Reserved here, in the one function
+// that decides what an @token is, so [[alias @all …]] refuses at the door
+// rather than defining something unreachable.
+export const SHOW_ALL_TOKEN = "@all";
+
 // "@..." token -> its parts, or undefined when malformed. Assumes the token is
 // already normalized (the parser guarantees it).
 export function parseAliasToken(token: string): AliasRef | undefined {
   if (!token.startsWith("@") || token.length < 2) return undefined;
   const parts = token.slice(1).split(":").map(p => p.trim()).filter(p => p.length > 0);
-  const RESERVED = ["global", "player", "char", "character"];
+  const RESERVED = ["global", "player", "char", "character", "all"];
   // A scope keyword with the wrong number of parts is malformed, not an alias.
   if (parts.length === 1) return RESERVED.includes(parts[0]) ? undefined : { alias: parts[0] };
   if (parts.length === 2 && parts[0] === "global") return { scope: "global", alias: parts[1] };

@@ -22,7 +22,8 @@ export const COMMANDS_DOC_PATH = new URL("../docs/commands.md", import.meta.url)
 export async function renderCommandReference(): Promise<string> {
   await init();
   const verbs = CommandRouter.verbs().slice().sort();
-  const bareHelp = await CommandRouter.route("help");
+  const deprecated = CommandRouter.deprecatedVerbs().slice().sort((a, b) => a.verb.localeCompare(b.verb));
+  const bareHelp = await CommandRouter.route("show-help");
 
   const rows: string[] = [];
   const detail: string[] = [];
@@ -60,8 +61,8 @@ export async function renderCommandReference(): Promise<string> {
       params.length
         ? `| argument | kind | meaning |\n|---|---|---|\n${params.join("\n")}\n`
         : "_No arguments._\n",
-      "**`[[help " + verb + "]]`** replies:\n",
-      "```\n" + (await CommandRouter.route(`help ${verb}`)) + "\n```\n",
+      "**`[[show-help " + verb + "]]`** replies:\n",
+      "```\n" + (await CommandRouter.route(`show-help ${verb}`)) + "\n```\n",
     );
   }
 
@@ -77,9 +78,10 @@ export async function renderCommandReference(): Promise<string> {
     "",
     "---",
     "",
-    "## `[[help]]` — what it publishes",
+    "## `[[show-help]]` — what it publishes",
     "",
-    "With no argument it lists every verb:",
+    "With no argument it lists every current verb (`[[help]]` is the same command,",
+    "kept as a visible alias because it is what a player who knows nothing types):",
     "",
     "```",
     bareHelp,
@@ -89,6 +91,10 @@ export async function renderCommandReference(): Promise<string> {
     "verb's `CommandSpec` — the same declaration that builds its window. Nothing is",
     "written twice, so help can never disagree with the parser.",
     "",
+    "**Anything named `show-*` only looks at things.** Its reply is stripped from",
+    "the AI's context before generation; `in-story=true` on any of them keeps that",
+    "one reply in the story.",
+    "",
     "---",
     "",
     `## All ${verbs.length} commands`,
@@ -96,6 +102,21 @@ export async function renderCommandReference(): Promise<string> {
     "| command | what it does |",
     "|---|---|",
     ...rows,
+    "",
+    "---",
+    "",
+    // Old names still route, and a reader who finds one in an old card or an
+    // old habit needs to be told where it went - but they are not the surface,
+    // so they are a footnote rather than rows in the table above.
+    `## ${deprecated.length} older names that still work`,
+    "",
+    "Each does exactly what it always did, then says what replaced it. They are",
+    "left out of `[[show-help]]` and out of the table above: the current",
+    "vocabulary is what a player should be reading.",
+    "",
+    "| old name | now |",
+    "|---|---|",
+    ...deprecated.map(d => `| \`${d.verb}\` | \`${d.replacedBy}\` |`),
     "",
     "---",
     "",

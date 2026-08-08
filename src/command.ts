@@ -25,6 +25,21 @@ export function sys(body: string): string {
   return `[SYSTEM: ${body}]`;
 }
 
+// The body of a [SYSTEM: …] reply, so two replies can be folded into one block
+// rather than shown as two. Returns the text unchanged if it is not one.
+export function stripSys(reply: string): string {
+  const m = /^\[SYSTEM: ([\s\S]*)\]$/.exec(reply.trim());
+  return m ? m[1] : reply.trim();
+}
+
+// Add a note INSIDE the [SYSTEM: …] envelope, so a reply carries one block and
+// not two. Falls back to appending for anything that isn't one (a handler may
+// return several blocks, or plain text).
+export function sysNote(reply: string, note: string): string {
+  const m = /^\[SYSTEM: ([\s\S]*)\]$/.exec(reply.trim());
+  return m ? sys(`${m[1]} ${note}`) : `${reply} ${sys(note)}`;
+}
+
 // --- PARSER ------------------------------------------------------------------
 // A command body -> { name, positional[], named{}, raw }. Pure and
 // dispatch-agnostic: it only tokenizes (respecting quotes). A token
@@ -171,6 +186,20 @@ export interface CommandSpec {
   params?: ParamSpec[];
   openNamed?: boolean;               // accepts arbitrary extra named args (afflict's slots)
   note?: string;                     // extra help remark, appended to the summary
+  // A NAME THAT STILL WORKS BUT IS NOT THE NAME ANY MORE - the verb that
+  // replaced it. A deprecated verb routes exactly as before (nothing a player
+  // typed last week breaks) but is kept OUT of [[help]]'s listing and filed in
+  // its own section of docs/commands.md, so the visible surface is the current
+  // one. `hidden: false` keeps it listed anyway - [[help]] itself is deprecated
+  // in favour of [[show-help]] and must still be findable by a player who knows
+  // nothing else.
+  deprecated?: string;
+  hidden?: boolean;                  // default: whatever `deprecated` implies
+}
+// Is this verb kept out of the listings? Deprecated implies hidden unless the
+// spec says otherwise.
+export function specHidden(spec: CommandSpec): boolean {
+  return spec.hidden ?? spec.deprecated !== undefined;
 }
 
 // Derive the one-line usage string [[help]] shows for a verb.
@@ -240,15 +269,41 @@ export class CommandRouter {
     CommandRouter._registry.set(verb.toLowerCase(), { handler, spec });
   }
   static beforeRoute(hook: () => Promise<void>): void { CommandRouter._beforeRoute.push(hook); }
-  static verbs(): string[] { return [...CommandRouter._registry.keys()]; }
+  // The CURRENT vocabulary. Deprecated aliases still route; they are simply not
+  // what anyone should be told to type, so every listing asks for them by name.
+  static verbs(opts: { includeHidden?: boolean } = {}): string[] {
+    return [...CommandRouter._registry.entries()]
+      .filter(([, def]) => opts.includeHidden || !specHidden(def.spec))
+      .map(([verb]) => verb);
+  }
+  // Mark an ALREADY REGISTERED verb as replaced by another. Used so the list of
+  // what-replaced-what lives in ONE table (game.ts SHOW_SUBJECTS) rather than
+  // being restated at forty scattered registration sites. Returns false when
+  // the verb or its replacement is not registered - a typo in that table is a
+  // test failure, not a silently dead pointer.
+  static deprecate(verb: string, replacedBy: string, opts: { hidden?: boolean } = {}): boolean {
+    const def = CommandRouter._registry.get(verb.toLowerCase());
+    if (!def || !CommandRouter._registry.has(replacedBy.toLowerCase())) return false;
+    def.spec.deprecated = replacedBy.toLowerCase();
+    if (opts.hidden !== undefined) def.spec.hidden = opts.hidden;
+    return true;
+  }
+  // Every verb whose spec names a replacement, with it.
+  static deprecatedVerbs(): Array<{ verb: string; replacedBy: string }> {
+    return [...CommandRouter._registry.entries()]
+      .filter(([, def]) => def.spec.deprecated !== undefined)
+      .map(([verb, def]) => ({ verb, replacedBy: def.spec.deprecated! }));
+  }
   static specFor(verb: string): CommandSpec | undefined { return CommandRouter._registry.get(verb.toLowerCase())?.spec; }
   // Registered verb -> its one-line usage, derived from the spec (drives [[help]]).
   static helpFor(verb: string): string | undefined {
     const def = CommandRouter._registry.get(verb.toLowerCase());
     return def && describeCommandSpec(verb.toLowerCase(), def.spec);
   }
-  static help(): { verb: string; help: string }[] {
-    return [...CommandRouter._registry.entries()].map(([verb, def]) => ({ verb, help: describeCommandSpec(verb, def.spec) }));
+  static help(opts: { includeHidden?: boolean } = {}): { verb: string; help: string }[] {
+    return [...CommandRouter._registry.entries()]
+      .filter(([, def]) => opts.includeHidden || !specHidden(def.spec))
+      .map(([verb, def]) => ({ verb, help: describeCommandSpec(verb, def.spec) }));
   }
 
   // Routes one command body to its handler; returns the OOC replacement text
@@ -258,6 +313,11 @@ export class CommandRouter {
     for (const hook of CommandRouter._beforeRoute) await hook();
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return sys(`Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`);
-    return def.handler(cmd, ctx);
+    const reply = await def.handler(cmd, ctx);
+    // A deprecated verb still does its job and then says what it is called now.
+    // Done HERE so a deprecation can never be declared without the pointer.
+    return def.spec.deprecated
+      ? sysNote(reply, `⚠ [[${cmd.name}]] is now [[${def.spec.deprecated}]].`)
+      : reply;
   }
 }

@@ -430,11 +430,12 @@ In adventure mode, `[[…]]` blocks in the input box are commands. The
 `CommandRouter`, and replaces it with a single-line **`[SYSTEM: …]`** note (the
 engine's mechanical voice — distinct from the in-fiction ST/character voices).
 Generation is then suppressed for the turn (`stopGeneration`) when the input was
-*only* commands, **or** when any command was a **read-only query** (`help`,
-`characters`, `sheet`, `resources`, `health`, `merits`, `tables`, … — the
-`QUIET_VERBS` in `game.ts`): querying the system never makes the AI narrate,
-even with prose around it. An in-fiction action (`roll`, `spend`, `damage`, …)
-wrapped in prose still generates.
+*only* commands, **or** when any command was a **read-only query** — which is
+every verb named **`show-*`**, plus the handful of maintenance verbs. Querying
+the system never makes the AI narrate, even with prose around it; an in-fiction
+action (`roll`, `spend`, `damage`, …) wrapped in prose still generates. Those
+same replies are also stripped from the AI's context — see
+[Looking at things](#looking-at-things--the-show--verbs).
 
 ```
 [[create-playable name="Erik the Red" templates="vampire,werewolf,mage"]]
@@ -882,6 +883,62 @@ inherits its original's expiry, so a curse and its reflection end together.
 
 ...only apply and lift `in-sanctum` / `in-library`, and what *those* grant is
 data — the rating-scaled tiers on their own cards, editable in the lorebook.
+
+### Looking at things — the `show-*` verbs
+
+**Every read-only verb is called `show-<thing>`, and its reply never reaches the
+AI.** That is one rule doing two jobs: the name tells a player whether a command
+touches the game or only looks at it, and it is *also* how the engine decides
+what to strip from the model's context. A listing cannot be forgotten from a
+register, because there is no register — there is a prefix.
+
+Each takes a **name** (`@all` for the whole list) and a **scope**:
+
+```
+[[show-merit]]                          what I have
+[[show-merit iron-will]]                one, in full
+[[show-merit @all in=campaign]]         everything the chronicle defines
+[[show-merit @all in=Kvar]]             what Kvar has
+[[show-merit @all in=template::mage]]   what a mage may take
+[[show-merit @all in=clan::nosferatu]]  what a Nosferatu may take
+```
+
+`in=` understands seven kinds of place, because a chronicle has seven kinds of
+place a question can be asked of — and the last three are **not** reducible to a
+template:
+
+| `in=` | means |
+|---|---|
+| *(omitted)* | the verb's own default — usually the current character |
+| `current` · `me` · `self` | whoever you are playing |
+| `campaign` · `chronicle` · `story` | what the chronicle **defines** |
+| a character name or `@alias` | that character's sheet |
+| a template name | what that kind of creature may have |
+| a **clan** or **fellowship** | a *choice*, not a template — clan-exclusive merits gate on it |
+| a **scene** name | that scene's records |
+| a **player** id | that player's pointers and aliases |
+
+A bare name is worked out (character → template → clan → fellowship → scene →
+player); a name that means two things **reports the collision** rather than
+guessing, and `in=clan::nosferatu` says which explicitly. A scope a verb has no
+answer for is a correction, not an empty list:
+
+```
+[[show-health in=campaign]]
+→ That is a campaign, and this one is only asked of current / character.
+```
+
+**`in-story=true`** puts one reply back into the story for the Storyteller to
+read. It does not make the turn generate — looking something up is still not an
+action, so the reply sits there and is read on the next generation:
+
+```
+[[show-sheet in-story=true]]   the AI can now see the sheet
+```
+
+Roughly forty older names (`merits`, `sheet`, `clans`, `afflictions`, …) still
+work and say what replaced them; they are kept out of `[[show-help]]` so the
+listed surface is the current one. `docs/commands.md` has the full table.
 
 ### `[[flush-context]]` — clean the story on demand
 

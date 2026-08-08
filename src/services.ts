@@ -90,6 +90,21 @@ export const KEY = Object.freeze({
   lorebookBackup: (category: string, entry: string) => `lb:backup:${category}/${entry}`,
 } as const);
 
+// --- THE ONE KEY THAT CANNOT LIVE BEHIND A SCRIPT ID ------------------------
+// ScopedStorage prefixes every key with the script's OWN id, so script B cannot
+// read what script A wrote unless it already knows A's id - and learning A's id
+// is precisely what this key is for. So the directory lives at a FIXED prefix
+// every unit can compute while knowing nothing at all.
+//
+// Nothing moves: this is a NEW key at a NEW prefix, so there is no migration
+// here and no live save at risk. It is also the pattern the shared game state
+// will eventually want, proved out somewhere it costs nothing.
+export const REGISTRY_PREFIX = "naiowod";
+export const DIRECTORY_KEY = "scripts";
+// A cached address is dropped if nothing has confirmed it for this long, so a
+// script that was deleted stops being written to to eventually.
+const DIRECTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 export class ScopedStorage {
   // THE PREFIX IS ONE PLACE ON PURPOSE. Today it is this script's own id, which
   // is what keeps two unrelated scripts from colliding in a storyStorage they
@@ -816,9 +831,46 @@ export class PostOffice {
     return Bus.channels().filter(c => !isLocalChannel(c) && c !== HELLO_CHANNEL);
   }
 
-  // Say hello. `to` targets one script (the reply to an arriving hello);
-  // omitted, it goes to everybody.
-  private static async announce(to?: string): Promise<void> {
+  // Say hello. `to` targets one script, `isReply` marks it as the answer that
+  // ENDS the handshake. The two are separate on purpose: a hello sent to a
+  // remembered address is targeted but still OPENING - we want an answer back,
+  // because the answer is how we learn that script is still there.
+  // --- THE REMEMBERED ADDRESSES ---------------------------------------------
+  // ADDRESSES persist; INTEREST does not, and the split is the whole design.
+  // Reloading `_remote` from disk would re-arm the wire for a script that may
+  // have been deleted, undoing "nobody is listening, so nobody is told". So the
+  // cache only ever answers "who do I say hello TO" - a remembered script earns
+  // its way into `_remote`, and so earns relayed traffic, ONLY by answering.
+  // A deleted script therefore costs exactly one wasted send per load, then
+  // ages out of the cache; it never costs a relayed event.
+  private static _registry = new ScopedStorage(REGISTRY_PREFIX);
+
+  private static async directory(): Promise<Record<string, number>> {
+    try {
+      const raw = await PostOffice._registry.getOrDefault<Record<string, number>>(DIRECTORY_KEY, {});
+      const cutoff = Date.now() - DIRECTORY_TTL_MS;
+      return Object.fromEntries(
+        Object.entries(raw).filter(([id, at]) => typeof at === "number" && at > cutoff && id !== api.v1.script.id),
+      );
+    } catch { return {}; }        // a host without storage is not an error
+  }
+
+  /** Record that a script exists at this id, so the next load can skip the broadcast. */
+  static async remember(scriptId: string): Promise<void> {
+    if (!scriptId || scriptId === api.v1.script.id) return;
+    try {
+      const dir = await PostOffice.directory();
+      dir[scriptId] = Date.now();
+      await PostOffice._registry.set(DIRECTORY_KEY, dir);
+    } catch { /* nothing to remember with */ }
+  }
+
+  /** Addresses we remember from previous sessions. Exposed for tests and [[show-*]]. */
+  static async remembered(): Promise<string[]> {
+    return Object.keys(await PostOffice.directory()).sort();
+  }
+
+  private static async announce(to?: string, isReply = false): Promise<void> {
     const messaging = (api as { v1?: { messaging?: {
       broadcast?: (data: unknown, channel?: string) => Promise<void>;
       send?: (toScriptId: string, data: unknown, channel?: string) => Promise<void>;
@@ -826,7 +878,7 @@ export class PostOffice {
     if (!messaging) return;
     const hello: Hello = {
       scriptId: api.v1.script.id, channels: PostOffice.ourChannels(),
-      ...(to ? { reply: true } : {}),
+      ...(isReply ? { reply: true } : {}),
     };
     PostOffice._announcedAt = Bus.version;
     try {
@@ -854,14 +906,25 @@ export class PostOffice {
         if (!who || who === api.v1.script.id) return;
         PostOffice._remote.set(who, new Set((hello.channels ?? []).map(busChannel)));
         // Answer an opening hello; never answer an answer.
-        if (!hello.reply && m.fromScriptId) void PostOffice.announce(m.fromScriptId);
+        if (!hello.reply && m.fromScriptId) void PostOffice.announce(m.fromScriptId, true);
+        // Remember the address. Next load we can write to them directly instead
+        // of shouting into the room and waiting a tick for the answer.
+        if (m.fromScriptId) void PostOffice.remember(m.fromScriptId);
         return;
       }
       // Arrived from outside, so it is announced with `from` set - and it is
       // NOT relayed onward: this script is a subscriber, not a repeater.
       Bus.emit(m.channel, m.data, { from: m.fromScriptId, at: m.timestamp });
     });
-    await PostOffice.announce();
+    // THE KNOWN KEY FIRST, THE BROADCAST ONLY IF IT MISSES. A remembered
+    // address gets a targeted opening hello; if we remember nobody - first ever
+    // load, or everyone has aged out - fall back to shouting into the room.
+    // Either way the answers arrive on a LATER tick, so this is where init
+    // waits, and it is safe to wait here precisely because init runs on ENABLE
+    // rather than on a command that owes somebody a reply this turn.
+    const known = await PostOffice.remembered();
+    if (known.length) for (const id of known) await PostOffice.announce(id);
+    else await PostOffice.announce();
   }
 
   static async close(): Promise<void> {
@@ -878,6 +941,9 @@ export class PostOffice {
     // longer there.
     PostOffice._remote.clear();
     PostOffice._announcedAt = -1;
+    // The stored directory deliberately SURVIVES a close. `_remote` is "who is
+    // listening right now" and is only true while we are; the directory is "who
+    // has ever been here", which is what saves the next load a round-trip.
   }
 
   // Announce something. Local handlers have all run by the time this resolves;

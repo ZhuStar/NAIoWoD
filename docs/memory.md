@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `af756c8`** ("Every key in one
-> place").
+> **Last synced with the code as of commit `5e584e4`** ("Addresses persist,
+> interest does not").
+> Prior: `af756c8` ("Every key in one place").
 > Prior: `0523e2d` ("A form belongs to the story").
 > Prior: `55c05b7` ("Measured, so the fallback comes out").
 > Prior: `bab02c8` ("A cray asks its own time").
@@ -4386,7 +4387,12 @@ and `prefill` are mocked/available but not yet written.
 
     **NOT done, and deliberately** — both were asked and both need an answer:
 
-    1. **The prefix.** `ScopedStorage` still defaults to `api.v1.script.id`. The
+    1. ~~**The prefix.**~~ **ANSWERED 2026-08-08 by the owner: a script id is
+       STABLE.** Changing a script's code, permissions or configuration does not
+       touch it; only deleting and recreating the script mints a new one. So the
+       orphaning risk below is real but narrow, and an id is a durable ADDRESS -
+       which is what §7.87 builds on. Original concern, kept for the reasoning:
+       `ScopedStorage` still defaults to `api.v1.script.id`. The
        owner suggested the MAIN script's id; two problems. A unit cannot read
        storage until it has LEARNED that id, and the announcement arrives on a
        later tick — so the first command after load would have no sheet. And a
@@ -4405,6 +4411,46 @@ and `prefill` are mocked/available but not yet written.
        The storage script then owns the key registry and migrations rather than
        the read path.
 
+
+87. **Remembering who else is here** (owner: *"read in story storage under a
+    known key if the storage script is saved there... if it's not, then publish
+    an event asking for the storage script to send its id and wait"*). The
+    handshake already existed (§7.84 `PostOffice`) but forgot everything on
+    close, so every load rebuilt the directory with a broadcast whose answers
+    arrive a TICK LATER. Addresses now persist.
+
+    - **A FIXED PREFIX IS FORCED, not chosen.** `ScopedStorage` prefixes every
+      key with the script's OWN id, so script B cannot read what A wrote unless
+      it already knows A's id — and learning A's id is exactly what the key is
+      for. So the directory lives at `naiowod_scripts`. Note this is ADDITIVE: a
+      new key at a new prefix, no migration, no live save at risk — and it
+      proves out the fixed-prefix pattern the shared game state will want, in a
+      place where getting it wrong costs nothing.
+    - **ADDRESSES PERSIST; INTEREST DOES NOT.** This split is the whole design.
+      Reloading `_remote` from disk would re-arm the wire for a script that may
+      have been deleted, undoing §7.84's "nobody is listening, so nobody is
+      told". So the cache only answers *who do I say hello TO* — a remembered
+      script earns its way into `_remote`, and so earns relayed traffic, ONLY by
+      answering. A deleted script costs exactly one wasted `send` per load, then
+      ages out (30-day TTL); it never costs a relayed event.
+    - `announce()` now separates **targeted-opening** from **targeted-reply**.
+      They were one flag, which was fine when the only targeted hello WAS a
+      reply; a hello sent to a remembered address is targeted but still opening,
+      because the answer is how we learn that script is still there.
+    - Waiting is safe **here specifically**: init runs on ENABLE, not on a
+      command that owes somebody a reply this turn.
+    - Five tests, including the one that matters — remember an address, open
+      without it ever replying, and assert `remoteInterest()` is still empty.
+
+    **STILL OPEN — the batched init orchestration.** The owner's design: the bus
+    host sends direct messages asking each script to do whatever init it can,
+    then the next, then further batches from earlier scripts, until everything
+    is done. Sound, and the round/progress shape is clear — iterate to a
+    fixpoint, and if a round makes NO progress while somebody is still pending,
+    that is a dependency deadlock to REPORT rather than loop on. What is missing
+    is not design but data: **there is no unit list yet** (Phase 4's manifests),
+    so there is nothing concrete to orchestrate. Building the orchestrator
+    before the units exist would be inventing its participants.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

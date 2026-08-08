@@ -19,7 +19,7 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  ScopedStorage, KEY, STORE, LorebookManager,
+  ScopedStorage, KEY, STORE, REGISTRY_PREFIX, DIRECTORY_KEY, LorebookManager,
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, ArcanumRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
@@ -8818,5 +8818,60 @@ describe("the storage key registry", () => {
     expect(written).toContain(KEY.afflictions("Kvar the Bold"));
     expect(written).toContain(KEY.currentCharacter);
     expect(written).toContain(KEY.clock);
+  });
+});
+
+
+// =============================================================================
+// REMEMBERING WHO ELSE IS HERE
+// -----------------------------------------------------------------------------
+// The handshake worked but forgot everything on close, so every load rebuilt the
+// directory with a broadcast whose answers land a TICK LATER. Addresses now
+// persist; interest still does not, and the split is the point (§7.87).
+// =============================================================================
+describe("the script directory", () => {
+  const OTHER = "other-script-id";
+  beforeEach(async () => { await PostOffice.close(); __resetMessagingMock(); __resetStorageMock(); });
+
+  test("the directory lives at a FIXED prefix - a key behind a script id could never be found", async () => {
+    __resetStorageMock();
+    await PostOffice.remember(OTHER);
+    // Readable knowing NOTHING but the constant, which is the entire requirement.
+    const blind = new ScopedStorage(REGISTRY_PREFIX);
+    const dir = await blind.getOrDefault<Record<string, number>>(DIRECTORY_KEY, {});
+    expect(Object.keys(dir)).toEqual([OTHER]);
+  });
+
+  test("a remembered address survives close - that is what saves the next load a round-trip", async () => {
+    __resetStorageMock();
+    await PostOffice.open();
+    await __deliverMessage({ fromScriptId: OTHER, channel: "naiowod:hello", data: { scriptId: OTHER, channels: ["command"] } });
+    await new Promise(r => setTimeout(r, 0));      // the directory write is fire-and-forget
+    expect(await PostOffice.remembered()).toContain(OTHER);
+    await PostOffice.close();
+    expect(await PostOffice.remembered()).toContain(OTHER);   // the address outlives the session
+  });
+
+  test("but INTEREST does not survive - a remembered script earns relayed traffic only by ANSWERING", async () => {
+    __resetStorageMock();
+    await PostOffice.remember(OTHER);          // we remember them from a past life...
+    await PostOffice.open();                   // ...and open WITHOUT them ever replying
+    expect(await PostOffice.remembered()).toContain(OTHER);
+    // ...yet nothing is armed for them, so publish() still does not touch the wire.
+    expect(PostOffice.remoteInterest()).toEqual({});
+    await PostOffice.close();
+  });
+
+  test("we never remember ourselves", async () => {
+    __resetStorageMock();
+    await PostOffice.remember(api.v1.script.id);
+    expect(await PostOffice.remembered()).toEqual([]);
+  });
+
+  test("an address nothing has confirmed for a month ages out", async () => {
+    __resetStorageMock();
+    const stale = Date.now() - 31 * 24 * 60 * 60 * 1000;
+    await new ScopedStorage(REGISTRY_PREFIX).set(DIRECTORY_KEY, { [OTHER]: stale, fresh: Date.now() });
+    expect(await PostOffice.remembered()).toEqual(["fresh"]);
   });
 });

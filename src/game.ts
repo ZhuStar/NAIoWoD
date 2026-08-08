@@ -58,7 +58,7 @@ import {
   TemplateVariant,
 } from "./rules";
 import {
-  MeritFlawRegistry, ArcanumRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage, PostOffice, Bus,
+  MeritFlawRegistry, ArcanumRegistry, reloadAllConfigStores, LorebookManager, ScopedStorage, KEY, PostOffice, Bus,
   TrackedLorebook, ReconcileFinding, combineConfigTexts, structuralHash,
   writeTrackedEntry, ensurePath, TABLE_GENERAL_HEADER,
   configEntryText, namedDefsToCard,
@@ -7137,7 +7137,7 @@ CommandRouter.register("alias", cmdAlias, {
     { key: "target", kind: "positional", required: true, hint: '"Target Name"' },
   ],
 });
-CommandRouter.register("aliases", cmdAliases, { summary: "list every alias, grouped by scope" });
+CommandRouter.register(KEY.aliases, cmdAliases, { summary: "list every alias, grouped by scope" });
 CommandRouter.register("forget-alias", cmdForgetAlias, {
   summary: "remove an alias (bare @a = global; scoped tokens as in alias)",
   params: [{ key: "token", kind: "positional", required: true, hint: "<@token>" }],
@@ -7436,7 +7436,7 @@ const SHOW_SUBJECTS: ShowSubject[] = [
   },
   {
     verb: "show-alias", summary: "every alias, grouped by scope",
-    replaces: [{ verb: "aliases" }], scopes: ["campaign", "player", "character", "current"],
+    replaces: [{ verb: KEY.aliases }], scopes: ["campaign", "player", "character", "current"],
     defaultScope: "campaign",
     render: async () => cmdAliases(),
   },

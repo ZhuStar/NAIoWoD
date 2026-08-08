@@ -40,7 +40,7 @@ import {
 } from "./rules";
 import { ExprScope, ExprResult, Numeric, evaluateExpr, evalNumeric } from "./core/expr";
 import {
-  ScopedStorage, LorebookManager, MeritFlawRegistry, ArcanumRegistry,
+  ScopedStorage, KEY, LorebookManager, MeritFlawRegistry, ArcanumRegistry,
   ListConfigStore, MapConfigStore, CONFIG_CATEGORY,
   ALL_CONFIG_STORES, parseConfigBody, parseNamedConfigList, configEntryText, namedDefsToCard,
   writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
@@ -576,9 +576,9 @@ export interface TraitInstance { rating: number; note?: string; paid?: string }
 
 export class CharacterStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-character";
-  private static readonly DEFAULT_KEY = "default-character";
-  private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
+  private static readonly CURRENT_KEY = KEY.currentCharacter;
+  private static readonly DEFAULT_KEY = KEY.defaultCharacter;
+  private static _key(name: string): string { return KEY.character(name); }
   private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
 
   // Do these templates actually grant a Willpower tracker of its own? Almost
@@ -1697,8 +1697,8 @@ export class NamedRollStore {
 // =============================================================================
 export class ExtendedRollStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-extended";
-  private static _key(id: string): string { return `xroll:${id}`; }
+  private static readonly CURRENT_KEY = KEY.currentExtended;
+  private static _key(id: string): string { return KEY.extendedRoll(id); }
 
   static async save(a: ExtendedRoll): Promise<void> { await ExtendedRollStore._storage.set(ExtendedRollStore._key(a.id), a); }
   static async load(id: string): Promise<ExtendedRoll | undefined> {
@@ -1733,8 +1733,8 @@ export class ExtendedRollStore {
 // =============================================================================
 export class ExtendedContestStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-contest";
-  private static _key(id: string): string { return `xcontest:${id}`; }
+  private static readonly CURRENT_KEY = KEY.currentContest;
+  private static _key(id: string): string { return KEY.extendedContest(id); }
 
   static async save(c: ExtendedContest): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore._key(c.id), c); }
   static async load(id: string): Promise<ExtendedContest | undefined> {
@@ -1779,7 +1779,7 @@ export interface StoryClockState { start: number; now: number }
 
 export class StoryClock {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "time:clock";
+  private static readonly KEY = KEY.clock;
 
   static async get(): Promise<StoryClockState | undefined> {
     return (await StoryClock._storage.get(StoryClock.KEY)) as StoryClockState | undefined;
@@ -1815,7 +1815,7 @@ export class StoryClock {
 // =============================================================================
 export class DateBook {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "time:dates";
+  private static readonly KEY = KEY.dates;
 
   static async all(): Promise<Record<string, number>> {
     return await DateBook._storage.getOrDefault<Record<string, number>>(DateBook.KEY, {});
@@ -1867,8 +1867,8 @@ export interface Scene {
 
 export class SceneStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-scene";
-  private static _key(name: string): string { return `scene:${StringUtil.normalize(name)}`; }
+  private static readonly CURRENT_KEY = KEY.currentScene;
+  private static _key(name: string): string { return KEY.scene(name); }
 
   static async save(s: Scene): Promise<void> { await SceneStore._storage.set(SceneStore._key(s.name), s); }
   static async get(name: string): Promise<Scene | undefined> {
@@ -1898,7 +1898,7 @@ export class SceneStore {
 // =============================================================================
 export class GenCounter {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "gen:count";
+  private static readonly KEY = KEY.generations;
   static async get(): Promise<number> { return GenCounter._storage.getOrDefault<number>(GenCounter.KEY, 0); }
   static async increment(): Promise<number> {
     const n = (await GenCounter.get()) + 1;
@@ -1919,8 +1919,8 @@ export class GenCounter {
 export class PlayerStore {
   static readonly STORYTELLER = "storyteller";
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-player";
-  private static readonly DEFAULT_KEY = "default-player";
+  private static readonly CURRENT_KEY = KEY.currentPlayer;
+  private static readonly DEFAULT_KEY = KEY.defaultPlayer;
 
   static async current(): Promise<string> {
     return (await PlayerStore._storage.getOrDefault(PlayerStore.CURRENT_KEY, PlayerStore.STORYTELLER)) as string;
@@ -2292,7 +2292,7 @@ export const TableLibrary = new TableLibraryStore();
 // =============================================================================
 export class TableAliases {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "table-aliases";
+  private static readonly KEY = KEY.tableAliases;
 
   static async all(): Promise<Record<string, string>> {
     return ((await TableAliases._storage.get(TableAliases.KEY)) as Record<string, string> | undefined) ?? {};
@@ -2373,9 +2373,9 @@ export const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
 export class CreatorMode {
   private static _storage = new ScopedStorage();
   static async enabled(): Promise<boolean> {
-    return (await CreatorMode._storage.getOrDefault("creator-mode", false)) as boolean;
+    return (await CreatorMode._storage.getOrDefault(KEY.creatorMode, false)) as boolean;
   }
-  static async set(on: boolean): Promise<void> { await CreatorMode._storage.set("creator-mode", on); }
+  static async set(on: boolean): Promise<void> { await CreatorMode._storage.set(KEY.creatorMode, on); }
 }
 
 // One live affliction on someone: which definition, and what its slots are bound
@@ -2437,7 +2437,7 @@ export interface ArmedCooldown { expiry: AfflictionExpiry; at: number }
 
 export class CharacterCooldowns {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cool:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.cooldowns(name); }
 
   static async all(name: string): Promise<Record<string, ArmedCooldown>> {
     return ((await CharacterCooldowns._storage.get(CharacterCooldowns._key(name))) as Record<string, ArmedCooldown> | undefined) ?? {};
@@ -2482,7 +2482,7 @@ export class CharacterAfflictions {
   }
 
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `affl:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.afflictions(name); }
 
   static async list(name: string): Promise<ActiveAffliction[]> {
     return ((await CharacterAfflictions._storage.get(CharacterAfflictions._key(name))) as ActiveAffliction[] | undefined) ?? [];
@@ -2597,7 +2597,7 @@ export interface ResourceView { def: ResourceDef; current: number; max: number; 
 
 export class CharacterResources {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.resources(name); }
 
   // The character's resources, with replacement applied: a resource whose
   // `replaces` names others HIDES them (their names then resolve to it).
@@ -2709,7 +2709,7 @@ const HEAL_ORDER: (keyof HealthCounts)[] = ["aggravated", "lethal", "bashing"];
 
 export class CharacterHealth {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `hp:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.health(name); }
 
   static async counts(char: PlayableCharacter): Promise<HealthCounts> {
     return ((await CharacterHealth._storage.get(CharacterHealth._key(char.name))) as HealthCounts | undefined)
@@ -2762,7 +2762,7 @@ export class CharacterHealth {
 // =============================================================================
 export class CharacterBoosts {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `boost:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.boosts(name); }
 
   static async all(char: PlayableCharacter): Promise<Record<string, number>> {
     return ((await CharacterBoosts._storage.get(CharacterBoosts._key(char.name))) as Record<string, number> | undefined) ?? {};
@@ -2823,7 +2823,7 @@ export class CharacterBoosts {
 // =============================================================================
 export class EffectUses {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `uses:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.uses(name); }
   private static _slot(resource: string, effectName: string): string {
     return effectName ? `${StringUtil.normalize(resource)}:${StringUtil.normalize(effectName)}` : StringUtil.normalize(resource);
   }
@@ -2870,7 +2870,7 @@ const DORMANT_DAYS_PER_POINT = 365;
 
 export class CrayStore {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cray:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.cray(name); }
 
   // A cray CONFERRED by a Talisman is as real a site as a bought one.
   static rating(char: PlayableCharacter): number { return effectiveTraitOf(char, "cray"); }
@@ -2931,7 +2931,7 @@ interface CastLedger { scene: string; spells: Record<string, CastRecord>; }
 
 export class CastAttempts {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cast:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.castAttempts(name); }
 
   private static async _ledger(char: PlayableCharacter, scene: string): Promise<CastLedger> {
     const raw = (await CastAttempts._storage.get(CastAttempts._key(char.name))) as CastLedger | undefined;
@@ -2969,7 +2969,7 @@ export interface ActiveWizard { def: string; state: WizardStateData; prompt: Wiz
 
 export class WizardSession {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "wizard:active";
+  private static readonly KEY = KEY.wizard;
   static async get(): Promise<ActiveWizard | undefined> {
     return (await WizardSession._storage.get(WizardSession.KEY)) as ActiveWizard | undefined;
   }

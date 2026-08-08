@@ -6948,7 +6948,79 @@ class CommandRouter {
 // beneath a human-readable header, so the user edits game data like a database
 // table in the lorebook UI.
 // =============================================================================
+// --- WHICH STORE ------------------------------------------------------------
+// A frozen enum rather than four bare strings, so a request can NAME its store
+// and be checked. There are four, and only two are ours to write:
+//
+//   story    persistent, per story, SHARED BY EVERY SCRIPT - the engine's home
+//   temp     session scratch, cleared when the story closes
+//   history  undo-aware; reserved for mechanical state, unused today
+//   account  api.v1.storage - ACCOUNT-level, shared across every story. The
+//            engine NEVER writes it (§7.85); listed so the name exists to be
+//            refused rather than being an absence somebody fills in later.
+const STORE = Object.freeze({
+  story: "story", temp: "temp", history: "history", account: "account",
+} as const);
+type StoreName = typeof STORE[keyof typeof STORE];
+
+// --- WHICH KEY --------------------------------------------------------------
+// EVERY key the engine stores, in one place. They used to be thirteen inline
+// template strings scattered across the store classes, which is how memory.md
+// §6 ended up being the only complete list of what this engine persists - a
+// document, not code, and so unable to fail when it drifted. A registry means
+// the map of persistent state IS the map, and a rename cannot miss a caller.
+//
+// Values are the key WITHOUT the storage prefix; ScopedStorage adds that.
+//
+// TWO KINDS OF BUILDER, and the difference matters. A SUBJECT-keyed one takes a
+// character or scene name and NORMALIZES it, so "Kvar The Bold" and
+// "kvar-the-bold" are one record - the player types both. An ID-keyed one takes
+// an opaque id the engine minted and must leave it exactly as it is; normalizing
+// a uuid would quietly point at a different record. `extendedRoll`,
+// `extendedContest` and `lorebookBackup` are the id-keyed ones.
+const KEY = Object.freeze({
+  // Characters and the pointers into them
+  character: (name: string) => `pc:${StringUtil.normalize(name)}`,
+  currentCharacter: "current-character",
+  defaultCharacter: "default-character",
+  creatorMode: "creator-mode",
+  // Per-character live state
+  afflictions: (name: string) => `affl:${StringUtil.normalize(name)}`,
+  resources: (name: string) => `res:${StringUtil.normalize(name)}`,
+  health: (name: string) => `hp:${StringUtil.normalize(name)}`,
+  boosts: (name: string) => `boost:${StringUtil.normalize(name)}`,
+  uses: (name: string) => `uses:${StringUtil.normalize(name)}`,
+  cooldowns: (name: string) => `cool:${StringUtil.normalize(name)}`,
+  cray: (name: string) => `cray:${StringUtil.normalize(name)}`,
+  castAttempts: (name: string) => `cast:${StringUtil.normalize(name)}`,
+  // Rolls in flight
+  extendedRoll: (id: string) => `xroll:${id}`,
+  currentExtended: "current-extended",
+  extendedContest: (id: string) => `xcontest:${id}`,
+  currentContest: "current-contest",
+  // The clock and the calendar
+  clock: "time:clock",
+  dates: "time:dates",
+  scene: (name: string) => `scene:${StringUtil.normalize(name)}`,
+  currentScene: "current-scene",
+  generations: "gen:count",
+  // Players, aliases, wizards, lorebook bookkeeping
+  aliases: "aliases",
+  currentPlayer: "current-player",
+  defaultPlayer: "default-player",
+  tableAliases: "table-aliases",
+  wizard: "wizard:active",
+  lorebookIds: "lb:ids",
+  lorebookBackup: (category: string, entry: string) => `lb:backup:${category}/${entry}`,
+} as const);
+
 class ScopedStorage {
+  // THE PREFIX IS ONE PLACE ON PURPOSE. Today it is this script's own id, which
+  // is what keeps two unrelated scripts from colliding in a storyStorage they
+  // both see. It is also the single line the multi-script split has to change:
+  // several units sharing one game state must agree on a prefix, and a script
+  // id is per-script by definition. Changing it is a MIGRATION, not an edit -
+  // every existing story has its keys under the old one.
   constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
 
   private _key(key: string): string { return `${this.StoragePrefix}_${key}`; }
@@ -7188,8 +7260,8 @@ interface ReconcileFinding {
 
 class TrackedLorebook {
   private static _storage = new ScopedStorage();
-  private static readonly IDS_KEY = "lb:ids";
-  private static _backupKey(category: string, entry: string): string { return `lb:backup:${category}/${entry}`; }
+  private static readonly IDS_KEY = KEY.lorebookIds;
+  private static _backupKey(category: string, entry: string): string { return KEY.lorebookBackup(category, entry); }
 
   private static async _ids(): Promise<Record<string, string>> {
     return ((await TrackedLorebook._storage.get(TrackedLorebook.IDS_KEY)) as Record<string, string> | undefined) ?? {};
@@ -8317,9 +8389,9 @@ interface TraitInstance { rating: number; note?: string; paid?: string }
 
 class CharacterStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-character";
-  private static readonly DEFAULT_KEY = "default-character";
-  private static _key(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
+  private static readonly CURRENT_KEY = KEY.currentCharacter;
+  private static readonly DEFAULT_KEY = KEY.defaultCharacter;
+  private static _key(name: string): string { return KEY.character(name); }
   private static _entryName(name: string): string { return `pc:${StringUtil.normalize(name)}`; }
 
   // Do these templates actually grant a Willpower tracker of its own? Almost
@@ -9438,8 +9510,8 @@ class NamedRollStore {
 // =============================================================================
 class ExtendedRollStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-extended";
-  private static _key(id: string): string { return `xroll:${id}`; }
+  private static readonly CURRENT_KEY = KEY.currentExtended;
+  private static _key(id: string): string { return KEY.extendedRoll(id); }
 
   static async save(a: ExtendedRoll): Promise<void> { await ExtendedRollStore._storage.set(ExtendedRollStore._key(a.id), a); }
   static async load(id: string): Promise<ExtendedRoll | undefined> {
@@ -9474,8 +9546,8 @@ class ExtendedRollStore {
 // =============================================================================
 class ExtendedContestStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-contest";
-  private static _key(id: string): string { return `xcontest:${id}`; }
+  private static readonly CURRENT_KEY = KEY.currentContest;
+  private static _key(id: string): string { return KEY.extendedContest(id); }
 
   static async save(c: ExtendedContest): Promise<void> { await ExtendedContestStore._storage.set(ExtendedContestStore._key(c.id), c); }
   static async load(id: string): Promise<ExtendedContest | undefined> {
@@ -9520,7 +9592,7 @@ interface StoryClockState { start: number; now: number }
 
 class StoryClock {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "time:clock";
+  private static readonly KEY = KEY.clock;
 
   static async get(): Promise<StoryClockState | undefined> {
     return (await StoryClock._storage.get(StoryClock.KEY)) as StoryClockState | undefined;
@@ -9556,7 +9628,7 @@ class StoryClock {
 // =============================================================================
 class DateBook {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "time:dates";
+  private static readonly KEY = KEY.dates;
 
   static async all(): Promise<Record<string, number>> {
     return await DateBook._storage.getOrDefault<Record<string, number>>(DateBook.KEY, {});
@@ -9608,8 +9680,8 @@ interface Scene {
 
 class SceneStore {
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-scene";
-  private static _key(name: string): string { return `scene:${StringUtil.normalize(name)}`; }
+  private static readonly CURRENT_KEY = KEY.currentScene;
+  private static _key(name: string): string { return KEY.scene(name); }
 
   static async save(s: Scene): Promise<void> { await SceneStore._storage.set(SceneStore._key(s.name), s); }
   static async get(name: string): Promise<Scene | undefined> {
@@ -9639,7 +9711,7 @@ class SceneStore {
 // =============================================================================
 class GenCounter {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "gen:count";
+  private static readonly KEY = KEY.generations;
   static async get(): Promise<number> { return GenCounter._storage.getOrDefault<number>(GenCounter.KEY, 0); }
   static async increment(): Promise<number> {
     const n = (await GenCounter.get()) + 1;
@@ -9660,8 +9732,8 @@ class GenCounter {
 class PlayerStore {
   static readonly STORYTELLER = "storyteller";
   private static _storage = new ScopedStorage();
-  private static readonly CURRENT_KEY = "current-player";
-  private static readonly DEFAULT_KEY = "default-player";
+  private static readonly CURRENT_KEY = KEY.currentPlayer;
+  private static readonly DEFAULT_KEY = KEY.defaultPlayer;
 
   static async current(): Promise<string> {
     return (await PlayerStore._storage.getOrDefault(PlayerStore.CURRENT_KEY, PlayerStore.STORYTELLER)) as string;
@@ -10033,7 +10105,7 @@ const TableLibrary = new TableLibraryStore();
 // =============================================================================
 class TableAliases {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "table-aliases";
+  private static readonly KEY = KEY.tableAliases;
 
   static async all(): Promise<Record<string, string>> {
     return ((await TableAliases._storage.get(TableAliases.KEY)) as Record<string, string> | undefined) ?? {};
@@ -10114,9 +10186,9 @@ const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
 class CreatorMode {
   private static _storage = new ScopedStorage();
   static async enabled(): Promise<boolean> {
-    return (await CreatorMode._storage.getOrDefault("creator-mode", false)) as boolean;
+    return (await CreatorMode._storage.getOrDefault(KEY.creatorMode, false)) as boolean;
   }
-  static async set(on: boolean): Promise<void> { await CreatorMode._storage.set("creator-mode", on); }
+  static async set(on: boolean): Promise<void> { await CreatorMode._storage.set(KEY.creatorMode, on); }
 }
 
 // One live affliction on someone: which definition, and what its slots are bound
@@ -10178,7 +10250,7 @@ interface ArmedCooldown { expiry: AfflictionExpiry; at: number }
 
 class CharacterCooldowns {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cool:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.cooldowns(name); }
 
   static async all(name: string): Promise<Record<string, ArmedCooldown>> {
     return ((await CharacterCooldowns._storage.get(CharacterCooldowns._key(name))) as Record<string, ArmedCooldown> | undefined) ?? {};
@@ -10223,7 +10295,7 @@ class CharacterAfflictions {
   }
 
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `affl:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.afflictions(name); }
 
   static async list(name: string): Promise<ActiveAffliction[]> {
     return ((await CharacterAfflictions._storage.get(CharacterAfflictions._key(name))) as ActiveAffliction[] | undefined) ?? [];
@@ -10338,7 +10410,7 @@ interface ResourceView { def: ResourceDef; current: number; max: number; blocked
 
 class CharacterResources {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `res:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.resources(name); }
 
   // The character's resources, with replacement applied: a resource whose
   // `replaces` names others HIDES them (their names then resolve to it).
@@ -10450,7 +10522,7 @@ const HEAL_ORDER: (keyof HealthCounts)[] = ["aggravated", "lethal", "bashing"];
 
 class CharacterHealth {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `hp:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.health(name); }
 
   static async counts(char: PlayableCharacter): Promise<HealthCounts> {
     return ((await CharacterHealth._storage.get(CharacterHealth._key(char.name))) as HealthCounts | undefined)
@@ -10503,7 +10575,7 @@ class CharacterHealth {
 // =============================================================================
 class CharacterBoosts {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `boost:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.boosts(name); }
 
   static async all(char: PlayableCharacter): Promise<Record<string, number>> {
     return ((await CharacterBoosts._storage.get(CharacterBoosts._key(char.name))) as Record<string, number> | undefined) ?? {};
@@ -10564,7 +10636,7 @@ class CharacterBoosts {
 // =============================================================================
 class EffectUses {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `uses:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.uses(name); }
   private static _slot(resource: string, effectName: string): string {
     return effectName ? `${StringUtil.normalize(resource)}:${StringUtil.normalize(effectName)}` : StringUtil.normalize(resource);
   }
@@ -10611,7 +10683,7 @@ const DORMANT_DAYS_PER_POINT = 365;
 
 class CrayStore {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cray:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.cray(name); }
 
   // A cray CONFERRED by a Talisman is as real a site as a bought one.
   static rating(char: PlayableCharacter): number { return effectiveTraitOf(char, "cray"); }
@@ -10672,7 +10744,7 @@ interface CastLedger { scene: string; spells: Record<string, CastRecord>; }
 
 class CastAttempts {
   private static _storage = new ScopedStorage();
-  private static _key(name: string): string { return `cast:${StringUtil.normalize(name)}`; }
+  private static _key(name: string): string { return KEY.castAttempts(name); }
 
   private static async _ledger(char: PlayableCharacter, scene: string): Promise<CastLedger> {
     const raw = (await CastAttempts._storage.get(CastAttempts._key(char.name))) as CastLedger | undefined;
@@ -10710,7 +10782,7 @@ interface ActiveWizard { def: string; state: WizardStateData; prompt: WizardProm
 
 class WizardSession {
   private static _storage = new ScopedStorage();
-  private static readonly KEY = "wizard:active";
+  private static readonly KEY = KEY.wizard;
   static async get(): Promise<ActiveWizard | undefined> {
     return (await WizardSession._storage.get(WizardSession.KEY)) as ActiveWizard | undefined;
   }
@@ -17763,7 +17835,7 @@ CommandRouter.register("alias", cmdAlias, {
     { key: "target", kind: "positional", required: true, hint: '"Target Name"' },
   ],
 });
-CommandRouter.register("aliases", cmdAliases, { summary: "list every alias, grouped by scope" });
+CommandRouter.register(KEY.aliases, cmdAliases, { summary: "list every alias, grouped by scope" });
 CommandRouter.register("forget-alias", cmdForgetAlias, {
   summary: "remove an alias (bare @a = global; scoped tokens as in alias)",
   params: [{ key: "token", kind: "positional", required: true, hint: "<@token>" }],
@@ -18062,7 +18134,7 @@ const SHOW_SUBJECTS: ShowSubject[] = [
   },
   {
     verb: "show-alias", summary: "every alias, grouped by scope",
-    replaces: [{ verb: "aliases" }], scopes: ["campaign", "player", "character", "current"],
+    replaces: [{ verb: KEY.aliases }], scopes: ["campaign", "player", "character", "current"],
     defaultScope: "campaign",
     render: async () => cmdAliases(),
   },

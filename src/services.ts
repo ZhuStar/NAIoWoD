@@ -24,7 +24,79 @@ import {
 // beneath a human-readable header, so the user edits game data like a database
 // table in the lorebook UI.
 // =============================================================================
+// --- WHICH STORE ------------------------------------------------------------
+// A frozen enum rather than four bare strings, so a request can NAME its store
+// and be checked. There are four, and only two are ours to write:
+//
+//   story    persistent, per story, SHARED BY EVERY SCRIPT - the engine's home
+//   temp     session scratch, cleared when the story closes
+//   history  undo-aware; reserved for mechanical state, unused today
+//   account  api.v1.storage - ACCOUNT-level, shared across every story. The
+//            engine NEVER writes it (§7.85); listed so the name exists to be
+//            refused rather than being an absence somebody fills in later.
+export const STORE = Object.freeze({
+  story: "story", temp: "temp", history: "history", account: "account",
+} as const);
+export type StoreName = typeof STORE[keyof typeof STORE];
+
+// --- WHICH KEY --------------------------------------------------------------
+// EVERY key the engine stores, in one place. They used to be thirteen inline
+// template strings scattered across the store classes, which is how memory.md
+// §6 ended up being the only complete list of what this engine persists - a
+// document, not code, and so unable to fail when it drifted. A registry means
+// the map of persistent state IS the map, and a rename cannot miss a caller.
+//
+// Values are the key WITHOUT the storage prefix; ScopedStorage adds that.
+//
+// TWO KINDS OF BUILDER, and the difference matters. A SUBJECT-keyed one takes a
+// character or scene name and NORMALIZES it, so "Kvar The Bold" and
+// "kvar-the-bold" are one record - the player types both. An ID-keyed one takes
+// an opaque id the engine minted and must leave it exactly as it is; normalizing
+// a uuid would quietly point at a different record. `extendedRoll`,
+// `extendedContest` and `lorebookBackup` are the id-keyed ones.
+export const KEY = Object.freeze({
+  // Characters and the pointers into them
+  character: (name: string) => `pc:${StringUtil.normalize(name)}`,
+  currentCharacter: "current-character",
+  defaultCharacter: "default-character",
+  creatorMode: "creator-mode",
+  // Per-character live state
+  afflictions: (name: string) => `affl:${StringUtil.normalize(name)}`,
+  resources: (name: string) => `res:${StringUtil.normalize(name)}`,
+  health: (name: string) => `hp:${StringUtil.normalize(name)}`,
+  boosts: (name: string) => `boost:${StringUtil.normalize(name)}`,
+  uses: (name: string) => `uses:${StringUtil.normalize(name)}`,
+  cooldowns: (name: string) => `cool:${StringUtil.normalize(name)}`,
+  cray: (name: string) => `cray:${StringUtil.normalize(name)}`,
+  castAttempts: (name: string) => `cast:${StringUtil.normalize(name)}`,
+  // Rolls in flight
+  extendedRoll: (id: string) => `xroll:${id}`,
+  currentExtended: "current-extended",
+  extendedContest: (id: string) => `xcontest:${id}`,
+  currentContest: "current-contest",
+  // The clock and the calendar
+  clock: "time:clock",
+  dates: "time:dates",
+  scene: (name: string) => `scene:${StringUtil.normalize(name)}`,
+  currentScene: "current-scene",
+  generations: "gen:count",
+  // Players, aliases, wizards, lorebook bookkeeping
+  aliases: "aliases",
+  currentPlayer: "current-player",
+  defaultPlayer: "default-player",
+  tableAliases: "table-aliases",
+  wizard: "wizard:active",
+  lorebookIds: "lb:ids",
+  lorebookBackup: (category: string, entry: string) => `lb:backup:${category}/${entry}`,
+} as const);
+
 export class ScopedStorage {
+  // THE PREFIX IS ONE PLACE ON PURPOSE. Today it is this script's own id, which
+  // is what keeps two unrelated scripts from colliding in a storyStorage they
+  // both see. It is also the single line the multi-script split has to change:
+  // several units sharing one game state must agree on a prefix, and a script
+  // id is per-script by definition. Changing it is a MIGRATION, not an edit -
+  // every existing story has its keys under the old one.
   constructor(public readonly StoragePrefix: string = api.v1.script.id) {}
 
   private _key(key: string): string { return `${this.StoragePrefix}_${key}`; }
@@ -264,8 +336,8 @@ export interface ReconcileFinding {
 
 export class TrackedLorebook {
   private static _storage = new ScopedStorage();
-  private static readonly IDS_KEY = "lb:ids";
-  private static _backupKey(category: string, entry: string): string { return `lb:backup:${category}/${entry}`; }
+  private static readonly IDS_KEY = KEY.lorebookIds;
+  private static _backupKey(category: string, entry: string): string { return KEY.lorebookBackup(category, entry); }
 
   private static async _ids(): Promise<Record<string, string>> {
     return ((await TrackedLorebook._storage.get(TrackedLorebook.IDS_KEY)) as Record<string, string> | undefined) ?? {};

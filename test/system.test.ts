@@ -19,7 +19,7 @@ import {
   UndeadPhysiology, SilverVulnerability, ArmorReaction,
   Pool, bloodForGeneration,
   MoralityTrait,
-  ScopedStorage, LorebookManager,
+  ScopedStorage, KEY, STORE, LorebookManager,
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
   MeritFlawRegistry, ArcanumRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
@@ -8743,5 +8743,80 @@ describe("no window field escapes the story it belongs to", () => {
     // A new story clears storyStorage; the field goes with it, as it should.
     __resetStorageMock();
     expect(__uiFieldValue("story:win:roll:pool")).toBe("");
+  });
+});
+
+
+// =============================================================================
+// EVERY KEY IN ONE PLACE
+// -----------------------------------------------------------------------------
+// The engine's persistent state used to be described completely in exactly one
+// spot - docs/memory.md §6 - which is a document, so nothing could fail when it
+// drifted from the thirteen inline template strings it was describing. KEY is
+// that map as CODE. These tests are what make it a map rather than a list.
+// =============================================================================
+describe("the storage key registry", () => {
+  const staticKeys = Object.entries(KEY).filter(([, v]) => typeof v === "string") as Array<[string, string]>;
+  const builders = Object.entries(KEY).filter(([, v]) => typeof v === "function") as Array<[string, (a: string, b?: string) => string]>;
+
+  test("no two keys can ever collide", () => {
+    // Flat keys are distinct from each other...
+    const flat = staticKeys.map(([, v]) => v);
+    expect(new Set(flat).size).toBe(flat.length);
+    // ...and every builder occupies its own namespace, so two kinds of record
+    // about the SAME character cannot overwrite one another.
+    const built = builders.map(([, fn]) => fn("marius", "marius"));
+    expect(new Set(built).size).toBe(built.length);
+    // A flat key is never also a built one.
+    expect(flat.filter(f => built.includes(f))).toEqual([]);
+  });
+
+  // An ID-keyed builder takes an opaque id the engine minted; normalizing a
+  // uuid would quietly address a different record.
+  const ID_KEYED = ["extendedRoll", "extendedContest", "lorebookBackup"];
+
+  test("a SUBJECT-keyed builder normalizes, so `Kvar The Bold` and `kvar-the-bold` are one record", () => {
+    const subjectKeyed = builders.filter(([name]) => !ID_KEYED.includes(name));
+    expect(subjectKeyed.length).toBeGreaterThan(5);
+    for (const [, fn] of subjectKeyed) {
+      expect(fn("Kvar The Bold")).toBe(fn("kvar the bold"));
+      expect(fn("Kvar The Bold")).toBe(fn("  kvar-the-bold  "));
+    }
+  });
+
+  test("an ID-keyed builder leaves the id exactly alone", () => {
+    for (const name of ID_KEYED) {
+      const fn = (KEY as unknown as Record<string, (a: string, b?: string) => string>)[name];
+      expect(fn("A1b2-C3d4", "A1b2-C3d4")).toContain("A1b2-C3d4");
+    }
+  });
+
+  test("the registry and the store enum are frozen - a key is not something to patch at runtime", () => {
+    expect(Object.isFrozen(KEY)).toBe(true);
+    expect(Object.isFrozen(STORE)).toBe(true);
+    // `account` exists so it can be REFUSED by name rather than being an
+    // absence somebody fills in later (§7.85).
+    expect(STORE.account).toBe("account");
+    expect(Object.values(STORE)).toContain("story");
+  });
+
+  test("the keys the stores actually write are the registry's", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
+    await LorebookManager.bootstrap();
+    await StoryClock.seedDefault();
+    await CommandRouter.route('create-playable name="Kvar the Bold" templates=vampire');
+    await CommandRouter.route("afflict state-rested");
+    const written = await new ScopedStorage().list();
+    // Everything written is a key the registry can account for.
+    const known = (k: string): boolean =>
+      staticKeys.some(([, v]) => v === k) ||
+      builders.some(([, fn]) => fn("kvar-the-bold") === k || fn("kvar the bold") === k);
+    const strays = written.filter(k => !known(k) && !k.startsWith("lb:"));
+    expect(strays).toEqual([]);
+    // And the ones we know were written ARE there, by their registry name.
+    expect(written).toContain(KEY.character("Kvar the Bold"));
+    expect(written).toContain(KEY.afflictions("Kvar the Bold"));
+    expect(written).toContain(KEY.currentCharacter);
+    expect(written).toContain(KEY.clock);
   });
 });

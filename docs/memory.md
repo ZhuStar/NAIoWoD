@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `0523e2d`** ("A form belongs to
-> the story").
+> **Last synced with the code as of commit `af756c8`** ("Every key in one
+> place").
+> Prior: `0523e2d` ("A form belongs to the story").
 > Prior: `55c05b7` ("Measured, so the fallback comes out").
 > Prior: `bab02c8` ("A cray asks its own time").
 > Prior: `abd2179` ("The Roll button never rolled").
@@ -1476,6 +1477,10 @@ replies via `processAdventureInput` (plain text). `types/bun-test.d.ts` +
 (note: `expect.objectContaining` is NOT in the shim — assert fields directly).
 
 ## 6. Persistent state map (complete)
+
+> **`KEY` in `services.ts` is now the authoritative list** (§7.86) — a frozen
+> registry the suite checks for collisions and strays. This section is the
+> annotated reading of it; if the two ever disagree, the code is right.
 
 **ScopedStorage keys** (all under prefix `<scriptId>_` in `storyStorage`):
 `pc:<name>` character records · `current-character` / `default-character`
@@ -4351,6 +4356,54 @@ and `prefill` are mocked/available but not yet written.
       plus the leak check.
     - The store is not banned, it is RESERVED — for something that belongs to
       the player rather than the chronicle. Nothing today qualifies.
+
+
+86. **Every key in one place, and the store has a name** (owner: *"Storage is
+    always supposed to be handled by one single class... what is the key (which
+    should never be hardcoded, we can define constants)... a const, frozen
+    object serves as enums to which storage"*). The safe, prefix-independent
+    half of the storage-service design; the two decisions with consequences are
+    left open below.
+
+    - **`KEY`** — a frozen registry of all 25 keys the engine persists,
+      replacing thirteen inline template strings scattered across the store
+      classes. That scattering is why §6 of this file was the only complete
+      list of what the engine stores: a DOCUMENT, so nothing could fail when it
+      drifted. Now the map is code.
+    - **TWO KINDS OF BUILDER**, made explicit because the test caught the
+      difference: a SUBJECT-keyed one normalizes ("Kvar The Bold" and
+      "kvar-the-bold" are one record, since a player types both), an ID-keyed
+      one (`extendedRoll`, `extendedContest`, `lorebookBackup`) leaves an
+      engine-minted id exactly alone — normalizing a uuid addresses a different
+      record.
+    - **`STORE`** — the frozen enum: `story` / `temp` / `history` / `account`.
+      `account` is listed so it can be REFUSED BY NAME rather than being an
+      absence somebody fills in later (§7.85).
+    - Guarded: no two keys can collide (flat keys distinct, every builder its
+      own namespace, no flat key equal to a built one), both objects frozen, and
+      a live test creates a character and asserts everything actually written is
+      a key the registry accounts for.
+
+    **NOT done, and deliberately** — both were asked and both need an answer:
+
+    1. **The prefix.** `ScopedStorage` still defaults to `api.v1.script.id`. The
+       owner suggested the MAIN script's id; two problems. A unit cannot read
+       storage until it has LEARNED that id, and the announcement arrives on a
+       later tick — so the first command after load would have no sheet. And a
+       script id is per-installation: `scripts/build-single.ts` documents the
+       normal workflow as PASTING plain TypeScript (the `.naiscript`
+       frontmatter that carries an id is only for export/import), so if a
+       re-paste mints a new id then **every engine update silently orphans the
+       save** — which is a live risk today, not only under the new design. A
+       fixed constant (`naiowod_`) avoids both and collides no more than a uuid
+       does. Changing it is a MIGRATION: read through the old prefix once.
+    2. **Where the handler runs.** `StorageReadRequestEvent` /
+       `StorageWriteRequestEvent` over the bus is right, but the handler must be
+       LOCAL to each unit. storyStorage is shared by every script (§4), so no
+       unit ever needs to ask another for data — and it must not, because
+       messaging is cross-tick and a command has to return its reply THIS turn.
+       The storage script then owns the key registry and migrations rather than
+       the read path.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

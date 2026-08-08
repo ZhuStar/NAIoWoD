@@ -263,10 +263,21 @@ config registry in one sweep), logs a summary with per-entry counts, returns
   `storyStorage` is SHARED between scripts, N scripts seeing one game state is a
   **one-line change**: `ScopedStorage`'s prefix is already a constructor
   parameter (services.ts:27) defaulting to `api.v1.script.id`, so a fixed
-  `"naiowod"` makes every unit read the same keys. If it is isolated, every
-  split unit must reach the sheet through the lorebook instead. UNVERIFIED.
-- **`scripts/probe-messaging.ts` answers all of the above and has never been
-  run.** Not in the build, not in `tsconfig` (which includes src/test/types
+  `"naiowod"` makes every unit read the same keys. **ANSWERED 2026-08-08 by the
+  owner: storyStorage IS shared across all scripts** — hence the community habit
+  of prefixing keys with a UUID, which is what `ScopedStorage` already does with
+  `api.v1.script.id`. So the multi-script split is unblocked, and the remaining
+  work is a MIGRATION rather than a decision: every existing story has its keys
+  under `<scriptId>_`, so switching to a fixed prefix must read through the old
+  one or it orphans live saves.
+- **`scripts/probe-window-field.ts` — the SMALL one, ONE slot.** Answers where
+  a window field actually goes: F1 is the `story:` prefix honoured (if yes,
+  `window.ts`'s storyStorage→temp→storage fallback is dead code and can go), F2
+  where an UNPREFIXED storageKey lands — the thing the docs are silent about and
+  that broke every window (§7.83) — and F3 whether `history:` is symmetric.
+  Paste, type `probe-field`, fill three boxes, click. It prints its own verdict.
+- **`scripts/probe-messaging.ts` answers the multi-script questions and has
+  never been run.** Not in the build, not in `tsconfig` (which includes src/test/types
   only), so type-check it standalone against the vendored d.ts. One file, one
   `ROLE` constant: paste it twice, change `"one"` to `"two"` in the second slot,
   reload, then type `probe-hooks` and `probe-reply` in the Text Adventure box.

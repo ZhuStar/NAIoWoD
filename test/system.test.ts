@@ -69,7 +69,9 @@ import {
   extractHideBlocks, processGeneratedText, init,
   processContextBuilt, stripCtxSkip, GenCounter, isQuietVerb, SHOW_SUBJECT_VERBS, readBool,
   processGenerationEnd, stripAgedCtxSkip,
-  parseCardText, formatCardText, characterToCard, characterFromCard,
+  parseCardText, formatCardText, characterToCard, characterFromCard, asNamedList,
+  namedDefsToCard, DEFAULT_MERITS_FLAWS, DEFAULT_ARCANA, DEFAULT_BACKGROUNDS, DEFAULT_AFFLICTIONS,
+  meritFlawFromCard, arcanumFromCard, makeBackgroundDef, makeTemplateDef,
   asNumber, asText, asList, asStringList, CardMap, permanentRatingOf,
   COSTS_CONFIG_ENTRY, AdvancementCosts, advancementCostsFrom,
   ROLLS_CONFIG_ENTRY, RollRulesConfig, rollFloorFrom, SuccessTableRow,
@@ -8506,5 +8508,73 @@ describe("affliction names: the role comes first", () => {
     expect((await CharacterAfflictions.list("Rok")).find(a => a.def === "under-majesty")).toBeDefined();
     // ...and only leaving ends it.
     expect(await CommandRouter.route("remove under-majesty")).toContain("is free of under-majesty");
+  });
+});
+
+// =============================================================================
+// THE ROUND TRIP - a def a card cannot carry is a def that quietly loses a rule
+// -----------------------------------------------------------------------------
+// Three fields have now been lost this way: `grants`, `aka`, and `choices` (the
+// gate that makes all 38 Exclusive Merits/Flaws exclusive). The shape of the
+// bug is always the same and it is structural, not careless: the WRITER
+// (namedDefsToCard) spreads whatever the def has, so it never loses anything;
+// every READER enumerates its fields by hand, so it loses whatever nobody
+// remembered to add. Enumeration cannot be made safe by being careful.
+//
+// So this is the guard, and it uses the defs the ENGINE ITSELF SHIPS rather
+// than hand-written exemplars - those are real, valid, and cover the field
+// surface that is actually in use. Anything the engine can express, a card must
+// be able to carry home again.
+// =============================================================================
+describe("every shipped def survives the trip through its own lorebook card", () => {
+  type CardReader = (name: string, body: CardMap) => Record<string, unknown> | undefined;
+
+  // Write one def the way its registry does, read it back the way the loader
+  // does, and report the fields that did not make it.
+  function fieldsLost(def: Record<string, unknown>, read: CardReader): string[] {
+    const text = formatCardText(namedDefsToCard([def as { name: string }]));
+    const back = asNamedList(parseCardText(text));
+    expect(back).toHaveLength(1);
+    const got = read(back[0].name, back[0].body);
+    if (!got) return ["<the reader refused the card entirely>"];
+    return Object.keys(def).filter(k => got[k] === undefined);
+  }
+
+  const suites: Array<[string, Array<Record<string, unknown>>, CardReader]> = [
+    ["merits and flaws", DEFAULT_MERITS_FLAWS as unknown as Array<Record<string, unknown>>,
+      (n, b) => meritFlawFromCard(n, b) as unknown as Record<string, unknown> | undefined],
+    ["arcana and taints", DEFAULT_ARCANA as unknown as Array<Record<string, unknown>>,
+      (n, b) => arcanumFromCard(n, b) as unknown as Record<string, unknown> | undefined],
+    ["afflictions", DEFAULT_AFFLICTIONS as unknown as Array<Record<string, unknown>>,
+      (n, b) => makeAfflictionDef({ ...b, name: n } as never) as unknown as Record<string, unknown>],
+    ["backgrounds", DEFAULT_BACKGROUNDS as unknown as Array<Record<string, unknown>>,
+      (n, b) => makeBackgroundDef({ ...b, name: n } as never) as unknown as Record<string, unknown>],
+    ["templates", DEFAULT_TEMPLATE_DEFS as unknown as Array<Record<string, unknown>>,
+      (n, b) => makeTemplateDef({ ...b, name: n } as never) as unknown as Record<string, unknown>],
+  ];
+
+  for (const [label, defs, read] of suites) {
+    test(`${label}: no field is dropped on the way back`, () => {
+      expect(defs.length).toBeGreaterThan(0);
+      const broken = defs
+        .map(d => ({ name: String(d.name), lost: fieldsLost(d, read) }))
+        .filter(r => r.lost.length);
+      // Named, not counted: the failure message has to say WHICH field, or the
+      // next person is where I was - staring at a number.
+      expect(broken.map(r => `${r.name} lost: ${r.lost.join(", ")}`)).toEqual([]);
+    });
+  }
+
+  test("the gate that makes an Exclusive Merit exclusive comes home", () => {
+    // The specific regression: `requires.choices` is what ties a merit to a
+    // clan or a fellowship, and losing it did not break the merit - it made it
+    // available to EVERYONE, silently, which is the worst way for a rule to
+    // fail.
+    const exclusive = DEFAULT_MERITS_FLAWS.find(m => m.requires?.choices);
+    expect(exclusive).toBeDefined();
+    const text = formatCardText(namedDefsToCard([exclusive!]));
+    const back = asNamedList(parseCardText(text));
+    const read = meritFlawFromCard(back[0].name, back[0].body);
+    expect(read?.requires?.choices).toEqual(exclusive!.requires!.choices!);
   });
 });

@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `1216053`** ("Nobody is
-> listening, so nobody is told").
+> **Last synced with the code as of commit `e7a7bdc`** ("A card must carry
+> a def all the way home").
+> Prior: `1216053` ("Nobody is listening, so nobody is told").
 > Prior: `bd60c4f` ("The moon has phases and the week has days").
 > Prior: `a62c201` ("Afflictions are named role first, and Majesty is the
 > pair").
@@ -4155,6 +4156,59 @@ and `prefill` are mocked/available but not yet written.
     `__sentMessages()` is never empty after opening — the suite filters it with
     `wireTraffic()`. Three existing tests changed for exactly these reasons;
     that is the behaviour change, not a regression.
+
+
+82. **The pilot said no, and found a live bug on its way out** (Phase 2 of the
+    multi-script plan: *"use outside libraries to shorten our working code"*,
+    with **Zod Mini** picked as the pilot because the last two bugs were both
+    "the reader didn't know the field").
+
+    **MEASURED, then rejected.** Tree-shaken through `Bun.build` (no esbuild
+    needed — Bun bundles natively): **zod/mini 921 lines / 28.5 KB**, **jsep 682
+    / 19.0 KB**, **date-fns (4 fns) 96 / 3.4 KB**. What each would SHED from
+    this codebase, read line by line rather than assumed:
+
+    - **Zod: nothing.** A card reader is not doing validation, it is doing
+      DOMAIN DECISIONS — `difficulty: asNumber(x) ?? DEFAULT_DIFFICULTY`,
+      `requires: Math.max(1, asNumber(x) ?? 1)`, `tags: asStringList(x).map(
+      normalize)`, `if (auto)` (omit when ZERO, not merely absent). Zod replaces
+      `asNumber(x)` with a `safeParse` call and leaves every one of those rules
+      standing: MORE code, plus 28.5 KB. And it cannot fix the motivating bug at
+      all — a schema you forgot to add a field to is exactly as broken as an
+      extraction you forgot to add a line to.
+    - **jsep: a loss.** It replaces `tokenize` (35 lines). The parser and the
+      evaluator in `core/expr.ts` are FUSED — recursive descent that evaluates
+      as it goes — so taking an AST instead means writing a new ~100-line
+      tree-walker to replace the 171 lines that hold `role:willpower`,
+      `system::time::*` and the good error messages.
+    - **date-fns: a loss.** ~15 lines saved (`daysInMonth`, the month clamp in
+      `addDuration`) for 96 vendored; `diffCalendar` is our own algorithm,
+      pinned by tests.
+
+    **The general finding, and it is the reusable one: this codebase's bulk is
+    domain decisions, not generic plumbing.** The 147 coercion calls are 147
+    RULES — this field defaults to 7, that one clamps to ≥1, this one vanishes
+    when zero — and no library can know any of them. Zod, jsep and date-fns are
+    all clean for the sandbox (zod's `captureStackTrace` is guarded with a
+    no-op, its `allowsEval` probe is lazy and try/caught, no `process`, no
+    `Buffer`) — so the objection is not safety, it is that none of them makes
+    this code shorter. **No dependency was kept**; `package.json` still has
+    none, and re-adding is one `bun add`.
+
+    **WHAT THE PHASE ACTUALLY DELIVERED**, because the goal was never Zod, it
+    was "stop losing fields": a **round-trip property test over every def the
+    engine ships**. It immediately found the third instance of the bug class —
+    **`requires.choices` was never read by `ownedPowerFromCard`**, so all 38
+    Exclusive Merits/Flaws lost their clan/fellowship gate the moment their card
+    was re-read, silently becoming available to EVERYONE. Verified live: before
+    the fix a Tremere could take the Nosferatu Exclusive Merit; now the take is
+    refused, and all 38 gates survive a real `reloadAllConfigStores()`.
+
+    The test uses the SHIPPED defs rather than hand-written exemplars, which was
+    itself a lesson: the first draft used invented ones and reported four false
+    positives (`paramFrom: "ability"` is not a trait category, so the reader was
+    right to drop it). Real defs are valid by construction and cover the field
+    surface actually in use. Failures name the missing FIELD, not a count.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

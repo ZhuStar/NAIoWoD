@@ -2311,11 +2311,23 @@ function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[
   const templates = asStringList(requires["templates"]).map(t => StringUtil.normalize(t));
   const tags = asStringList(requires["tags"]).map(t => StringUtil.normalize(t));
   const meritsFlaws = asStringList(requires["meritsFlaws"]).map(t => StringUtil.normalize(t));
-  if (templates.length || tags.length || meritsFlaws.length) {
+  // A CHOICE gate (`{clan: "nosferatu"}`) is what makes a clan- or
+  // fellowship-exclusive merit exclusive. Reading it back was missed, so every
+  // one of the 38 shipped Exclusive Merits/Flaws lost its gate the moment its
+  // card was re-read - the merit stayed, the exclusivity did not. The
+  // round-trip test below is what finally caught it, after `grants` and `aka`
+  // had failed the same way. See invariants §7.
+  const choices: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(asMap(requires["choices"]))) {
+    const value = asText(raw);
+    if (value) choices[StringUtil.normalize(key)] = StringUtil.normalize(value);
+  }
+  if (templates.length || tags.length || meritsFlaws.length || Object.keys(choices).length) {
     def.requires = {};
     if (templates.length) def.requires.templates = templates;
     if (tags.length) def.requires.tags = tags;
     if (meritsFlaws.length) def.requires.meritsFlaws = meritsFlaws;
+    if (Object.keys(choices).length) def.requires.choices = choices;
   }
   const description = asText(body["description"]);
   if (description) def.description = description;

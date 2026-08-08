@@ -164,7 +164,19 @@ category  physical/social/mental   (Attributes - a fixed nine, so it is a RULE)
 - **A field the card READER does not know does not exist.** A definition is
   written to its lorebook card and read back from it, so adding a field to
   `MeritFlawDef` without teaching `ownedPowerFromCard` silently drops it on the
-  round-trip. `grants` was lost exactly this way.
+  round-trip. `grants`, `aka` and `choices` were all lost exactly this way.
+
+  The asymmetry is **structural, not careless**: the writer
+  (`namedDefsToCard`) spreads whatever the def has and so can never lose
+  anything, while every reader enumerates its fields by hand and so loses
+  whatever nobody remembered. Being careful does not fix an enumeration.
+  **The guard is the round-trip test** (`test/system.test.ts`, "every shipped
+  def survives the trip through its own lorebook card"): every def the engine
+  ships is written to a card, read back, and any field that fails to return is
+  named in the failure. It found `choices` — the gate that made all 38
+  Exclusive Merits/Flaws exclusive — which had been silently making them
+  available to *everyone* since they were written. **Add a field to a def type,
+  and the test tells you the moment you forget the reader.**
 - **An auto-created affliction gets no `tags`.** A tag is something a ROLL
   carries; one nobody wrote a modifier for is reported as `[unknown tag: …]` on
   every roll the character makes.

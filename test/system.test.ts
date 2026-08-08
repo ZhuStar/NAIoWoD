@@ -39,6 +39,7 @@ import {
   MAGIC_CONFIG_ENTRY, MagicRulesConfig, CastAttempts, magicRulesFrom, DEFAULT_MAGIC_RULES,
   LIVING_RESOLVE, GHOUL_SOAK, TEMPLATE_REVENANT, FELLOWSHIPS,
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
+  WEEKDAYS, weekdayOf, weekdayName, formatStoryDay, MOON_PHASES, moonAt, nextMoonPhase,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
   EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, LOCAL_PREFIX,
   commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
@@ -5024,6 +5025,111 @@ describe("recovery on the story clock: days, the Umbra gate, full moons", () => 
     const next = nextFullMoon(ep("2000-01-10"));
     expect(next).toBeGreaterThan(ep("2000-01-20"));
     expect(next).toBeLessThan(ep("2000-01-22"));
+  });
+
+  test("the week is unbroken back through the Gregorian reform", () => {
+    // The 1582 reform dropped ten DATES and no weekday: Thursday 4 Oct was
+    // followed by Friday 15 Oct. So a proleptic weekday is the real one.
+    expect(weekdayName(ep("1582-10-15"))).toBe("friday");
+    expect(weekdayName(ep("1197-03-15"))).toBe("saturday");
+    expect(weekdayName(ep("0800-12-25"))).toBe("monday");   // Charlemagne crowned
+    expect(weekdayOf(ep("2000-01-06"))).toBe(4);            // Thursday, 0 = Sunday
+    // Agrees with the platform for every instant, not just the ones picked.
+    for (let d = 0; d < 40; d++) {
+      const e = ep("1197-03-01") + d * 86400 + 3600;
+      expect(WEEKDAYS[new Date(e * 1000).getUTCDay()]).toBe(weekdayName(e));
+    }
+    expect(formatStoryDay(ep("1197-03-15-20"))).toBe("Saturday 1197-03-15 20:00");
+  });
+
+  test("the moon is eight phases, each centred on its instant", () => {
+    const REF = 947182440;                       // the 2000-01-06 18:14 new moon
+    const SYN = 29.530588853 * 86400;
+    expect(moonAt(REF).phase).toBe("new");
+    expect(moonAt(REF).illumination).toBeCloseTo(0, 6);
+    expect(moonAt(REF + SYN / 2).phase).toBe("full");
+    expect(moonAt(REF + SYN / 2).illumination).toBeCloseTo(1, 6);
+    expect(moonAt(REF + SYN / 4).phase).toBe("first-quarter");
+    expect(moonAt(REF + SYN / 4).illumination).toBeCloseTo(0.5, 6);
+    // One full cycle in eighths visits every phase, in order.
+    const walk = MOON_PHASES.map((_p, i) => moonAt(REF + i * SYN / 8).phase);
+    expect(walk).toEqual([...MOON_PHASES]);
+    // Waxing is the first half and waning the second.
+    expect(moonAt(REF + SYN / 4).waxing).toBe(true);
+    expect(moonAt(REF + 3 * SYN / 4).waxing).toBe(false);
+  });
+
+  test("a phase is a WINDOW; a full moon is an INSTANT; they disagree on purpose", () => {
+    const dark = ep("1197-03-15-20");
+    // The window opens before the instant it is centred on - ~1.85 days.
+    const opens = nextMoonPhase(dark, "full");
+    const exact = nextFullMoon(dark);
+    expect(opens).toBeLessThan(exact);
+    expect((exact - opens) / 86400).toBeCloseTo(29.530588853 / 16, 2);
+    // Walking the whole cycle hour by hour: the phase turns exactly 8 times,
+    // the windows abut with no gap, and nothing ever reads negative.
+    let changes = 0, prev = moonAt(dark);
+    for (let t = dark + 3600; t < dark + 29.530588853 * 86400; t += 3600) {
+      const m = moonAt(t);
+      expect(m.into).toBeGreaterThanOrEqual(0);
+      expect(m.toNext).toBeGreaterThanOrEqual(0);
+      expect(m.fraction).toBeGreaterThanOrEqual(0);
+      expect(m.fraction).toBeLessThan(1);
+      if (m.phase !== prev.phase) {
+        changes++;
+        expect(m.begins).toBe(prev.ends);            // the window abuts the last
+        expect(m.phase).toBe(prev.next);             // and is the one predicted
+      }
+      prev = m;
+    }
+    expect(changes).toBe(8);
+  });
+
+  test("show-moon reports phase, depth and turn; a named phase says when it next begins", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route("story-start 1197-03-15-20");
+    const bare = await CommandRouter.route("show-moon");
+    expect(bare).toContain("Saturday 1197-03-15 20:00");
+    expect(bare).toContain("waning gibbous");
+    expect(bare).toContain("% lit");
+    expect(bare).toContain("in,");                    // how long we have been in it
+    expect(bare).toContain("to the last quarter");    // and how long until it turns
+    expect(bare).toContain("day 18 of the cycle, waning");
+    const named = await CommandRouter.route("show-moon full");
+    expect(named).toContain("The full moon next begins");
+    expect(named).toContain("Exact full moon:");
+    expect(await CommandRouter.route("show-moon nonesuch")).toContain(`No moon phase "nonesuch"`);
+    // show-date now carries the day of the week and the phase, not a bare instant.
+    const date = await CommandRouter.route("show-date");
+    expect(date).toContain("Saturday 1197-03-15");
+    expect(date).toContain("waning gibbous");
+  });
+
+  test("the moon and the week are conditions: `moon-phase = moon:full`, `weekday = day:friday`", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route("story-start 1197-03-15-20");             // a Saturday, waning gibbous
+    await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
+    // The named constants are numbers, so the comparison is plain arithmetic:
+    // the evaluator resolves both sides to 6 and answers 1.
+    const ev = async (e: string): Promise<string> => CommandRouter.route(`show-eval \`${e}\``);
+    expect(await ev("weekday = day:saturday")).toContain("weekday = day:saturday = 1");
+    expect(await ev("weekday = day:friday")).toContain("weekday = day:friday = 0");
+    expect(await ev("moon-phase = moon:waning-gibbous")).toContain("moon-phase = moon:waning-gibbous = 1");
+    expect(await ev("moon-phase = moon:full")).toContain("moon-phase = moon:full = 0");
+    expect(await ev("moon-illumination >= 80")).toContain("moon-illumination >= 80 = 1");
+    // The prefixed forms answer the same, and the general call takes any date.
+    expect(await ev("system::time::moon-phase = system::time::moon:waning-gibbous")).toContain("= 1");
+    await CommandRouter.route("save-date the-pact 1197-04-11-08");       // inside the next full window
+    expect(await ev("system::time::moon-phase-at(system::time::date:the-pact) = moon:full")).toContain("= 1");
+    expect(await ev("system::time::weekday-at(system::time::date:the-pact) = day:friday")).toContain("= 1");
+    // An affliction can therefore END on a phase, not only on a counted instant.
+    await CommandRouter.route("define-affliction moon-touched");
+    await CommandRouter.route("afflict moon-touched until=`moon-phase = moon:full`");
+    expect(await CommandRouter.route("show-affliction")).toContain("moon-touched");
+    await CommandRouter.route("advance-time 20d");                       // 1197-04-04: not full yet
+    expect(await CommandRouter.route("show-affliction")).toContain("moon-touched");
+    await CommandRouter.route("advance-time 7d");                        // 1197-04-11: the full window
+    expect(await CommandRouter.route("show-affliction")).not.toContain("moon-touched");
   });
 
   test("advance-time credits recovery per midnight crossed; the Umbra affliction opens the +1/day gate", async () => {

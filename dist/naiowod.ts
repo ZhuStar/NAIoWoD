@@ -1852,6 +1852,34 @@ function formatStoryDate(epochSeconds: number): string {
   return d.getUTCSeconds() ? `${base}:${padNum(d.getUTCSeconds())}` : base;
 }
 
+// --- Days of the week ---------------------------------------------------------
+
+// The week is the one calendar cycle that never broke: the Gregorian reform of
+// 1582 dropped ten DATES but not a single weekday (Thursday 4 Oct was followed
+// by Friday 15 Oct), so the weekday of a proleptic-Gregorian instant is the real
+// weekday, unbroken back past 1197. What is NOT the same is the date itself - a
+// scribe in 1197 wrote Julian, which ran six days behind the Gregorian dates
+// this engine stores. The DAY NAME here is right; the NUMBER beside it is the
+// Gregorian one.
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const;
+type Weekday = typeof WEEKDAYS[number];
+
+// 0 = Sunday .. 6 = Saturday.
+function weekdayOf(epochSeconds: number): number {
+  return new Date(epochSeconds * 1000).getUTCDay();
+}
+
+function weekdayName(epochSeconds: number): Weekday {
+  return WEEKDAYS[weekdayOf(epochSeconds)];
+}
+
+const titleCase = (s: string): string => s.replace(/(^|[\s-])([a-z])/g, (_m, lead: string, ch: string) => lead + ch.toUpperCase());
+
+// "Friday 1197-03-15 08:00" - the parseable form with the day it fell on.
+function formatStoryDay(epochSeconds: number): string {
+  return `${titleCase(weekdayName(epochSeconds))} ${formatStoryDate(epochSeconds)}`;
+}
+
 // --- Durations: fixed part (seconds) + calendar part (months) ----------------
 
 // Months and years are calendar-relative (variable length) so they are kept
@@ -1966,7 +1994,8 @@ function countDayBoundaries(fromEpoch: number, toEpoch: number): number {
 // phases wobble a few hours around the mean, so a computed instant can be off
 // by up to ~half a day - plenty for a story clock, even proleptically in 1197.
 const SYNODIC_SECONDS = 29.530588853 * 86400;
-const FULL_MOON_REF = 947182440 + SYNODIC_SECONDS / 2;   // 2000-01-06 18:14 UTC new moon + half a cycle
+const NEW_MOON_REF = 947182440;                          // 2000-01-06 18:14 UTC
+const FULL_MOON_REF = NEW_MOON_REF + SYNODIC_SECONDS / 2;
 
 // How many full-moon instants lie in (from, to]. 0 when to <= from.
 function countFullMoons(fromEpoch: number, toEpoch: number): number {
@@ -1979,6 +2008,106 @@ function countFullMoons(fromEpoch: number, toEpoch: number): number {
 function nextFullMoon(epoch: number): number {
   const k = Math.floor((epoch - FULL_MOON_REF) / SYNODIC_SECONDS) + 1;
   return Math.round(FULL_MOON_REF + k * SYNODIC_SECONDS);
+}
+
+// The first new-moon instant strictly after `epoch`.
+function nextNewMoon(epoch: number): number {
+  const k = Math.floor((epoch - NEW_MOON_REF) / SYNODIC_SECONDS) + 1;
+  return Math.round(NEW_MOON_REF + k * SYNODIC_SECONDS);
+}
+
+// --- The moon as a PHASE, not just an instant --------------------------------
+
+// An INSTANT and a PHASE are different questions and the engine needs both.
+// countFullMoons/nextFullMoon answer "when is the moon exactly full", which is
+// what a recovery rule counts. Nobody in the story talks that way: they say it
+// IS the full moon for the few nights it looks full. So the cycle is cut into
+// eight slices, each CENTERED on its defining instant - the full moon phase runs
+// from ~1.85 days before the exact full moon to ~1.85 days after. The two
+// therefore disagree on purpose: it can be the full moon tonight while the exact
+// instant is still a day out, and both statements are true.
+const MOON_PHASES = [
+  "new", "waxing-crescent", "first-quarter", "waxing-gibbous",
+  "full", "waning-gibbous", "last-quarter", "waning-crescent",
+] as const;
+type MoonPhase = typeof MOON_PHASES[number];
+
+const MOON_GLYPHS: Record<MoonPhase, string> = {
+  "new": "🌑", "waxing-crescent": "🌒", "first-quarter": "🌓", "waxing-gibbous": "🌔",
+  "full": "🌕", "waning-gibbous": "🌖", "last-quarter": "🌗", "waning-crescent": "🌘",
+};
+const MOON_LABELS: Record<MoonPhase, string> = {
+  "new": "new moon", "waxing-crescent": "waxing crescent", "first-quarter": "first quarter",
+  "waxing-gibbous": "waxing gibbous", "full": "full moon", "waning-gibbous": "waning gibbous",
+  "last-quarter": "last quarter", "waning-crescent": "waning crescent",
+};
+
+const PHASE_SECONDS = SYNODIC_SECONDS / 8;
+
+interface MoonState {
+  phase: MoonPhase;
+  index: number;            // 0-7, MOON_PHASES order
+  next: MoonPhase;
+  age: number;              // seconds since the new moon that opened this cycle
+  fraction: number;         // 0..1 through the cycle (0 = new, 0.5 = full)
+  illumination: number;     // 0..1 of the disc lit
+  waxing: boolean;
+  into: number;             // seconds since THIS phase began
+  toNext: number;           // seconds until the next phase begins
+  begins: number;           // epoch seconds this phase began
+  ends: number;             // epoch seconds the next phase begins
+}
+
+// Where the moon is at `epoch`. Every date this engine handles is a thousand
+// years BEFORE the reference, so the slice index is taken with Math.floor
+// (which rounds toward -Infinity and so keeps working) rather than a modulo
+// that would flip sign.
+function moonAt(epoch: number): MoonState {
+  const slice = Math.floor((epoch - NEW_MOON_REF + PHASE_SECONDS / 2) / PHASE_SECONDS);
+  const begins = NEW_MOON_REF + slice * PHASE_SECONDS - PHASE_SECONDS / 2;
+  const index = ((slice % 8) + 8) % 8;
+  const age = (((epoch - NEW_MOON_REF) % SYNODIC_SECONDS) + SYNODIC_SECONDS) % SYNODIC_SECONDS;
+  const fraction = age / SYNODIC_SECONDS;
+  return {
+    phase: MOON_PHASES[index],
+    index,
+    next: MOON_PHASES[(index + 1) % 8],
+    age,
+    fraction,
+    illumination: (1 - Math.cos(2 * Math.PI * fraction)) / 2,
+    waxing: fraction < 0.5,
+    into: epoch - begins,
+    toNext: begins + PHASE_SECONDS - epoch,
+    begins: Math.round(begins),
+    ends: Math.round(begins + PHASE_SECONDS),
+  };
+}
+
+// When the named phase next BEGINS, strictly after `epoch`. Note this is the
+// start of the window, not the principal instant: nextMoonPhase(e, "full") comes
+// ~1.85 days before nextFullMoon(e).
+function nextMoonPhase(epoch: number, phase: MoonPhase): number {
+  const k = MOON_PHASES.indexOf(phase);
+  const base = NEW_MOON_REF + k * PHASE_SECONDS - PHASE_SECONDS / 2;
+  const m = Math.floor((epoch - base) / SYNODIC_SECONDS) + 1;
+  return Math.round(base + m * SYNODIC_SECONDS);
+}
+
+// A rough span for the moon report: hours matter, seconds do not.
+function roundToHour(seconds: number): number {
+  return Math.max(0, Math.round(seconds / 3600) * 3600);
+}
+
+// "🌔 waxing gibbous (71% lit) - 2 days, 3 hours in, 1 day, 15 hours to the
+// full moon". Deliberately says all three things the Storyteller asks for:
+// which phase, how deep into it, how long until the next.
+function formatMoon(m: MoonState): string {
+  // Both spans are bounded by one slice (~3.7 days), so measuring them from
+  // epoch 0 can never surface a calendar unit - it is a plain fixed breakdown.
+  const span = (secs: number): string => formatCalendarSpan(diffCalendar(0, roundToHour(secs)));
+  const pct = Math.round(m.illumination * 100);
+  return `${MOON_GLYPHS[m.phase]} ${MOON_LABELS[m.phase]} (${pct}% lit) - ${span(m.into)} in, `
+       + `${span(m.toNext)} to the ${MOON_LABELS[m.next]}`;
 }
 //#endregion src/core/time.ts
 
@@ -13676,7 +13805,30 @@ async function cmdStoryStart(cmd: ParsedCommand): Promise<string> {
 // name (`system:time:date:my-wedding`, from the DateBook that [[save-date]]
 // writes). So "until the full moon after the wedding" is expressible without
 // anyone hard-coding a number.
+//
+// THE MOON AND THE WEEK ARE NUMBERS, and the names for them are numbers too.
+// The expression language is numeric, so a phase can't be a string - but
+// `moon-phase = moon:full` still reads like English, because `moon:full` is a
+// NAMED CONSTANT (4) sitting in the same table as the fact it is compared to.
+// Same for `weekday = day:friday`. A chronicle writes the words; the evaluator
+// only ever sees arithmetic. `moon-phase` is the PHASE WINDOW, so it is true for
+// the ~3.7 days the moon looks full - which is what "under the full moon" means
+// in play; `full-moons` still counts exact instants, for recovery.
 const TIME_PREFIX = "system:time";
+function moonAndWeekFacts(now: number): Record<string, number> {
+  const moon = moonAt(now);
+  const facts: Record<string, number> = {
+    "moon-phase": moon.index,
+    "moon-illumination": Math.round(moon.illumination * 100),   // percent, so conditions stay integral
+    "moon-age-days": Math.floor(moon.age / 86400),
+    "moon-waxing": moon.waxing ? 1 : 0,
+    "weekday": weekdayOf(now),
+  };
+  MOON_PHASES.forEach((p, i) => { facts[`moon:${p}`] = i; });
+  WEEKDAYS.forEach((d, i) => { facts[`day:${d}`] = i; });
+  return facts;
+}
+
 async function timeScopeExtension(fromEpoch: number, now: number): Promise<ScopeExtension> {
   const dates = await DateBook.all();
   const facts: Record<string, number> = {
@@ -13684,11 +13836,13 @@ async function timeScopeExtension(fromEpoch: number, now: number): Promise<Scope
     "full-moons": countFullMoons(fromEpoch, now),
     "elapsed-days": countDayBoundaries(fromEpoch, now),
     "elapsed-hours": Math.floor((now - fromEpoch) / 3600),   // the story clock counts SECONDS
+    ...moonAndWeekFacts(now),
   };
   return (path) => {
-    // The bare shorthands, so a condition reads like English.
-    if (path.length === 1 && path[0] in facts) return { value: facts[path[0]] };
+    // The bare shorthands, so a condition reads like English. Whole path, not
+    // path[0]: the named constants (`moon:full`, `day:friday`) are two segments.
     const joined = path.join(":");
+    if (joined in facts) return { value: facts[joined] };
     if (!joined.startsWith(`${TIME_PREFIX}:`)) return undefined;
     const rest = joined.slice(TIME_PREFIX.length + 1);
     if (rest in facts) return { value: facts[rest], from: TIME_PREFIX };
@@ -13708,6 +13862,13 @@ function timeScopeCalls(): (name: string, args: number[]) => number | undefined 
       case "full-moons-since": return countFullMoons(a, b);
       case "days-since": return countDayBoundaries(a, b);
       case "hours-since": return Math.floor((b - a) / 3600);
+      // One-argument forms, so a condition can ask about a date it names rather
+      // than only about now: `moon-phase-at(system:time:date:the-pact)`.
+      case "moon-phase-at": return moonAt(a).index;
+      case "moon-illumination-at": return Math.round(moonAt(a).illumination * 100);
+      case "weekday-at": return weekdayOf(a);
+      case "next-full-moon": return nextFullMoon(a);
+      case "next-new-moon": return nextNewMoon(a);
       default: return undefined;
     }
   };
@@ -13917,10 +14078,51 @@ async function cmdAdvanceTime(cmd: ParsedCommand): Promise<string> {
 async function cmdStoryDate(): Promise<string> {
   const c = await StoryClock.get();
   if (!c) return sys(NO_CLOCK);
-  const moon = ` Next full moon: ${formatStoryDate(nextFullMoon(c.now))} (mean cycle).`;
-  if (c.now === c.start) return sys(`Story date: ${formatStoryDate(c.now)} - the story has just begun.${moon}`);
+  // The date now carries the DAY it fell on, and the moon as a phase rather
+  // than a distant instant - the two things anyone narrating a night asks.
+  const moon = ` ${formatMoon(moonAt(c.now))}. [[show-moon]] for the whole cycle.`;
+  if (c.now === c.start) return sys(`Story date: ${formatStoryDay(c.now)} - the story has just begun.${moon}`);
   const span = diffCalendar(c.start, c.now);
-  return sys(`Story date: ${formatStoryDate(c.now)} - ${formatCalendarSpan(span)} since it began (${formatStoryDate(c.start)}).${moon}`);
+  return sys(`Story date: ${formatStoryDay(c.now)} - ${formatCalendarSpan(span)} since it began (${formatStoryDay(c.start)}).${moon}`);
+}
+
+// The mean cycle is only good to a few hours, so printing a moon instant to the
+// SECOND would be claiming precision the model does not have. Rounded to the
+// minute for display; the epochs themselves stay exact.
+const moonMoment = (epoch: number): string => formatStoryDate(Math.round(epoch / 60) * 60);
+const moonDay = (epoch: number): string => formatStoryDay(Math.round(epoch / 60) * 60);
+const moonAway = (from: number, to: number): string =>
+  formatCalendarSpan(diffCalendar(from, from + Math.round((to - from) / 3600) * 3600));
+
+// The moon in full: where it is, how deep into that phase, when the phase turns,
+// and when each principal instant next falls. A named phase asks the other
+// question - "when is the next one of THOSE" - which is what a rite or a
+// werewolf's auspice actually needs.
+async function cmdMoon(cmd: ParsedCommand): Promise<string> {
+  const c = await StoryClock.get();
+  if (!c) return sys(NO_CLOCK);
+  const asked = (cmd.named["name"] ?? cmd.positional[0])?.trim();
+  if (asked) {
+    const key = StringUtil.normalize(asked).replace(/^moon:/, "");
+    const phase = MOON_PHASES.find(p => p === key || MOON_LABELS[p] === key.replace(/-/g, " "));
+    if (!phase) {
+      return sys(`No moon phase "${key}". The eight: ${MOON_PHASES.map(p => `${MOON_GLYPHS[p]} ${p}`).join(", ")}.`);
+    }
+    const opens = nextMoonPhase(c.now, phase);
+    const here = moonAt(c.now).phase === phase ? ` It is the ${MOON_LABELS[phase]} right now.` : "";
+    const exact = phase === "full" ? ` Exact full moon: ${moonMoment(nextFullMoon(c.now))}.`
+                : phase === "new" ? ` Exact new moon: ${moonMoment(nextNewMoon(c.now))}.` : "";
+    return sys(`${MOON_GLYPHS[phase]} The ${MOON_LABELS[phase]} next begins ${moonDay(opens)}, `
+             + `${moonAway(c.now, opens)} from now.${here}${exact}`);
+  }
+  const m = moonAt(c.now);
+  const cycle = MOON_PHASES.map(p => (p === m.phase ? `[${MOON_GLYPHS[p]} ${p}]` : `${MOON_GLYPHS[p]} ${p}`)).join(" -> ");
+  return sys(
+    `${formatStoryDay(c.now)}. ${formatMoon(m)}.`
+    + ` This phase runs ${moonMoment(m.begins)} -> ${moonMoment(m.ends)};`
+    + ` day ${Math.floor(m.age / 86400) + 1} of the cycle, ${m.waxing ? "waxing" : "waning"}.`
+    + ` Next full moon ${moonMoment(nextFullMoon(c.now))}, next new moon ${moonMoment(nextNewMoon(c.now))} (mean cycle).`
+    + ` Cycle: ${cycle}.`);
 }
 
 async function cmdSaveDate(cmd: ParsedCommand): Promise<string> {
@@ -17529,6 +17731,14 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     render: async (name, _scope, cmd) => (name
       ? cmdTimeBetween({ ...cmd, positional: [name, "now"] })
       : sysNote(await cmdStoryDate(), stripSys(await cmdDates()))),
+  },
+  {
+    verb: "show-moon", summary: "the moon's phase, how far into it we are, and when it turns",
+    scopes: ["campaign"], defaultScope: "campaign",
+    nameHint: "a phase to ask when it next begins", nameExample: "full",
+    note: "Eight phases, each centred on its instant, so the full moon lasts the ~3.7 nights it looks full. "
+        + "In a condition: `moon-phase = moon:full`, `moon-illumination >= 90`, `weekday = day:friday`.",
+    render: async (name, _scope, cmd) => cmdMoon(asCmd(name, cmd)),
   },
   {
     verb: "show-time-between", summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)",

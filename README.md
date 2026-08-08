@@ -809,7 +809,21 @@ system::time::full-moons-since(a, b)   ·  system::time::days-since  ·  hours-s
 system::time::full-moons               ·  system::time::elapsed-days  ·  elapsed-hours
 system::time::date:the-wedding         a date [[save-date]] wrote
 full-moons                             the bare shorthand, for readability
+
+moon-phase  ·  moon-illumination  ·  moon-age-days  ·  moon-waxing  ·  weekday
+moon:full · moon:new · moon:first-quarter · …        named constants, 0-7
+day:friday · day:saturday · …                        named constants, 0-6
+moon-phase-at(d) · weekday-at(d) · next-full-moon(d) · next-new-moon(d)
 ```
+
+The moon and the week are **numbers, and so are their names** — the expression
+language is numeric, so a phase cannot be a string, but `` `moon-phase =
+moon:full` `` still reads like English because `moon:full` is a named constant
+sitting in the same table as the fact it is compared to. The chronicle writes
+words; the evaluator only ever sees arithmetic. So an affliction can end
+*"under the next full moon"* (`` until=`moon-phase = moon:full` ``), a rite can
+require a bright night (`moon-illumination >= 90`), and a market can open on
+`weekday = day:friday`.
 
 So *"the full moon after the wedding"* is
 `` system::time::full-moons-since(system::time::date:the-wedding, system::time::now) >= 1 ``,
@@ -1449,12 +1463,13 @@ default start (`1197-01-01-00`) you override once.
 [[story-start 1197-03-15-08]]     # when the chronicle begins
 [[advance-time 2d 6h]]            # move the clock forward
 [[advance-time 1mo]]              # calendar months/years roll over correctly
-[[story-date]]                    # "1197-04-17 14:00 — 1 month, 2 days, 6 hours since it began"
+[[show-date]]                     # "Saturday 1197-04-17 14:00 — 1 month, 2 days, 6 hours
+                                  #  since it began. 🌖 waning gibbous (90% lit) …"
+[[show-moon]]                     # the phase, how deep into it, and when it turns
+[[show-moon full]]                # when the next full moon begins
 [[save-date siege-began]]         # bookmark the current moment...
 [[save-date yuletide 1197-12-25-00]]   # ...or an explicit date
-[[dates]]                         # list the bookmarks
-[[time-between start now]]        # measure any two dates
-[[time-between siege-began 1197-12-25-00]]
+[[show-time-between start now]]   # measure any two dates
 ```
 
 - **`story-start <yyyy-mm-dd-hh>`** sets (or resets) when the story begins; the
@@ -1464,12 +1479,30 @@ default start (`1197-01-01-00`) you override once.
   `90s`, `3 days`. Months and years are calendar-relative (Jan 31 + 1 month =
   Feb 28); the rest are fixed-length. *(The affliction stepper is a separate
   `[[advance]]`; the two will merge once the turn system lands.)*
-- **`story-date`** shows the current date and how long since the story began.
+- **`show-date`** shows the current date — **with the day of the week** and the
+  moon's phase — how long since the story began, and every bookmark.
+- **`show-moon [phase]`** is the moon in full: which phase, how long we have been
+  in it, how long until it turns, the window's start and end, the day of the
+  cycle, and both principal instants. Name a phase (`[[show-moon full]]`) to ask
+  when the next one begins instead.
 - **`save-date <name> [<yyyy-mm-dd-hh>]`** bookmarks the current moment (or a given
-  date) under a name; **`forget-date <name>`** drops it; **`dates`** lists them.
-- **`time-between <a> <b>`** reports the span between two dates — each a saved
+  date) under a name; **`forget-date <name>`** drops it.
+- **`show-time-between <a> <b>`** reports the span between two dates — each a saved
   bookmark, **`now`**, **`start`**, or an ad-hoc `yyyy-mm-dd-hh` — as a natural
   breakdown plus a day total, and says "before" when `b` precedes `a`.
+
+**The weekday is real; the date is Gregorian.** The 1582 reform dropped ten
+*dates* and not one weekday (Thursday 4 Oct was followed by Friday 15 Oct), so a
+proleptic weekday is the genuine one back past 1197. The date beside it is not:
+a scribe in 1197 wrote *Julian*, six days behind. Julian display is on the
+roadmap, flagged rather than quietly wrong.
+
+**A phase is a window; a full moon is an instant.** The cycle is cut into eight
+slices each *centred* on its defining instant, so the full moon lasts the ~3.7
+nights it looks full — which is what "under the full moon" means in play. The
+two therefore disagree on purpose: it can be the full moon tonight while the
+exact instant is still a day out, and both statements are true. `full-moons`
+keeps counting instants, because that is what a recovery rule means.
 
 Scenes (below) build on this clock; combat's 3-second turns march it in beats.
 

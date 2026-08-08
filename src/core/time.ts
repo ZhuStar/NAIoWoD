@@ -52,6 +52,34 @@ export function formatStoryDate(epochSeconds: number): string {
   return d.getUTCSeconds() ? `${base}:${padNum(d.getUTCSeconds())}` : base;
 }
 
+// --- Days of the week ---------------------------------------------------------
+
+// The week is the one calendar cycle that never broke: the Gregorian reform of
+// 1582 dropped ten DATES but not a single weekday (Thursday 4 Oct was followed
+// by Friday 15 Oct), so the weekday of a proleptic-Gregorian instant is the real
+// weekday, unbroken back past 1197. What is NOT the same is the date itself - a
+// scribe in 1197 wrote Julian, which ran six days behind the Gregorian dates
+// this engine stores. The DAY NAME here is right; the NUMBER beside it is the
+// Gregorian one.
+export const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const;
+export type Weekday = typeof WEEKDAYS[number];
+
+// 0 = Sunday .. 6 = Saturday.
+export function weekdayOf(epochSeconds: number): number {
+  return new Date(epochSeconds * 1000).getUTCDay();
+}
+
+export function weekdayName(epochSeconds: number): Weekday {
+  return WEEKDAYS[weekdayOf(epochSeconds)];
+}
+
+const titleCase = (s: string): string => s.replace(/(^|[\s-])([a-z])/g, (_m, lead: string, ch: string) => lead + ch.toUpperCase());
+
+// "Friday 1197-03-15 08:00" - the parseable form with the day it fell on.
+export function formatStoryDay(epochSeconds: number): string {
+  return `${titleCase(weekdayName(epochSeconds))} ${formatStoryDate(epochSeconds)}`;
+}
+
 // --- Durations: fixed part (seconds) + calendar part (months) ----------------
 
 // Months and years are calendar-relative (variable length) so they are kept
@@ -166,7 +194,8 @@ export function countDayBoundaries(fromEpoch: number, toEpoch: number): number {
 // phases wobble a few hours around the mean, so a computed instant can be off
 // by up to ~half a day - plenty for a story clock, even proleptically in 1197.
 const SYNODIC_SECONDS = 29.530588853 * 86400;
-const FULL_MOON_REF = 947182440 + SYNODIC_SECONDS / 2;   // 2000-01-06 18:14 UTC new moon + half a cycle
+const NEW_MOON_REF = 947182440;                          // 2000-01-06 18:14 UTC
+const FULL_MOON_REF = NEW_MOON_REF + SYNODIC_SECONDS / 2;
 
 // How many full-moon instants lie in (from, to]. 0 when to <= from.
 export function countFullMoons(fromEpoch: number, toEpoch: number): number {
@@ -179,4 +208,104 @@ export function countFullMoons(fromEpoch: number, toEpoch: number): number {
 export function nextFullMoon(epoch: number): number {
   const k = Math.floor((epoch - FULL_MOON_REF) / SYNODIC_SECONDS) + 1;
   return Math.round(FULL_MOON_REF + k * SYNODIC_SECONDS);
+}
+
+// The first new-moon instant strictly after `epoch`.
+export function nextNewMoon(epoch: number): number {
+  const k = Math.floor((epoch - NEW_MOON_REF) / SYNODIC_SECONDS) + 1;
+  return Math.round(NEW_MOON_REF + k * SYNODIC_SECONDS);
+}
+
+// --- The moon as a PHASE, not just an instant --------------------------------
+
+// An INSTANT and a PHASE are different questions and the engine needs both.
+// countFullMoons/nextFullMoon answer "when is the moon exactly full", which is
+// what a recovery rule counts. Nobody in the story talks that way: they say it
+// IS the full moon for the few nights it looks full. So the cycle is cut into
+// eight slices, each CENTERED on its defining instant - the full moon phase runs
+// from ~1.85 days before the exact full moon to ~1.85 days after. The two
+// therefore disagree on purpose: it can be the full moon tonight while the exact
+// instant is still a day out, and both statements are true.
+export const MOON_PHASES = [
+  "new", "waxing-crescent", "first-quarter", "waxing-gibbous",
+  "full", "waning-gibbous", "last-quarter", "waning-crescent",
+] as const;
+export type MoonPhase = typeof MOON_PHASES[number];
+
+export const MOON_GLYPHS: Record<MoonPhase, string> = {
+  "new": "🌑", "waxing-crescent": "🌒", "first-quarter": "🌓", "waxing-gibbous": "🌔",
+  "full": "🌕", "waning-gibbous": "🌖", "last-quarter": "🌗", "waning-crescent": "🌘",
+};
+export const MOON_LABELS: Record<MoonPhase, string> = {
+  "new": "new moon", "waxing-crescent": "waxing crescent", "first-quarter": "first quarter",
+  "waxing-gibbous": "waxing gibbous", "full": "full moon", "waning-gibbous": "waning gibbous",
+  "last-quarter": "last quarter", "waning-crescent": "waning crescent",
+};
+
+const PHASE_SECONDS = SYNODIC_SECONDS / 8;
+
+export interface MoonState {
+  phase: MoonPhase;
+  index: number;            // 0-7, MOON_PHASES order
+  next: MoonPhase;
+  age: number;              // seconds since the new moon that opened this cycle
+  fraction: number;         // 0..1 through the cycle (0 = new, 0.5 = full)
+  illumination: number;     // 0..1 of the disc lit
+  waxing: boolean;
+  into: number;             // seconds since THIS phase began
+  toNext: number;           // seconds until the next phase begins
+  begins: number;           // epoch seconds this phase began
+  ends: number;             // epoch seconds the next phase begins
+}
+
+// Where the moon is at `epoch`. Every date this engine handles is a thousand
+// years BEFORE the reference, so the slice index is taken with Math.floor
+// (which rounds toward -Infinity and so keeps working) rather than a modulo
+// that would flip sign.
+export function moonAt(epoch: number): MoonState {
+  const slice = Math.floor((epoch - NEW_MOON_REF + PHASE_SECONDS / 2) / PHASE_SECONDS);
+  const begins = NEW_MOON_REF + slice * PHASE_SECONDS - PHASE_SECONDS / 2;
+  const index = ((slice % 8) + 8) % 8;
+  const age = (((epoch - NEW_MOON_REF) % SYNODIC_SECONDS) + SYNODIC_SECONDS) % SYNODIC_SECONDS;
+  const fraction = age / SYNODIC_SECONDS;
+  return {
+    phase: MOON_PHASES[index],
+    index,
+    next: MOON_PHASES[(index + 1) % 8],
+    age,
+    fraction,
+    illumination: (1 - Math.cos(2 * Math.PI * fraction)) / 2,
+    waxing: fraction < 0.5,
+    into: epoch - begins,
+    toNext: begins + PHASE_SECONDS - epoch,
+    begins: Math.round(begins),
+    ends: Math.round(begins + PHASE_SECONDS),
+  };
+}
+
+// When the named phase next BEGINS, strictly after `epoch`. Note this is the
+// start of the window, not the principal instant: nextMoonPhase(e, "full") comes
+// ~1.85 days before nextFullMoon(e).
+export function nextMoonPhase(epoch: number, phase: MoonPhase): number {
+  const k = MOON_PHASES.indexOf(phase);
+  const base = NEW_MOON_REF + k * PHASE_SECONDS - PHASE_SECONDS / 2;
+  const m = Math.floor((epoch - base) / SYNODIC_SECONDS) + 1;
+  return Math.round(base + m * SYNODIC_SECONDS);
+}
+
+// A rough span for the moon report: hours matter, seconds do not.
+function roundToHour(seconds: number): number {
+  return Math.max(0, Math.round(seconds / 3600) * 3600);
+}
+
+// "🌔 waxing gibbous (71% lit) - 2 days, 3 hours in, 1 day, 15 hours to the
+// full moon". Deliberately says all three things the Storyteller asks for:
+// which phase, how deep into it, how long until the next.
+export function formatMoon(m: MoonState): string {
+  // Both spans are bounded by one slice (~3.7 days), so measuring them from
+  // epoch 0 can never surface a calendar unit - it is a plain fixed breakdown.
+  const span = (secs: number): string => formatCalendarSpan(diffCalendar(0, roundToHour(secs)));
+  const pct = Math.round(m.illumination * 100);
+  return `${MOON_GLYPHS[m.phase]} ${MOON_LABELS[m.phase]} (${pct}% lit) - ${span(m.into)} in, `
+       + `${span(m.toNext)} to the ${MOON_LABELS[m.next]}`;
 }

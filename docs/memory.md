@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `a62c201`** ("Afflictions are
-> named role first, and Majesty is the pair").
+> **Last synced with the code as of commit `bd60c4f`** ("The moon has
+> phases and the week has days").
+> Prior: `a62c201` ("Afflictions are named role first, and Majesty is the
+> pair").
 > Prior: `dae9f8a` ("Held down is not gone: lift, restore and remove are three
 > things").
 > Prior: `281ea88` ("One affliction most merits want, and it is signed").
@@ -407,9 +409,24 @@ derived values.
   Jan 31→Mar 01 = 1mo 1d borrow case); `formatCalendarSpan` → prose.
 - **Recovery boundaries (§7.33):** `countDayBoundaries(from,to)` = UTC
   midnights in `(from,to]` (split advances accumulate; `to<=from` → 0);
-  `countFullMoons(from,to)` + `nextFullMoon(epoch)` on the MEAN synodic month
-  (29.530588853 d anchored to the 2000-01-06 18:14 UTC new moon + half a
-  cycle; ±hours vs true phase, fine proleptically in 1197).
+  `countFullMoons(from,to)` + `nextFullMoon(epoch)` + `nextNewMoon(epoch)` on
+  the MEAN synodic month (29.530588853 d anchored to the 2000-01-06 18:14 UTC
+  new moon; ±hours vs true phase, fine proleptically in 1197).
+- **Days of the week (§7.80):** `WEEKDAYS` (sunday-first, matching
+  `getUTCDay`), `weekdayOf(e)` → 0-6, `weekdayName(e)`, `formatStoryDay(e)` →
+  `"Saturday 1197-03-15 20:00"`. The week never broke at the 1582 reform (ten
+  DATES were dropped, no weekday), so a proleptic weekday IS the real one — but
+  the date beside it is Gregorian where a 1197 scribe wrote Julian, six days
+  behind. `formatStoryDate` is left alone so it still round-trips through
+  `parseStoryDate`.
+- **Moon phases (§7.80):** `MOON_PHASES` (8, new→waning-crescent),
+  `MOON_GLYPHS`, `MOON_LABELS`, `moonAt(e)` → `MoonState {phase, index, next,
+  age, fraction, illumination, waxing, into, toNext, begins, ends}`,
+  `nextMoonPhase(e, phase)` (when the WINDOW opens), `formatMoon(m)`. Each
+  phase is 1/8 of the cycle **centred on** its instant, so the full moon lasts
+  ~3.7 days; `illumination = (1 - cos 2πf)/2`. The slice index uses
+  `Math.floor` (not `%`) because every story date is ~800 years BEFORE the
+  reference and a modulo would flip sign.
 
 ### src/wizard.ts (83) — medium-agnostic wizard engine
 - `WizardPrompt {step, title, body, kind: choice|number|text|confirm,
@@ -1035,8 +1052,9 @@ replaced names with min(cap, current)); `applyPenaltyShield(rollAs, poolTraits,
 specDiceMod, extra)` (mutating; returns the note) called from BOTH
 `execCharacterRoll` (which gained an optional `seed` extra param) and
 `rollAndReport`. `launchExtended` opts gained `firstExtra`/`preNotes`.
-`applyRecovery(from, to)` + wiring in `cmdAdvanceTime`; `cmdStoryDate` shows
-`nextFullMoon`. **MAGIC section** after `cmdResources`: `parsePillars`,
+`applyRecovery(from, to)` + wiring in `cmdAdvanceTime`; `cmdStoryDate` leads
+with `formatStoryDay` and carries `formatMoon` (§7.80); `cmdMoon` backs
+`[[show-moon]]`; `moonAndWeekFacts(now)` feeds the time scope. **MAGIC section** after `cmdResources`: `parsePillars`,
 `grantsUncancelableOnSpend`, `afflictionRollExtra` (§7.35 - the twin of passiveRollExtra, folding scaled
 affliction tiers with the `@foundation` sentinel), `applyPenaltyShield`,
 `cmdMeasureDoor`/`cmdLeaveLibrary`/`cmdCray`/`cmdHarvest`/`cmdAbsorb`/
@@ -3701,7 +3719,9 @@ and `prefill` are mocked/available but not yet written.
 
     1. **YES** - `[[show-date]]` (§7.73's merge of `story-date` + `dates`) prints
        the in-game date AND time to the minute, elapsed-since-start, the next
-       full moon, and every bookmark. No new verb needed.
+       full moon, and every bookmark. No new verb needed. (§7.80 later added the
+       DAY OF THE WEEK and the moon's PHASE to that line, and split the full
+       cycle out into `[[show-moon]]`.)
     2. **`in-story` IS UNIVERSAL, AND RUNS BOTH WAYS.** `CommandRouter.register`
        attaches `IN_STORY_PARAM` to EVERY spec - declaring it 130 times would be
        130 chances to forget, and a knob missing from its spec does not exist.
@@ -3999,10 +4019,79 @@ and `prefill` are mocked/available but not yet written.
     THROUGH the registry, not by reading the source** - the same round-trip trap
     as invariants §7.
 
+80. **The moon has phases and the week has days** (owner: *"Is there a calendar
+    that tells us days of the week? Also, we should not only talk about full
+    moon. We should say current phase, how long in the phase we are, and how
+    long to the next phase."*).
+
+    Both answers were NO. `getUTCDay` was called nowhere in the engine, and the
+    moon existed only as `countFullMoons` / `nextFullMoon` — instants, for the
+    `per: "full-moon"` recovery rules. Nobody in a story speaks that way.
+
+    - **AN INSTANT AND A PHASE ARE DIFFERENT QUESTIONS and the engine needs
+      both.** The cycle is cut into eight slices each **centred on** its
+      defining instant, so the full moon runs from ~1.85 days before the exact
+      full moon to ~1.85 days after — which is what "under the full moon" means
+      in play. The two therefore **disagree on purpose**: it can be the full
+      moon tonight while the exact instant is a day out, and both are true.
+      `countFullMoons` keeps counting instants (recovery is unchanged);
+      `moon-phase` is the window.
+    - **The moon and the week are NUMBERS, and so are their names.** The
+      expression language is numeric, so a phase cannot be a string — but
+      `` `moon-phase = moon:full` `` still reads like English because
+      `moon:full` is a NAMED CONSTANT (4) sitting in the same fact table as the
+      thing it is compared to. Same for `weekday = day:friday`. The chronicle
+      writes words; the evaluator only ever sees arithmetic. This is why the
+      bare-shorthand lookup changed from `path.length === 1` to matching the
+      whole joined path: the constants are two segments.
+    - Facts added (both bare and `system::time::`-prefixed): `moon-phase`,
+      `moon-illumination` (**percent**, so conditions stay integral),
+      `moon-age-days`, `moon-waxing`, `weekday`, plus `moon:<phase>` ×8 and
+      `day:<name>` ×7. Calls added: `moon-phase-at(d)`,
+      `moon-illumination-at(d)`, `weekday-at(d)`, `next-full-moon(d)`,
+      `next-new-moon(d)` — one-argument forms, so a rule can ask about a date it
+      NAMES rather than only about now.
+    - **`[[show-moon]]`** (new `ShowSubject`, campaign scope) answers all three
+      things asked at once: which phase, how deep into it, how long till it
+      turns — plus the window's start/end, day-of-cycle, both principal
+      instants, and the eight-phase wheel with the current one bracketed. Named
+      (`[[show-moon full]]`) it answers the other question, "when is the next
+      one of those", which is what a rite or a werewolf auspice needs.
+      `[[show-date]]` now leads with `formatStoryDay` and carries the phase line.
+    - **`formatStoryDate` was deliberately NOT changed.** It round-trips through
+      `parseStoryDate` (and is stored), so the weekday went into a separate
+      `formatStoryDay`.
+    - **The week never broke.** The 1582 reform dropped ten DATES and not one
+      weekday (Thursday 4 Oct → Friday 15 Oct), so a proleptic weekday is the
+      REAL weekday back past 1197 — asserted in the suite against 1582-10-15 =
+      Friday. What is *not* right is the date beside it: a 1197 scribe wrote
+      Julian, six days behind the Gregorian dates this engine stores. Flagged,
+      not built (roadmap).
+    - Arithmetic trap worth keeping: the slice index uses `Math.floor`, never
+      `%`. Every story date is ~800 years BEFORE the 2000-01-06 reference, and a
+      modulo would flip sign on all of them.
+
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
+
+0. **Named-but-not-built, from §7.80's calendar pass** (small, all flagged to
+   the owner rather than silently skipped):
+   - **The Julian calendar.** The engine stores proleptic Gregorian; a scribe in
+     1197 wrote Julian, six days behind. The WEEKDAY is already correct (the
+     week never broke), but a chronicle that wants period-accurate DATES needs a
+     `formatJulian` and probably a `calendar=julian|gregorian` display knob. The
+     offset is a fixed formula, ~15 lines.
+   - **Recovery on phases other than full.** `RecoveryRule.per` is still
+     `"day" | "full-moon"`; now that phases exist, `"new-moon"` and the two
+     quarters are a one-line widening plus a counter per phase.
+   - **Werewolf auspices** collapse the eight phases onto five (Ragabash/
+     Theurge/Philodox/Galliard/Ahroun). Pure data over `MOON_PHASES` whenever a
+     werewolf template exists.
+   - **Feast and saints' days**, which matter more than weekdays for a Dark
+     Ages chronicle — a DateBook seeded with the movable feasts (computus for
+     Easter) would make "the Tuesday after Michaelmas" sayable.
 
 1. **Turn/time system** — the biggest unlock. The **story clock** (§7.30) AND
    **Scenes + turn-length** (§7.31: `Scene`/`SceneStore` + `scene`/`turn`/

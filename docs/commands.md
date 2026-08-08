@@ -16,7 +16,7 @@ every other read-only verb was renamed `show-*`, but this is the one command
 a player types before they know anything at all. `[[show-help]]` is an alias.
 
 ```
-[SYSTEM: 129 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
+[SYSTEM: 130 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-moon, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -29,7 +29,7 @@ one reply in the story.
 
 ---
 
-## All 129 commands
+## All 130 commands
 
 | command | what it does |
 |---|---|
@@ -136,6 +136,7 @@ one reply in the story.
 | `show-health` | a character's health track, penalty and what soaks what |
 | `show-help` | alias of [[help]], which keeps its name - it is the one command everybody already knows |
 | `show-merit` | merits & flaws: what a character owns, or what the chronicle defines |
+| `show-moon` | the moon's phase, how far into it we are, and when it turns |
 | `show-player` | the current player (the storyteller, unless somebody took a seat) |
 | `show-resource` | a character's live pools and trackers (and what they cannot use) |
 | `show-roll` | the chronicle's saved rolls, or one in full |
@@ -2478,6 +2479,28 @@ merits & flaws: what a character owns, or what the chronicle defines
 
 ```
 [SYSTEM: show-merit - show-merit [name|@all] [in=<where>] [in-story]  (merits & flaws: what a character owns, or what the chronicle defines; in=campaign lists the definitions; a name shows one in full. NEVER lists Arcana - [[show-arcanum]] is their list)]
+```
+
+### `show-moon`
+
+the moon's phase, how far into it we are, and when it turns
+
+```
+[[show-moon [a phase to ask when it next begins] [in=<where>] [in-story]]]
+```
+
+> Eight phases, each centred on its instant, so the full moon lasts the ~3.7 nights it looks full. In a condition: `moon-phase = moon:full`, `moon-illumination >= 90`, `weekday = day:friday`.
+
+| argument | kind | meaning |
+|---|---|---|
+| `name` | positional | What to show; @all means the whole list <br>*e.g.* `full` |
+| `in` | named | Where to look: campaign (default campaign); a bare name is worked out, kind::name is explicit <br>*e.g.* `campaign` |
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help show-moon]]`** replies:
+
+```
+[SYSTEM: show-moon - show-moon [a phase to ask when it next begins] [in=<where>] [in-story]  (the moon's phase, how far into it we are, and when it turns; Eight phases, each centred on its instant, so the full moon lasts the ~3.7 nights it looks full. In a condition: `moon-phase = moon:full`, `moon-illumination >= 90`, `weekday = day:friday`.)]
 ```
 
 ### `show-player`

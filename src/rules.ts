@@ -1901,9 +1901,9 @@ export interface DisciplineDef {
 
 export const DISCIPLINES: Record<string, DisciplineDef> = {
   potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength.",
-    grants: { afflicts: "potent", togglable: true, note: "the strength is always there; a vampire may still hold it back" } },
+    grants: { afflicts: "power-potence", togglable: true, note: "the strength is always there; a vampire may still hold it back" } },
   fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't.",
-    grants: { afflicts: "fortified", togglable: true, note: "the toughness is always there" } },
+    grants: { afflicts: "power-fortitude", togglable: true, note: "the toughness is always there" } },
   celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
   animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
   auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
@@ -2432,9 +2432,51 @@ export const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
 // The tag gate is a FIELD, not a second affliction: `trait` and `tags` are two
 // independent optional conditions on the same op, and splitting them would
 // double the surface to say the same thing.
-export const DIFFICULTY_MODIFIER = "difficulty-modifier";
+// =============================================================================
+// AFFLICTION NAMES ARE ROLE FIRST
+// -----------------------------------------------------------------------------
+// The owner's rule, and it is a filing rule: "I don't want these afflictions to
+// be filed [by subject]. If you're looking at them in alphabetical order ... the
+// first part of the name should be what ROLE this affliction has, what KIND of
+// affliction it is."
+//
+// So `emitting-majesty` and `under-majesty`, not `majesty-emitter` and
+// `majesty-effect`. Sorted, every emitter sits with every other emitter, and a
+// player scanning the list reads down a column of KINDS rather than a column of
+// unrelated subjects. `in-sanctum` and `in-library` already worked this way,
+// which is what suggested the rule was already half-there.
+//
+// The vocabulary is data so a chronicle can add to it; the check is ADVISORY,
+// like everything else here - a name outside it is reported, never refused.
+// =============================================================================
+export const AFFLICTION_ROLES: Record<string, string> = {
+  emitting: "you are the SOURCE - others near you are caught in it",
+  under: "you are caught in something somebody else is emitting",
+  in: "you are somewhere, and the place is doing it (in-sanctum, in-umbra)",
+  wearing: "something you wear or carry is doing it - and stops when it comes off",
+  modifier: "a bare change to what dice do (modifier-difficulty)",
+  power: "one of your OWN powers is running (power-potence)",
+  state: "a condition on you with no other role (state-rested)",
+};
+export const AFFLICTION_ROLE_KEYS: string[] = Object.keys(AFFLICTION_ROLES);
+
+// The role a name declares, or undefined when it declares none.
+export function afflictionRole(name: string): string | undefined {
+  const key = StringUtil.normalize(name);
+  const i = key.indexOf("-");
+  if (i <= 0) return undefined;
+  const head = key.slice(0, i);
+  return AFFLICTION_ROLES[head] ? head : undefined;
+}
+// What a name would be if it took a role: `emitting` + `majesty`.
+export function withAfflictionRole(role: string, subject: string): string {
+  return `${StringUtil.normalize(role)}-${StringUtil.normalize(subject)}`;
+}
+
+export const DIFFICULTY_MODIFIER = "modifier-difficulty";
 export const DIFFICULTY_MODIFIER_AFFLICTION: AfflictionDef = {
   name: DIFFICULTY_MODIFIER,
+  aka: ["difficulty-modifier"],
   description: "Rolls using a named trait are easier or harder. `trait` is the trait or CATEGORY it "
     + "applies to (melee, knowledge, all); `tags` narrows it to rolls carrying a tag (reckless); "
     + "the level is how many steps, negative for easier.",
@@ -2442,10 +2484,35 @@ export const DIFFICULTY_MODIFIER_AFFLICTION: AfflictionDef = {
   apply: [{ op: "difficulty", amount: -1, trait: "$trait", target: "$tags" }],
 };
 
+// MAJESTY, both halves - the pair that showed why one word for two things was
+// wrong, and the pattern every emitted effect should copy. The holder radiates
+// it and may stop at will; everyone near him is caught, may BUY relief for a
+// scene, and is free of it only by leaving. `mirror` is what ties them: the
+// emitter's binding names who is caught, and they take the other half.
+export const EMITTING_MAJESTY: AfflictionDef = {
+  name: "emitting-majesty",
+  description: "Presence 5: you are radiating Majesty. Those near you are awed. You may stop at will.",
+  bindings: ["target"],
+  mirror: "under-majesty",
+  lift: { how: "at-will", note: "it is his own power; he simply stops" },
+};
+export const UNDER_MAJESTY: AfflictionDef = {
+  name: "under-majesty",
+  description: "You are awed by someone's Majesty: +2 difficulty to act against them. Willpower buys "
+    + "a scene's relief - you are still under it - and only leaving their presence ends it.",
+  apply: [{ op: "difficulty", amount: 2, target: "$against" }],
+  lift: { how: "cost", cost: "willpower", for: "1 scene",
+    note: "the awe is still on you; the relief runs out" },
+};
+
 export const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
   DIFFICULTY_MODIFIER_AFFLICTION,
-  { name: "potent", description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it).", tags: ["potent"] },
-  { name: "fortified", description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can.", tags: ["fortified"] },
+  EMITTING_MAJESTY,
+  UNDER_MAJESTY,
+  { name: "power-potence", aka: ["potent"], tags: ["potent"],
+    description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it)." },
+  { name: "power-fortitude", aka: ["fortified"], tags: ["fortified"],
+    description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can." },
   // @deprecated The label Trait Affinity used to apply. Kept so a character
   // afflicted with it before difficulty-modifier existed still reads; nothing
   // grants it any more.
@@ -2714,6 +2781,9 @@ export interface AfflictionDef {
   // The DEFAULT is `never`, because most afflictions are not shruggable and a
   // permissive default would quietly make every one of them optional.
   lift?: AfflictionLift;
+  // OLDER NAMES that still resolve to this one. A rename must not break a card
+  // somebody wrote last week, or an affliction already on a character.
+  aka?: string[];
   // While THIS one is on, those are held down. The glove that covers the claws:
   // `wearing-gloves` suppresses `claw-hands`, and the claws are back the moment
   // the glove comes off - nobody has to remember to restore them.
@@ -2789,6 +2859,8 @@ export function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string
   // §7): definitions round-trip through their lorebook card.
   const apply = Array.isArray(parts.apply) ? parts.apply : effectOpsFromCard(parts.apply as CardValue | undefined);
   if (apply.length) def.apply = apply;
+  const aka = asStringList(parts.aka as CardValue | undefined).map(a => StringUtil.normalize(a)).filter(Boolean);
+  if (aka.length) def.aka = aka;
   return def;
 }
 
@@ -3060,7 +3132,8 @@ export const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
   // The rest gates: recovery rules requiring BOTH at once ("full-rested" AND
   // "in-sanctum") grant the extra daily point of Living Resolve / Quintessence.
   makeAfflictionDef({
-    name: "full-rested",
+    name: "state-rested",
+    aka: ["full-rested"],
     description: "Eight full hours of sleep behind them",
     tags: ["full-rested"],
   }),

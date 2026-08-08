@@ -27,7 +27,7 @@ import {
   CONSTRAINT_RELATIONS, CONSTRAINT_DOMAINS, CreatorMode,
   type SuccessTable, type ExtendedContest, type RollExecution,
   parseAliasToken, AliasRegistry, PlayerStore,
-  AfflictionRegistry, CharacterAfflictions, AFFLICTIONS_ENTRY,
+  AfflictionRegistry, resolveAffliction, afflictionNames, CharacterAfflictions, AFFLICTIONS_ENTRY,
   makeAfflictionDef, describeAfflictionDef, parseAfflictionDuration, describeDuration,
   type AfflictionDef, type ActiveAffliction,
   makeConstraintGroup, describeConstraint, checkConstraints, ConstraintRegistry, CONSTRAINTS_ENTRY,
@@ -46,7 +46,7 @@ import {
   expiryIsAdvisoryOnly, evaluateCondition, AFFLICTION_MODES,
   GRANT_SOURCES, sourceDrawsOnPurse, describeCreationGrant,
   makeOrphanPolicy, describeOrphanPolicy, ORPHAN_IMMEDIATELY, ORPHAN_KEEP,
-  PASSIVE_AFFLICTIONS, budgetOfKind, SYSTEM, grantIsAutomatic, registerSystemHandlers, afflictionOpsOf,
+  PASSIVE_AFFLICTIONS, afflictionRole, budgetOfKind, SYSTEM, grantIsAutomatic, registerSystemHandlers, afflictionOpsOf,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
   resolvePowerInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
@@ -4681,9 +4681,9 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     const affinity = ArcanumRegistry.get("trait-affinity")!;
     expect(affinity.passive).toBeUndefined();
     expect(affinity.grants).toEqual({
-      afflicts: "difficulty-modifier", binds: { trait: "$param" }, level: "$rating",
+      afflicts: "modifier-difficulty", binds: { trait: "$param" }, level: "$rating",
     });
-    const def = AfflictionRegistry.get("difficulty-modifier")!;
+    const def = AfflictionRegistry.get("modifier-difficulty")!;
     expect(afflictionOpsOf(def, { trait: "melee" }, 2))
       .toEqual([{ op: "difficulty", trait: "melee", amount: -2 }]);
     // An unfilled $binding DROPS the gate rather than the op: no tags given
@@ -7460,26 +7460,32 @@ describe("passive powers apply themselves", () => {
     expect(budgetOfKind(aptitude)).toBe("arcana");
     // It grants the SHARED affliction - the effect is a rule it uses, not a
     // rule it owns, so any other merit or flaw can apply the same one.
-    expect(aptitude.grants?.afflicts).toBe("difficulty-modifier");
+    expect(aptitude.grants?.afflicts).toBe("modifier-difficulty");
     // A Discipline carries the same field, for the same reason.
-    expect(disciplineDef("potence")!.grants?.afflicts).toBe("potent");
-    expect(disciplineDef("fortitude")!.grants?.afflicts).toBe("fortified");
+    expect(disciplineDef("potence")!.grants?.afflicts).toBe("power-potence");
+    expect(disciplineDef("fortitude")!.grants?.afflicts).toBe("power-fortitude");
     expect(PASSIVE_AFFLICTIONS.map(a => a.name))
-      .toEqual(["difficulty-modifier", "potent", "fortified", "trait-aptitude", "trait-expansion"]);
+      .toEqual(["modifier-difficulty", "emitting-majesty", "under-majesty",
+        "power-potence", "power-fortitude", "trait-aptitude", "trait-expansion"]);
+    // Every name is ROLE FIRST, so an alphabetical list groups by KIND.
+    for (const a of PASSIVE_AFFLICTIONS) {
+      if (a.name.startsWith("trait-")) continue;            // deprecated leftovers
+      expect([a.name, afflictionRole(a.name)]).not.toEqual([a.name, undefined]);
+    }
   });
 
   test("rating Potence applies its affliction, and the reply says so", async () => {
     await CommandRouter.route('create-playable name="Vlad" templates=vampire');
     const r = await CommandRouter.route("set-trait potence 2 group=discipline");
-    expect(r).toContain("Potent is now applied");
+    expect(r).toContain("Power Potence is now applied");
     expect(r).toContain("from discipline:potence");
     const shown = await CommandRouter.route("afflictions");
-    expect(shown).toContain("potent");
+    expect(shown).toContain("power-potence");
     expect(shown).toContain("ends at once");           // the default orphan policy
     // Dropping it to 0 takes the passive away again.
     const gone = await CommandRouter.route("set-trait potence 0 group=discipline");
-    expect(gone).toContain("Potent ends with discipline:potence");
-    expect(await CommandRouter.route("afflictions")).not.toContain("potent");
+    expect(gone).toContain("Power Potence ends with discipline:potence");
+    expect(await CommandRouter.route("afflictions")).not.toContain("power-potence");
   });
 
   test("taking an arcanum applies its passive; dropping it takes it back", async () => {
@@ -7487,15 +7493,15 @@ describe("passive powers apply themselves", () => {
     const took = await CommandRouter.route("take-arcanum trait-affinity::melee 2");
     // The grant fills the affliction's bindings from the INSTANCE: which trait,
     // and at what level - so one shared definition serves every rating.
-    expect(took).toContain("Difficulty Modifier is now applied (melee)");
+    expect(took).toContain("Modifier Difficulty is now applied (melee)");
     expect(took).toContain("from arcanum:trait-affinity:melee");
     const active = (await CharacterAfflictions.list("Duke"))
-      .find(a => a.def === "difficulty-modifier")!;
+      .find(a => a.def === "modifier-difficulty")!;
     expect(active.bindings["trait"]).toBe("melee");
     expect(active.level).toBe(2);
-    expect(await CommandRouter.route("show-affliction")).toContain("difficulty-modifier");
+    expect(await CommandRouter.route("show-affliction")).toContain("modifier-difficulty");
     expect(await CommandRouter.route("drop-arcanum trait-affinity::melee"))
-      .toContain("Difficulty Modifier ends with");
+      .toContain("Modifier Difficulty ends with");
   });
 
   test("an application is ANNOUNCED on the bus", async () => {
@@ -7503,7 +7509,7 @@ describe("passive powers apply themselves", () => {
     const heard: unknown[] = [];
     const id = PostOffice.subscribe("affliction:applied", (e) => { heard.push(e.data); });
     await CommandRouter.route("set-trait potence 1 group=discipline");
-    expect(heard).toEqual([{ character: "vlad", affliction: "potent", from: "discipline:potence", automatic: true }]);
+    expect(heard).toEqual([{ character: "vlad", affliction: "power-potence", from: "discipline:potence", automatic: true }]);
     PostOffice.unsubscribe(id);
   });
 
@@ -7545,7 +7551,7 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
     const ids = Bus.listeners(SYSTEM.powerTaken).map(l => l.id);
     for (const id of ids) Bus.off(id);
     await CommandRouter.route("set-trait potence 1 group=discipline");
-    expect(await CommandRouter.route("afflictions")).not.toContain("potent");
+    expect(await CommandRouter.route("afflictions")).not.toContain("power-potence");
     // Put it back the way the module does - registration is a function, and an
     // idempotent one, precisely so this is possible.
     registerSystemHandlers();
@@ -7553,7 +7559,7 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
     // A DIFFERENT power, since the passive fires on 0 -> rated and Potence is
     // already rated by the failed attempt above.
     await CommandRouter.route("set-trait fortitude 1 group=discipline");
-    expect(await CommandRouter.route("afflictions")).toContain("fortified");
+    expect(await CommandRouter.route("afflictions")).toContain("power-fortitude");
   });
 
   test("a handler may do async work, and the publisher waits for it", async () => {
@@ -7570,21 +7576,21 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
 
   test("a togglable passive switches off and back on without losing the power", async () => {
     await CommandRouter.route("set-trait potence 2 group=discipline");
-    expect(await CommandRouter.route("show-affliction")).toContain("potent");
-    const off = await CommandRouter.route("toggle potent");
-    expect(off).toContain("switches Potent OFF");
+    expect(await CommandRouter.route("show-affliction")).toContain("power-potence");
+    const off = await CommandRouter.route("toggle power-potence");
+    expect(off).toContain("switches Power Potence OFF");
     expect(off).toContain("held down, not lost");
     // HELD DOWN IS NOT GONE. It is still listed, still counted, still his - and
     // it is not biting. Removing it would have lost the bindings and the level.
     const listed = await CommandRouter.route("show-affliction");
-    expect(listed).toContain("potent");
+    expect(listed).toContain("power-potence");
     expect(listed).toContain("HELD DOWN");
-    expect((await CharacterAfflictions.list("Vlad")).find(a => a.def === "potent")!.suspended!.by).toBe("self");
+    expect((await CharacterAfflictions.list("Vlad")).find(a => a.def === "power-potence")!.suspended!.by).toBe("self");
     expect(await CharacterAfflictions.tags("Vlad")).not.toContain("potent");
     // The Discipline is still rated - he simply is not using it.
     expect(await CommandRouter.route("show-sheet")).toContain("otence");
-    const on = await CommandRouter.route("toggle potent");
-    expect(on).toContain("switches Potent back ON");
+    const on = await CommandRouter.route("toggle power-potence");
+    expect(on).toContain("switches Power Potence back ON");
     expect(await CharacterAfflictions.tags("Vlad")).toContain("potent");
   });
 
@@ -7972,7 +7978,7 @@ describe("define-merit grants= (the passive affliction) and the merit windows", 
 // =============================================================================
 // difficulty-modifier: ONE affliction every rated merit can reuse (§7.77)
 // =============================================================================
-describe("difficulty-modifier - the shared affliction", () => {
+describe("modifier-difficulty - the shared affliction", () => {
   beforeEach(async () => {
     __resetStorageMock(); __resetLorebookMock();
     MeritFlawRegistry.reset(); ArcanumRegistry.reset(); AbilityCategories.reset();
@@ -7984,12 +7990,12 @@ describe("difficulty-modifier - the shared affliction", () => {
   });
 
   test("ONE signed thing, not a bonus/penalty pair - and the note says which way", async () => {
-    await CommandRouter.route("afflict difficulty-modifier trait=melee level=2");
+    await CommandRouter.route("afflict modifier-difficulty trait=melee level=2");
     const easier = await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) });
     expect(easier).toContain("vs diff 4");                 // 6 - 2
     expect(easier).toContain("difficulty -2 (easier)");
     // The SAME affliction, the other way: a signed level, no second definition.
-    await CommandRouter.route("remove difficulty-modifier");
+    await CommandRouter.route("remove modifier-difficulty");
     await CommandRouter.route("define-affliction name=`cursed` apply=`difficulty +1 if=$trait` bindings=trait");
     await CommandRouter.route("afflict cursed trait=melee level=2");
     const harder = await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) });
@@ -7998,7 +8004,7 @@ describe("difficulty-modifier - the shared affliction", () => {
   });
 
   test("the tag gate is a FIELD, not a second affliction (the Crack Driver case)", async () => {
-    await CommandRouter.route("afflict difficulty-modifier trait=ride tags=reckless level=2 from=`merit:crack-rider`");
+    await CommandRouter.route("afflict modifier-difficulty trait=ride tags=reckless level=2 from=`merit:crack-rider`");
     // Only when the manoeuvre is reckless.
     expect(await CommandRouter.route("roll ride", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
     const reckless = await CommandRouter.route("roll ride tags=reckless", { rng: seqRng([6, 6, 6]) });
@@ -8012,27 +8018,27 @@ describe("difficulty-modifier - the shared affliction", () => {
   });
 
   test("the trait gate takes a CATEGORY, so `all Talents` is one instance", async () => {
-    await CommandRouter.route("afflict difficulty-modifier trait=knowledge level=1 from=`merit:scholar`");
+    await CommandRouter.route("afflict modifier-difficulty trait=knowledge level=1 from=`merit:scholar`");
     expect(await CommandRouter.route("roll occult", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
     // ...and `all` means no trait gate at all.
-    await CommandRouter.route("remove difficulty-modifier");
-    await CommandRouter.route("afflict difficulty-modifier trait=all level=1 from=`merit:blessed`");
+    await CommandRouter.route("remove modifier-difficulty");
+    await CommandRouter.route("afflict modifier-difficulty trait=all level=1 from=`merit:blessed`");
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
   });
 
   test("a SHARED affliction is held once per source - one merit cannot delete another's", async () => {
-    await CommandRouter.route("afflict difficulty-modifier trait=ride tags=reckless level=2 from=`merit:crack-rider`");
-    await CommandRouter.route("afflict difficulty-modifier trait=knowledge level=1 from=`merit:scholar`");
+    await CommandRouter.route("afflict modifier-difficulty trait=ride tags=reckless level=2 from=`merit:crack-rider`");
+    await CommandRouter.route("afflict modifier-difficulty trait=knowledge level=1 from=`merit:scholar`");
     const active = await CharacterAfflictions.list("Rok");
-    expect(active.filter(a => a.def === "difficulty-modifier").length).toBe(2);
+    expect(active.filter(a => a.def === "modifier-difficulty").length).toBe(2);
     // Both still bite, each through its own gate.
     expect(await CommandRouter.route("roll occult", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 5");
     expect(await CommandRouter.route("roll ride tags=reckless", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
     // An affliction with no bindings and no source is still one-of, as before.
-    await CommandRouter.route("afflict potent");
-    await CommandRouter.route("afflict potent");
-    expect((await CharacterAfflictions.list("Rok")).filter(a => a.def === "potent").length).toBe(1);
+    await CommandRouter.route("afflict power-potence");
+    await CommandRouter.route("afflict power-potence");
+    expect((await CharacterAfflictions.list("Rok")).filter(a => a.def === "power-potence").length).toBe(1);
   });
 
   test("Trait Affinity USES the shared rule rather than owning one of its own", async () => {
@@ -8041,13 +8047,13 @@ describe("difficulty-modifier - the shared affliction", () => {
     await CommandRouter.route("set-trait melee 3");
     await CommandRouter.route("take-arcanum trait-affinity::melee 2");
     // The grant fills the affliction from the instance: which trait, what level.
-    const active = (await CharacterAfflictions.list("Duke")).find(a => a.def === "difficulty-modifier")!;
+    const active = (await CharacterAfflictions.list("Duke")).find(a => a.def === "modifier-difficulty")!;
     expect(active.bindings["trait"]).toBe("melee");
     expect(active.level).toBe(2);
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 4");
     // ...and because the effect is a STATE, it can be switched off - which a
     // passive op could never be.
-    await CommandRouter.route("remove difficulty-modifier");
+    await CommandRouter.route("remove modifier-difficulty");
     expect(await CommandRouter.route("roll melee", { rng: seqRng([6, 6, 6]) })).toContain("vs diff 6");
   });
 
@@ -8056,8 +8062,9 @@ describe("difficulty-modifier - the shared affliction", () => {
       'define-merit name=`Duellist` points=`1,2,3` param=trait param-from=skill grants=difficulty-modifier');
     // The definition reads as doing something, because it says what the
     // affliction it applies DOES.
-    expect(await CommandRouter.route("show-merit duellist")).toContain('applies "difficulty-modifier"');
-    expect(MeritFlawRegistry.get("duellist")!.grants!.afflicts).toBe("difficulty-modifier");
+    // An older name is filed under the current one when the merit is defined.
+    expect(await CommandRouter.route("show-merit duellist")).toContain('applies "modifier-difficulty"');
+    expect(MeritFlawRegistry.get("duellist")!.grants!.afflicts).toBe("modifier-difficulty");
   });
 });
 
@@ -8146,18 +8153,93 @@ describe("lift vs remove: the Majesty distinction", () => {
   });
 
   test("`from` picks ONE instance of a shared affliction, for both verbs", async () => {
-    await CommandRouter.route("afflict difficulty-modifier trait=climb level=2 from=`merit:sure-footed`");
-    await CommandRouter.route("afflict difficulty-modifier trait=subterfuge level=1 from=`merit:glib`");
-    await CommandRouter.route("remove difficulty-modifier from=`merit:glib`");
+    await CommandRouter.route("afflict modifier-difficulty trait=climb level=2 from=`merit:sure-footed`");
+    await CommandRouter.route("afflict modifier-difficulty trait=subterfuge level=1 from=`merit:glib`");
+    await CommandRouter.route("remove modifier-difficulty from=`merit:glib`");
     const left = await CharacterAfflictions.list("Rok");
-    expect(left.filter(a => a.def === "difficulty-modifier").length).toBe(1);
+    expect(left.filter(a => a.def === "modifier-difficulty").length).toBe(1);
     expect(left[0].from).toBe("merit:sure-footed");
     // ...and lifting one leaves the other biting.
-    await CommandRouter.route("afflict difficulty-modifier trait=subterfuge level=1 from=`merit:glib`");
-    await CommandRouter.route("define-affliction name=`difficulty-modifier` apply=`difficulty -1 if=$trait` bindings=trait lift=at-will");
-    await CommandRouter.route("lift difficulty-modifier from=`merit:glib`");
+    await CommandRouter.route("afflict modifier-difficulty trait=subterfuge level=1 from=`merit:glib`");
+    await CommandRouter.route("define-affliction name=`modifier-difficulty` apply=`difficulty -1 if=$trait` bindings=trait lift=at-will");
+    await CommandRouter.route("lift modifier-difficulty from=`merit:glib`");
     const now = await CharacterAfflictions.list("Rok");
     expect(now.find(a => a.from === "merit:glib")!.suspended).toBeDefined();
     expect(now.find(a => a.from === "merit:sure-footed")!.suspended).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// AFFLICTION NAMES ARE ROLE FIRST (§7.79)
+// =============================================================================
+describe("affliction names: the role comes first", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetLorebookMock();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset(); AbilityCategories.reset();
+    resetAllConfigStores(); await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Rok" templates=mortal');
+    await CommandRouter.route("story-start 1197-03-15-08");
+    await CommandRouter.route('scene "Court"');
+  });
+
+  test("sorted, they group by KIND rather than by subject", () => {
+    expect(afflictionRole("emitting-majesty")).toBe("emitting");
+    expect(afflictionRole("under-majesty")).toBe("under");
+    expect(afflictionRole("in-sanctum")).toBe("in");
+    expect(afflictionRole("power-potence")).toBe("power");
+    expect(afflictionRole("modifier-difficulty")).toBe("modifier");
+    // A name whose FIRST part is the subject declares no role - which is the
+    // thing the convention exists to stop.
+    expect(afflictionRole("majesty-effect")).toBeUndefined();
+    expect(afflictionRole("dazed")).toBeUndefined();
+    // Sorting puts the pair with their own kind, not with each other.
+    const names = ["under-majesty", "emitting-majesty", "emitting-fear", "under-fear"].sort();
+    expect(names).toEqual(["emitting-fear", "emitting-majesty", "under-fear", "under-majesty"]);
+  });
+
+  test("the listing is grouped by role, and defining without one is nudged (never refused)", async () => {
+    const listed = await CommandRouter.route("show-affliction @all in=campaign");
+    expect(listed).toContain("Defined afflictions, by role");
+    expect(listed).toContain("emitting- (you are the SOURCE");
+    expect(listed).toContain("emitting-majesty");
+    expect(listed).toContain("under-majesty");
+    const nudged = await CommandRouter.route("define-affliction name=`dazed` apply=`difficulty +1`");
+    expect(nudged).toContain("declares no ROLE");
+    expect(nudged).toContain("Perhaps state-dazed?");
+    expect(AfflictionRegistry.get("dazed")).toBeDefined();     // stored anyway
+  });
+
+  test("an older name still finds its definition - a rename breaks nobody's card", async () => {
+    for (const [old, now] of [["potent", "power-potence"], ["fortified", "power-fortitude"],
+      ["difficulty-modifier", "modifier-difficulty"], ["full-rested", "state-rested"]] as const) {
+      expect([old, resolveAffliction(old)?.name]).toEqual([old, now]);
+    }
+    // ...and afflicting by the old name files it under the current one.
+    await CommandRouter.route("afflict difficulty-modifier trait=climb level=2");
+    expect((await CharacterAfflictions.list("Rok"))[0].def).toBe("modifier-difficulty");
+    // A recovery gate written against the old name still gates (both resolve).
+    expect(afflictionNames(resolveAffliction("state-rested")!)).toEqual(["state-rested", "full-rested"]);
+  });
+
+  test("Majesty ships as the pair, and each half behaves as its role says", async () => {
+    await CommandRouter.route('create-playable name="Anais" templates=vampire');
+    await CommandRouter.route('play name="Anais"');
+    await CommandRouter.route("set-trait subterfuge 3");
+    await CommandRouter.route("gain willpower 3");
+    // The EMITTER radiates it, and stops at will - nothing spent.
+    const emit = await CommandRouter.route('afflict emitting-majesty target="Rok"');
+    expect(emit).toContain("Rok is now under-majesty");            // the mirror
+    expect(await CommandRouter.route("lift emitting-majesty")).not.toContain("spent");
+
+    // The TARGET buys relief, and is still under it.
+    await CommandRouter.route('play name="Rok"');
+    await CommandRouter.route("set-trait subterfuge 3");
+    await CommandRouter.route("gain willpower 3");
+    const relief = await CommandRouter.route("lift under-majesty");
+    expect(relief).toContain("spent 1 willpower");
+    expect(relief).toContain("still on Rok");
+    expect((await CharacterAfflictions.list("Rok")).find(a => a.def === "under-majesty")).toBeDefined();
+    // ...and only leaving ends it.
+    expect(await CommandRouter.route("remove under-majesty")).toContain("is free of under-majesty");
   });
 });

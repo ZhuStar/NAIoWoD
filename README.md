@@ -2121,6 +2121,46 @@ Any affliction can now carry ops (`[[define-affliction apply=…]]`), and
 `$binding` in an op reads the instance's own binding — which is what lets one
 definition serve every rated merit in the book.
 
+### Afflictions are named **role first**
+
+An affliction's name begins with **what kind of affliction it is**, not with what
+it is about. Sorted, they group by *role* — a player scanning the list reads down
+a column of kinds, not of unrelated subjects:
+
+```
+emitting-fear      in-library        power-fortitude
+emitting-majesty   in-sanctum        power-potence
+under-fear         in-umbra          modifier-difficulty
+under-majesty                        state-rested
+```
+
+| role | means |
+|---|---|
+| `emitting-` | you are the **source** — others near you are caught in it |
+| `under-` | you are caught in something somebody else is emitting |
+| `in-` | you are somewhere, and the place is doing it |
+| `wearing-` | something you wear or carry is doing it — and stops when it comes off |
+| `modifier-` | a bare change to what dice do |
+| `power-` | one of your **own** powers is running |
+| `state-` | a condition on you with no other role |
+
+`[[show-affliction]]` groups the list by role, and `[[define-affliction]]`
+**nudges** a name that declares none (`Perhaps state-dazed?`) — advisory, like
+everything else here; it is stored either way. Older names still resolve, so a
+rename breaks nobody's card: `potent` → `power-potence`, `fortified` →
+`power-fortitude`, `difficulty-modifier` → `modifier-difficulty`, `full-rested`
+→ `state-rested`.
+
+**Majesty ships as the worked pair**, because it is what showed the rule:
+
+```
+[[afflict emitting-majesty target="Rok"]]   → Rok is now under-majesty
+```
+
+The emitter's half is `lift=at-will` — his own power, he simply stops. The
+target's is `lift=cost lift-cost=willpower lift-for=1 scene` — buy a scene of
+relief and you are *still* under it; only leaving his presence removes it.
+
 ### Held down is not gone — `[[lift]]`, `[[restore]]`, `[[remove]]`
 
 Majesty puts everyone near its holder under a passive. They can spend Willpower

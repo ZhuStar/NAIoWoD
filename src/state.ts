@@ -2334,6 +2334,22 @@ export const ConstraintRegistry = new ListConfigStore<ConstraintGroup>({
 // Affliction definitions: shipped DEFAULT_AFFLICTIONS (the Feral Speech pair)
 // overlaid by the entry; the overlay may SHADOW a built-in, and
 // [[forget-affliction]] removes overlay entries only (the built-in resurfaces).
+// AN OLDER NAME STILL FINDS ITS DEFINITION. Afflictions were renamed to put
+// the ROLE first (`potent` -> `power-potence`), and a rename must not break a
+// card somebody wrote last week or an affliction already sitting on a
+// character. Every lookup goes through here rather than through the store's
+// own `get`, so there is one place that knows about `aka`.
+export function resolveAffliction(name: string): AfflictionDef | undefined {
+  const key = StringUtil.normalize(name);
+  const direct = AfflictionRegistry.get(key);
+  if (direct) return direct;
+  return AfflictionRegistry.all().find(d => (d.aka ?? []).includes(key));
+}
+// Every name an affliction answers to - what a gate set and a report both want.
+export function afflictionNames(def: AfflictionDef): string[] {
+  return [def.name, ...(def.aka ?? [])];
+}
+
 export const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
   entry: AFFLICTIONS_ENTRY,
   header: [
@@ -2451,7 +2467,7 @@ export class CharacterAfflictions {
   static async ops(subject: string): Promise<Array<{ from: string; ops: EffectOp[] }>> {
     const out: Array<{ from: string; ops: EffectOp[] }> = [];
     for (const active of await CharacterAfflictions.list(subject)) {
-      const def = AfflictionRegistry.get(active.def);
+      const def = resolveAffliction(active.def);
       if (!def?.apply?.length) continue;
       if (!afflictionActive(active)) continue;   // held down: still on him, not biting
       const ops = afflictionOpsOf(def, active.bindings ?? {}, active.level ?? 1);
@@ -2526,7 +2542,7 @@ export class CharacterAfflictions {
     const out: string[] = [];
     for (const c of await CharacterAfflictions.list(name)) {
       if (!afflictionActive(c)) continue;      // held down grants nothing, tags included
-      const def = AfflictionRegistry.get(c.def);
+      const def = resolveAffliction(c.def);
       if (def?.tags) out.push(...def.tags);
     }
     return out;
@@ -2544,7 +2560,7 @@ export class CharacterAfflictions {
     const held = new Map<string, string>();          // suppressed def -> suppressor
     for (const a of list) {
       if (!afflictionActive(a)) continue;            // a held-down glove holds nothing
-      for (const target of AfflictionRegistry.get(a.def)?.suppresses ?? []) {
+      for (const target of resolveAffliction(a.def)?.suppresses ?? []) {
         if (!held.has(target)) held.set(target, a.def);
       }
     }

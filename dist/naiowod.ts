@@ -4885,9 +4885,9 @@ interface DisciplineDef {
 
 const DISCIPLINES: Record<string, DisciplineDef> = {
   potence:       { name: "Potence",       arena: "physical", clans: ["brujah", "lasombra", "nosferatu"], description: "Rating in automatic successes on feats of Strength.",
-    grants: { afflicts: "potent", togglable: true, note: "the strength is always there; a vampire may still hold it back" } },
+    grants: { afflicts: "power-potence", togglable: true, note: "the strength is always there; a vampire may still hold it back" } },
   fortitude:     { name: "Fortitude",     arena: "physical", clans: ["gangrel", "ventrue"], description: "Rating in soak dice; lets you soak what you otherwise couldn't.",
-    grants: { afflicts: "fortified", togglable: true, note: "the toughness is always there" } },
+    grants: { afflicts: "power-fortitude", togglable: true, note: "the toughness is always there" } },
   celerity:      { name: "Celerity",      arena: "physical", clans: ["assamite", "brujah", "toreador"], description: "Extra speed (rating in bonus dice here, pending a turn system)." },
   animalism:     { name: "Animalism",     arena: "mental",   clans: ["gangrel", "nosferatu", "tzimisce"] },
   auspex:        { name: "Auspex",        arena: "mental",   clans: ["cappadocian", "malkavian", "toreador", "tzimisce"] },
@@ -5416,9 +5416,51 @@ const EXCLUSIVE_MERITS_FLAWS: MeritFlawDef[] = [
 // The tag gate is a FIELD, not a second affliction: `trait` and `tags` are two
 // independent optional conditions on the same op, and splitting them would
 // double the surface to say the same thing.
-const DIFFICULTY_MODIFIER = "difficulty-modifier";
+// =============================================================================
+// AFFLICTION NAMES ARE ROLE FIRST
+// -----------------------------------------------------------------------------
+// The owner's rule, and it is a filing rule: "I don't want these afflictions to
+// be filed [by subject]. If you're looking at them in alphabetical order ... the
+// first part of the name should be what ROLE this affliction has, what KIND of
+// affliction it is."
+//
+// So `emitting-majesty` and `under-majesty`, not `majesty-emitter` and
+// `majesty-effect`. Sorted, every emitter sits with every other emitter, and a
+// player scanning the list reads down a column of KINDS rather than a column of
+// unrelated subjects. `in-sanctum` and `in-library` already worked this way,
+// which is what suggested the rule was already half-there.
+//
+// The vocabulary is data so a chronicle can add to it; the check is ADVISORY,
+// like everything else here - a name outside it is reported, never refused.
+// =============================================================================
+const AFFLICTION_ROLES: Record<string, string> = {
+  emitting: "you are the SOURCE - others near you are caught in it",
+  under: "you are caught in something somebody else is emitting",
+  in: "you are somewhere, and the place is doing it (in-sanctum, in-umbra)",
+  wearing: "something you wear or carry is doing it - and stops when it comes off",
+  modifier: "a bare change to what dice do (modifier-difficulty)",
+  power: "one of your OWN powers is running (power-potence)",
+  state: "a condition on you with no other role (state-rested)",
+};
+const AFFLICTION_ROLE_KEYS: string[] = Object.keys(AFFLICTION_ROLES);
+
+// The role a name declares, or undefined when it declares none.
+function afflictionRole(name: string): string | undefined {
+  const key = StringUtil.normalize(name);
+  const i = key.indexOf("-");
+  if (i <= 0) return undefined;
+  const head = key.slice(0, i);
+  return AFFLICTION_ROLES[head] ? head : undefined;
+}
+// What a name would be if it took a role: `emitting` + `majesty`.
+function withAfflictionRole(role: string, subject: string): string {
+  return `${StringUtil.normalize(role)}-${StringUtil.normalize(subject)}`;
+}
+
+const DIFFICULTY_MODIFIER = "modifier-difficulty";
 const DIFFICULTY_MODIFIER_AFFLICTION: AfflictionDef = {
   name: DIFFICULTY_MODIFIER,
+  aka: ["difficulty-modifier"],
   description: "Rolls using a named trait are easier or harder. `trait` is the trait or CATEGORY it "
     + "applies to (melee, knowledge, all); `tags` narrows it to rolls carrying a tag (reckless); "
     + "the level is how many steps, negative for easier.",
@@ -5426,10 +5468,35 @@ const DIFFICULTY_MODIFIER_AFFLICTION: AfflictionDef = {
   apply: [{ op: "difficulty", amount: -1, trait: "$trait", target: "$tags" }],
 };
 
+// MAJESTY, both halves - the pair that showed why one word for two things was
+// wrong, and the pattern every emitted effect should copy. The holder radiates
+// it and may stop at will; everyone near him is caught, may BUY relief for a
+// scene, and is free of it only by leaving. `mirror` is what ties them: the
+// emitter's binding names who is caught, and they take the other half.
+const EMITTING_MAJESTY: AfflictionDef = {
+  name: "emitting-majesty",
+  description: "Presence 5: you are radiating Majesty. Those near you are awed. You may stop at will.",
+  bindings: ["target"],
+  mirror: "under-majesty",
+  lift: { how: "at-will", note: "it is his own power; he simply stops" },
+};
+const UNDER_MAJESTY: AfflictionDef = {
+  name: "under-majesty",
+  description: "You are awed by someone's Majesty: +2 difficulty to act against them. Willpower buys "
+    + "a scene's relief - you are still under it - and only leaving their presence ends it.",
+  apply: [{ op: "difficulty", amount: 2, target: "$against" }],
+  lift: { how: "cost", cost: "willpower", for: "1 scene",
+    note: "the awe is still on you; the relief runs out" },
+};
+
 const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
   DIFFICULTY_MODIFIER_AFFLICTION,
-  { name: "potent", description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it).", tags: ["potent"] },
-  { name: "fortified", description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can.", tags: ["fortified"] },
+  EMITTING_MAJESTY,
+  UNDER_MAJESTY,
+  { name: "power-potence", aka: ["potent"], tags: ["potent"],
+    description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it)." },
+  { name: "power-fortitude", aka: ["fortified"], tags: ["fortified"],
+    description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can." },
   // @deprecated The label Trait Affinity used to apply. Kept so a character
   // afflicted with it before difficulty-modifier existed still reads; nothing
   // grants it any more.
@@ -5698,6 +5765,9 @@ interface AfflictionDef {
   // The DEFAULT is `never`, because most afflictions are not shruggable and a
   // permissive default would quietly make every one of them optional.
   lift?: AfflictionLift;
+  // OLDER NAMES that still resolve to this one. A rename must not break a card
+  // somebody wrote last week, or an affliction already on a character.
+  aka?: string[];
   // While THIS one is on, those are held down. The glove that covers the claws:
   // `wearing-gloves` suppresses `claw-hands`, and the claws are back the moment
   // the glove comes off - nobody has to remember to restore them.
@@ -5773,6 +5843,8 @@ function makeAfflictionDef(parts: Partial<AfflictionDef> & { name: string }): Af
   // §7): definitions round-trip through their lorebook card.
   const apply = Array.isArray(parts.apply) ? parts.apply : effectOpsFromCard(parts.apply as CardValue | undefined);
   if (apply.length) def.apply = apply;
+  const aka = asStringList(parts.aka as CardValue | undefined).map(a => StringUtil.normalize(a)).filter(Boolean);
+  if (aka.length) def.aka = aka;
   return def;
 }
 
@@ -6044,7 +6116,8 @@ const DEFAULT_AFFLICTIONS: AfflictionDef[] = [
   // The rest gates: recovery rules requiring BOTH at once ("full-rested" AND
   // "in-sanctum") grant the extra daily point of Living Resolve / Quintessence.
   makeAfflictionDef({
-    name: "full-rested",
+    name: "state-rested",
+    aka: ["full-rested"],
     description: "Eight full hours of sleep behind them",
     tags: ["full-rested"],
   }),
@@ -9664,6 +9737,22 @@ const ConstraintRegistry = new ListConfigStore<ConstraintGroup>({
 // Affliction definitions: shipped DEFAULT_AFFLICTIONS (the Feral Speech pair)
 // overlaid by the entry; the overlay may SHADOW a built-in, and
 // [[forget-affliction]] removes overlay entries only (the built-in resurfaces).
+// AN OLDER NAME STILL FINDS ITS DEFINITION. Afflictions were renamed to put
+// the ROLE first (`potent` -> `power-potence`), and a rename must not break a
+// card somebody wrote last week or an affliction already sitting on a
+// character. Every lookup goes through here rather than through the store's
+// own `get`, so there is one place that knows about `aka`.
+function resolveAffliction(name: string): AfflictionDef | undefined {
+  const key = StringUtil.normalize(name);
+  const direct = AfflictionRegistry.get(key);
+  if (direct) return direct;
+  return AfflictionRegistry.all().find(d => (d.aka ?? []).includes(key));
+}
+// Every name an affliction answers to - what a gate set and a report both want.
+function afflictionNames(def: AfflictionDef): string[] {
+  return [def.name, ...(def.aka ?? [])];
+}
+
 const AfflictionRegistry = new ListConfigStore<AfflictionDef>({
   entry: AFFLICTIONS_ENTRY,
   header: [
@@ -9781,7 +9870,7 @@ class CharacterAfflictions {
   static async ops(subject: string): Promise<Array<{ from: string; ops: EffectOp[] }>> {
     const out: Array<{ from: string; ops: EffectOp[] }> = [];
     for (const active of await CharacterAfflictions.list(subject)) {
-      const def = AfflictionRegistry.get(active.def);
+      const def = resolveAffliction(active.def);
       if (!def?.apply?.length) continue;
       if (!afflictionActive(active)) continue;   // held down: still on him, not biting
       const ops = afflictionOpsOf(def, active.bindings ?? {}, active.level ?? 1);
@@ -9856,7 +9945,7 @@ class CharacterAfflictions {
     const out: string[] = [];
     for (const c of await CharacterAfflictions.list(name)) {
       if (!afflictionActive(c)) continue;      // held down grants nothing, tags included
-      const def = AfflictionRegistry.get(c.def);
+      const def = resolveAffliction(c.def);
       if (def?.tags) out.push(...def.tags);
     }
     return out;
@@ -9874,7 +9963,7 @@ class CharacterAfflictions {
     const held = new Map<string, string>();          // suppressed def -> suppressor
     for (const a of list) {
       if (!afflictionActive(a)) continue;            // a held-down glove holds nothing
-      for (const target of AfflictionRegistry.get(a.def)?.suppresses ?? []) {
+      for (const target of resolveAffliction(a.def)?.suppresses ?? []) {
         if (!held.has(target)) held.set(target, a.def);
       }
     }
@@ -11004,7 +11093,7 @@ function afflictionRollExtra(char: PlayableCharacter, active: ActiveAffliction[]
   const awakened = isAwakened(char.templates);
   const foundation = resolveFoundation(undefined, (n: string) => resolveTraitFromRecord(char, n)).trait;
   for (const inst of active) {
-    const def = AfflictionRegistry.get(inst.def);
+    const def = resolveAffliction(inst.def);
     if (!def?.tiers?.length) continue;
     if (def.requiresAwakened && !awakened) continue;
     const rating = def.scalesWith ? effectiveTraitOf(char, def.scalesWith) : 0;
@@ -12938,7 +13027,7 @@ async function enterPlace(key: string, enter: boolean): Promise<string> {
     }
     const applied: string[] = [];
     for (const state of place.states) {
-      const def = AfflictionRegistry.get(state);
+      const def = resolveAffliction(state);
       if (!def) { applied.push(`⚠ "${state}" is not defined`); continue; }
       const r = await applyAffliction(subject, def, {});
       if (!r.error) applied.push(state);
@@ -12967,7 +13056,7 @@ async function cmdMeasureDoor(): Promise<string> {
   const clock = await StoryClock.get();
   if (clock) await StoryClock.advance({ months: 0, seconds: 10 * 60 });
   for (const state of LIBRARY_STATES) {
-    const def = AfflictionRegistry.get(state);
+    const def = resolveAffliction(state);
     if (def) await applyAffliction(StringUtil.normalize(char.name), def, {});
   }
   const when = clock ? ` Ten minutes pass (${formatStoryDate((await StoryClock.get())!.now)}).` : "";
@@ -13768,9 +13857,15 @@ async function applyRecovery(fromEpoch: number, toEpoch: number): Promise<string
   for (const name of await CharacterStore.listNames()) {
     const char = await CharacterStore.load(name);
     if (!char) continue;
+    // A gate names an affliction, and an affliction answers to its current name
+    // AND every older one - so a chronicle written before the rename still gates.
+    const active = await CharacterAfflictions.list(char.name);
     const gates = new Set<string>([
       ...(await CharacterAfflictions.tags(char.name)).map(t => StringUtil.normalize(t)),
-      ...(await CharacterAfflictions.list(char.name)).map(c => StringUtil.normalize(c.def)),
+      ...active.filter(afflictionActive).flatMap(c => {
+        const def = resolveAffliction(c.def);
+        return def ? afflictionNames(def) : [StringUtil.normalize(c.def)];
+      }),
     ]);
     for (const def of CharacterResources.defsFor(char)) {
       if (!def.recovery?.length) continue;
@@ -14835,7 +14930,10 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
   let seeded = "";
   const grantsRaw = (cmd.named["grants"] ?? "").trim();
   if (grantsRaw) {
-    const afflicts = StringUtil.normalize(grantsRaw);
+    // An OLDER name is filed under the current one, so a definition written
+    // against last week's name does not preserve it forever.
+    const asked = StringUtil.normalize(grantsRaw);
+    const afflicts = resolveAffliction(asked)?.name ?? asked;
     const grant: PassiveGrant = { afflicts };
     const mode = StringUtil.normalize(cmd.named["grants-mode"] ?? "");
     if (mode === "offered" || mode === "automatic") grant.mode = mode;
@@ -14843,7 +14941,7 @@ async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, fam
     const orphan = (cmd.named["grants-orphan"] ?? "").trim();
     if (orphan) grant.orphan = orphan;
     def.grants = grant;
-    if (!AfflictionRegistry.get(afflicts)) {
+    if (!resolveAffliction(afflicts)) {
       // No `tags`: a tag is a thing a ROLL carries, and one nobody has written
       // a modifier for is reported as unknown on every roll the character makes.
       // A merit's passive is a STATE. [[define-affliction]] adds tags if the
@@ -14932,7 +15030,7 @@ async function ownedPowerInfo<T extends OwnedPowerDef>(cmd: ParsedCommand, famil
   if (def.grants) {
     // Its effect may live in the affliction it applies rather than in a passive
     // of its own - say what that affliction DOES, or the definition reads empty.
-    const applied = AfflictionRegistry.get(def.grants.afflicts);
+    const applied = resolveAffliction(def.grants.afflicts);
     const does = (applied?.apply ?? []).map(describePassiveOp).join("; ");
     bits.push(`applies "${def.grants.afflicts}"${does ? ` - ${does}` : ""}`
       + `${grantIsAutomatic(def.grants) ? "" : " when invoked"}${def.grants.togglable ? ", togglable" : ""}`);
@@ -15177,7 +15275,7 @@ async function afflictionSubject(cmd: ParsedCommand): Promise<{ name?: string; e
 // One line of active affliction. Given the CHARACTER, a rating-scaled def also
 // reports what it is granting right now ("what is my sanctum doing for me?").
 function afflictionLine(c: ActiveAffliction, char?: PlayableCharacter): string {
-  const def = AfflictionRegistry.get(c.def);
+  const def = resolveAffliction(c.def);
   const bits = [c.def];
   const bound = Object.entries(c.bindings).map(([k, v]) => `${k}: ${disp(v)}`).join(", ");
   if (bound) bits.push(`(${bound})`);
@@ -15272,7 +15370,7 @@ async function applyAffliction(subject: string, def: AfflictionDef, rawBindings:
   const lines = [`${disp(subject)} is now ${afflictionLine(fresh)}`];
   if (suppression.length) lines.push(suppression.join("; "));
   if (def.mirror && bindings["target"]) {
-    const mirrorDef = AfflictionRegistry.get(def.mirror);
+    const mirrorDef = resolveAffliction(def.mirror);
     if (!mirrorDef) lines.push(`mirror "${def.mirror}" is not defined - skipped`);
     else {
       // A mirror ends when its original does: same expiry, copied.
@@ -15400,7 +15498,7 @@ function registerSystemHandlers(): void {
 const onPowerTaken: BusHandler = (event) => {
   const d = event.data as { character: string; kind: string; key: string; grant: PassiveGrant; said?: string; ctx?: { param?: string; rating?: number } };
   event.pending.push((async () => {
-    const def = AfflictionRegistry.get(d.grant.afflicts);
+    const def = resolveAffliction(d.grant.afflicts);
     if (!def) { event.errors.push(`"${d.grant.afflicts}" is not a defined affliction`); return; }
     const from = `${d.kind}:${d.key}`;
     // OFFERED means the power gives you the ABILITY, not the state: nothing is
@@ -15474,7 +15572,7 @@ async function removeAffliction(subject: string, defName: string, from?: string)
   const removed = await CharacterAfflictions.lift(subject, defName, from);
   if (!removed) return { error: `${disp(subject)} does not have "${StringUtil.normalize(defName)}". [[afflictions${subject ? ` ${subject}` : ""}]] lists them.` };
   await armCooldown(subject, removed);
-  const def = AfflictionRegistry.get(removed.def);
+  const def = resolveAffliction(removed.def);
   if (def?.mirror && removed.bindings["target"]) {
     const gone = await CharacterAfflictions.lift(removed.bindings["target"], def.mirror);
     if (gone) return { removed, alsoLifted: `${def.mirror} lifted from ${disp(removed.bindings["target"])}` };
@@ -15523,21 +15621,40 @@ async function cmdDefineAffliction(cmd: ParsedCommand): Promise<string> {
     suppresses: (cmd.named["suppresses"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
   });
   await AfflictionRegistry.put(def);
+  // ADVISORY, like everything else here: a name outside the vocabulary is
+  // reported with what it might have been, never refused.
+  const role = afflictionRole(def.name);
+  const nudge = role ? "" :
+    ` ⚠ Its name declares no ROLE. Afflictions are named role-first so an alphabetical list groups by kind`
+    + ` - ${AFFLICTION_ROLE_KEYS.map(r => `${r}-`).join(", ")}. Perhaps ${withAfflictionRole("state", def.name)}?`;
   const extras = [
+    role ? `role: ${role} (${AFFLICTION_ROLES[role]})` : "",
     def.apply?.length ? `does: ${def.apply.map(describePassiveOp).join("; ")}` : "",
     def.lift ? describeLift(def.lift) : "",
     def.suppresses?.length ? `holds down: ${def.suppresses.join(", ")}` : "",
   ].filter(Boolean);
-  return sys(`Defined affliction ${describeAfflictionDef(def)}${extras.length ? ` - ${extras.join("; ")}` : ""}.`);
+  return sys(`Defined affliction ${describeAfflictionDef(def)}${extras.length ? ` - ${extras.join("; ")}` : ""}.${nudge}`);
 }
 
 async function cmdAfflictionInfo(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) {
-    const items = AfflictionRegistry.all().map(d => d.name).join(", ");
-    return sys(`Defined afflictions: ${items}. [[show-affliction <name>]] for detail; [[show-affliction]] shows who has what.`);
+    // BY ROLE, which is the point of naming them role-first: a player scanning
+    // the list reads down a column of KINDS, not of unrelated subjects.
+    const all = AfflictionRegistry.all();
+    const groups: string[] = [];
+    const filed = new Set<string>();
+    for (const role of AFFLICTION_ROLE_KEYS) {
+      const mine = all.filter(d => afflictionRole(d.name) === role).map(d => d.name).sort();
+      mine.forEach(n => filed.add(n));
+      if (mine.length) groups.push(`${role}- (${AFFLICTION_ROLES[role]}): ${mine.join(", ")}`);
+    }
+    const rest = all.filter(d => !filed.has(d.name)).map(d => d.name).sort();
+    if (rest.length) groups.push(`no role yet: ${rest.join(", ")}`);
+    return sys(`Defined afflictions, by role - ${groups.join(" | ")}. `
+      + `[[show-affliction <name>]] for detail; [[show-affliction]] shows who has what.`);
   }
-  const def = AfflictionRegistry.get(name);
+  const def = resolveAffliction(name);
   if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". [[show-affliction]] lists them.`);
   return sys(`${describeAfflictionDef(def)}.`);
 }
@@ -15548,18 +15665,18 @@ async function cmdForgetAffliction(cmd: ParsedCommand): Promise<string> {
   const key = StringUtil.normalize(name);
   const removed = await AfflictionRegistry.remove(key);
   if (!removed) {
-    return AfflictionRegistry.get(key)
+    return resolveAffliction(key)
       ? sys(`"${key}" is a built-in affliction - it can be shadowed with [[define-affliction]] but not deleted.`)
       : sys(`No affliction "${key}".`);
   }
-  const shipped = AfflictionRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
+  const shipped = resolveAffliction(key) ? ` The built-in "${key}" resurfaces.` : "";
   return sys(`Forgot affliction "${key}".${shipped}`);
 }
 
 async function cmdAfflict(cmd: ParsedCommand): Promise<string> {
   const name = cmd.positional[0]?.trim();
   if (!name) return sys(`afflict needs an affliction, e.g. [[afflict concentrating-on target="Wolf"]]. [[show-affliction]] lists them.`);
-  const def = AfflictionRegistry.get(name);
+  const def = resolveAffliction(name);
   if (!def) return sys(`No affliction "${StringUtil.normalize(name)}". Define it with [[define-affliction]].`);
   const subject = await afflictionSubject(cmd);
   if (subject.error) return sys(`${subject.error}`);
@@ -15704,9 +15821,9 @@ async function cmdAdvance(cmd: ParsedCommand): Promise<string> {
   if (subject.error) return sys(`${subject.error}`);
   const current = (await CharacterAfflictions.list(subject.name!)).find(c => c.def === StringUtil.normalize(name));
   if (!current) return sys(`${disp(subject.name!)} does not have "${StringUtil.normalize(name)}".`);
-  const def = AfflictionRegistry.get(current.def);
+  const def = resolveAffliction(current.def);
   if (!def?.then) return sys(`"${current.def}" has no successor to advance into - [[lift ${current.def}]] to end it.`);
-  const next = AfflictionRegistry.get(def.then);
+  const next = resolveAffliction(def.then);
   if (!next) return sys(`Successor "${def.then}" is not defined.`);
   await removeAffliction(subject.name!, current.def);
   const r = await applyAffliction(subject.name!, next, current.bindings);
@@ -15738,7 +15855,7 @@ async function cmdLift(cmd: ParsedCommand, ctx: CommandContext): Promise<string>
     return sys(`${disp(subject.name!)} does not have "${name}"${from ? ` from ${from}` : ""}. [[show-affliction]] lists them.`);
   }
   if (held.every(a => a.suspended)) return sys(`${name} is already held down on ${disp(subject.name!)}.`);
-  const def = AfflictionRegistry.get(name);
+  const def = resolveAffliction(name);
   const policy = liftPolicyOf(def);
   const waived = flagOf(cmd, "waive") === true;
   // WHO MAY, AND AT WHAT PRICE. `never` is the default, because most

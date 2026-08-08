@@ -191,6 +191,14 @@ the same two gates a merit's passive uses (`trait` names a trait OR a category,
 - **Do not put the same effect in a passive AND its granted affliction** — it
   applies twice. If a def grants an affliction that does the work, the def
   carries no passive of its own (Trait Affinity).
+- **AFFLICTIONS ARE NAMED ROLE FIRST** (`AFFLICTION_ROLES`): `emitting-majesty`,
+  not `majesty-emitter`. The name's first part is what KIND of affliction it is,
+  so an alphabetical list groups by role rather than by subject. Advisory —
+  `[[define-affliction]]` nudges a name without one and stores it anyway.
+- **A rename keeps the old name working.** `AfflictionDef.aka` holds it, and
+  **every lookup goes through `resolveAffliction`**, never the store's own `get`
+  — one place knows about aliases. Gate sets use `afflictionNames`, so a
+  recovery rule written against the old name still gates.
 - **HELD DOWN IS NOT GONE.** `[[lift]]` suspends (still on him, relief runs
   out), `[[remove]]` ends it, `[[restore]]` ends the relief early. A suspended
   instance contributes NO ops and NO tags and is still listed, still counted,

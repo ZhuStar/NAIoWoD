@@ -7,8 +7,10 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `dae9f8a`** ("Held down is not
-> gone: lift, restore and remove are three things").
+> **Last synced with the code as of commit `a62c201`** ("Afflictions are
+> named role first, and Majesty is the pair").
+> Prior: `dae9f8a` ("Held down is not gone: lift, restore and remove are three
+> things").
 > Prior: `281ea88` ("One affliction most merits want, and it is signed").
 > Prior: `49a4c57` ("A trait knows what kind of trait it is, and a merit can say
 > what it turns on").
@@ -3946,6 +3948,56 @@ and `prefill` are mocked/available but not yet written.
       matters now that a shared affliction carries both.
     - **`from=` on `lift` and `remove`** picks one instance, which is what he
       originally asked for and is now the smaller half of the answer.
+
+
+79. **Afflictions are named role first** (owner: *"Majesty is two afflictions and
+    they should be called `emitting-majesty` (I was thinking about Aura or
+    Emitter. I don't like the name Aura because it has significance in the game)
+    ... and `under-majesty` or `majesty-effect` or whatever on the ones caught on
+    it. ... the thing is, I want these names to be regular, and I don't want
+    these afflictions to be filed [by subject]. If you're looking at them in
+    alphabetical order, I don't think they should be. I don't think the name of
+    what they actually do should be the first part of the name. The first part of
+    the name should be what ROLE this affliction has, what KIND of affliction it
+    is."*).
+
+    A FILING rule, not a naming preference: sorted, `emitting-fear` sits with
+    `emitting-majesty` and not with `under-fear`, so the list reads as a column
+    of kinds. `in-sanctum` / `in-library` / `in-umbra` already worked this way,
+    which is what showed the rule was half-there already.
+
+    - **`AFFLICTION_ROLES`** (data, so a chronicle may add): `emitting`, `under`,
+      `in`, `wearing`, `modifier`, `power`, `state`. `afflictionRole(name)` reads
+      the prefix; `[[show-affliction @all in=campaign]]` groups by it; and
+      `[[define-affliction]]` NUDGES a name that declares none ("Perhaps
+      state-dazed?") - advisory, stored either way, like every other
+      creation-side check.
+    - **Renamed:** `potent` -> `power-potence`, `fortified` -> `power-fortitude`,
+      `difficulty-modifier` -> `modifier-difficulty`, `full-rested` ->
+      `state-rested`. His rejected candidates are worth recording: `aura-` was
+      out because Aura means something specific in the game, and
+      `majesty-effect` / `majesty-emitter` are exactly the subject-first shape
+      the rule forbids.
+    - **`AfflictionDef.aka` + `resolveAffliction`.** A rename must not break a
+      card written last week or an affliction already on a character, so every
+      lookup goes through ONE resolver rather than the store's `get` (16 sites in
+      game.ts, 3 in state.ts). `afflictionNames` feeds the recovery GATE set, so
+      a rule written against `full-rested` still gates on `state-rested`. And
+      `define-merit grants=<old name>` files the grant under the current name
+      rather than preserving the old one forever.
+    - **MAJESTY SHIPS AS THE PAIR** it was described as: `emitting-majesty`
+      (`lift: at-will` - his own power, he simply stops; `mirror: under-majesty`
+      so afflicting the emitter catches the target) and `under-majesty`
+      (`lift: cost willpower for 1 scene` - buy relief and you are STILL under
+      it; only `[[remove]]` ends it). It is the worked example of §7.78's
+      distinction and of this naming rule at once.
+
+    Bug caught on the way: the `aka` copy in `makeAfflictionDef` silently did not
+    land, because the anchor line it was appended to had been rewritten by the
+    previous pass. Every alias resolved to undefined and only the accidental
+    tag overlap kept the rest gates working. **A def field must be verified
+    THROUGH the registry, not by reading the source** - the same round-trip trap
+    as invariants §7.
 
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)

@@ -3187,9 +3187,32 @@ const CAPABILITIES: Record<string, string> = {
   awakened: "works Awakened magic: may hold, harvest and spend Quintessence",
   vitae: "uses vampiric vitae as the Damned do - heal with it, boost with it",
   resolve: "channels the Resolve of the infernal - rare, in these centuries",
+  // Not a pool but a CATEGORY: what opens the Arcana list at all. See
+  // ARCANA_CAPABILITY below for why the gate lives here.
+  arcana: "bound to the infernal: may hold Arcana and Taints (Devil's Due)",
 };
 function capabilityNote(name: string): string | undefined {
   return CAPABILITIES[StringUtil.normalize(name)];
+}
+
+// =============================================================================
+// WHO HAS AN ARCANA LIST AT ALL
+// -----------------------------------------------------------------------------
+// Merits and Flaws are open to EVERY character to some degree. Arcana are not,
+// and neither are Disciplines or Pillars: each of those belongs to a kind of
+// creature, and to no other. A regular vampire's list of Merits and Flaws must
+// contain no Arcana whatsoever - not "Arcana filed at the bottom", none.
+//
+// The gate is a capability rather than a template list, because the owner's
+// ruling is that ANY splat may acquire it: "anyone can be a thrall of a demon,
+// like a mage, a vampire, anyone can be". So a template that opens the list
+// says so (thrall, demon), a sheet may be granted it on top ([[attune arcana]],
+// for the campaign that says otherwise), and nothing else has to be edited.
+const ARCANA_CAPABILITY = "arcana";
+// Do these capabilities open the Arcana list? Pass what the character can use
+// (template capabilities + attunements): CharacterResources.capabilities().
+function capabilitiesOpenArcana(capabilities: string[]): boolean {
+  return capabilities.map(c => StringUtil.normalize(c)).includes(ARCANA_CAPABILITY);
 }
 
 // =============================================================================
@@ -3509,7 +3532,10 @@ const TEMPLATE_THRALL = new TemplateConfig(
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true,
-  STANDARD_HEALTH_LEVELS, [], ["resolve"],   // the bond is what lets him channel it
+  // The bond is what lets him channel Resolve - and it is also the ONLY way an
+  // ordinary man comes by Arcana. Anyone may be a demon's thrall (a mage, a
+  // vampire, anyone), and nobody who isn't has an Arcana list at all.
+  STANDARD_HEALTH_LEVELS, [], ["resolve", ARCANA_CAPABILITY],
   { arcana: "10" }   // placeholder, like the demon's
 );
 
@@ -3620,7 +3646,7 @@ const TEMPLATE_DEMON = new TemplateConfig(
   DEMON_SOAK,
   // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
   { name: "Torment", polarity: "ascending", start: 3 }, false,
-  STANDARD_HEALTH_LEVELS, [], ["resolve"],
+  STANDARD_HEALTH_LEVELS, [], ["resolve", ARCANA_CAPABILITY],
   // A PLACEHOLDER arcana allowance: the owner's number goes here (or on the
   // sheet, which overrides). The book's own formula is
   // (Resolve x permanent Torment) + temporary Torment + Willpower + Taints;
@@ -3894,8 +3920,9 @@ const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
     // He inherits `awakened` from the mage and adds the two nobody else has
     // both of: a revenant's vitae and a laham's Resolve. Without these he would
     // HOLD his fused pool and be unable to spend a point of it as any of the
-    // three things it is.
-    capabilities: ["vitae", "resolve"],
+    // three things it is. And `arcana`, because his Arcana are what he IS -
+    // without it the list below would be priced for a man who cannot have one.
+    capabilities: ["vitae", "resolve", ARCANA_CAPABILITY],
     budgets: {
       // The owner's ruling, and the shape the demon's formula will take when
       // permanent-vs-temporary Torment is modelled: the arcana purse is worth
@@ -4742,36 +4769,62 @@ function disciplineDef(name: string): DisciplineDef | undefined {
 }
 
 // =============================================================================
-// MERITS & FLAWS - optional quirks with (waivable) prerequisites
+// OWNED POWERS - two CATEGORIES that share a mechanism and nothing else
 // -----------------------------------------------------------------------------
-// Defaults live in an in-code list; the lorebook is the editable database on
-// top: any entry in the "srd:merits-flaws" category whose text names definitions
-// of definitions is merged over the defaults by MeritFlawRegistry
-// .loadFromLorebook(). Prerequisites may name templates, free-form character
-// tags ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every
-// check can be waived case-by-case.
+// MERITS & FLAWS are optional quirks any character may have to some degree:
+// they trade freebie points, and every splat has a list of them.
+//
+// ARCANA & TAINTS are Devil's Due's own category, and they are NOT merits. They
+// belong to a kind of creature the way Disciplines belong to vampires and
+// Pillars to mages - a thing only some characters have at all. They trade an
+// arcana budget of their own, they are never bought with freebies, and a
+// regular vampire or mage must see NONE of them in a list of Merits and Flaws.
+//
+//   * disciplines - only some characters have them
+//   * pillars     - only some characters have them
+//   * ARCANA      - only some characters have them (ARCANA_CAPABILITY: you must
+//                   at least be a demon's thrall, and anyone may become one)
+//   * merits/flaws - ANY character, to some degree
+//
+// So they are two TYPES over two REGISTRIES writing two lorebook categories,
+// reached by two families of verbs, and stored in two buckets on the sheet.
+// What they share is a MECHANISM - parameterized instances, always-on passives,
+// per-template pricing, instance caps, passive grants - and that lives on
+// OwnedPowerDef below, which is the shared machinery and NOT a shared identity.
+//
+// Prerequisites (either category) may name templates, free-form character tags
+// ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every check
+// can be waived case-by-case. Defaults live in in-code lists; the lorebook is
+// the editable database laid on top (srd:merits-flaws, srd:arcana).
 // =============================================================================
-// What a definition IS, which decides two things at once: which purse it draws
-// on, and which way the money flows. Merits and Flaws trade freebie points;
-// ARCANA and TAINTS trade an arcana budget of their own, which is why an
-// arcanum must never be counted as a merit - it would make a legal character
-// look overspent.
-type MeritFlawKind = "merit" | "flaw" | "arcanum" | "taint";
-const MERIT_FLAW_KINDS: MeritFlawKind[] = ["merit", "flaw", "arcanum", "taint"];
+type MeritFlawKind = "merit" | "flaw";
+type ArcanumKind = "arcanum" | "taint";
+// The union exists for the machinery only (what purse, which way the money
+// flows). Nothing that reports to a player should say "owned power".
+type OwnedPowerKind = MeritFlawKind | ArcanumKind;
+const MERIT_FLAW_KINDS: MeritFlawKind[] = ["merit", "flaw"];
+const ARCANUM_KINDS: ArcanumKind[] = ["arcanum", "taint"];
+const OWNED_POWER_KINDS: OwnedPowerKind[] = [...MERIT_FLAW_KINDS, ...ARCANUM_KINDS];
+function isArcanumKind(kind: string): kind is ArcanumKind {
+  return (ARCANUM_KINDS as string[]).includes(kind);
+}
+function isMeritFlawKind(kind: string): kind is MeritFlawKind {
+  return (MERIT_FLAW_KINDS as string[]).includes(kind);
+}
 
 // The purse each kind draws on, and the sign of the trade: a merit and an
 // arcanum COST, a flaw and a taint GRANT. `budget` on the def overrides the
 // purse when a chronicle invents another one.
-const KIND_BUDGET: Record<MeritFlawKind, string> = {
+const KIND_BUDGET: Record<OwnedPowerKind, string> = {
   merit: "freebie", flaw: "freebie", arcanum: "arcana", taint: "arcana",
 };
-const KIND_SPENDS: Record<MeritFlawKind, boolean> = {
+const KIND_SPENDS: Record<OwnedPowerKind, boolean> = {
   merit: true, flaw: false, arcanum: true, taint: false,
 };
-function budgetOfKind(def: { kind: MeritFlawKind; budget?: string }): string {
+function budgetOfKind(def: { kind: OwnedPowerKind; budget?: string }): string {
   return StringUtil.normalize(def.budget ?? KIND_BUDGET[def.kind] ?? "freebie");
 }
-function kindSpends(kind: MeritFlawKind): boolean { return KIND_SPENDS[kind] ?? true; }
+function kindSpends(kind: OwnedPowerKind): boolean { return KIND_SPENDS[kind] ?? true; }
 
 // How one template differs on a definition. Dark Ages arcana are printed with
 // a price per splat - "Celestial Radiance (7/5)" is 7 to a demon and 5 to a
@@ -4798,9 +4851,13 @@ interface InstanceLimit {
   perKind?: Record<string, number>;  // and at most this many of a trait KIND
 }
 
-interface MeritFlawDef {
+// THE SHARED MECHANISM, and nothing more. Every field here is machinery a
+// Merit and an Arcanum happen to use the same way; the two are told apart by
+// the `kind` their own interface declares, and by the registry they live in.
+// Do not add anything to this that means one category and not the other.
+interface OwnedPowerDef {
   name: string;
-  kind: MeritFlawKind;
+  kind: OwnedPowerKind;
   points: number | number[]; // cost (merit/arcanum) / bonus granted (flaw/taint); array = variable rating
   // Which purse this trades in, when the kind's default is not right.
   budget?: string;
@@ -4839,10 +4896,16 @@ interface MeritFlawDef {
   grants?: PassiveGrant;
 }
 
+// A Merit or a Flaw. Any character may have these.
+interface MeritFlawDef extends OwnedPowerDef { kind: MeritFlawKind }
+// An Arcanum or a Taint (Dark Ages: Devil's Due). NOT a merit, NOT a flaw, and
+// not open to a character who is not at least a demon's thrall.
+interface ArcanumDef extends OwnedPowerDef { kind: ArcanumKind }
+
 // What this definition costs THIS character, and whether they may take it at
 // all. The first of the character's templates with an entry wins; a def with
 // per-template prices and no entry for any of them is not open to them.
-function meritCostFor(def: MeritFlawDef, templates: string[]): {
+function meritCostFor(def: OwnedPowerDef, templates: string[]): {
   points: number | number[] | string; available: boolean; note?: string; from?: string;
 } {
   const mine = templates.map(t => StringUtil.normalize(t));
@@ -4862,15 +4925,19 @@ function meritCostFor(def: MeritFlawDef, templates: string[]): {
 }
 
 // A def's cross-instance limits.
-function instanceLimitsOf(def: MeritFlawDef): InstanceLimit[] {
+function instanceLimitsOf(def: OwnedPowerDef): InstanceLimit[] {
   return [...(def.limits ?? [])];
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
 // split off ONLY when the base def declares `param` (plain names with colons
 // stay whole otherwise; lookup tries the full key first).
-function resolveMeritInstance(key: string, lookup: (name: string) => MeritFlawDef | undefined):
-  { def: MeritFlawDef; param?: string } | undefined {
+//
+// Generic in the def type on purpose: pass a MERIT registry and you get a
+// MeritFlawDef back, pass an ARCANUM registry and you get an ArcanumDef. The
+// mechanism is shared; the category never is.
+function resolvePowerInstance<T extends OwnedPowerDef>(
+  key: string, lookup: (name: string) => T | undefined): { def: T; param?: string } | undefined {
   const full = StringUtil.normalize(key);
   const whole = lookup(full);
   if (whole) return whole.param ? undefined : { def: whole };   // a param def owned bare is malformed
@@ -4884,7 +4951,7 @@ function resolveMeritInstance(key: string, lookup: (name: string) => MeritFlawDe
 
 // An instance's passive ops, with "$<param>" substituted and amounts scaled
 // by the points taken. Pure - ownership walks live in state.ts.
-function passiveOpsOf(def: MeritFlawDef, param: string | undefined, points: number): EffectOp[] {
+function passiveOpsOf(def: OwnedPowerDef, param: string | undefined, points: number): EffectOp[] {
   const sub = (v: string | undefined): string | undefined =>
     def.param && v === `$${def.param}` ? param : v;
   return (def.passive ?? []).map(op => {
@@ -5002,13 +5069,16 @@ function effectOpsFromCard(raw: CardValue | undefined): EffectOp[] {
   return asList(raw).map(effectOpFromCard).filter((op): op is EffectOp => op !== undefined);
 }
 
-// One Merit / Flaw / arcanum. Undefined when the block never says which it is -
+// One owned power, read from a card and CHECKED AGAINST THE KINDS THE CALLER
+// ACCEPTS. That check is the whole point: the merits card cannot smuggle in an
+// arcanum and the arcana card cannot smuggle in a merit. Undefined when the
+// block never says which it is, or says a kind this category does not hold -
 // the card keeps the text, the registry just doesn't take it.
-function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
-  const kind = (asText(body["kind"]) ?? "").toLowerCase() as MeritFlawKind;
-  if (!MERIT_FLAW_KINDS.includes(kind)) return undefined;
+function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[]): OwnedPowerDef | undefined {
+  const kind = (asText(body["kind"]) ?? "").toLowerCase() as OwnedPowerKind;
+  if (!kinds.includes(kind)) return undefined;
   const rawPoints = body["points"];
-  const def: MeritFlawDef = {
+  const def: OwnedPowerDef = {
     name: name.trim(),
     kind,
     points: Array.isArray(rawPoints)
@@ -5068,6 +5138,22 @@ function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefine
   if (Object.keys(perTemplate).length) def.perTemplate = perTemplate;
   return def;
 }
+// One Merit or Flaw. An `arcanum`/`taint` block in the merits category is NOT
+// one, and is skipped (and reported) rather than quietly filed as a merit.
+function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
+  return ownedPowerFromCard(name, body, MERIT_FLAW_KINDS) as MeritFlawDef | undefined;
+}
+// ...and one Arcanum or Taint, from the arcana category, symmetrically.
+function arcanumFromCard(name: string, body: CardMap): ArcanumDef | undefined {
+  return ownedPowerFromCard(name, body, ARCANUM_KINDS) as ArcanumDef | undefined;
+}
+// What kind a card block CLAIMS to be, whether or not this category holds it -
+// so a reader can say "that is an arcanum, it belongs in [[define-arcanum]]"
+// instead of the useless "no kind".
+function kindOnCard(body: CardMap): string | undefined {
+  const kind = (asText(body["kind"]) ?? "").toLowerCase();
+  return kind || undefined;
+}
 
 // One exclusive Merit and Flaw per clan and per fellowship, so the SHAPE exists
 // and the chronicle can fill in what they actually do. They gate on the CHOICE
@@ -5099,16 +5185,23 @@ const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
   { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
 ];
 
-const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
-  ...EXCLUSIVE_MERITS_FLAWS,
-  // Devil's Due arcana, modeled as parameterized merits with passive effects.
+// =============================================================================
+// THE ARCANA LIST - its own list, because it is its own category
+// -----------------------------------------------------------------------------
+// These four used to sit inside DEFAULT_MERITS_FLAWS with `kind: "arcanum"`,
+// which put Devil's Due Arcana in front of every vampire and mage who typed
+// [[merits]]. They are not merits and they were never open to those characters;
+// the list they belong to is this one, reached by [[arcana]], gated on
+// ARCANA_CAPABILITY, and priced from the arcana purse.
+// =============================================================================
+const DEFAULT_ARCANA: ArcanumDef[] = [
   {
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
     grants: { afflicts: "trait-aptitude" },
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
-      + "([[take-merit trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
+      + "([[take-arcanum trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
       + "Abilities; every other trait caps at 2.",
   },
   {
@@ -5135,6 +5228,12 @@ const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
       + "(difficulty 8), +1 success per Resolve point spent; the successes buy parlor tricks, illusions and auras, "
       + "up to a battlefield-blinding flare at five (which needs Resolve 7+). Four successes need Resolve 5+.",
   },
+];
+
+// Merits and Flaws. NO ARCANA - see DEFAULT_ARCANA above; a block with
+// `kind: arcanum` in this list is a type error, which is the point.
+const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
+  ...EXCLUSIVE_MERITS_FLAWS,
   { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
   { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },
   { name: "Iron Will", kind: "merit", points: 3, description: "Resistant to Dominate and mental control." },
@@ -5163,7 +5262,10 @@ const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
 // are covered: mutually-exclusive members (exclusive) vs reserved access
 // (restricted).
 // =============================================================================
-type ConstraintDomain = "background" | "merit" | "flaw" | "meritflaw" | "any";
+// `arcanum` covers Arcana AND Taints, the way `meritflaw` covers both of those:
+// a constraint names a LIST, and Arcana are a list of their own (§ "OWNED
+// POWERS"). `any` still searches everything a character holds.
+type ConstraintDomain = "background" | "merit" | "flaw" | "meritflaw" | "arcanum" | "any";
 type ConstraintRelation = "exclusive" | "restricted" | "forbidden";
 interface ConstraintGroup {
   name: string;                  // normalized group id
@@ -5183,7 +5285,7 @@ interface ConstraintViolation {
 // Exported so consumers (command specs, windows) reference THE vocabulary
 // instead of retyping it - a new relation/domain reaches every surface.
 const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
-const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
+const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "arcanum", "any"];
 
 // Fill defaults and normalize. An unknown relation falls back to "exclusive",
 // an unknown domain to "any" - a misconfigured group is still stored, never lost.
@@ -5216,6 +5318,8 @@ interface OwnedTraits {
   backgrounds: string[];
   merits: string[];
   flaws: string[];
+  // Arcana and Taints together - their own list, never folded into merits.
+  arcana: string[];
   templates: string[];
 }
 
@@ -5225,7 +5329,8 @@ function ownedForDomain(owned: OwnedTraits, domain: ConstraintDomain): string[] 
     case "merit": return owned.merits;
     case "flaw": return owned.flaws;
     case "meritflaw": return [...owned.merits, ...owned.flaws];
-    default: return [...owned.backgrounds, ...owned.merits, ...owned.flaws];
+    case "arcanum": return owned.arcana ?? [];
+    default: return [...owned.backgrounds, ...owned.merits, ...owned.flaws, ...(owned.arcana ?? [])];
   }
 }
 
@@ -5693,7 +5798,7 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
     entries: [
       { displayName: "srd:merits-flaws:custom", text: srdEntryText(
         [
-          `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
+          `Custom Merits & Flaws. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
           "NAME followed by a colon, with its fields indented underneath. They are merged",
           "over the built-in list. The fields:",
           '  kind        - "merit" or "flaw" (required - a block without it is skipped)',
@@ -5703,6 +5808,8 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
           "                merits-flaws (all-of)",
           "  description - optional text (commas in it are just punctuation)",
           "  passive     - optional always-on effects; see [[define-merit]]",
+          "Arcana and Taints are NOT merits and do not belong here - they have their",
+          "own category (srd:arcana) and their own verbs ([[arcana]], [[define-arcanum]]).",
           "The two below are examples - edit or replace them.",
         ],
         [
@@ -5717,6 +5824,40 @@ const SRD_CATEGORIES: SrdCategorySpec[] = [
           "  kind: flaw",
           "  points: 1",
           "  description: You cannot read or write.",
+        ]) },
+    ],
+  },
+  {
+    name: "srd:arcana",
+    blurb: "custom Arcana & Taints (Devil's Due), layered over the built-in list",
+    entries: [
+      { displayName: "srd:arcana:custom", text: srdEntryText(
+        [
+          `Custom Arcana & Taints. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
+          "NAME followed by a colon, with its fields indented underneath. They are merged",
+          "over the built-in list.",
+          "",
+          "An ARCANUM IS NOT A MERIT. Arcana and Taints are Dark Ages: Devil's Due's own",
+          "category - like Disciplines for vampires and Pillars for mages, they belong to",
+          "a kind of creature and to nobody else. They are bought from the ARCANA purse,",
+          "never with freebies, and only a character bound to the infernal (a demon, or",
+          "anyone at all who has become a demon's thrall) has this list open at all.",
+          "",
+          "  kind        - \"arcanum\" or \"taint\" (required - a block without it is skipped;",
+          "                a taint GRANTS arcana points rather than costing them)",
+          "  points      - arcana cost (arcanum) / points granted (taint); one number, or",
+          "                `1, 2, 3` for a variable rating",
+          "  per-template- a price per splat, the printed \"(7/5)\" - naming any template",
+          "                means ONLY those templates may take it",
+          "  param       - an instance slot, e.g. `trait` (owned as name::value)",
+          "  requires, description, passive - as for Merits & Flaws",
+          "The one below is an example - edit or replace it.",
+        ],
+        [
+          "Whispering Blood:",
+          "  kind: arcanum",
+          "  points: 1, 2, 3",
+          "  description: The blood of the pit answers questions it was not asked.",
         ]) },
     ],
   },
@@ -6554,39 +6695,65 @@ class MapConfigStore<V> {
   }
 }
 
-class MeritFlawRegistry {
-  private static _defs: Map<string, MeritFlawDef> =
-    new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
+// TWO REGISTRIES, because they are two categories (rules.ts "OWNED POWERS").
+// The shape below is shared; the contents never mix. A merits card that names
+// an arcanum is skipped and REPORTED, saying where it belongs - the old
+// behaviour filed it as a merit, which is exactly the conflation this split
+// exists to end.
+class OwnedPowerRegistry<T extends { name: string; kind: string }> {
+  private _defs: Map<string, T>;
+  constructor(
+    private readonly _defaults: T[],
+    private readonly _category: string,
+    private readonly _read: (name: string, body: CardMap) => T | undefined,
+    private readonly _label: string,
+    private readonly _kinds: readonly string[],
+    private readonly _elsewhere: string,
+  ) {
+    this._defs = new Map(_defaults.map(d => [StringUtil.normalize(d.name), d]));
+  }
+  get(name: string): T | undefined { return this._defs.get(StringUtil.normalize(name)); }
+  all(): T[] { return [...this._defs.values()]; }
+  register(def: T): void { this._defs.set(StringUtil.normalize(def.name), def); }
+  reset(): void { this._defs = new Map(this._defaults.map(d => [StringUtil.normalize(d.name), d])); }
+  get category(): string { return this._category; }
 
-  static get(name: string): MeritFlawDef | undefined {
-    return MeritFlawRegistry._defs.get(StringUtil.normalize(name));
-  }
-  static all(): MeritFlawDef[] { return [...MeritFlawRegistry._defs.values()]; }
-  static register(def: MeritFlawDef): void {
-    MeritFlawRegistry._defs.set(StringUtil.normalize(def.name), def);
-  }
-  static reset(): void {
-    MeritFlawRegistry._defs = new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
-  }
-
-  // Merge lorebook definitions over the defaults: every entry in the
-  // srd:merits-flaws category, read as `name:` blocks below the marker.
-  // Returns how many definitions were registered.
-  static async loadFromLorebook(): Promise<number> {
+  // Merge lorebook definitions over the defaults: every entry in this
+  // registry's category, read as `name:` blocks below the marker. Returns how
+  // many definitions were registered.
+  async loadFromLorebook(): Promise<number> {
     let count = 0;
-    for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
+    for (const entry of await LorebookManager.entriesInCategory(this._category)) {
       const parsed = parseCardText(LorebookManager.contentBelowHeader(entry.text ?? "").trim());
       if (parsed === undefined) continue;
       let skipped = 0;
+      const misfiled: string[] = [];
       for (const { name, body } of asNamedList(parsed)) {
-        const def = meritFlawFromCard(name, body);
-        if (def) { MeritFlawRegistry.register(def); count++; } else skipped++;
+        const def = this._read(name, body);
+        if (def) { this.register(def); count++; continue; }
+        const claimed = kindOnCard(body);
+        // A block that says what it is, in a category that does not hold that
+        // kind, is not malformed - it is in the wrong drawer. Say which one.
+        if (claimed && OWNED_POWER_KINDS.includes(claimed as never)) misfiled.push(`${name} (${claimed})`);
+        else skipped++;
       }
-      if (skipped) log(`[MERITS] ${entry.displayName}: skipped ${skipped} definition(s) with no kind (merit|flaw)`);
+      if (skipped) log(`[${this._label}] ${entry.displayName}: skipped ${skipped} definition(s) with no kind (${this._kinds.join("|")})`);
+      if (misfiled.length) {
+        log(`[${this._label}] ${entry.displayName}: ${misfiled.join(", ")} belong${misfiled.length === 1 ? "s" : ""} in ${this._elsewhere}, not here - not loaded`);
+      }
     }
     return count;
   }
 }
+
+const MeritFlawRegistry = new OwnedPowerRegistry<MeritFlawDef>(
+  DEFAULT_MERITS_FLAWS, "srd:merits-flaws", meritFlawFromCard, "MERITS",
+  MERIT_FLAW_KINDS, "srd:arcana",
+);
+const ArcanumRegistry = new OwnedPowerRegistry<ArcanumDef>(
+  DEFAULT_ARCANA, "srd:arcana", arcanumFromCard, "ARCANA",
+  ARCANUM_KINDS, "srd:merits-flaws",
+);
 
 // --- LOREBOOK PARSER ---
 // Builds zero-dot Stat maps from the lorebook ability/background lists (see
@@ -7182,9 +7349,14 @@ interface PlayableCharacter {
   disciplines: Record<string, number>;
   traits: Record<string, number>;
   poolStarts: Record<string, number>;
-  // name -> points; kind via the registry. Parameterized defs are owned as
-  // "name:<param>" instances ("trait-affinity:melee" - typed with :: ).
+  // name -> points; kind via MeritFlawRegistry. Parameterized defs are owned as
+  // "name:<param>" instances (typed with :: ). MERITS AND FLAWS ONLY.
   meritsFlaws: Record<string, number>;
+  // Arcana and Taints, in a bucket of their own because they are a category of
+  // their own (rules.ts "OWNED POWERS"): a different registry, a different
+  // purse, and a list most characters do not have at all. Same key shape.
+  // Absent on every sheet that has none, which is most of them.
+  arcana?: Record<string, number>;
   tags: string[];                         // free-form (clan, ghoul, ...)
   // trait -> specialty labels (VERBATIM case - display text). At most one
   // specialty applies per roll, chosen by the specialty= argument.
@@ -7342,7 +7514,11 @@ class CharacterStore {
   }
 
   static async load(name: string): Promise<PlayableCharacter | undefined> {
-    return await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
+    const char = await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
+    // A sheet stored before Arcana became their own category keeps them in
+    // meritsFlaws. Move them on the way out, so nothing downstream ever sees
+    // the old shape and no player has to re-enter a character.
+    return char ? migratePowerBuckets(char) : undefined;
   }
 
   // Lorebook -> storage. The player's lorebook edits win; unreadable entries
@@ -7388,30 +7564,38 @@ const CHARACTER_BUCKETS: Array<[keyof PlayableCharacter, string]> = [
   ["traits", "traits"],
   ["poolStarts", "poolStarts"],
   ["meritsFlaws", "meritsFlaws"],
-];
-// One bucket holds every owned power, but the CARD files them by what they are:
-// an arcanum drawing on the arcana budget must not appear under merits-flaws.
-// Both blocks read back into the one bucket, so nothing needs migrating.
-const OWNED_POWER_BLOCKS: Array<[string, (kind: string) => boolean]> = [
-  ["meritsFlaws", k => k === "merit" || k === "flaw"],
-  ["arcana", k => k === "arcanum" || k === "taint"],
+  ["arcana", "arcana"],
 ];
 // `pools` / `merits` read as the longer engine names, so a player may write
-// either spelling on the card.
+// either spelling on the card. `taints` files with the arcana, because a Taint
+// IS an arcanum-category thing (it grants rather than costs).
 const BUCKET_SYNONYMS: Record<string, string> = {
-  pools: "poolStarts", merits: "meritsFlaws",
-  // Written apart on the card, read into the one bucket the engine keeps.
-  arcana: "meritsFlaws", taints: "meritsFlaws", "merits-flaws": "meritsFlaws",
+  pools: "poolStarts", merits: "meritsFlaws", "merits-flaws": "meritsFlaws",
+  taints: "arcana",
 };
 
-// Is this owned power an arcanum or a taint? The registry knows; an unregistered
-// key is treated as a merit, which is where [[check-constraints]] already
-// reports it as unknown.
+// Is this key an arcanum or a taint? The ARCANA registry is the only authority:
+// a key it doesn't know is not an arcanum. Used to migrate sheets written
+// before the two categories were separated - see migratePowerBuckets.
 function isArcanumKey(key: string): boolean {
-  const hit = resolveMeritInstance(StringUtil.normalize(key), n => MeritFlawRegistry.get(n));
-  return hit ? !kindSpendsFreebies(hit.def.kind) : false;
+  return resolvePowerInstance(StringUtil.normalize(key), n => ArcanumRegistry.get(n)) !== undefined;
 }
-const kindSpendsFreebies = (kind: string): boolean => kind === "merit" || kind === "flaw";
+
+// SHEETS WRITTEN BEFORE THE SPLIT kept arcana inside `meritsFlaws`, because
+// there was one bucket. Move anything the arcana registry claims into its own
+// bucket on the way through - reading a sheet, and reading a card. Nobody has
+// to re-enter a character, and after one save the stored shape is the new one.
+function migratePowerBuckets(char: PlayableCharacter): PlayableCharacter {
+  const strays = Object.keys(char.meritsFlaws ?? {}).filter(isArcanumKey);
+  if (!strays.length) return char;
+  const arcana = { ...(char.arcana ?? {}) };
+  for (const key of strays) {
+    arcana[key] ??= char.meritsFlaws[key];
+    delete char.meritsFlaws[key];
+  }
+  char.arcana = arcana;
+  return char;
+}
 
 // A merit instance key ("trait-affinity:melee") keeps its parameter; only the
 // def's own name is title-cased for display.
@@ -7427,10 +7611,7 @@ function characterToCard(char: PlayableCharacter): CardMap {
   const specialties = char.specialties ?? {};
   for (const [field, key] of CHARACTER_BUCKETS) {
     const bucket = (char[field] ?? {}) as Record<string, number>;
-    let names = Object.keys(bucket);
-    // Owned powers split by kind: merits and flaws here, arcana and taints in
-    // their own block below, because they are not the same currency.
-    if (field === "meritsFlaws") names = names.filter(n => !isArcanumKey(n));
+    const names = Object.keys(bucket);
     if (!names.length) continue;
     const block: CardMap = {};
     for (const name of names) {
@@ -7469,13 +7650,6 @@ function characterToCard(char: PlayableCharacter): CardMap {
     orphans[displayTraitName(trait)] = labels.length === 1 ? labels[0] : labels;
   }
   if (Object.keys(orphans).length) card["specialties"] = orphans;
-  const arcana: CardMap = {};
-  for (const [name, points] of Object.entries(char.meritsFlaws ?? {})) {
-    if (!isArcanumKey(name)) continue;
-    const paid = char.paid?.[StringUtil.normalize(name)];
-    arcana[displayTraitName(name)] = paid === undefined ? points : { [CARD_VALUE_KEY]: points, paid };
-  }
-  if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (char.capabilities?.length) card["capabilities"] = [...char.capabilities];
   if (Object.keys(char.source ?? {}).length) card["source"] = { ...char.source } as CardMap;
   if (char.purseGrants?.length) {
@@ -7512,6 +7686,9 @@ function characterFromCard(raw: CardValue | undefined): PlayableCharacter | unde
     stage,
     attributes: {}, abilities: {}, backgrounds: {}, virtues: {}, disciplines: {},
     traits: {}, poolStarts: {}, meritsFlaws: {},
+    // Seeded so the bucket loop can fill it; dropped again below if the card
+    // named none, because most sheets have no arcana at all.
+    arcana: {},
     tags: asStringList(card["tags"]).map(t => StringUtil.normalize(t)),
     specialties: {},
   };
@@ -7553,6 +7730,10 @@ function characterFromCard(raw: CardValue | undefined): PlayableCharacter | unde
   }
   if (Object.keys(instances).length) char.instances = instances;
   if (Object.keys(paid).length) char.paid = paid;
+  // A card written before the split lists its arcana under merits-flaws; the
+  // registry, not the card, decides which is which.
+  migratePowerBuckets(char);
+  if (!Object.keys(char.arcana ?? {}).length) delete char.arcana;
   const capabilities = asStringList(card["capabilities"]).map(c => StringUtil.normalize(c));
   if (capabilities.length) char.capabilities = capabilities;
   const source: Record<string, string> = {};
@@ -7914,32 +8095,54 @@ function permanentRatingOf(char: PlayableCharacter, name: string): number {
   return resolveTraitFromRecord(char, owner.name) || resourceNumbers(char, owner).start;
 }
 
-// --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
-// A character's meritsFlaws bucket maps instance keys ("iron-will",
-// "trait-affinity:melee") to points. Resolution goes through the registry;
-// unknown or malformed keys are skipped here and SURFACED by
-// [[check-constraints]], never silently enforced.
-interface OwnedMeritInstance {
+// --- OWNED POWER INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
+// Each bucket maps instance keys ("iron-will", "trait-affinity:melee") to
+// points, resolved through ITS OWN registry: merits through MeritFlawRegistry,
+// arcana through ArcanumRegistry. Unknown or malformed keys are skipped here
+// and SURFACED by [[check-constraints]], never silently enforced.
+//
+// THREE walks, and picking the right one is not a style choice:
+//   ownedMeritInstances   - the Merits & Flaws report. NEVER arcana.
+//   ownedArcanumInstances - the Arcana & Taints report. NEVER merits.
+//   ownedPowerInstances   - both, for MECHANISM: passive ops, purse ledgers,
+//                           which power grants an affliction. A machine that
+//                           has to look at everything the character owns.
+interface OwnedPowerInstance<T extends OwnedPowerDef = OwnedPowerDef> {
   key: string;
-  def: MeritFlawDef;
+  def: T;
   param?: string;
   points: number;
 }
+/** @deprecated Named for merits, used for both. Prefer OwnedPowerInstance. */
+type OwnedMeritInstance = OwnedPowerInstance;
 
-function ownedMeritInstances(char: PlayableCharacter): OwnedMeritInstance[] {
-  const out: OwnedMeritInstance[] = [];
-  for (const [key, points] of Object.entries(char.meritsFlaws ?? {})) {
-    const hit = resolveMeritInstance(key, n => MeritFlawRegistry.get(n));
+function instancesOf<T extends OwnedPowerDef>(
+  bucket: Record<string, number> | undefined, lookup: (name: string) => T | undefined,
+): Array<OwnedPowerInstance<T>> {
+  const out: Array<OwnedPowerInstance<T>> = [];
+  for (const [key, points] of Object.entries(bucket ?? {})) {
+    const hit = resolvePowerInstance(key, lookup);
     if (hit) out.push({ key: StringUtil.normalize(key), def: hit.def, param: hit.param, points });
   }
   return out;
 }
 
-// Every always-on op the character's merits grant ($param substituted,
+function ownedMeritInstances(char: PlayableCharacter): Array<OwnedPowerInstance<MeritFlawDef>> {
+  return instancesOf(char.meritsFlaws, n => MeritFlawRegistry.get(n));
+}
+function ownedArcanumInstances(char: PlayableCharacter): Array<OwnedPowerInstance<ArcanumDef>> {
+  return instancesOf(char.arcana, n => ArcanumRegistry.get(n));
+}
+function ownedPowerInstances(char: PlayableCharacter): OwnedPowerInstance[] {
+  return [...ownedMeritInstances(char), ...ownedArcanumInstances(char)];
+}
+
+// Every always-on op the character's owned powers grant ($param substituted,
 // amounts scaled by points). Roll-op gates (actionTag/trait) are judged at
-// the roll site.
+// the roll site. BOTH categories: Trait Enhancement is an arcanum and its
+// enhance op is as real as Iron Will's.
 function passiveOpsFor(char: PlayableCharacter): EffectOp[] {
-  return ownedMeritInstances(char).flatMap(inst => passiveOpsOf(inst.def, inst.param, inst.points));
+  return ownedPowerInstances(char).flatMap(inst => passiveOpsOf(inst.def, inst.param, inst.points));
 }
 
 // Permanent per-trait enhancement totals (the "enhance" passive op): raises
@@ -9988,7 +10191,8 @@ function poolTraitsOf(char: PlayableCharacter, pool: string): string[] {
 function passiveRollExtra(char: PlayableCharacter, poolTraits: string[], tags: string[], resourceAt?: (n: string) => number): { extra: Partial<RollModifier>; notes: string[] } {
   const extra: Partial<RollModifier> = {};
   const notes: string[] = [];
-  for (const inst of ownedMeritInstances(char)) {
+  // Both categories - a die is a die, and Trait Affinity is an arcanum.
+  for (const inst of ownedPowerInstances(char)) {
     for (const op of passiveOpsOf(inst.def, inst.param, inst.points)) {
       const kind = op.op.toLowerCase();
       const patch = (n: number): Partial<RollModifier> => rollOpPatch(kind, n) ?? {};
@@ -11099,7 +11303,10 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
     disciplines.items.push(`${name} ${rating}${override !== undefined ? ` (paid ${cost})` : ""}`);
   }
   if (disciplines.items.length) out["discipline"] = disciplines;
-  for (const inst of ownedMeritInstances(char)) {
+  // BOTH categories: a purse ledger is machinery, and the whole reason arcana
+  // are their own category is that they draw on their own purse. Each instance
+  // says which one it trades in.
+  for (const inst of ownedPowerInstances(char)) {
     const purse = budgetOfKind(inst.def);
     if (offPurse(inst.key)) {
       const row = out[purse] ?? { spent: 0, items: [] };
@@ -13286,13 +13493,16 @@ function ownedTraitsOf(char: PlayableCharacter): OwnedTraits {
   for (const name of Object.keys(char.meritsFlaws)) {
     // Parameterized instances ("trait-affinity:melee") resolve to their base
     // def for the merit/flaw split; the full instance key stays the trait.
-    const def = resolveMeritInstance(name, n => MeritFlawRegistry.get(n))?.def ?? MeritFlawRegistry.get(name);
+    const def = resolvePowerInstance(name, n => MeritFlawRegistry.get(n))?.def ?? MeritFlawRegistry.get(name);
     (def && def.kind === "flaw" ? flaws : merits).push(StringUtil.normalize(name));
   }
   return {
     backgrounds: Object.keys(char.backgrounds).map(n => StringUtil.normalize(n)),
     merits,
     flaws,
+    // Their own list, so a constraint over an arcanum matches an arcanum and a
+    // constraint over merits never accidentally catches one.
+    arcana: Object.keys(char.arcana ?? {}).map(n => StringUtil.normalize(n)),
     templates: (char.templates ?? []).map(t => StringUtil.normalize(t)),
   };
 }
@@ -13360,7 +13570,7 @@ async function cmdCheckConstraints(): Promise<string> {
 // resolved against this character - undefined when the def has no such cap.
 // The name resolves through resources too, so the Ouroboros is capped by his
 // Living Resolve without the def having to know that.
-function meritTraitCeiling(char: PlayableCharacter, def: MeritFlawDef): { trait: string; cap: number } | undefined {
+function meritTraitCeiling(char: PlayableCharacter, def: OwnedPowerDef): { trait: string; cap: number } | undefined {
   if (!def.maxFromTrait) return undefined;
   const trait = StringUtil.normalize(def.maxFromTrait);
   return { trait, cap: permanentRatingOf(char, trait) };
@@ -13370,12 +13580,16 @@ function meritTraitCeiling(char: PlayableCharacter, def: MeritFlawDef): { trait:
 // were also taken. Returns one complaint per limit that would be broken - by
 // total slots, or by how many of a KIND fill them.
 function instanceLimitBreaches(
-  char: PlayableCharacter, def: MeritFlawDef, pending?: { key: string; points: number },
+  char: PlayableCharacter, def: OwnedPowerDef, pending?: { key: string; points: number },
 ): string[] {
   const limits = instanceLimitsOf(def);
   if (!limits.length) return [];
-  const held = ownedMeritInstances(char)
-    .filter(i => StringUtil.normalize(i.def.name) === StringUtil.normalize(def.name) && i.key !== pending?.key)
+  // Same name AND same category: two registries may legitimately hold a def of
+  // the same name, and one category's instances never fill the other's slots.
+  const held = ownedPowerInstances(char)
+    .filter(i => StringUtil.normalize(i.def.name) === StringUtil.normalize(def.name)
+      && isArcanumKind(i.def.kind) === isArcanumKind(def.kind)
+      && i.key !== pending?.key)
     .map(i => ({ label: i.param ?? i.key, points: i.points }));
   if (pending) held.push({ label: pending.key.includes(":") ? pending.key.slice(pending.key.lastIndexOf(":") + 1) : pending.key, points: pending.points });
 
@@ -13398,14 +13612,16 @@ function instanceLimitBreaches(
   return out;
 }
 
-// Advisory merit-instance findings: unknown/malformed keys and instance-limit
+// Advisory owned-power findings: unknown/malformed keys and instance-limit
 // violations ("one favoured trait" caps). Reported, never enforced - the
-// creation engine will enforce.
+// creation engine will enforce. Walks BOTH buckets, and names the bucket a
+// stray key sits in, because "unknown merit/flaw" is a bad thing to say about
+// an arcanum somebody typed into the wrong list.
 function meritInstanceFindings(char: PlayableCharacter): string[] {
   const findings: string[] = [];
   const known = new Set<string>();
   const checkedDefs = new Set<string>();
-  for (const inst of ownedMeritInstances(char)) {
+  for (const inst of ownedPowerInstances(char)) {
     known.add(inst.key);
     // The ceiling is a trait, so it can MOVE: a Resolve that drops leaves the
     // purchases stranded above it. Reported, never silently trimmed.
@@ -13421,7 +13637,22 @@ function meritInstanceFindings(char: PlayableCharacter): string[] {
     }
   }
   for (const key of Object.keys(char.meritsFlaws)) {
-    if (!known.has(StringUtil.normalize(key))) findings.push(`unknown merit/flaw "${StringUtil.normalize(key)}"`);
+    const k = StringUtil.normalize(key);
+    if (known.has(k)) continue;
+    // It may be an arcanum somebody filed as a merit - the registry knows, and
+    // saying so is more use than "unknown".
+    const asArcanum = resolvePowerInstance(k, n => ArcanumRegistry.get(n));
+    findings.push(asArcanum
+      ? `"${k}" is an ${asArcanum.def.kind}, not a merit or flaw - [[take-arcanum ${k}]] files it right`
+      : `unknown merit/flaw "${k}"`);
+  }
+  for (const key of Object.keys(char.arcana ?? {})) {
+    const k = StringUtil.normalize(key);
+    if (known.has(k)) continue;
+    const asMerit = resolvePowerInstance(k, n => MeritFlawRegistry.get(n));
+    findings.push(asMerit
+      ? `"${k}" is a ${asMerit.def.kind}, not an arcanum or taint - [[take-merit ${k}]] files it right`
+      : `unknown arcanum/taint "${k}"`);
   }
   // A pool start naming a resource the templates don't grant: a hand-edited
   // card can give a mage a "Resolve" he cannot have, and every trait lookup
@@ -13467,51 +13698,170 @@ function unmetRequirements(char: PlayableCharacter, req?: MeritFlawRequirements)
   return missing;
 }
 
-// --- DEFINING merits, flaws and arcana -----------------------------------
-// The custom-definition overlay lives in the srd:merits-flaws lorebook
-// category (name-keyed blocks merged over the built-ins). These commands write
-// it for you; hand-editing the card stays equally valid.
-const MERITS_CATEGORY = "srd:merits-flaws";
-const MERITS_CUSTOM_ENTRY = "srd:merits-flaws:custom";
-
-async function customMeritDefs(): Promise<MeritFlawDef[]> {
-  const text = await LorebookManager.entryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY);
-  const parsed = parseCardText(LorebookManager.contentBelowHeader(text ?? "").trim());
-  return asNamedList(parsed)
-    .map(({ name, body }) => meritFlawFromCard(name, body))
-    .filter((d): d is MeritFlawDef => d !== undefined);
+// =============================================================================
+// TWO FAMILIES OF OWNED POWER - one mechanism, two categories that never mix
+// -----------------------------------------------------------------------------
+// Merits & Flaws and Arcana & Taints are handled by the SAME code and are NOT
+// THE SAME THING. The difference is a `PowerFamily`: which registry answers a
+// name, which lorebook category holds the custom ones, which bucket on the
+// sheet owns the instances, which verbs to name in a reply - and, for arcana,
+// which capability a character must have before the list is open to him at all.
+//
+// This is why [[define-merit]] CANNOT define an arcanum: it is not a check it
+// forgets to make, it is a different family object with different kinds, a
+// different registry and a different card. And it is why a regular vampire's
+// [[merits]] shows no Arcana: they were never in that list.
+// =============================================================================
+interface PowerFamily<T extends OwnedPowerDef> {
+  kinds: readonly OwnedPowerKind[];
+  defaultKind: OwnedPowerKind;
+  registry: {
+    get(name: string): T | undefined;
+    all(): T[];
+    register(def: T): void;
+    reset(): void;
+    loadFromLorebook(): Promise<number>;
+  };
+  category: string;
+  entry: string;
+  read(name: string, body: CardMap): T | undefined;
+  // Where this family's instances live on the sheet. `ensure` creates the
+  // bucket (arcana is absent on the sheets that have none).
+  bucket(char: PlayableCharacter): Record<string, number>;
+  ensureBucket(char: PlayableCharacter): Record<string, number>;
+  instances(char: PlayableCharacter): Array<OwnedPowerInstance<T>>;
+  one: string;              // "merit/flaw" - what one of them is, in a message
+  aOne: string;             // ...with its article ("a merit/flaw", "an arcanum/taint")
+  many: string;             // "Merits & Flaws" - the list's name
+  verbs: { define: string; forget: string; take: string; drop: string; list: string; info: string };
+  // The capability that opens this list, if any. Merits are open to everyone.
+  requires?: string;
+  requiresNote?: string;
+  cardHeader: string[];
+  // The other family, so every "wrong drawer" message can point somewhere.
+  other(): PowerFamily<OwnedPowerDef>;
 }
 
-async function writeCustomMeritDefs(defs: MeritFlawDef[]): Promise<void> {
-  const header = [
-    `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line each one is its NAME,`,
+const MERITS_CATEGORY = "srd:merits-flaws";
+const MERITS_CUSTOM_ENTRY = "srd:merits-flaws:custom";
+const ARCANA_CATEGORY = "srd:arcana";
+const ARCANA_CUSTOM_ENTRY = "srd:arcana:custom";
+
+const MERIT_FAMILY: PowerFamily<MeritFlawDef> = {
+  kinds: MERIT_FLAW_KINDS,
+  defaultKind: "merit",
+  registry: MeritFlawRegistry,
+  category: MERITS_CATEGORY,
+  entry: MERITS_CUSTOM_ENTRY,
+  read: meritFlawFromCard,
+  bucket: char => char.meritsFlaws ?? {},
+  ensureBucket: char => (char.meritsFlaws ??= {}),
+  instances: ownedMeritInstances,
+  one: "merit/flaw",
+  aOne: "a merit/flaw",
+  many: "Merits & Flaws",
+  verbs: { define: "define-merit", forget: "forget-merit", take: "take-merit", drop: "drop-merit", list: "merits", info: "merit" },
+  cardHeader: [
+    `Custom Merits & Flaws. Below the ${SRD_HEADER_MARKER} line each one is its NAME,`,
     "with its fields indented under it; the list is merged over the built-ins.",
     "[[define-merit]] writes this for you; hand-editing is equally fine. The fields:",
     "kind (merit|flaw), points (a number, or `1, 2, 3`), param, passive (always-on",
     "ops), requires, limit-at/limit-slots, description.",
-  ];
-  const text = configEntryText(header, namedDefsToCard(defs));
-  const { id } = await LorebookManager.ensureCategory(MERITS_CATEGORY);
-  const created = await LorebookManager.ensureEntry(id, MERITS_CUSTOM_ENTRY, text);
-  if (!created) await LorebookManager.updateEntryText(MERITS_CATEGORY, MERITS_CUSTOM_ENTRY, text);
-  await MeritFlawRegistry.loadFromLorebook();
+    "Arcana and Taints are NOT merits - they live in srd:arcana ([[define-arcanum]]).",
+  ],
+  other: () => ARCANUM_FAMILY as unknown as PowerFamily<OwnedPowerDef>,
+};
+
+const ARCANUM_FAMILY: PowerFamily<ArcanumDef> = {
+  kinds: ARCANUM_KINDS,
+  defaultKind: "arcanum",
+  registry: ArcanumRegistry,
+  category: ARCANA_CATEGORY,
+  entry: ARCANA_CUSTOM_ENTRY,
+  read: arcanumFromCard,
+  bucket: char => char.arcana ?? {},
+  ensureBucket: char => (char.arcana ??= {}),
+  instances: ownedArcanumInstances,
+  one: "arcanum/taint",
+  aOne: "an arcanum/taint",
+  many: "Arcana & Taints",
+  verbs: { define: "define-arcanum", forget: "forget-arcanum", take: "take-arcanum", drop: "drop-arcanum", list: "arcana", info: "arcanum" },
+  requires: ARCANA_CAPABILITY,
+  requiresNote: "Arcana belong to the infernal: a demon has them, and so does anyone at all "
+    + "who has become a demon's thrall. Nobody else has this list open.",
+  cardHeader: [
+    `Custom Arcana & Taints (Dark Ages: Devil's Due). Below the ${SRD_HEADER_MARKER} line each one`,
+    "is its NAME, with its fields indented under it; merged over the built-ins.",
+    "AN ARCANUM IS NOT A MERIT: its own category, its own purse, and open only to",
+    "characters bound to the infernal. [[define-arcanum]] writes this for you. Fields:",
+    "kind (arcanum|taint), points (a number, or `1, 2, 3`), per-template, param,",
+    "passive, requires, limit-at/limit-slots, description.",
+  ],
+  other: () => MERIT_FAMILY as unknown as PowerFamily<OwnedPowerDef>,
+};
+
+// The family a name belongs to, whichever registry knows it - for the "you
+// asked the wrong verb" replies, and for nothing else.
+function familyOwning(key: string): PowerFamily<OwnedPowerDef> | undefined {
+  const k = StringUtil.normalize(key);
+  if (resolvePowerInstance(k, n => MeritFlawRegistry.get(n))) return MERIT_FAMILY as unknown as PowerFamily<OwnedPowerDef>;
+  if (resolvePowerInstance(k, n => ArcanumRegistry.get(n))) return ARCANUM_FAMILY as unknown as PowerFamily<OwnedPowerDef>;
+  return undefined;
+}
+
+// Is this list open to this character at all? A family with no `requires` is
+// open to everyone (Merits and Flaws are). Returns the refusal, or undefined.
+function familyClosedTo(char: PlayableCharacter, family: PowerFamily<OwnedPowerDef>): string | undefined {
+  if (!family.requires) return undefined;
+  if (capabilitiesOpenArcana(CharacterResources.capabilities(char))) return undefined;
+  return `${disp(char.name)} (${char.templates.join("+")}) has no ${family.many} at all. `
+    + `${family.requiresNote ?? ""} `
+    + `Add the template, [[attune ${family.requires}]] if this chronicle says otherwise, or waive=true for one purchase.`;
+}
+
+// --- THE CUSTOM-DEFINITION OVERLAY -------------------------------------------
+// Each family's custom definitions live in its own lorebook category
+// (name-keyed blocks merged over the built-ins). These commands write it for
+// you; hand-editing the card stays equally valid.
+async function customDefs<T extends OwnedPowerDef>(family: PowerFamily<T>): Promise<T[]> {
+  const text = await LorebookManager.entryText(family.category, family.entry);
+  const parsed = parseCardText(LorebookManager.contentBelowHeader(text ?? "").trim());
+  return asNamedList(parsed)
+    .map(({ name, body }) => family.read(name, body))
+    .filter((d): d is T => d !== undefined);
+}
+
+async function writeCustomDefs<T extends OwnedPowerDef>(family: PowerFamily<T>, defs: T[]): Promise<void> {
+  const text = configEntryText(family.cardHeader, namedDefsToCard(defs));
+  const { id } = await LorebookManager.ensureCategory(family.category);
+  const created = await LorebookManager.ensureEntry(id, family.entry, text);
+  if (!created) await LorebookManager.updateEntryText(family.category, family.entry, text);
+  await family.registry.loadFromLorebook();
 }
 
 // define-merit name="Inviolate Soul" points=0 description=`…`
 //   passive="immune:possession,soul-control; immune:fear,mind-control while=living-resolve"
-async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
+// ...and define-arcanum, which is the same code over the other family.
+async function defineOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, family: PowerFamily<T>): Promise<string> {
   const rawName = cmd.named["name"] ?? cmd.positional[0];
   if (!rawName?.trim()) {
-    return sys("define-merit needs a name, e.g. [[define-merit name=`Inviolate Soul` points=0 "
+    return sys(`${family.verbs.define} needs a name, e.g. [[${family.verbs.define} name=\`Inviolate Soul\` points=0 `
       + "passive=`immune:possession; immune:fear while=living-resolve` description=`…`]]. "
       + 'Passives read "<op>[:<target>] [+N|-N] [if=<trait>] [while=<resource>[>=N]] [once]", ";"-separated '
       + "(or a raw ops array in JSON). Use BACKTICKS for name/passive/description - a quoted value is normalized (spaces become hyphens).");
   }
   const name = rawName.trim();
-  const kindRaw = (cmd.named["kind"] ?? "merit").toLowerCase() as MeritFlawKind;
-  if (!MERIT_FLAW_KINDS.includes(kindRaw)) {
-    return sys(`kind must be one of ${MERIT_FLAW_KINDS.join(", ")} (got "${kindRaw}"). `
-      + `Merits and flaws trade freebie points; arcana and taints trade an arcana budget of their own.`);
+  const kindRaw = (cmd.named["kind"] ?? family.defaultKind).toLowerCase() as OwnedPowerKind;
+  // THE STRUCTURAL REFUSAL. define-merit cannot make an arcanum and
+  // define-arcanum cannot make a merit - not because either forgets to check,
+  // but because a family holds the kinds it holds and no others.
+  if (!family.kinds.includes(kindRaw)) {
+    const elsewhere = family.other();
+    return elsewhere.kinds.includes(kindRaw)
+      ? sys(`"${kindRaw}" is not ${family.aOne}. ${elsewhere.many} are a different category - `
+        + `a different list, a different purse, and not open to every character. `
+        + `Use [[${elsewhere.verbs.define} name=\`${name}\` kind=${kindRaw}]].`)
+      : sys(`kind must be one of ${family.kinds.join(", ")} (got "${kindRaw}").`);
   }
 
   // points: a single number or a "1,2,3" ladder of allowed ratings.
@@ -13520,7 +13870,7 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   if (ladder.some(n => Number.isNaN(n))) return sys(`points must be a number or a list like "1,2,3" (got "${pointsRaw}").`);
   const points: number | number[] = ladder.length === 1 ? ladder[0] : ladder;
 
-  const def: MeritFlawDef = { name, kind: kindRaw, points };
+  const def = { name, kind: kindRaw, points } as T;
   if (cmd.named["description"]?.trim()) def.description = cmd.named["description"].trim();
   if (cmd.named["param"]?.trim()) def.param = StringUtil.normalize(cmd.named["param"]);
   const budget = (cmd.named["budget"] ?? "").trim();
@@ -13570,48 +13920,58 @@ async function cmdDefineMerit(cmd: ParsedCommand): Promise<string> {
   if (templates.length) def.requires = { templates };
 
   const key = StringUtil.normalize(name);
-  const defs = await customMeritDefs();
+  const defs = await customDefs(family);
   const existing = defs.findIndex(d => StringUtil.normalize(d.name) === key);
-  const shadows = existing < 0 && MeritFlawRegistry.get(key) ? ` (shadowing the built-in "${key}")` : "";
+  const shadows = existing < 0 && family.registry.get(key) ? ` (shadowing the built-in "${key}")` : "";
   if (existing >= 0) defs[existing] = def; else defs.push(def);
-  await writeCustomMeritDefs(defs);
+  await writeCustomDefs(family, defs);
 
   const bits = [`${def.kind} "${name}"`, `${Array.isArray(points) ? `[${points.join(", ")}]` : points} point${points === 1 ? "" : "s"}`];
   if (def.param) bits.push(`parameterized by ${def.param}`);
   if (def.passive?.length) bits.push(`passive: ${def.passive.map(describePassiveOp).join("; ")}`);
   return sys(`${existing >= 0 ? "Redefined" : "Defined"} ${bits.join(", ")}${shadows}. `
-    + `Take it with [[take-merit ${key}${def.param ? `::<${def.param}>` : ""}${Array.isArray(points) ? ` ${points[0]}` : ""}]].`);
+    + `Take it with [[${family.verbs.take} ${key}${def.param ? `::<${def.param}>` : ""}${Array.isArray(points) ? ` ${points[0]}` : ""}]].`);
 }
 
-async function cmdForgetMerit(cmd: ParsedCommand): Promise<string> {
+async function forgetOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, family: PowerFamily<T>): Promise<string> {
   const raw = cmd.positional[0]?.trim() ?? cmd.named["name"]?.trim();
-  if (!raw) return sys(`forget-merit needs a name, e.g. [[forget-merit inviolate-soul]].`);
+  if (!raw) return sys(`${family.verbs.forget} needs a name, e.g. [[${family.verbs.forget} inviolate-soul]].`);
   const key = StringUtil.normalize(raw);
-  const defs = await customMeritDefs();
+  const defs = await customDefs(family);
   const rest = defs.filter(d => StringUtil.normalize(d.name) !== key);
   if (rest.length === defs.length) {
-    return MeritFlawRegistry.get(key)
-      ? sys(`"${key}" is a built-in - it can be shadowed with [[define-merit]] but not deleted.`)
-      : sys(`No custom merit/flaw "${key}".`);
+    if (family.registry.get(key)) return sys(`"${key}" is a built-in - it can be shadowed with [[${family.verbs.define}]] but not deleted.`);
+    const elsewhere = familyOwning(key);
+    return elsewhere
+      ? sys(`"${key}" is ${elsewhere.aOne}, not ${family.aOne}. Use [[${elsewhere.verbs.forget} ${key}]].`)
+      : sys(`No custom ${family.one} "${key}".`);
   }
-  await writeCustomMeritDefs(rest);
-  MeritFlawRegistry.reset();
-  await MeritFlawRegistry.loadFromLorebook();
-  const shipped = MeritFlawRegistry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
+  await writeCustomDefs(family, rest);
+  family.registry.reset();
+  await family.registry.loadFromLorebook();
+  const shipped = family.registry.get(key) ? ` The built-in "${key}" resurfaces.` : "";
   return sys(`Forgot custom ${key}.${shipped}`);
 }
 
-// merit [name] - list the definitions, or inspect one in full.
-async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
+// merit [name] / arcanum [name] - list the definitions, or inspect one in full.
+async function ownedPowerInfo<T extends OwnedPowerDef>(cmd: ParsedCommand, family: PowerFamily<T>): Promise<string> {
   const raw = cmd.positional[0]?.trim();
   if (!raw) {
-    const items = MeritFlawRegistry.all()
-      .map(d => `${StringUtil.normalize(d.name)}${d.kind === "flaw" ? " (flaw)" : ""}`).join(", ");
-    return sys(`Defined merits & flaws: ${items}. [[merit <name>]] for detail; [[define-merit]] adds one.`);
+    const defs = family.registry.all();
+    if (!defs.length) return sys(`No ${family.many} defined. [[${family.verbs.define}]] adds one.`);
+    const items = defs.map(d => `${StringUtil.normalize(d.name)}${d.kind === family.defaultKind ? "" : ` (${d.kind})`}`).join(", ");
+    return sys(`Defined ${family.many}: ${items}. [[${family.verbs.info} <name>]] for detail; [[${family.verbs.define}]] adds one.`);
   }
   const key = StringUtil.normalize(raw);
-  const def = MeritFlawRegistry.get(key);
-  if (!def) return sys(`No merit/flaw "${key}". [[merit]] lists them.`);
+  const def = family.registry.get(key);
+  if (!def) {
+    // It may be perfectly well defined - in the other list. Say so; "no such
+    // merit" about an arcanum is the confusion this split exists to end.
+    const elsewhere = familyOwning(key);
+    return elsewhere
+      ? sys(`"${key}" is ${elsewhere.aOne}, not ${family.aOne} - a different category entirely. Use [[${elsewhere.verbs.info} ${key}]].`)
+      : sys(`No ${family.one} "${key}". [[${family.verbs.info}]] lists them.`);
+  }
   const bits = [`${def.kind} "${def.name}"`];
   const perTemplate = Object.entries(def.perTemplate ?? {});
   if (perTemplate.length) {
@@ -13629,6 +13989,7 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   }
   if (def.maxFromTrait) bits.push(`never more purchases than ${disp(def.maxFromTrait)}`);
   if (def.requires?.templates?.length) bits.push(`templates: ${def.requires.templates.join("/")}`);
+  if (family.requires) bits.push(`needs the "${family.requires}" capability ([[attune]])`);
   if (def.passive?.length) bits.push(`passive - ${def.passive.map(describePassiveOp).join("; ")}`);
   const note = def.passive?.some(o => !isRollOp(o))
     ? " Ops the engine has no interpreter for are recorded and surfaced for the Storyteller (immunities have no system to enforce them yet)."
@@ -13636,25 +13997,34 @@ async function cmdMeritInfo(cmd: ParsedCommand): Promise<string> {
   return sys(`${bits.join("; ")}.${def.description ? ` ${def.description}` : ""}${note}`);
 }
 
-async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
+async function takeOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, family: PowerFamily<T>): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const raw = cmd.positional[0]?.trim();
-  if (!raw) return sys(`take-merit needs a name, e.g. [[take-merit trait-affinity::melee 2]].`);
+  if (!raw) return sys(`${family.verbs.take} needs a name, e.g. [[${family.verbs.take} trait-affinity::melee 2]].`);
   const key = StringUtil.normalize(raw);
-  const hit = resolveMeritInstance(key, n => MeritFlawRegistry.get(n));
+  const waived = cmd.named["waive"] === "true";
+  const hit = resolvePowerInstance(key, n => family.registry.get(n));
   if (!hit) {
-    const bare = MeritFlawRegistry.get(key);
+    const elsewhere = familyOwning(key);
+    if (elsewhere) {
+      return sys(`${key} is ${elsewhere.aOne}, not ${family.aOne}. Use [[${elsewhere.verbs.take} ${key}]].`);
+    }
+    const bare = family.registry.get(key);
     return bare?.param
-      ? sys(`"${key}" is parameterized - name its ${bare.param}: [[take-merit ${key}::<${bare.param}>]].`)
-      : sys(`Unknown merit/flaw "${key}". Custom definitions go in the srd:merits-flaws lorebook category.`);
+      ? sys(`"${key}" is parameterized - name its ${bare.param}: [[${family.verbs.take} ${key}::<${bare.param}>]].`)
+      : sys(`Unknown ${family.one} "${key}". Custom definitions go in the ${family.category} lorebook category.`);
   }
+  // IS THIS LIST OPEN TO HIM AT ALL? Asked before price, because "a vampire has
+  // no Arcana" is a truer answer than "that costs 5 arcana points".
+  const closed = waived ? undefined : familyClosedTo(char, family as unknown as PowerFamily<OwnedPowerDef>);
+  if (closed) return sys(closed);
   // The price - and whether it may be taken at all - can differ per template.
   const priced = meritCostFor(hit.def, char.templates);
-  if (!priced.available && cmd.named["waive"] !== "true") {
+  if (!priced.available && !waived) {
     const who = char.templates.join("+");
     return sys(`${hit.def.name} is not open to ${who}${priced.note ? ` - ${priced.note}` : ""}. `
-      + `[[merit ${key}]] lists who may take it. Add waive=true to override.`);
+      + `[[${family.verbs.info} ${key}]] lists who may take it. Add waive=true to override.`);
   }
   const listed = typeof priced.points === "string" ? intOrUndef(priced.points) ?? 0 : priced.points;
   const allowed = Array.isArray(listed) ? listed : [listed];
@@ -13664,15 +14034,15 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
       + `${priced.from ? ` for a ${priced.from}` : ""}.`);
   }
   const missing = unmetRequirements(char, hit.def.requires);
-  if (missing.length && cmd.named["waive"] !== "true") {
+  if (missing.length && !waived) {
     return sys(`${hit.def.name} prerequisites not met: ${missing.join(", ")}. Add waive=true to override.`);
   }
   const breaches = instanceLimitBreaches(char, hit.def, { key, points });
-  if (breaches.length && cmd.named["waive"] !== "true") {
+  if (breaches.length && !waived) {
     return sys(`${breaches.join("; ")}. Lower another instance first, or add waive=true to override.`);
   }
   const ceiling = meritTraitCeiling(char, hit.def);
-  if (ceiling && points > ceiling.cap && cmd.named["waive"] !== "true") {
+  if (ceiling && points > ceiling.cap && !waived) {
     // A ceiling of 0 is not a low cap, it is the WRONG KIND OF BEING: a mage
     // has Quintessence and Willpower, never Resolve, so an arcanum measured
     // against Resolve is not open to him at all. Say that, not "0".
@@ -13682,7 +14052,7 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
       : sys(`${hit.def.name} may not be taken more times than ${disp(ceiling.trait)} (${ceiling.cap}) - `
         + `asked for ${points}. Raise ${disp(ceiling.trait)} first, or add waive=true to override.`);
   }
-  char.meritsFlaws[key] = points;
+  family.ensureBucket(char)[key] = points;
   // The Storyteller may set what it REALLY cost, right here.
   const paidExpr = cmd.named["paid"]?.trim();
   if (paidExpr !== undefined) char.paid = { ...(char.paid ?? {}), [key]: paidExpr };
@@ -13690,8 +14060,7 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
   // Taking it turns it ON: the passive affliction is applied here, not by the
   // player remembering to. The reply says so.
   const granted = hit.def.grants
-    ? await applyPassiveGrant(StringUtil.normalize(char.name), budgetOfKind(hit.def) === "arcana" ? "arcanum" : "merit",
-        key, hit.def.grants)
+    ? await applyPassiveGrant(StringUtil.normalize(char.name), hit.def.kind, key, hit.def.grants)
     : "";
   const passiveBits = passiveOpsOf(hit.def, hit.param, points).map(describePassiveOp);
   const purse = budgetOfKind(hit.def);
@@ -13703,42 +14072,75 @@ async function cmdTakeMerit(cmd: ParsedCommand): Promise<string> {
     + `${passiveBits.length ? ` - passive: ${passiveBits.join(", ")}` : ""}. [[budget]] tracks the purse.`);
 }
 
-async function cmdDropMerit(cmd: ParsedCommand): Promise<string> {
+async function dropOwnedPower<T extends OwnedPowerDef>(cmd: ParsedCommand, family: PowerFamily<T>): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return noCharacter();
   const key = StringUtil.normalize(cmd.positional[0]?.trim() ?? "");
-  if (!key) return sys(`drop-merit needs a name.`);
-  if (!(key in char.meritsFlaws)) return sys(`${disp(char.name)} does not have "${key}". [[merits]] lists them.`);
-  delete char.meritsFlaws[key];
+  if (!key) return sys(`${family.verbs.drop} needs a name.`);
+  const bucket = family.bucket(char);
+  if (!(key in bucket)) {
+    const elsewhere = family.other();
+    if (key in elsewhere.bucket(char)) {
+      return sys(`${key} is ${elsewhere.aOne}, not ${family.aOne}. Use [[${elsewhere.verbs.drop} ${key}]].`);
+    }
+    return sys(`${disp(char.name)} does not have "${key}". [[${family.verbs.list}]] lists them.`);
+  }
+  delete bucket[key];
+  if (char.arcana && !Object.keys(char.arcana).length) delete char.arcana;
   await CharacterStore.save(char);
-  // Losing an arcanum loses what it granted. Every affliction that named this
-  // as its source is re-measured through its own orphan policy - immediately,
-  // after a while, unchanged, or by an expression over what was left.
-  const orphaned = await orphanAfflictions(StringUtil.normalize(char.name), `arcanum:${key}`);
-  const alsoMerit = await orphanAfflictions(StringUtil.normalize(char.name), key);
-  const notes = [...orphaned, ...alsoMerit];
+  // Losing a power loses what it granted. Every affliction that named this as
+  // its source is re-measured through its own orphan policy - immediately,
+  // after a while, unchanged, or by an expression over what was left. The
+  // source is written `<kind>:<key>`, and a bare key is matched too because a
+  // chronicle may have afflicted by name.
+  const subject = StringUtil.normalize(char.name);
+  const notes: string[] = [];
+  for (const kind of family.kinds) notes.push(...await orphanAfflictions(subject, `${kind}:${key}`));
+  notes.push(...await orphanAfflictions(subject, key));
   return sys(`${disp(char.name)} drops ${key}.${notes.length ? ` ${notes.join("; ")}.` : ""}`);
 }
 
-async function cmdMerits(): Promise<string> {
+// merits / arcana - what this character OWNS from one list.
+async function ownedPowerList<T extends OwnedPowerDef>(family: PowerFamily<T>): Promise<string> {
   const char = await CharacterStore.getCurrent();
   if (!char) return noCharacter();
-  const insts = ownedMeritInstances(char);
-  if (!insts.length && !Object.keys(char.meritsFlaws).length) {
-    return sys(`${disp(char.name)} has no merits or flaws. [[take-merit <name[::param]> [points]]] takes one.`);
+  const insts = family.instances(char);
+  const bucket = family.bucket(char);
+  if (!insts.length && !Object.keys(bucket).length) {
+    const closed = familyClosedTo(char, family as unknown as PowerFamily<OwnedPowerDef>);
+    if (closed) return sys(closed);
+    return sys(`${disp(char.name)} has no ${family.many}. [[${family.verbs.take} <name[::param]> [points]]] takes one.`);
   }
-  const items = insts.map(i => `${i.key} (${i.points}${i.def.kind === "flaw" ? ", flaw" : ""})`);
-  const enh = enhancementsFor(char);
-  const enhBits = Object.entries(enh).map(([t, n]) => {
+  const items = insts.map(i => `${i.key} (${i.points}${i.def.kind === family.defaultKind ? "" : `, ${i.def.kind}`})`);
+  // Enhancements and findings are about the WHOLE sheet, so they are reported
+  // by the list a player is most likely to be looking at when they matter.
+  const enhBits = Object.entries(enhancementsFor(char)).map(([t, n]) => {
     const base = resolveTraitFromRecord(char, t);
     return `${t}: base ${base} -> effective ${base + n} (ceiling +${n}, advisory)`;
   });
   const issues = meritInstanceFindings(char);
-  const parts = [`Merits/Flaws: ${items.join("; ")}`];
+  const parts = [`${family.many}: ${items.join("; ")}`];
   if (enhBits.length) parts.push(`Enhancements - ${enhBits.join("; ")}`);
   if (issues.length) parts.push(`Issues (ST-enforced): ${issues.join("; ")}`);
   return sys(`${parts.join(". ")}.`);
 }
+
+// --- THE VERBS, one line each per family --------------------------------------
+const cmdDefineMerit = (cmd: ParsedCommand): Promise<string> => defineOwnedPower(cmd, MERIT_FAMILY);
+const cmdForgetMerit = (cmd: ParsedCommand): Promise<string> => forgetOwnedPower(cmd, MERIT_FAMILY);
+const cmdMeritInfo = (cmd: ParsedCommand): Promise<string> => ownedPowerInfo(cmd, MERIT_FAMILY);
+const cmdTakeMerit = (cmd: ParsedCommand): Promise<string> => takeOwnedPower(cmd, MERIT_FAMILY);
+const cmdDropMerit = (cmd: ParsedCommand): Promise<string> => dropOwnedPower(cmd, MERIT_FAMILY);
+const cmdMerits = (): Promise<string> => ownedPowerList(MERIT_FAMILY);
+
+const cmdDefineArcanum = (cmd: ParsedCommand): Promise<string> => defineOwnedPower(cmd, ARCANUM_FAMILY);
+const cmdForgetArcanum = (cmd: ParsedCommand): Promise<string> => forgetOwnedPower(cmd, ARCANUM_FAMILY);
+const cmdArcanumInfo = (cmd: ParsedCommand): Promise<string> => ownedPowerInfo(cmd, ARCANUM_FAMILY);
+const cmdTakeArcanum = (cmd: ParsedCommand): Promise<string> => takeOwnedPower(cmd, ARCANUM_FAMILY);
+const cmdDropArcanum = (cmd: ParsedCommand): Promise<string> => dropOwnedPower(cmd, ARCANUM_FAMILY);
+// [[arcana]] with a name inspects it, the way [[arcana]] always has.
+const cmdArcana = (cmd: ParsedCommand): Promise<string> =>
+  cmd.positional[0]?.trim() ? ownedPowerInfo(cmd, ARCANUM_FAMILY) : ownedPowerList(ARCANUM_FAMILY);
 
 async function cmdSpecialty(cmd: ParsedCommand): Promise<string> {
   const char = await CharacterStore.getCurrent();
@@ -14232,7 +14634,7 @@ async function cmdInvoke(cmd: ParsedCommand): Promise<string> {
   if (!char) return noCharacter();
   const source = passiveSourceFor(char, name);
   if (!source) {
-    return sys(`Nothing ${disp(char.name)} has offers "${name}". [[merits]] and [[sheet]] show what he holds.`);
+    return sys(`Nothing ${disp(char.name)} has offers "${name}". [[merits]], [[arcana]] and [[sheet]] show what he holds.`);
   }
   const said = await applyPassiveGrant(StringUtil.normalize(char.name), source.kind, source.key,
     { ...source.grant, mode: "automatic" });
@@ -14240,12 +14642,14 @@ async function cmdInvoke(cmd: ParsedCommand): Promise<string> {
 }
 
 // Which power a character holds that deals in this affliction - the arcanum,
-// the merit or the Discipline. One walk, used by both verbs above.
+// the merit or the Discipline. One walk, used by both verbs above; the KIND it
+// reports is the def's own, which is what makes the source key (`<kind>:<key>`)
+// match again when the power is dropped.
 function passiveSourceFor(char: PlayableCharacter, affliction: string):
     { kind: string; key: string; grant: PassiveGrant } | undefined {
-  for (const inst of ownedMeritInstances(char)) {
+  for (const inst of ownedPowerInstances(char)) {
     if (inst.def.grants?.afflicts === affliction) {
-      return { kind: budgetOfKind(inst.def) === "arcana" ? "arcanum" : "merit", key: inst.key, grant: inst.def.grants };
+      return { kind: inst.def.kind, key: inst.key, grant: inst.def.grants };
     }
   }
   for (const [trait, rating] of Object.entries(char.disciplines ?? {})) {
@@ -14584,6 +14988,7 @@ async function cmdConvertCards(): Promise<string> {
   if (!converted.length && !failed.length) return sys("Nothing to convert - every card is already in the readable format.");
   const sync = await CharacterStore.syncFromLorebook();
   await MeritFlawRegistry.loadFromLorebook();
+  await ArcanumRegistry.loadFromLorebook();
   await reloadAllConfigStores();
   const bits = [`Converted ${converted.length} card${converted.length === 1 ? "" : "s"} from JSON: ${converted.join(", ")}.`];
   if (failed.length) bits.push(`Left alone (unreadable): ${failed.join(", ")}.`);
@@ -14633,6 +15038,11 @@ async function cmdSheet(cmd: ParsedCommand): Promise<string> {
   }
   if (Object.keys(char.meritsFlaws ?? {}).length) {
     parts.push(`Merits/Flaws: ${Object.entries(char.meritsFlaws).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[merits]] for detail)`);
+  }
+  // Its own line, because it is its own category - and absent entirely from the
+  // sheets of the characters (nearly all of them) who have no Arcana.
+  if (Object.keys(char.arcana ?? {}).length) {
+    parts.push(`Arcana/Taints: ${Object.entries(char.arcana!).map(([k, v]) => `${StringUtil.normalize(k)} ${v}`).join(", ")} ([[arcana]] for detail)`);
   }
   const specs = Object.entries(char.specialties ?? {}).filter(([, labels]) => labels.length);
   if (specs.length) parts.push(`Specialties: ${specs.map(([t, labels]) => `${t}: ${labels.join(", ")}`).join("; ")}`);
@@ -15262,48 +15672,9 @@ CommandRouter.register("forget-constraint", cmdForgetConstraint, {
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("check-constraints", cmdCheckConstraints, { summary: "flag the current character's constraint conflicts (incl. merit-instance caps)" });
-// --- THE ARCANA VOCABULARY ---------------------------------------------------
-// Arcana and Taints go through the SAME registry and the same handlers as
-// Merits and Flaws - one owned-power mechanism, four kinds. What they lacked
-// was a vocabulary that says what they are, so these are the same verbs under
-// the names the domain uses. `define-arcanum` defaults kind=arcanum; the
-// listings filter by purse so neither family drowns the other.
-async function cmdDefineArcanum(cmd: ParsedCommand): Promise<string> {
-  return cmdDefineMerit(cmd.named["kind"] ? cmd : { ...cmd, named: { ...cmd.named, kind: "arcanum" } });
-}
-const isArcanumKind = (k: MeritFlawKind): boolean => k === "arcanum" || k === "taint";
-
-async function cmdArcana(cmd: ParsedCommand): Promise<string> {
-  const raw = cmd.positional[0]?.trim();
-  if (raw) return cmdMeritInfo(cmd);
-  const defs = MeritFlawRegistry.all().filter(d => isArcanumKind(d.kind));
-  if (!defs.length) return sys(`No arcana or taints defined. [[define-arcanum]] adds one.`);
-  const items = defs.map(d => `${StringUtil.normalize(d.name)}${d.kind === "taint" ? " (taint)" : ""}`).join(", ");
-  return sys(`Defined arcana & taints: ${items}. [[arcanum <name>]] for detail; [[take-arcanum <name>]] takes one; `
-    + `[[budget]] tracks the arcana purse.`);
-}
-
-// take-arcanum / drop-arcanum insist on the KIND, so the vocabulary means
-// something: asking for a merit here points you at the other verb.
-function wrongFamily(cmd: ParsedCommand, wantArcanum: boolean): string | undefined {
-  const raw = cmd.positional[0]?.trim();
-  if (!raw) return undefined;
-  const hit = resolveMeritInstance(StringUtil.normalize(raw), n => MeritFlawRegistry.get(n));
-  if (!hit) return undefined;
-  const isArc = isArcanumKind(hit.def.kind);
-  if (isArc === wantArcanum) return undefined;
-  return sys(`${hit.def.name} is a ${hit.def.kind}, not ${wantArcanum ? "an arcanum or taint" : "a merit or flaw"}. `
-    + `Use [[${isArc ? "take-arcanum" : "take-merit"} ${StringUtil.normalize(raw)}]].`);
-}
-async function cmdTakeArcanum(cmd: ParsedCommand): Promise<string> {
-  return wrongFamily(cmd, true) ?? cmdTakeMerit(cmd);
-}
-async function cmdDropArcanum(cmd: ParsedCommand): Promise<string> {
-  return wrongFamily(cmd, true) ?? cmdDropMerit(cmd);
-}
-
 CommandRouter.register("take-merit", cmdTakeMerit, {
   summary: "take a merit/flaw; parameterized defs take name::param instances",
+  note: "Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]]",
   params: [
     { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
     { key: "points", kind: "positional", hint: "[points]" },
@@ -15317,56 +15688,20 @@ CommandRouter.register("drop-merit", cmdDropMerit, {
 });
 CommandRouter.register("merits", cmdMerits, {
   summary: "list owned merits/flaws, enhancement totals and advisory issues",
-});
-CommandRouter.register("arcana", cmdArcana, {
-  summary: "the arcana & taints this chronicle defines (they trade in the arcana budget, not freebies)",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
-});
-CommandRouter.register("arcanum", cmdMeritInfo, {
-  summary: "one arcanum or taint in full (the same detail [[merit]] gives)",
-  params: [{ key: "name", kind: "positional", hint: "<name>", example: "celestial-radiance" }],
-});
-CommandRouter.register("define-arcanum", cmdDefineArcanum, {
-  summary: "define an arcanum or taint (define-merit with kind=arcanum)",
-  note: "per-template= gives it a price per splat; kind=taint makes it GRANT points",
-  params: [
-    { key: "name", kind: "named", required: true, type: "literal", desc: "Name - BACKTICKS" },
-    { key: "kind", kind: "named", type: "enum", options: ["arcanum", "taint"], desc: "Default arcanum" },
-    { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings" },
-    { key: "per-template", kind: "named", hint: '"demon:7,thrall:5"', desc: "Price per template; `no` closes it to one" },
-    { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
-    { key: "passive", kind: "named", type: "literal", desc: 'Always-on ops, ";"-separated - BACKTICKS' },
-    { key: "description", kind: "named", type: "literal", desc: "Description - BACKTICKS" },
-  ],
-});
-CommandRouter.register("take-arcanum", cmdTakeArcanum, {
-  summary: "take an arcanum or taint (take-merit, but it insists on the family)",
-  params: [
-    { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
-    { key: "points", kind: "positional", hint: "[points]" },
-    { key: "paid", kind: "named", desc: "What it REALLY cost (0 = the Storyteller granted it)" },
-    { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive prerequisites / template limits" },
-  ],
-});
-CommandRouter.register("drop-arcanum", cmdDropArcanum, {
-  summary: "drop an owned arcanum or taint",
-  params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
-});
-CommandRouter.register("forget-arcanum", cmdForgetMerit, {
-  summary: "remove a custom arcanum/taint definition (a built-in resurfaces)",
-  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+  note: "Never lists Arcana - they are not merits. [[arcana]] is their list",
 });
 CommandRouter.register("define-merit", cmdDefineMerit, {
-  summary: "define a merit, flaw or arcanum (writes the srd:merits-flaws overlay)",
+  summary: "define a merit or flaw (writes the srd:merits-flaws overlay)",
+  note: "kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]]",
   params: [
     { key: "name", kind: "named", required: true, type: "literal", hint: "`<name>`", example: "e.g. `Inviolate Soul`" },
-    { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw", "arcanum", "taint"], desc: "Merits/flaws trade freebies; arcana/taints their own budget (default merit)" },
+    { key: "kind", kind: "named", type: "enum", options: ["merit", "flaw"], desc: "Merits cost freebies, flaws grant them (default merit)" },
     { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings (default 0)" },
     { key: "passive", kind: "named", type: "literal", hint: "`<op>[:<target>] [+N] [if=] [while=]`", desc: 'Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS' },
     { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
     { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
-    { key: "budget", kind: "named", desc: "Which purse it trades in (default: freebie for merit/flaw, arcana for arcanum/taint)", example: "arcana" },
-    { key: "per-template", kind: "named", hint: '"demon:7,thrall:5"', desc: "Price per template; `no` closes it to one", example: "demon:7,thrall:5" },
+    { key: "budget", kind: "named", desc: "Which purse it trades in (default: freebie)", example: "freebie" },
+    { key: "per-template", kind: "named", hint: '"vampire:3,ghoul:1"', desc: "Price per template; `no` closes it to one", example: "vampire:3,ghoul:1" },
     { key: "limit-at", kind: "named", type: "int", desc: "The rating that is rationed across instances", example: "3" },
     { key: "limit-slots", kind: "named", type: "int", desc: "How many instances may hold that rating (default 1)", example: "2" },
     { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
@@ -15380,6 +15715,57 @@ CommandRouter.register("merit", cmdMeritInfo, {
 });
 CommandRouter.register("forget-merit", cmdForgetMerit, {
   summary: "delete a custom merit/flaw definition (built-ins resurface)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
+});
+
+// --- ARCANA & TAINTS - a category of their own, not a flavour of merit -------
+// Dark Ages: Devil's Due. These verbs are the merit verbs' equals, not their
+// wrappers: their own registry, their own lorebook category, their own bucket
+// on the sheet, and a list that opens only for a character bound to the
+// infernal. A vampire who types [[merits]] sees no Arcana, because he has none.
+CommandRouter.register("arcana", cmdArcana, {
+  summary: "the Arcana & Taints this character owns (bare), or one in detail",
+  note: "They trade in the ARCANA purse, never freebies, and only a demon or a demon's thrall has this list at all",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
+});
+CommandRouter.register("arcanum", cmdArcanumInfo, {
+  summary: "inspect an arcanum/taint definition (bare: list them)",
+  params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
+});
+CommandRouter.register("define-arcanum", cmdDefineArcanum, {
+  summary: "define an arcanum or taint (writes the srd:arcana overlay)",
+  note: "per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list",
+  params: [
+    { key: "name", kind: "named", required: true, type: "literal", desc: "Name - BACKTICKS" },
+    { key: "kind", kind: "named", type: "enum", options: ["arcanum", "taint"], desc: "Default arcanum" },
+    { key: "points", kind: "named", hint: "<n|1,2,3>", desc: "Cost, or the ladder of allowed ratings" },
+    { key: "per-template", kind: "named", hint: '"demon:7,thrall:5"', desc: "Price per template; `no` closes it to one" },
+    { key: "param", kind: "named", desc: "Instance-parameter slot (owned as name::value)" },
+    { key: "templates", kind: "named", hint: '"a,b"', desc: "Templates that may take it" },
+    { key: "budget", kind: "named", desc: "Which purse it trades in (default: arcana)", example: "arcana" },
+    { key: "limit-at", kind: "named", type: "int", desc: "The rating that is rationed across instances", example: "3" },
+    { key: "limit-slots", kind: "named", type: "int", desc: "How many instances may hold that rating (default 1)", example: "2" },
+    { key: "limit-per-kind", kind: "named", desc: "And at most this many of a trait kind", example: "attribute:1" },
+    { key: "max-from-trait", kind: "named", desc: "Rating ceiling is this trait", example: "resolve" },
+    { key: "passive", kind: "named", type: "literal", desc: 'Always-on ops, ";"-separated - BACKTICKS' },
+    { key: "description", kind: "named", type: "literal", desc: "Description - BACKTICKS" },
+  ],
+});
+CommandRouter.register("take-arcanum", cmdTakeArcanum, {
+  summary: "take an arcanum or taint (needs the arcana capability - [[attune]])",
+  params: [
+    { key: "name", kind: "positional", required: true, hint: "<name[::param]>" },
+    { key: "points", kind: "positional", hint: "[points]" },
+    { key: "paid", kind: "named", desc: "What it REALLY cost (0 = the Storyteller granted it)" },
+    { key: "waive", kind: "named", type: "enum", options: ["true"], desc: "Waive prerequisites / template limits / the capability gate" },
+  ],
+});
+CommandRouter.register("drop-arcanum", cmdDropArcanum, {
+  summary: "drop an owned arcanum or taint (its passives lift with it)",
+  params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
+});
+CommandRouter.register("forget-arcanum", cmdForgetArcanum, {
+  summary: "remove a custom arcanum/taint definition (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 CommandRouter.register("specialty", cmdSpecialty, {
@@ -16250,11 +16636,14 @@ async function init(): Promise<{ setupMessage: string | null }> {
   await ensurePath("config:success-tables", TABLE_GENERAL_HEADER);
   const recon = await reconcileLorebook();
   const merits = await MeritFlawRegistry.loadFromLorebook();
+  // A SECOND registry, because Arcana are a second category - not merits with
+  // a different `kind`. Two cards, two lists, two sets of verbs.
+  const arcana = await ArcanumRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
   const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
   const seededClock = await StoryClock.seedDefault();        // the story clock (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; custom arcana/taints: ${arcana}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
   return { setupMessage: boot.message };
 }
 //#endregion src/index.ts

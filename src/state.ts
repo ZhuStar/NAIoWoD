@@ -24,12 +24,13 @@ import {
 } from "./core/damage";
 import {
   RulesetConfig, MORTAL_SOAK, TemplateConfig, TEMPLATES, ROAD_OF_HUMANITY, RoadDefinition, roadByName, ResourceDef,
-  bloodForGeneration, MeritFlawDef, MeritFlawRequirements, SRD_HEADER_MARKER, ALL_ATTRIBUTES,
+  bloodForGeneration, MeritFlawDef, ArcanumDef, OwnedPowerDef, MeritFlawRequirements,
+  SRD_HEADER_MARKER, ALL_ATTRIBUTES,
   resourcesForTemplates, healthLevelsForTemplates, ATTRIBUTES,
   ConstraintGroup, makeConstraintGroup,
   BackgroundDef, makeBackgroundDef, DEFAULT_BACKGROUNDS, grantsFromBackgrounds,
   AfflictionDef, makeAfflictionDef, DEFAULT_AFFLICTIONS,
-  EffectOp, resolveMeritInstance, passiveOpsOf,
+  EffectOp, resolvePowerInstance, passiveOpsOf,
   Derivation, traitMaxForGeneration, DISCIPLINES, TraitLimit,
   AfflictionExpiry, rollSpendsCharge, expiryElapsed, OrphanPolicy,
   TemplateDef, makeTemplateDef, DEFAULT_TEMPLATE_DEFS, applyTemplateDefs,
@@ -37,7 +38,7 @@ import {
 } from "./rules";
 import { ExprScope, ExprResult, Numeric, evaluateExpr, evalNumeric } from "./core/expr";
 import {
-  ScopedStorage, LorebookManager, MeritFlawRegistry,
+  ScopedStorage, LorebookManager, MeritFlawRegistry, ArcanumRegistry,
   ListConfigStore, MapConfigStore, CONFIG_CATEGORY,
   ALL_CONFIG_STORES, parseConfigBody, parseNamedConfigList, configEntryText, namedDefsToCard,
   writeTrackedEntry, ensurePath, GENERAL_ENTRY, TABLE_GENERAL_HEADER,
@@ -513,9 +514,14 @@ export interface PlayableCharacter {
   disciplines: Record<string, number>;
   traits: Record<string, number>;
   poolStarts: Record<string, number>;
-  // name -> points; kind via the registry. Parameterized defs are owned as
-  // "name:<param>" instances ("trait-affinity:melee" - typed with :: ).
+  // name -> points; kind via MeritFlawRegistry. Parameterized defs are owned as
+  // "name:<param>" instances (typed with :: ). MERITS AND FLAWS ONLY.
   meritsFlaws: Record<string, number>;
+  // Arcana and Taints, in a bucket of their own because they are a category of
+  // their own (rules.ts "OWNED POWERS"): a different registry, a different
+  // purse, and a list most characters do not have at all. Same key shape.
+  // Absent on every sheet that has none, which is most of them.
+  arcana?: Record<string, number>;
   tags: string[];                         // free-form (clan, ghoul, ...)
   // trait -> specialty labels (VERBATIM case - display text). At most one
   // specialty applies per roll, chosen by the specialty= argument.
@@ -673,7 +679,11 @@ export class CharacterStore {
   }
 
   static async load(name: string): Promise<PlayableCharacter | undefined> {
-    return await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
+    const char = await CharacterStore._storage.get(CharacterStore._key(name)) as PlayableCharacter | undefined;
+    // A sheet stored before Arcana became their own category keeps them in
+    // meritsFlaws. Move them on the way out, so nothing downstream ever sees
+    // the old shape and no player has to re-enter a character.
+    return char ? migratePowerBuckets(char) : undefined;
   }
 
   // Lorebook -> storage. The player's lorebook edits win; unreadable entries
@@ -719,30 +729,38 @@ const CHARACTER_BUCKETS: Array<[keyof PlayableCharacter, string]> = [
   ["traits", "traits"],
   ["poolStarts", "poolStarts"],
   ["meritsFlaws", "meritsFlaws"],
-];
-// One bucket holds every owned power, but the CARD files them by what they are:
-// an arcanum drawing on the arcana budget must not appear under merits-flaws.
-// Both blocks read back into the one bucket, so nothing needs migrating.
-const OWNED_POWER_BLOCKS: Array<[string, (kind: string) => boolean]> = [
-  ["meritsFlaws", k => k === "merit" || k === "flaw"],
-  ["arcana", k => k === "arcanum" || k === "taint"],
+  ["arcana", "arcana"],
 ];
 // `pools` / `merits` read as the longer engine names, so a player may write
-// either spelling on the card.
+// either spelling on the card. `taints` files with the arcana, because a Taint
+// IS an arcanum-category thing (it grants rather than costs).
 const BUCKET_SYNONYMS: Record<string, string> = {
-  pools: "poolStarts", merits: "meritsFlaws",
-  // Written apart on the card, read into the one bucket the engine keeps.
-  arcana: "meritsFlaws", taints: "meritsFlaws", "merits-flaws": "meritsFlaws",
+  pools: "poolStarts", merits: "meritsFlaws", "merits-flaws": "meritsFlaws",
+  taints: "arcana",
 };
 
-// Is this owned power an arcanum or a taint? The registry knows; an unregistered
-// key is treated as a merit, which is where [[check-constraints]] already
-// reports it as unknown.
+// Is this key an arcanum or a taint? The ARCANA registry is the only authority:
+// a key it doesn't know is not an arcanum. Used to migrate sheets written
+// before the two categories were separated - see migratePowerBuckets.
 function isArcanumKey(key: string): boolean {
-  const hit = resolveMeritInstance(StringUtil.normalize(key), n => MeritFlawRegistry.get(n));
-  return hit ? !kindSpendsFreebies(hit.def.kind) : false;
+  return resolvePowerInstance(StringUtil.normalize(key), n => ArcanumRegistry.get(n)) !== undefined;
 }
-const kindSpendsFreebies = (kind: string): boolean => kind === "merit" || kind === "flaw";
+
+// SHEETS WRITTEN BEFORE THE SPLIT kept arcana inside `meritsFlaws`, because
+// there was one bucket. Move anything the arcana registry claims into its own
+// bucket on the way through - reading a sheet, and reading a card. Nobody has
+// to re-enter a character, and after one save the stored shape is the new one.
+export function migratePowerBuckets(char: PlayableCharacter): PlayableCharacter {
+  const strays = Object.keys(char.meritsFlaws ?? {}).filter(isArcanumKey);
+  if (!strays.length) return char;
+  const arcana = { ...(char.arcana ?? {}) };
+  for (const key of strays) {
+    arcana[key] ??= char.meritsFlaws[key];
+    delete char.meritsFlaws[key];
+  }
+  char.arcana = arcana;
+  return char;
+}
 
 // A merit instance key ("trait-affinity:melee") keeps its parameter; only the
 // def's own name is title-cased for display.
@@ -758,10 +776,7 @@ export function characterToCard(char: PlayableCharacter): CardMap {
   const specialties = char.specialties ?? {};
   for (const [field, key] of CHARACTER_BUCKETS) {
     const bucket = (char[field] ?? {}) as Record<string, number>;
-    let names = Object.keys(bucket);
-    // Owned powers split by kind: merits and flaws here, arcana and taints in
-    // their own block below, because they are not the same currency.
-    if (field === "meritsFlaws") names = names.filter(n => !isArcanumKey(n));
+    const names = Object.keys(bucket);
     if (!names.length) continue;
     const block: CardMap = {};
     for (const name of names) {
@@ -800,13 +815,6 @@ export function characterToCard(char: PlayableCharacter): CardMap {
     orphans[displayTraitName(trait)] = labels.length === 1 ? labels[0] : labels;
   }
   if (Object.keys(orphans).length) card["specialties"] = orphans;
-  const arcana: CardMap = {};
-  for (const [name, points] of Object.entries(char.meritsFlaws ?? {})) {
-    if (!isArcanumKey(name)) continue;
-    const paid = char.paid?.[StringUtil.normalize(name)];
-    arcana[displayTraitName(name)] = paid === undefined ? points : { [CARD_VALUE_KEY]: points, paid };
-  }
-  if (Object.keys(arcana).length) card["arcana"] = arcana;
   if (char.capabilities?.length) card["capabilities"] = [...char.capabilities];
   if (Object.keys(char.source ?? {}).length) card["source"] = { ...char.source } as CardMap;
   if (char.purseGrants?.length) {
@@ -843,6 +851,9 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
     stage,
     attributes: {}, abilities: {}, backgrounds: {}, virtues: {}, disciplines: {},
     traits: {}, poolStarts: {}, meritsFlaws: {},
+    // Seeded so the bucket loop can fill it; dropped again below if the card
+    // named none, because most sheets have no arcana at all.
+    arcana: {},
     tags: asStringList(card["tags"]).map(t => StringUtil.normalize(t)),
     specialties: {},
   };
@@ -884,6 +895,10 @@ export function characterFromCard(raw: CardValue | undefined): PlayableCharacter
   }
   if (Object.keys(instances).length) char.instances = instances;
   if (Object.keys(paid).length) char.paid = paid;
+  // A card written before the split lists its arcana under merits-flaws; the
+  // registry, not the card, decides which is which.
+  migratePowerBuckets(char);
+  if (!Object.keys(char.arcana ?? {}).length) delete char.arcana;
   const capabilities = asStringList(card["capabilities"]).map(c => StringUtil.normalize(c));
   if (capabilities.length) char.capabilities = capabilities;
   const source: Record<string, string> = {};
@@ -1245,32 +1260,54 @@ export function permanentRatingOf(char: PlayableCharacter, name: string): number
   return resolveTraitFromRecord(char, owner.name) || resourceNumbers(char, owner).start;
 }
 
-// --- OWNED MERIT INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
-// A character's meritsFlaws bucket maps instance keys ("iron-will",
-// "trait-affinity:melee") to points. Resolution goes through the registry;
-// unknown or malformed keys are skipped here and SURFACED by
-// [[check-constraints]], never silently enforced.
-export interface OwnedMeritInstance {
+// --- OWNED POWER INSTANCES + PASSIVE EFFECTS (the owned-power pattern) -------
+// Each bucket maps instance keys ("iron-will", "trait-affinity:melee") to
+// points, resolved through ITS OWN registry: merits through MeritFlawRegistry,
+// arcana through ArcanumRegistry. Unknown or malformed keys are skipped here
+// and SURFACED by [[check-constraints]], never silently enforced.
+//
+// THREE walks, and picking the right one is not a style choice:
+//   ownedMeritInstances   - the Merits & Flaws report. NEVER arcana.
+//   ownedArcanumInstances - the Arcana & Taints report. NEVER merits.
+//   ownedPowerInstances   - both, for MECHANISM: passive ops, purse ledgers,
+//                           which power grants an affliction. A machine that
+//                           has to look at everything the character owns.
+export interface OwnedPowerInstance<T extends OwnedPowerDef = OwnedPowerDef> {
   key: string;
-  def: MeritFlawDef;
+  def: T;
   param?: string;
   points: number;
 }
+/** @deprecated Named for merits, used for both. Prefer OwnedPowerInstance. */
+export type OwnedMeritInstance = OwnedPowerInstance;
 
-export function ownedMeritInstances(char: PlayableCharacter): OwnedMeritInstance[] {
-  const out: OwnedMeritInstance[] = [];
-  for (const [key, points] of Object.entries(char.meritsFlaws ?? {})) {
-    const hit = resolveMeritInstance(key, n => MeritFlawRegistry.get(n));
+function instancesOf<T extends OwnedPowerDef>(
+  bucket: Record<string, number> | undefined, lookup: (name: string) => T | undefined,
+): Array<OwnedPowerInstance<T>> {
+  const out: Array<OwnedPowerInstance<T>> = [];
+  for (const [key, points] of Object.entries(bucket ?? {})) {
+    const hit = resolvePowerInstance(key, lookup);
     if (hit) out.push({ key: StringUtil.normalize(key), def: hit.def, param: hit.param, points });
   }
   return out;
 }
 
-// Every always-on op the character's merits grant ($param substituted,
+export function ownedMeritInstances(char: PlayableCharacter): Array<OwnedPowerInstance<MeritFlawDef>> {
+  return instancesOf(char.meritsFlaws, n => MeritFlawRegistry.get(n));
+}
+export function ownedArcanumInstances(char: PlayableCharacter): Array<OwnedPowerInstance<ArcanumDef>> {
+  return instancesOf(char.arcana, n => ArcanumRegistry.get(n));
+}
+export function ownedPowerInstances(char: PlayableCharacter): OwnedPowerInstance[] {
+  return [...ownedMeritInstances(char), ...ownedArcanumInstances(char)];
+}
+
+// Every always-on op the character's owned powers grant ($param substituted,
 // amounts scaled by points). Roll-op gates (actionTag/trait) are judged at
-// the roll site.
+// the roll site. BOTH categories: Trait Enhancement is an arcanum and its
+// enhance op is as real as Iron Will's.
 export function passiveOpsFor(char: PlayableCharacter): EffectOp[] {
-  return ownedMeritInstances(char).flatMap(inst => passiveOpsOf(inst.def, inst.param, inst.points));
+  return ownedPowerInstances(char).flatMap(inst => passiveOpsOf(inst.def, inst.param, inst.points));
 }
 
 // Permanent per-trait enhancement totals (the "enhance" passive op): raises

@@ -14,7 +14,7 @@ import {
   MoralityTrait,
   ScopedStorage, LorebookManager,
   CommandRouter, CommandParser, CharacterStore, PLAYER_CHARACTERS_CATEGORY, processAdventureInput,
-  MeritFlawRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
+  MeritFlawRegistry, ArcanumRegistry, SRD_CATEGORIES, SRD_HEADER_MARKER,
   makeRollSpec, parsePoolExpression, resolveSpec, executeRoll, RollModifierRegistry, DEFAULT_DIFFICULTY,
   overrideSpec, describeSpec, NamedRollStore, NAMED_ROLLS_CATEGORY, DEFAULT_NAMED_ROLLS,
   ExtendedRoll, applyInterval, ExtendedRollStore,
@@ -49,7 +49,7 @@ import {
   PASSIVE_AFFLICTIONS, budgetOfKind, SYSTEM, grantIsAutomatic, registerSystemHandlers,
   budgetDef, budgetBuyable, NOT_PURCHASABLE, affinityDisciplines, CAPABILITIES,
   parsePassiveOps, describePassiveOp, type EffectOp, resolveTraitFromRecord,
-  resolveMeritInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
+  resolvePowerInstance, passiveOpsOf, ownedMeritInstances, enhancementsFor,
   DISCIPLINES, disciplineDef,
   TEMPLATE_MORTAL, TEMPLATE_THRALL, TEMPLATE_VAMPIRE, TEMPLATE_MAGE, TEMPLATE_DEMON,
   TEMPLATE_WEREWOLF, TEMPLATE_GHOUL, TEMPLATES,
@@ -744,7 +744,7 @@ describe("Merits & Flaws", () => {
   });
 
   test("tag prerequisites work against character tags (lorebook-defined merit)", async () => {
-    MeritFlawRegistry.reset();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset();
     const loaded = await MeritFlawRegistry.loadFromLorebook();
     expect(loaded).toBeGreaterThan(0); // the mock lorebook defines "Sturdy Stock"
 
@@ -763,7 +763,7 @@ describe("Merits & Flaws", () => {
     m.AddMeritFlaw("Iron Will");
     m.AddMeritFlaw("Old Blood");
     expect(m.MeritPointsSpent).toBe(5);
-    MeritFlawRegistry.reset();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset();
   });
 
   test("variable point costs validate the chosen rating", () => {
@@ -772,7 +772,7 @@ describe("Merits & Flaws", () => {
     expect(() => m.AddMeritFlaw("Contested Domain", { points: 5 })).toThrow(/one of \[1, 2, 3\]/);
     m.AddMeritFlaw("Contested Domain", { points: 2 });
     expect(m.FlawPointsGained).toBe(2);
-    MeritFlawRegistry.reset();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset();
   });
 
   test("duplicates and unknown names are rejected", () => {
@@ -2308,7 +2308,17 @@ describe("success tables: lorebook overlay & [[tables]]", () => {
 // CONSTRAINT GROUPS + the first api.v1.ui window
 // =============================================================================
 describe("constraint groups (checkConstraints, pure)", () => {
-  const owned = (o: Partial<OwnedTraits>): OwnedTraits => ({ backgrounds: [], merits: [], flaws: [], templates: [], ...o });
+  const owned = (o: Partial<OwnedTraits>): OwnedTraits => ({ backgrounds: [], merits: [], flaws: [], arcana: [], templates: [], ...o });
+
+  test("arcana are their own domain: a merit constraint never catches one", () => {
+    const asMerit = makeConstraintGroup({ name: "m", relation: "forbidden", domain: "merit", members: ["celestial-radiance"] });
+    expect(checkConstraints([asMerit], owned({ arcana: ["celestial-radiance"] })).length).toBe(0);
+    const asArcanum = makeConstraintGroup({ name: "a", relation: "forbidden", domain: "arcanum", members: ["celestial-radiance"] });
+    expect(checkConstraints([asArcanum], owned({ arcana: ["celestial-radiance"] })).length).toBe(1);
+    // ...and `any` still searches everything a character holds.
+    const anywhere = makeConstraintGroup({ name: "x", relation: "forbidden", domain: "any", members: ["celestial-radiance"] });
+    expect(checkConstraints([anywhere], owned({ arcana: ["celestial-radiance"] })).length).toBe(1);
+  });
 
   test("exclusive: holding more than max members is a violation", () => {
     const g = makeConstraintGroup({ name: "s", relation: "exclusive", domain: "background", members: ["status", "anonymity"], max: 1 });
@@ -2354,7 +2364,7 @@ describe("constraint groups (checkConstraints, pure)", () => {
 
 describe("constraint commands", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); MeritFlawRegistry.reset();
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); MeritFlawRegistry.reset(); ArcanumRegistry.reset();
     await LorebookManager.bootstrap();
   });
 
@@ -2978,7 +2988,7 @@ describe("define-table / forget-table (+ win-table): success-table authoring", (
 // BACKGROUNDS - a bag of their own; dots are not cost; one may confer others
 // =============================================================================
 describe("backgrounds: definitions, grants, and dots that are not cost", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("a Talisman that IS a place confers that place's ratings, and they are real", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
@@ -3032,29 +3042,85 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
 // THE ARCANA VOCABULARY - the same machinery, under the names the domain uses
 // =============================================================================
 describe("arcana verbs: take/drop/define/list, and they insist on the family", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("[[arcana]] lists only arcana and taints - merits stay out of it", async () => {
-    const listed = await CommandRouter.route("arcana");
+  test("[[arcanum]] lists only arcana and taints - merits stay out of it", async () => {
+    const listed = await CommandRouter.route("arcanum");
     expect(listed).toContain("celestial-radiance");
     expect(listed).toContain("trait-affinity");
     expect(listed).not.toContain("iron-will");                   // a merit
+    // ...and the merit list never mentions an arcanum. This is the whole point:
+    // a regular vampire's Merits & Flaws contains no Devil's Due Arcana.
+    const merits = await CommandRouter.route("merit");
+    expect(merits).toContain("iron-will");
+    expect(merits).not.toContain("celestial-radiance");
+    expect(merits).not.toContain("trait-affinity");
   });
 
   test("take-arcanum refuses a merit and points at the other verb", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     const wrong = await CommandRouter.route("take-arcanum iron-will");
-    expect(wrong).toContain("is a merit, not an arcanum or taint");
+    expect(wrong).toContain("is a merit/flaw, not an arcanum/taint");
     expect(wrong).toContain("take-merit iron-will");
     expect(await CommandRouter.route("take-arcanum celestial-radiance")).toContain("7 arcana points");
+    // ...and symmetrically: define-merit cannot be talked into making one.
+    const refused = await CommandRouter.route('define-merit name=`Borrowed Sight` kind=arcanum points=3');
+    expect(refused).toContain("is not a merit/flaw");
+    expect(refused).toContain("define-arcanum");
+    expect(MeritFlawRegistry.get("borrowed-sight")).toBeUndefined();
+  });
+
+  test("take-merit refuses an arcanum, and the two buckets stay apart", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    const wrong = await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    expect(wrong).toContain("takes Trait Affinity::melee");
+    const refused = await CommandRouter.route("take-merit trait-affinity::melee 2");
+    expect(refused).toContain("is an arcanum/taint, not a merit/flaw");
+    await CommandRouter.route("take-merit iron-will 3");
+    const char = (await CharacterStore.load("Azazel"))!;
+    expect(char.arcana).toEqual({ "trait-affinity:melee": 2 });
+    expect(char.meritsFlaws).toEqual({ "iron-will": 3 });
+    // [[merits]] shows the merit and NOT the arcanum; [[arcana]] the reverse.
+    expect(await CommandRouter.route("merits")).toContain("iron-will");
+    expect(await CommandRouter.route("merits")).not.toContain("trait-affinity");
+    expect(await CommandRouter.route("arcana")).toContain("trait-affinity");
+    expect(await CommandRouter.route("arcana")).not.toContain("iron-will");
+  });
+
+  test("a vampire has no Arcana list at all - not an empty one, none", async () => {
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const listed = await CommandRouter.route("arcana");
+    expect(listed).toContain("has no Arcana & Taints at all");
+    expect(listed).toContain("demon's thrall");
+    const refused = await CommandRouter.route("take-arcanum trait-affinity::melee 2");
+    expect(refused).toContain("has no Arcana & Taints at all");
+    expect((await CharacterStore.load("Kvar"))!.arcana).toBeUndefined();
+    // The gate is a CAPABILITY, so becoming a thrall - or being attuned by a
+    // Storyteller who says otherwise - opens it without editing any list.
+    await CommandRouter.route("attune arcana");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::melee 2")).toContain("arcana point");
+    expect((await CharacterStore.load("Kvar"))!.arcana!["trait-affinity:melee"]).toBe(2);
   });
 
   test("define-arcanum defaults the kind, so the purse is right without saying so", async () => {
     await CommandRouter.route('define-arcanum name=`Borrowed Sight` points=3 description=`Another\'s eyes.`');
-    expect(MeritFlawRegistry.get("borrowed-sight")!.kind).toBe("arcanum");
+    expect(ArcanumRegistry.get("borrowed-sight")!.kind).toBe("arcanum");
+    expect(MeritFlawRegistry.get("borrowed-sight")).toBeUndefined();   // NOT a merit
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     await CommandRouter.route("take-arcanum borrowed-sight 3");
     expect(await CommandRouter.route("budget")).toContain("arcana: 3/25");
+  });
+
+  test("a sheet written before the split migrates: arcana move to their own bucket", async () => {
+    await CommandRouter.route('create-playable name="Azazel" templates=demon');
+    // The old shape, straight into storage: one bucket for everything.
+    const old = (await CharacterStore.load("Azazel"))!;
+    old.meritsFlaws = { "iron-will": 3, "celestial-radiance": 7 };
+    delete old.arcana;
+    await CharacterStore.save(old);
+    const back = (await CharacterStore.load("Azazel"))!;
+    expect(back.meritsFlaws).toEqual({ "iron-will": 3 });
+    expect(back.arcana).toEqual({ "celestial-radiance": 7 });
   });
 });
 
@@ -3062,7 +3128,7 @@ describe("arcana verbs: take/drop/define/list, and they insist on the family", (
 // SET-TRAIT - the writing counterpart of [[sheet]]
 // =============================================================================
 describe("set-trait: putting ratings back without hand-editing the card", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("the group is inferred from the chronicle's own lists, not guessed", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
@@ -3107,7 +3173,7 @@ describe("set-trait: putting ratings back without hand-editing the card", () => 
 // SUPERNATURAL CATEGORIES - which family a power belongs to, and what it needs
 // =============================================================================
 describe("supernatural categories: disciplines, magic, sorcery, blood-sorcery", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("a blood-sorcery path hangs from its Discipline - unless it is Koldunic", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
@@ -3139,33 +3205,36 @@ describe("supernatural categories: disciplines, magic, sorcery, blood-sorcery", 
 // BUDGETS - arcana are not merits, and price paid is not price listed
 // =============================================================================
 describe("arcana budgets: their own purse, priced per template", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("a printed (7/5) arcanum: the demon pays 7, the thrall 5 and gets the lesser version", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
-    const demon = await CommandRouter.route("take-merit celestial-radiance");
+    const demon = await CommandRouter.route("take-arcanum celestial-radiance");
     expect(demon).toContain("7 arcana points");
     expect(demon).toContain("a demon's price");
 
     await CommandRouter.route('create-playable name="Bound" templates=thrall');
     await CommandRouter.route('play name="Bound"');
-    const thrall = await CommandRouter.route("take-merit celestial-radiance");
+    const thrall = await CommandRouter.route("take-arcanum celestial-radiance");
     expect(thrall).toContain("5 arcana points");
     expect(thrall).toContain("cannot generate effects greater than three successes");
   });
 
   test("naming templates is exhaustive: nobody else may take it", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    const refused = await CommandRouter.route("take-merit celestial-radiance");
+    // Open the category first, so what refuses here is the PER-TEMPLATE list and
+    // not the capability gate - two different refusals, tested apart.
+    await CommandRouter.route("attune arcana");
+    const refused = await CommandRouter.route("take-arcanum celestial-radiance");
     expect(refused).toContain("not open to vampire");
-    expect((await CharacterStore.load("Kvar"))!.meritsFlaws["celestial-radiance"]).toBeUndefined();
+    expect((await CharacterStore.load("Kvar"))!.arcana?.["celestial-radiance"]).toBeUndefined();
     // The Storyteller may still say otherwise.
-    expect(await CommandRouter.route("take-merit celestial-radiance waive=true")).toContain("arcana points");
+    expect(await CommandRouter.route("take-arcanum celestial-radiance waive=true")).toContain("arcana points");
   });
 
   test("the two purses never mix: an arcanum can never make a merit budget look overspent", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
-    await CommandRouter.route("take-merit celestial-radiance");
+    await CommandRouter.route("take-arcanum celestial-radiance");
     await CommandRouter.route("take-merit iron-will");           // a MERIT, 3 freebie
     const report = await CommandRouter.route("budget");
     expect(report).toContain("arcana: 7/25");
@@ -3186,7 +3255,7 @@ describe("arcana budgets: their own purse, priced per template", () => {
 
   test("price paid is not price listed: [[paid]] records what the Storyteller granted", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
-    await CommandRouter.route("take-merit celestial-radiance");
+    await CommandRouter.route("take-arcanum celestial-radiance");
     expect(await CommandRouter.route("budget")).toContain("arcana: 7/25");
     // The Storyteller says he was MADE with it.
     expect(await CommandRouter.route("paid celestial-radiance")).toContain("granted, not bought");
@@ -3200,7 +3269,7 @@ describe("arcana budgets: their own purse, priced per template", () => {
 
   test("take-merit can set the price on the spot", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
-    expect(await CommandRouter.route("take-merit celestial-radiance paid=0")).toContain("paid 0");
+    expect(await CommandRouter.route("take-arcanum celestial-radiance paid=0")).toContain("paid 0");
     expect(await CommandRouter.route("budget")).toContain("arcana: 0/25");
   });
 
@@ -3909,7 +3978,7 @@ describe("roll window: win-roll + the table sidecar", () => {
 // NAMED PROCEDURES - extended saved rolls + carried table/description + defaults
 // =============================================================================
 describe("named procedures: extended saved rolls, table + description, defaults", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("SavedRoll round-trips extended + description through the lorebook JSON", async () => {
     await CommandRouter.route("name-roll siege stamina+survival 7 extended=true intervals=5 interval=`1 night` description=`A long grind.`");
@@ -3996,7 +4065,7 @@ describe("named procedures: extended saved rolls, table + description, defaults"
 // CONTESTED SAVED ROLLS + MULTI-STAGE PROCEDURES - the "real arena" primitives
 // =============================================================================
 describe("contested saved rolls + multi-stage procedures", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("an opposed saved roll round-trips and invoking it launches a contest (not a single roll)", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');   // dexterity 1
@@ -4320,7 +4389,7 @@ describe("document cleanup: streaming-hide backstop + noise age-out (onGeneratio
 // SHEET - the record as the engine reads it + the creator-mode hand-edit loop
 // =============================================================================
 describe("sheet: engine view of the record + creator-mode manual fill", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("sheet shows the seeded record; enhancements mark effective values", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
@@ -4329,8 +4398,13 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
     expect(s).toContain("strength 1");
     expect(s).toContain("Abilities (nonzero): none");
     expect(s).toContain("Pool starts: willpower 0");
-    await CommandRouter.route("take-merit trait-enhancement::strength 2");
-    expect(await CommandRouter.route("sheet")).toContain("strength 1 (3 eff)");
+    expect(s).not.toContain("Arcana/Taints");            // a vampire has none
+    await CommandRouter.route("attune arcana");          // ...until he is a thrall
+    await CommandRouter.route("take-arcanum trait-enhancement::strength 2");
+    const after = await CommandRouter.route("sheet");
+    expect(after).toContain("strength 1 (3 eff)");
+    expect(after).toContain("Arcana/Taints: trait-enhancement:strength 2");
+    expect(after).not.toContain("Merits/Flaws");
   });
 
   test("the manual-fill loop: hand-write the lorebook card in creator mode, sheet shows the sync, the roll uses it", async () => {
@@ -4383,7 +4457,7 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
 // OWNED POWERS - parameterized merits, passive effects, specialties
 // =============================================================================
 describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("Sharpened Senses: each purchase is another -1, and only on Perception pools", async () => {
     // A DEMON: Willpower + Resolve. (Resolve is the infernal resource - mages
@@ -4393,7 +4467,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     char.attributes.perception = 4;
     char.abilities.awareness = 2;
     await CharacterStore.save(char);
-    expect(await CommandRouter.route("take-merit sharpened-senses 3")).toContain("difficulty -3");
+    expect(await CommandRouter.route("take-arcanum sharpened-senses 3")).toContain("difficulty -3");
     // Difficulty 8 - 3 = 5, so a run of 6s all hit.
     const sharp = await CommandRouter.route("roll perception+awareness 8", { rng: seqRng([6, 6, 6, 6, 6, 6]) });
     expect(sharp).toContain("vs diff 5");
@@ -4408,21 +4482,24 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     await CommandRouter.route('create-playable name="Aldous" templates=demon');
     const char = (await CharacterStore.load("Aldous"))!;
     expect(permanentRatingOf(char, "resolve")).toBe(3);   // the demon's own starting band
-    const refused = await CommandRouter.route("take-merit sharpened-senses 5");
+    const refused = await CommandRouter.route("take-arcanum sharpened-senses 5");
     expect(refused).toContain("may not be taken more times than Resolve (3)");
-    expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
-    expect(await CommandRouter.route("take-merit sharpened-senses 5 waive=true")).toContain("5 arcana points");
+    expect((await CharacterStore.load("Aldous"))!.arcana?.["sharpened-senses"]).toBeUndefined();
+    expect(await CommandRouter.route("take-arcanum sharpened-senses 5 waive=true")).toContain("5 arcana points");
     // A ceiling that MOVES strands the purchases above it - reported, never trimmed.
     expect(await CommandRouter.route("check-constraints")).toContain("sharpened-senses is at 5 but resolve is only 3");
   });
 
   test("a mage has no Resolve at all, so the arcanum is not open to him", async () => {
     await CommandRouter.route('create-playable name="Aldous" templates=mage');
+    // A mage bound as a thrall: the list is open to him, and the CEILING is
+    // still what stops him - he has no Resolve to measure it against.
+    await CommandRouter.route("attune arcana");
     const char = (await CharacterStore.load("Aldous"))!;
     expect(permanentRatingOf(char, "resolve")).toBe(0);        // Quintessence + Willpower, no Resolve
-    const refused = await CommandRouter.route("take-merit sharpened-senses 1");
+    const refused = await CommandRouter.route("take-arcanum sharpened-senses 1");
     expect(refused).toContain("has no Resolve");
-    expect((await CharacterStore.load("Aldous"))!.meritsFlaws["sharpened-senses"]).toBeUndefined();
+    expect((await CharacterStore.load("Aldous"))!.arcana?.["sharpened-senses"]).toBeUndefined();
   });
 
   test("a Resolve that is really Living Resolve caps it just the same", async () => {
@@ -4435,7 +4512,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(permanentRatingOf(char, "quintessence")).toBe(30);
     expect(permanentRatingOf(char, "blood")).toBe(30);
     expect(permanentRatingOf(char, "willpower")).toBe(30);
-    expect(await CommandRouter.route("take-merit sharpened-senses 6")).toContain("difficulty -6");
+    expect(await CommandRouter.route("take-arcanum sharpened-senses 6")).toContain("difficulty -6");
   });
 
   test("max-from-trait is authorable and survives the card round trip", async () => {
@@ -4445,30 +4522,37 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(MeritFlawRegistry.get("keen-nose")!.maxFromTrait).toBe("resolve");
     const text = (await LorebookManager.entryText("srd:merits-flaws", "srd:merits-flaws:custom"))!;
     expect(text).toContain("max-from-trait: resolve");
-    MeritFlawRegistry.reset();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset();
     await MeritFlawRegistry.loadFromLorebook();
     expect(MeritFlawRegistry.get("keen-nose")!.maxFromTrait).toBe("resolve");
   });
 
-  test("resolveMeritInstance: plain names, parameterized instances, malformed forms", () => {
+  test("resolvePowerInstance: plain names, parameterized instances, malformed forms", () => {
     const lookup = (n: string) => MeritFlawRegistry.get(n);
-    expect(resolveMeritInstance("iron-will", lookup)!.def.name).toBe("Iron Will");
-    const inst = resolveMeritInstance("trait-affinity:melee", lookup)!;
+    expect(resolvePowerInstance("iron-will", lookup)!.def.name).toBe("Iron Will");
+    // Parameterized instances resolve through whichever registry owns the def -
+    // Trait Affinity is an ARCANUM, so the merit registry must not answer it.
+    const arcane = (n: string) => ArcanumRegistry.get(n);
+    const inst = resolvePowerInstance("trait-affinity:melee", arcane)!;
     expect(inst.def.name).toBe("Trait Affinity");
     expect(inst.param).toBe("melee");
-    expect(resolveMeritInstance("trait-affinity", lookup)).toBeUndefined();   // param def owned bare
-    expect(resolveMeritInstance("nope:melee", lookup)).toBeUndefined();       // unknown base
+    expect(resolvePowerInstance("trait-affinity:melee", lookup)).toBeUndefined();  // wrong registry
+    expect(resolvePowerInstance("trait-affinity", arcane)).toBeUndefined();   // param def owned bare
+    expect(resolvePowerInstance("nope:melee", lookup)).toBeUndefined();       // unknown base
   });
 
   test("passiveOpsOf: $param substitution + points scaling", () => {
-    const def = MeritFlawRegistry.get("trait-affinity")!;
+    const def = ArcanumRegistry.get("trait-affinity")!;
     const ops = passiveOpsOf(def, "melee", 2);
     expect(ops).toEqual([{ op: "difficulty", trait: "melee", amount: -2 }]);
   });
 
   test("Trait Affinity lowers difficulty when the POOL uses the trait - and only then", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    await CommandRouter.route("take-merit trait-affinity::melee 2");
+    // A vampire bound as a thrall - anyone can be one, which is the whole
+    // reason the gate is a capability and not a template list.
+    await CommandRouter.route("attune arcana");
+    await CommandRouter.route("take-arcanum trait-affinity::melee 2");
     const hit = await CommandRouter.route("roll dexterity+melee", { rng: seqRng([6]) });
     expect(hit).toContain("vs diff 4");
     expect(hit).toContain("trait-affinity (melee): difficulty -2");
@@ -4484,7 +4568,8 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     await CommandRouter.route('create-playable name="Erik" templates=mortal');
     await CommandRouter.route('play name="Erik"');
-    await CommandRouter.route("take-merit trait-affinity::brawl 1");
+    await CommandRouter.route("attune arcana");
+    await CommandRouter.route("take-arcanum trait-affinity::brawl 1");
     await CommandRouter.route('play name="Rok"');
     const r = await CommandRouter.route('resist strength+brawl strength+brawl vs="Erik"', { rng: seqRng([6, 6]) });
     expect(r).toContain("vs diff 6");   // Rok, no affinity
@@ -4493,17 +4578,18 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
 
   test("two Abilities may reach 3; a THIRD trait at 3 is refused (waivable) and flagged", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("attune arcana");
     // Two Abilities at the top rating is exactly what the arcanum allows.
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 arcana points");
-    expect(await CommandRouter.route("take-merit trait-affinity::brawl 3")).toContain("3 arcana points");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::melee 3")).toContain("3 arcana points");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::brawl 3")).toContain("3 arcana points");
     await CommandRouter.route('define-constraint name="noop" relation=exclusive domain=background members="status"');
     expect(await CommandRouter.route("check-constraints")).toContain("satisfies all 1 constraint group");
     // A third one is over the ration - refused at the door...
-    const refused = await CommandRouter.route("take-merit trait-affinity::stealth 3");
+    const refused = await CommandRouter.route("take-arcanum trait-affinity::stealth 3");
     expect(refused).toContain("allows 2 traits at 3");
-    expect((await CharacterStore.load("Kvar"))!.meritsFlaws["trait-affinity:stealth"]).toBeUndefined();
+    expect((await CharacterStore.load("Kvar"))!.arcana?.["trait-affinity:stealth"]).toBeUndefined();
     // ...and reported if it gets in anyway (a waiver, or a hand-edited sheet).
-    await CommandRouter.route("take-merit trait-affinity::stealth 3 waive=true");
+    await CommandRouter.route("take-arcanum trait-affinity::stealth 3 waive=true");
     const report = await CommandRouter.route("check-constraints");
     expect(report).toContain("allows 2 traits at 3");
     expect(report).toContain("melee");
@@ -4512,45 +4598,53 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
 
   test("the SECOND top slot may not be another Attribute", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    expect(await CommandRouter.route("take-merit trait-affinity::strength 3")).toContain("3 arcana points");
+    await CommandRouter.route("attune arcana");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::strength 3")).toContain("3 arcana points");
     // One Attribute is fine; a second Attribute at 3 breaks the per-kind ration
     // even though the two slots are not full yet.
-    const refused = await CommandRouter.route("take-merit trait-affinity::dexterity 3");
+    const refused = await CommandRouter.route("take-arcanum trait-affinity::dexterity 3");
     expect(refused).toContain("allows 1 attribute at 3");
     // An Ability takes the other slot happily.
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 3")).toContain("3 arcana points");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::melee 3")).toContain("3 arcana points");
     // And a trait BELOW the top rating is never rationed.
-    expect(await CommandRouter.route("take-merit trait-affinity::stealth 2")).toContain("2 arcana points");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::stealth 2")).toContain("2 arcana points");
   });
 
   test("merit findings surface even with zero constraint groups defined", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("attune arcana");
     const clean = await CommandRouter.route("check-constraints");
     expect(clean).toContain("No constraint groups defined");
     expect(clean).toContain("check out");
-    await CommandRouter.route("take-merit trait-affinity::melee 3");
-    await CommandRouter.route("take-merit trait-affinity::brawl 3");
-    await CommandRouter.route("take-merit trait-affinity::stealth 3 waive=true");
+    await CommandRouter.route("take-arcanum trait-affinity::melee 3");
+    await CommandRouter.route("take-arcanum trait-affinity::brawl 3");
+    await CommandRouter.route("take-arcanum trait-affinity::stealth 3 waive=true");
     const report = await CommandRouter.route("check-constraints");
     expect(report).toContain("allows 2 traits at 3");
   });
 
   test("Trait Enhancement grows the pool, stacks with boosts, and reports the ceiling", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    await CommandRouter.route("attune arcana");
     const c = (await CharacterStore.getCurrent())!;
     c.attributes["strength"] = 3;
     await CharacterStore.save(c);
-    await CommandRouter.route("take-merit trait-enhancement::strength 2");
+    await CommandRouter.route("take-arcanum trait-enhancement::strength 2");
     const r = await CommandRouter.route("roll strength", { rng: seqRng([6, 6, 6, 6, 6]) });   // exactly 5 dice
     expect(r).toContain("(5)");
-    const m = await CommandRouter.route("merits");
+    // The enhancement is an ARCANUM, so it is [[arcana]] that lists it - and the
+    // enhancement total, which is about the whole sheet, rides along.
+    const m = await CommandRouter.route("arcana");
+    expect(m).toContain("trait-enhancement:strength");
     expect(m).toContain("strength: base 3 -> effective 5 (ceiling +2, advisory)");
+    expect(await CommandRouter.route("merits")).not.toContain("trait-enhancement");
   });
 
   test("take-merit validates points and prerequisites (waive overrides)", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
-    expect(await CommandRouter.route("take-merit trait-affinity::melee 5")).toContain("one of [1, 2, 3]");
-    expect(await CommandRouter.route("take-merit trait-affinity")).toContain("name its trait");
+    await CommandRouter.route("attune arcana");
+    expect(await CommandRouter.route("take-arcanum trait-affinity::melee 5")).toContain("one of [1, 2, 3]");
+    expect(await CommandRouter.route("take-arcanum trait-affinity")).toContain("name its trait");
     expect(await CommandRouter.route("take-merit eat-food")).toContain("prerequisites not met");
     expect(await CommandRouter.route("take-merit eat-food waive=true")).toContain("takes Eat Food");
     expect(await CommandRouter.route("drop-merit eat-food")).toContain("drops eat-food");
@@ -5358,7 +5452,7 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
 
 describe("defining merits, flaws & arcana from a command", () => {
   beforeEach(async () => {
-    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); MeritFlawRegistry.reset();
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); MeritFlawRegistry.reset(); ArcanumRegistry.reset();
     await LorebookManager.bootstrap();
   });
 
@@ -5387,7 +5481,7 @@ describe("defining merits, flaws & arcana from a command", () => {
     expect(defined).toContain("immune (possession,soul-control,soul-suppression)");
     expect(defined).toContain("while living-resolve >= 1");
     // The registry rebuilds itself from the lorebook alone.
-    MeritFlawRegistry.reset();
+    MeritFlawRegistry.reset(); ArcanumRegistry.reset();
     expect(MeritFlawRegistry.get("inviolate-soul")).toBeUndefined();
     await MeritFlawRegistry.loadFromLorebook();
     const def = MeritFlawRegistry.get("inviolate-soul")!;
@@ -5597,7 +5691,7 @@ describe("a fused point is never wasted at the difficulty floor", () => {
 // CHARACTER CREATION - the budget every fresh character is built against
 // =============================================================================
 describe("creation: the pools, the picks, and what the sheet has actually taken", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("every character buys the same three ladders; a splat adds its own on top", () => {
     expect(BASE_CREATION.attributes).toEqual({ primary: 7, secondary: 5, tertiary: 3 });
@@ -5724,7 +5818,7 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
 // CLANS & FELLOWSHIPS - the picks, and what only their own may buy
 // =============================================================================
 describe("clans & fellowships: thirteen and six, with exclusives gated on the pick", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("the Assamite castes pick different Disciplines but are one clan", () => {
     expect(Object.keys(CLANS).length).toBe(15);            // the castes are entries...
@@ -5875,7 +5969,7 @@ describe("expressions (core/expr.ts): arithmetic, references, and the hyphen rul
 // DERIVED VALUES - what a sheet implies rather than states
 // =============================================================================
 describe("derived values: Generation, Road, Willpower, and the ceilings they move", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("a fresh vampire's Road is 2 and its Willpower is 1, before anything is assigned", async () => {
     await CommandRouter.route('create-playable name="Sasha" templates=vampire');
@@ -5981,7 +6075,7 @@ describe("derived values: Generation, Road, Willpower, and the ceilings they mov
 // SIMPLIFICATION PASS - the seams that replaced duplicated code
 // =============================================================================
 describe("one definition, one behaviour: what the cleanup pass consolidated", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("the other two Roads are reachable, and change what the rating sums", async () => {
     expect(Object.keys(ROADS)).toEqual(["road-of-humanity", "road-of-kings", "road-of-the-beast"]);
@@ -6014,8 +6108,9 @@ describe("one definition, one behaviour: what the cleanup pass consolidated", ()
     // rollOpPatch is the single source: a def with all five ops folds each into
     // its own field, and an op nobody interprets is reported rather than applied.
     await CommandRouter.route('define-arcanum name=`Everything` points=1 passive=`difficulty -1; dice +2; successes +1; uncancelable +1; nagain 9; seduction +3`');
-    const def = MeritFlawRegistry.get("everything")!;
+    const def = ArcanumRegistry.get("everything")!;
     expect(def.passive!.length).toBe(6);
+    expect(MeritFlawRegistry.get("everything")).toBeUndefined();   // its own list
     expect(await CommandRouter.route("arcanum everything")).toContain("seduction");
   });
 });
@@ -6024,7 +6119,7 @@ describe("one definition, one behaviour: what the cleanup pass consolidated", ()
 // MANUAL SUCCESSES - the Storyteller hands some out, before a die is thrown
 // =============================================================================
 describe("successes= and uncancelable=: granted successes, by hand", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("the spec carries them, and resolveSpec folds them in beside tags and spends", () => {
     const resolve = (n: string): number => ({ strength: 3, brawl: 2 } as Record<string, number>)[n] ?? 0;
@@ -6091,7 +6186,7 @@ describe("successes= and uncancelable=: granted successes, by hand", () => {
 // TEMPLATES AS DATA - extending one, and the Ouroboros that stopped being code
 // =============================================================================
 describe("templates: extending one, from a def or a command", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("the Ouroboros is a DEF that extends the mage - and resolves to what it always was", () => {
     const def = DEFAULT_TEMPLATE_DEFS.find(d => d.name === "ouroboros")!;
@@ -6199,7 +6294,7 @@ describe("templates: extending one, from a def or a command", () => {
 // RESOURCES THAT READ THE SHEET - the Fount ladder, and a pool made of pools
 // =============================================================================
 describe("resource capacity as an expression: the Fount ladder, and fusing two pools", () => {
-  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
+  beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("a mage without the Fount holds ten and spends one; each dot raises both", async () => {
     await CommandRouter.route('create-playable name="Hermetic" templates=mage');
@@ -6423,13 +6518,18 @@ describe("capabilities: holding a pool is not being able to spend it", () => {
   });
 
   test("the roster is what templates draw on, and Awakened is one of them", () => {
-    expect(Object.keys(CAPABILITIES)).toEqual(["awakened", "vitae", "resolve"]);
+    expect(Object.keys(CAPABILITIES)).toEqual(["awakened", "vitae", "resolve", "arcana"]);
     expect(TEMPLATE_MAGE.Capabilities).toEqual(["awakened"]);
     expect(TEMPLATE_MAGE.Awakened).toBe(true);          // still the name it had
     expect(TEMPLATE_VAMPIRE.Capabilities).toEqual(["vitae"]);
     expect(TEMPLATE_VAMPIRE.Awakened).toBe(false);
-    // The Ouroboros inherits the mage's and adds the two nobody else has both of.
-    expect([...TEMPLATES["ouroboros"].Capabilities].sort()).toEqual(["awakened", "resolve", "vitae"]);
+    // The Ouroboros inherits the mage's and adds the ones nobody else has all of.
+    expect([...TEMPLATES["ouroboros"].Capabilities].sort()).toEqual(["arcana", "awakened", "resolve", "vitae"]);
+    // `arcana` is not a pool at all - it is what opens the Arcana LIST, and it
+    // belongs to the infernal: a demon, and anyone who became a demon's thrall.
+    expect(TEMPLATES["demon"].Capabilities).toContain("arcana");
+    expect(TEMPLATES["thrall"].Capabilities).toContain("arcana");
+    expect(TEMPLATES["mortal"].Capabilities).not.toContain("arcana");
   });
 
   test("a mage with blood in his veins holds it and cannot use it, until he is attuned", async () => {
@@ -7201,8 +7301,12 @@ describe("passive powers apply themselves", () => {
   });
 
   test("three different KINDS of thing, one behaviour - and arcana are their own kind", () => {
-    // Devil's Due arcana are NOT merits or flaws: they trade in their own purse.
-    const aptitude = MeritFlawRegistry.get("trait-affinity")!;
+    // Devil's Due arcana are NOT merits or flaws: their own list, their own
+    // registry, their own purse. The merit registry has never heard of them.
+    const aptitude = ArcanumRegistry.get("trait-affinity")!;
+    expect(MeritFlawRegistry.get("trait-affinity")).toBeUndefined();
+    expect(MeritFlawRegistry.all().every(d => d.kind === "merit" || d.kind === "flaw")).toBe(true);
+    expect(ArcanumRegistry.all().every(d => d.kind === "arcanum" || d.kind === "taint")).toBe(true);
     expect(aptitude.kind).toBe("arcanum");
     expect(budgetOfKind(aptitude)).toBe("arcana");
     expect(aptitude.grants?.afflicts).toBe("trait-aptitude");

@@ -14,7 +14,7 @@ may share one line; each is replaced by its `[SYSTEM: …]` reply.
 With no argument it lists every verb:
 
 ```
-[SYSTEM: 131 commands: help, creator-mode, create-playable, play, characters, sheet, set-trait, convert-cards, set-default, roll, roll-for, name-roll, list-rolls, roll-info, add-step, clear-steps, forget-roll, extended-roll, continue-roll, roll-status, cancel-roll, resources, attune, spend, gain, damage, health, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, contest-status, cancel-contest, story-start, advance-time, magick, cast, seal-spell, creation, derived, eval, choose, clans, clan, templates, extend-template, forget-template, define-resource, backgrounds, background, define-background, forget-background, supernatural, budget, grant, forget-grant, paid, costs, fellowships, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, cray, harvest, absorb, research, story-date, save-date, forget-date, dates, time-between, scene, turn, end-scene, downtime, scenes, scene-info, forget-scene, hide, tables, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, constraints, constraint, forget-constraint, check-constraints, take-merit, drop-merit, merits, arcana, arcanum, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, define-merit, merit, forget-merit, specialty, forget-specialty, specialties, define-affliction, affliction, forget-affliction, afflict, toggle, invoke, advance, lift, afflictions, alias, aliases, forget-alias, player, win-constraint, win-table, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage.]
+[SYSTEM: 131 commands: help, creator-mode, create-playable, play, characters, sheet, set-trait, convert-cards, set-default, roll, roll-for, name-roll, list-rolls, roll-info, add-step, clear-steps, forget-roll, extended-roll, continue-roll, roll-status, cancel-roll, resources, attune, spend, gain, damage, health, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, contest-status, cancel-contest, story-start, advance-time, magick, cast, seal-spell, creation, derived, eval, choose, clans, clan, templates, extend-template, forget-template, define-resource, backgrounds, background, define-background, forget-background, supernatural, budget, grant, forget-grant, paid, costs, fellowships, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, cray, harvest, absorb, research, story-date, save-date, forget-date, dates, time-between, scene, turn, end-scene, downtime, scenes, scene-info, forget-scene, hide, tables, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, constraints, constraint, forget-constraint, check-constraints, take-merit, drop-merit, merits, define-merit, merit, forget-merit, arcana, arcanum, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, specialties, define-affliction, affliction, forget-affliction, afflict, toggle, invoke, advance, lift, afflictions, alias, aliases, forget-alias, player, win-constraint, win-table, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage.]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -36,8 +36,8 @@ written twice, so help can never disagree with the parser.
 | `afflictions` | active afflictions; NPCs work too |
 | `alias` | define an alias for a character |
 | `aliases` | list every alias, grouped by scope |
-| `arcana` | the arcana & taints this chronicle defines (they trade in the arcana budget, not freebies) |
-| `arcanum` | one arcanum or taint in full (the same detail [[merit]] gives) |
+| `arcana` | the Arcana & Taints this character owns (bare), or one in detail |
+| `arcanum` | inspect an arcanum/taint definition (bare: list them) |
 | `attune` | what this character can USE (a pool he cannot use is only points) |
 | `background` | one background in full: ceiling, ladder, and what it grants |
 | `backgrounds` | the backgrounds this chronicle defines, what you hold, and what they confer |
@@ -69,16 +69,16 @@ written twice, so help can never disagree with the parser.
 | `damage` | mark damage on the current character |
 | `dates` | list the saved date bookmarks |
 | `define-affliction` | define/replace an affliction (overlay; may shadow a built-in) |
-| `define-arcanum` | define an arcanum or taint (define-merit with kind=arcanum) |
+| `define-arcanum` | define an arcanum or taint (writes the srd:arcana overlay) |
 | `define-background` | define/replace a background (a Talisman that IS a place grants that place's ratings) |
 | `define-constraint` | define/replace a constraint group |
-| `define-merit` | define a merit, flaw or arcanum (writes the srd:merits-flaws overlay) |
+| `define-merit` | define a merit or flaw (writes the srd:merits-flaws overlay) |
 | `define-resource` | define a pool or tracker a template can then grant |
 | `define-table` | define/replace a success table in its category's general card |
 | `define-table-category` | create a table subcategory (a real lorebook category with its general card) |
 | `derived` | what the sheet implies rather than states: Road, Willpower, generation, and why |
 | `downtime` | close the current scene and gloss the clock forward |
-| `drop-arcanum` | drop an owned arcanum or taint |
+| `drop-arcanum` | drop an owned arcanum or taint (its passives lift with it) |
 | `drop-merit` | drop an owned merit/flaw instance |
 | `end-scene` | close the current scene |
 | `enter-library` | enter your library (applies in-library) |
@@ -147,7 +147,7 @@ written twice, so help can never disagree with the parser.
 | `supernatural` | the families of power open to this character (disciplines, magic, sorcery, blood-sorcery) |
 | `table-alias` | define a table alias, or list them (no args); table=@alias resolves it |
 | `tables` | list success tables (grouped by category), or lay one out in full |
-| `take-arcanum` | take an arcanum or taint (take-merit, but it insists on the family) |
+| `take-arcanum` | take an arcanum or taint (needs the arcana capability - [[attune]]) |
 | `take-merit` | take a merit/flaw; parameterized defs take name::param instances |
 | `templates` | the templates this chronicle knows, and what each one is made of |
 | `time-between` | measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh) |
@@ -353,11 +353,13 @@ _No arguments._
 
 ### `arcana`
 
-the arcana & taints this chronicle defines (they trade in the arcana budget, not freebies)
+the Arcana & Taints this character owns (bare), or one in detail
 
 ```
-[[arcana [[name]]  (the arcana & taints this chronicle defines (they trade in the arcana budget, not freebies))]]
+[[arcana [[name]]  (the Arcana & Taints this character owns (bare), or one in detail; They trade in the ARCANA purse, never freebies, and only a demon or a demon's thrall has this list at all)]]
 ```
+
+> They trade in the ARCANA purse, never freebies, and only a demon or a demon's thrall has this list at all
 
 | argument | kind | meaning |
 |---|---|---|
@@ -366,25 +368,25 @@ the arcana & taints this chronicle defines (they trade in the arcana budget, not
 **`[[help arcana]]`** replies:
 
 ```
-[SYSTEM: arcana - arcana [[name]]  (the arcana & taints this chronicle defines (they trade in the arcana budget, not freebies))]
+[SYSTEM: arcana - arcana [[name]]  (the Arcana & Taints this character owns (bare), or one in detail; They trade in the ARCANA purse, never freebies, and only a demon or a demon's thrall has this list at all)]
 ```
 
 ### `arcanum`
 
-one arcanum or taint in full (the same detail [[merit]] gives)
+inspect an arcanum/taint definition (bare: list them)
 
 ```
-[[arcanum [<name>]  (one arcanum or taint in full (the same detail [[merit]] gives))]]
+[[arcanum [[name]]  (inspect an arcanum/taint definition (bare: list them))]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
-| `name` | positional | `<name>` <br>*e.g.* `celestial-radiance` |
+| `name` | positional | `[name]` <br>*e.g.* `celestial-radiance` |
 
 **`[[help arcanum]]`** replies:
 
 ```
-[SYSTEM: arcanum - arcanum [<name>]  (one arcanum or taint in full (the same detail [[merit]] gives))]
+[SYSTEM: arcanum - arcanum [[name]]  (inspect an arcanum/taint definition (bare: list them))]
 ```
 
 ### `attune`
@@ -967,13 +969,13 @@ define/replace an affliction (overlay; may shadow a built-in)
 
 ### `define-arcanum`
 
-define an arcanum or taint (define-merit with kind=arcanum)
+define an arcanum or taint (writes the srd:arcana overlay)
 
 ```
-[[define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [passive=".."] [description=".."]  (define an arcanum or taint (define-merit with kind=arcanum); per-template= gives it a price per splat; kind=taint makes it GRANT points)]]
+[[define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]]
 ```
 
-> per-template= gives it a price per splat; kind=taint makes it GRANT points
+> per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list
 
 | argument | kind | meaning |
 |---|---|---|
@@ -982,13 +984,19 @@ define an arcanum or taint (define-merit with kind=arcanum)
 | `points` | named | Cost, or the ladder of allowed ratings |
 | `per-template` | named | Price per template; `no` closes it to one |
 | `param` | named | Instance-parameter slot (owned as name::value) |
+| `templates` | named | Templates that may take it |
+| `budget` | named | Which purse it trades in (default: arcana) <br>*e.g.* `arcana` |
+| `limit-at` | named `int` | The rating that is rationed across instances <br>*e.g.* `3` |
+| `limit-slots` | named `int` | How many instances may hold that rating (default 1) <br>*e.g.* `2` |
+| `limit-per-kind` | named | And at most this many of a trait kind <br>*e.g.* `attribute:1` |
+| `max-from-trait` | named | Rating ceiling is this trait <br>*e.g.* `resolve` |
 | `passive` | named `literal` | Always-on ops, ";"-separated - BACKTICKS |
 | `description` | named `literal` | Description - BACKTICKS |
 
 **`[[help define-arcanum]]`** replies:
 
 ```
-[SYSTEM: define-arcanum - define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [passive=".."] [description=".."]  (define an arcanum or taint (define-merit with kind=arcanum); per-template= gives it a price per splat; kind=taint makes it GRANT points)]
+[SYSTEM: define-arcanum - define-arcanum name=".." [kind=arcanum|taint] [points=<n|1,2,3>] [per-template="demon:7,thrall:5"] [param=".."] [templates="a,b"] [budget=".."] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [passive=".."] [description=".."]  (define an arcanum or taint (writes the srd:arcana overlay); per-template= gives it a price per splat; kind=taint makes it GRANT points. NOT [[define-merit]] - a different list)]
 ```
 
 ### `define-background`
@@ -1018,14 +1026,14 @@ define/replace a background (a Talisman that IS a place grants that place's rati
 define/replace a constraint group
 
 ```
-[[define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|any] [members="a,b"] [max=N] [scope=".."] [note=".."]]]
+[[define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|arcanum|any] [members="a,b"] [max=N] [scope=".."] [note=".."]]]
 ```
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named **required** | Name <br>*e.g.* `e.g. clan-only-backgrounds` |
 | `relation` | named `enum` | Relation — one of `exclusive`, `restricted`, `forbidden` |
-| `domain` | named `enum` | Domain — one of `background`, `merit`, `flaw`, `meritflaw`, `any` |
+| `domain` | named `enum` | Domain — one of `background`, `merit`, `flaw`, `meritflaw`, `arcanum`, `any` |
 | `members` | named | Members (comma-separated Backgrounds or Merits/Flaws) <br>*e.g.* `e.g. status, anonymity` |
 | `max` | named `int` | Max to hold (exclusive only; default 1) |
 | `scope` | named | Scope: templates/choices it applies to (comma-separated; empty = everyone) <br>*e.g.* `e.g. tzimisce` |
@@ -1034,27 +1042,29 @@ define/replace a constraint group
 **`[[help define-constraint]]`** replies:
 
 ```
-[SYSTEM: define-constraint - define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|any] [members="a,b"] [max=N] [scope=".."] [note=".."]  (define/replace a constraint group)]
+[SYSTEM: define-constraint - define-constraint name=".." [relation=exclusive|restricted|forbidden] [domain=background|merit|flaw|meritflaw|arcanum|any] [members="a,b"] [max=N] [scope=".."] [note=".."]  (define/replace a constraint group)]
 ```
 
 ### `define-merit`
 
-define a merit, flaw or arcanum (writes the srd:merits-flaws overlay)
+define a merit or flaw (writes the srd:merits-flaws overlay)
 
 ```
-[[define-merit name=`<name>` [kind=merit|flaw|arcanum|taint] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="demon:7,thrall:5"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`]  (define a merit, flaw or arcanum (writes the srd:merits-flaws overlay))]]
+[[define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]]
 ```
+
+> kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]]
 
 | argument | kind | meaning |
 |---|---|---|
 | `name` | named `literal` **required** | ``<name>`` <br>*e.g.* `e.g. `Inviolate Soul`` |
-| `kind` | named `enum` | Merits/flaws trade freebies; arcana/taints their own budget (default merit) — one of `merit`, `flaw`, `arcanum`, `taint` |
+| `kind` | named `enum` | Merits cost freebies, flaws grant them (default merit) — one of `merit`, `flaw` |
 | `points` | named | Cost, or the ladder of allowed ratings (default 0) |
 | `passive` | named `literal` | Always-on ops, ";"-separated (or a raw JSON array) - BACKTICKS |
 | `param` | named | Instance-parameter slot (owned as name::value) |
 | `templates` | named | Templates that may take it |
-| `budget` | named | Which purse it trades in (default: freebie for merit/flaw, arcana for arcanum/taint) <br>*e.g.* `arcana` |
-| `per-template` | named | Price per template; `no` closes it to one <br>*e.g.* `demon:7,thrall:5` |
+| `budget` | named | Which purse it trades in (default: freebie) <br>*e.g.* `freebie` |
+| `per-template` | named | Price per template; `no` closes it to one <br>*e.g.* `vampire:3,ghoul:1` |
 | `limit-at` | named `int` | The rating that is rationed across instances <br>*e.g.* `3` |
 | `limit-slots` | named `int` | How many instances may hold that rating (default 1) <br>*e.g.* `2` |
 | `limit-per-kind` | named | And at most this many of a trait kind <br>*e.g.* `attribute:1` |
@@ -1064,7 +1074,7 @@ define a merit, flaw or arcanum (writes the srd:merits-flaws overlay)
 **`[[help define-merit]]`** replies:
 
 ```
-[SYSTEM: define-merit - define-merit name=`<name>` [kind=merit|flaw|arcanum|taint] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="demon:7,thrall:5"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`]  (define a merit, flaw or arcanum (writes the srd:merits-flaws overlay))]
+[SYSTEM: define-merit - define-merit name=`<name>` [kind=merit|flaw] [points=<n|1,2,3>] [passive=`<op>[:<target>] [+N] [if=] [while=]`] [param=".."] [templates="a,b"] [budget=".."] [per-template="vampire:3,ghoul:1"] [limit-at=N] [limit-slots=N] [limit-per-kind=".."] [max-from-trait=".."] [description=`<text>`]  (define a merit or flaw (writes the srd:merits-flaws overlay); kind= takes merit or flaw ONLY - an arcanum is not a merit; use [[define-arcanum]])]
 ```
 
 ### `define-resource`
@@ -1083,7 +1093,7 @@ define a pool or tracker a template can then grant
 | `max` | named `int` | Its ceiling |
 | `roles` | named | Names it also answers to (blood, willpower, magic-fuel...) |
 | `replaces` | named | Resources it stands in for, hiding them |
-| `requires` | named | What a character must be able to USE (awakened, vitae, resolve) to spend it at all |
+| `requires` | named | What a character must be able to USE (awakened, vitae, resolve, arcana) to spend it at all |
 | `per-turn` | named `int` | Most that may be spent in one turn |
 | `description` | named | `<text>` |
 
@@ -1178,10 +1188,10 @@ close the current scene and gloss the clock forward
 
 ### `drop-arcanum`
 
-drop an owned arcanum or taint
+drop an owned arcanum or taint (its passives lift with it)
 
 ```
-[[drop-arcanum <name[::param]>]]
+[[drop-arcanum <name[::param]>  (drop an owned arcanum or taint (its passives lift with it))]]
 ```
 
 | argument | kind | meaning |
@@ -1191,7 +1201,7 @@ drop an owned arcanum or taint
 **`[[help drop-arcanum]]`** replies:
 
 ```
-[SYSTEM: drop-arcanum - drop-arcanum <name[::param]>  (drop an owned arcanum or taint)]
+[SYSTEM: drop-arcanum - drop-arcanum <name[::param]>  (drop an owned arcanum or taint (its passives lift with it))]
 ```
 
 ### `drop-merit`
@@ -1939,12 +1949,14 @@ list owned merits/flaws, enhancement totals and advisory issues
 [[merits]]
 ```
 
+> Never lists Arcana - they are not merits. [[arcana]] is their list
+
 _No arguments._
 
 **`[[help merits]]`** replies:
 
 ```
-[SYSTEM: merits - merits  (list owned merits/flaws, enhancement totals and advisory issues)]
+[SYSTEM: merits - merits  (list owned merits/flaws, enhancement totals and advisory issues; Never lists Arcana - they are not merits. [[arcana]] is their list)]
 ```
 
 ### `name-roll`
@@ -2517,10 +2529,10 @@ list success tables (grouped by category), or lay one out in full
 
 ### `take-arcanum`
 
-take an arcanum or taint (take-merit, but it insists on the family)
+take an arcanum or taint (needs the arcana capability - [[attune]])
 
 ```
-[[take-arcanum <name[::param]> [[points]] [paid=".."] [waive=true]  (take an arcanum or taint (take-merit, but it insists on the family))]]
+[[take-arcanum <name[::param]> [[points]] [paid=".."] [waive=true]  (take an arcanum or taint (needs the arcana capability - [[attune]]))]]
 ```
 
 | argument | kind | meaning |
@@ -2528,12 +2540,12 @@ take an arcanum or taint (take-merit, but it insists on the family)
 | `name` | positional **required** | `<name[::param]>` |
 | `points` | positional | `[points]` |
 | `paid` | named | What it REALLY cost (0 = the Storyteller granted it) |
-| `waive` | named `enum` | Waive prerequisites / template limits — one of `true` |
+| `waive` | named `enum` | Waive prerequisites / template limits / the capability gate — one of `true` |
 
 **`[[help take-arcanum]]`** replies:
 
 ```
-[SYSTEM: take-arcanum - take-arcanum <name[::param]> [[points]] [paid=".."] [waive=true]  (take an arcanum or taint (take-merit, but it insists on the family))]
+[SYSTEM: take-arcanum - take-arcanum <name[::param]> [[points]] [paid=".."] [waive=true]  (take an arcanum or taint (needs the arcana capability - [[attune]]))]
 ```
 
 ### `take-merit`
@@ -2543,6 +2555,8 @@ take a merit/flaw; parameterized defs take name::param instances
 ```
 [[take-merit <name[::param]> [[points]] [paid=".."] [waive=true]]]
 ```
+
+> Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]]
 
 | argument | kind | meaning |
 |---|---|---|
@@ -2554,7 +2568,7 @@ take a merit/flaw; parameterized defs take name::param instances
 **`[[help take-merit]]`** replies:
 
 ```
-[SYSTEM: take-merit - take-merit <name[::param]> [[points]] [paid=".."] [waive=true]  (take a merit/flaw; parameterized defs take name::param instances)]
+[SYSTEM: take-merit - take-merit <name[::param]> [[points]] [paid=".."] [waive=true]  (take a merit/flaw; parameterized defs take name::param instances; Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]])]
 ```
 
 ### `templates`

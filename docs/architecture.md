@@ -63,7 +63,8 @@ type-checks alone.
 
 ### `src/rules.ts` (~2,700 lines) — the data layer
 Everything that is *a rule* rather than *a behaviour*: templates, resources,
-soak tables, clans, fellowships, roads, backgrounds, merits/flaws, **arcana**,
+soak tables, clans, fellowships, roads, backgrounds, merits/flaws, **arcana (a
+separate list — `DEFAULT_ARCANA`, never inside `DEFAULT_MERITS_FLAWS`)**,
 disciplines, afflictions, the creation budget, advancement costs, magic knobs.
 
 **If you are adding a game rule, it probably belongs here as data** — not as code
@@ -117,17 +118,31 @@ field to its window for free.
 
 ## Categories that are NOT each other
 
-Worth stating because the code once blurred them:
+The code once blurred these, and the fix was structural, not a rename.
 
-| Category | Purse | Where |
-|---|---|---|
-| **Merits / Flaws** | `freebie` | classic WoD |
-| **Arcana / Taints** | `arcana` | **Devil's Due** — a companion to Dark Ages: Vampire and Dark Ages: Mage. **Not merits.** |
-| **Disciplines** | `discipline` | vampire powers, with their own affinity rules |
-| **Backgrounds** | `background` | dots that buy a place in the world |
+| Category | Who has it | Purse | Type | Registry | Sheet bucket |
+|---|---|---|---|---|---|
+| **Merits / Flaws** | **anyone**, to a degree | `freebie` | `MeritFlawDef` | `MeritFlawRegistry` (`srd:merits-flaws`) | `meritsFlaws` |
+| **Arcana / Taints** | only the infernal-bound | `arcana` | `ArcanumDef` | `ArcanumRegistry` (`srd:arcana`) | `arcana` |
+| **Disciplines** | vampires and their kin | `discipline` | `DisciplineDef` | `DISCIPLINES` | `disciplines` |
+| **Pillars** | mages | `freebie` | fellowship data | `FELLOWSHIPS` | `traits` |
+| **Backgrounds** | anyone | `background` | `BackgroundDef` | `BackgroundRegistry` | `backgrounds` |
 
-They share `MeritFlawDef` as a *storage shape* and `PassiveGrant` as a *behaviour*,
-but they are four different things and a report must never call one the other.
+**Merits and Flaws are the only row open to every character.** Everything else
+belongs to a *kind of creature*, and a character who is not that kind does not
+have a short list — they have **no list**. `[[merits]]` on a vampire shows no
+Arcana; `[[arcana]]` tells him he has none at all and why.
+
+What they share is a MECHANISM — `OwnedPowerDef` (parameterized instances,
+passive ops, per-template prices, instance caps) and `PassiveGrant` (taking it
+applies its affliction). **Shared machinery is not shared identity.** Do not put
+anything on `OwnedPowerDef` that means one category and not the other, and do not
+let one registry answer for another: `resolvePowerInstance` is generic in the def
+type precisely so the caller has to name which list it is asking.
+
+The gate on Arcana is `ARCANA_CAPABILITY` (`rules.ts`) rather than a template
+list, because any splat may become a demon's thrall. `[[attune arcana]]` opens it
+for a chronicle that says otherwise.
 
 ---
 
@@ -139,8 +154,9 @@ but they are four different things and a report must never call one the other.
 | a new verb | handler in `game.ts` + `CommandRouter.register` with a full `CommandSpec` |
 | a new knob on an existing verb | add the `ParamSpec` — help and windows follow |
 | a new kind of always-on power | give its def a `PassiveGrant` + an `AfflictionDef` |
+| a new CATEGORY of owned power | a type over `OwnedPowerDef`, its own registry + lorebook category, and a `PowerFamily` in `game.ts` — the verbs come for free |
 | a new expression name | a scope extension, or `scopeFunctions` in `state.ts` |
 | a new persistent thing | a store class in `state.ts` over `ScopedStorage` |
 
 Then: tests in `test/system.test.ts`, update **`docs/memory.md` in the same
-commit**, and run the whole battery in `docs/invariants.md` §8.
+commit**, and run the whole battery in `docs/invariants.md` §9.

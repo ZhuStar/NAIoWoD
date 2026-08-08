@@ -6,7 +6,12 @@ import {
   CardValue, CardMap, parseCardText, formatCardText, canonicalCardText,
   asMap, asNamedList, asText,
 } from "./core/cardtext";
-import { SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER, DEFAULT_MERITS_FLAWS, MeritFlawDef, meritFlawFromCard } from "./rules";
+import {
+  SRD_CATEGORIES, SrdCategorySpec, SRD_HEADER_MARKER,
+  DEFAULT_MERITS_FLAWS, MeritFlawDef, meritFlawFromCard, MERIT_FLAW_KINDS,
+  DEFAULT_ARCANA, ArcanumDef, arcanumFromCard, ARCANUM_KINDS,
+  OWNED_POWER_KINDS, kindOnCard,
+} from "./rules";
 
 // =============================================================================
 // STORAGE & LOREBOOK MANAGERS - the script's editable database layer
@@ -574,39 +579,65 @@ export class MapConfigStore<V> {
   }
 }
 
-export class MeritFlawRegistry {
-  private static _defs: Map<string, MeritFlawDef> =
-    new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
+// TWO REGISTRIES, because they are two categories (rules.ts "OWNED POWERS").
+// The shape below is shared; the contents never mix. A merits card that names
+// an arcanum is skipped and REPORTED, saying where it belongs - the old
+// behaviour filed it as a merit, which is exactly the conflation this split
+// exists to end.
+class OwnedPowerRegistry<T extends { name: string; kind: string }> {
+  private _defs: Map<string, T>;
+  constructor(
+    private readonly _defaults: T[],
+    private readonly _category: string,
+    private readonly _read: (name: string, body: CardMap) => T | undefined,
+    private readonly _label: string,
+    private readonly _kinds: readonly string[],
+    private readonly _elsewhere: string,
+  ) {
+    this._defs = new Map(_defaults.map(d => [StringUtil.normalize(d.name), d]));
+  }
+  get(name: string): T | undefined { return this._defs.get(StringUtil.normalize(name)); }
+  all(): T[] { return [...this._defs.values()]; }
+  register(def: T): void { this._defs.set(StringUtil.normalize(def.name), def); }
+  reset(): void { this._defs = new Map(this._defaults.map(d => [StringUtil.normalize(d.name), d])); }
+  get category(): string { return this._category; }
 
-  static get(name: string): MeritFlawDef | undefined {
-    return MeritFlawRegistry._defs.get(StringUtil.normalize(name));
-  }
-  static all(): MeritFlawDef[] { return [...MeritFlawRegistry._defs.values()]; }
-  static register(def: MeritFlawDef): void {
-    MeritFlawRegistry._defs.set(StringUtil.normalize(def.name), def);
-  }
-  static reset(): void {
-    MeritFlawRegistry._defs = new Map(DEFAULT_MERITS_FLAWS.map(d => [StringUtil.normalize(d.name), d]));
-  }
-
-  // Merge lorebook definitions over the defaults: every entry in the
-  // srd:merits-flaws category, read as `name:` blocks below the marker.
-  // Returns how many definitions were registered.
-  static async loadFromLorebook(): Promise<number> {
+  // Merge lorebook definitions over the defaults: every entry in this
+  // registry's category, read as `name:` blocks below the marker. Returns how
+  // many definitions were registered.
+  async loadFromLorebook(): Promise<number> {
     let count = 0;
-    for (const entry of await LorebookManager.entriesInCategory("srd:merits-flaws")) {
+    for (const entry of await LorebookManager.entriesInCategory(this._category)) {
       const parsed = parseCardText(LorebookManager.contentBelowHeader(entry.text ?? "").trim());
       if (parsed === undefined) continue;
       let skipped = 0;
+      const misfiled: string[] = [];
       for (const { name, body } of asNamedList(parsed)) {
-        const def = meritFlawFromCard(name, body);
-        if (def) { MeritFlawRegistry.register(def); count++; } else skipped++;
+        const def = this._read(name, body);
+        if (def) { this.register(def); count++; continue; }
+        const claimed = kindOnCard(body);
+        // A block that says what it is, in a category that does not hold that
+        // kind, is not malformed - it is in the wrong drawer. Say which one.
+        if (claimed && OWNED_POWER_KINDS.includes(claimed as never)) misfiled.push(`${name} (${claimed})`);
+        else skipped++;
       }
-      if (skipped) log(`[MERITS] ${entry.displayName}: skipped ${skipped} definition(s) with no kind (merit|flaw)`);
+      if (skipped) log(`[${this._label}] ${entry.displayName}: skipped ${skipped} definition(s) with no kind (${this._kinds.join("|")})`);
+      if (misfiled.length) {
+        log(`[${this._label}] ${entry.displayName}: ${misfiled.join(", ")} belong${misfiled.length === 1 ? "s" : ""} in ${this._elsewhere}, not here - not loaded`);
+      }
     }
     return count;
   }
 }
+
+export const MeritFlawRegistry = new OwnedPowerRegistry<MeritFlawDef>(
+  DEFAULT_MERITS_FLAWS, "srd:merits-flaws", meritFlawFromCard, "MERITS",
+  MERIT_FLAW_KINDS, "srd:arcana",
+);
+export const ArcanumRegistry = new OwnedPowerRegistry<ArcanumDef>(
+  DEFAULT_ARCANA, "srd:arcana", arcanumFromCard, "ARCANA",
+  ARCANUM_KINDS, "srd:merits-flaws",
+);
 
 // --- LOREBOOK PARSER ---
 // Builds zero-dot Stat maps from the lorebook ability/background lists (see

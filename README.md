@@ -1804,12 +1804,17 @@ minutes, no roll, no resource — and it opens.
 - Everything credits the **`magic-fuel`** role — which for the Ouroboros is
   Living Resolve: every rule that says "Quintessence" means his fused substance.
 
-### Defining merits, flaws & arcana
+### Defining merits & flaws
 
-Merits, flaws and arcana are the same shape (`MeritFlawDef`) — arcana are simply
-merits with **passive** ops. Definitions live in the `srd:merits-flaws` lorebook
-category, merged over the built-ins, and **`[[define-merit]]` writes that card
-for you** (hand-editing stays equally valid).
+Merits and Flaws are the quirks **any** character may have. Definitions live in
+the `srd:merits-flaws` lorebook category, merged over the built-ins, and
+**`[[define-merit]]` writes that card for you** (hand-editing stays equally
+valid).
+
+> **Arcana are not merits.** They are a category of their own — their own
+> registry, their own card, their own verbs, and a list most characters do not
+> have at all. `[[define-merit kind=arcanum]]` is refused and points you at
+> [[define-arcanum]]. See *Arcana & Taints* below.
 
 ```
 [[define-merit name=`Inviolate Soul` points=0
@@ -1909,8 +1914,8 @@ Defaults live in `DEFAULT_MERITS_FLAWS` (an in-code list served by
 A def may declare a **`param`** slot and **`passive`** ops — always-on effects
 while owned, whose amounts scale with the points taken and whose `"$param"`
 fields substitute the instance's value. You own such a def as a
-**`name::param` instance**: `[[take-merit trait-affinity::melee 2]]`
-(`[[drop-merit …]]`, `[[merits]]` to list). Roll ops on passives are gated:
+**`name::param` instance**: `[[take-arcanum trait-affinity::melee 2]]`
+(`[[drop-arcanum …]]`, `[[arcana]]` to list). Roll ops on passives are gated:
 `trait` fires only when the roll's **pool** actually used that trait (a trait
 appearing only in the difficulty expression doesn't count), `target` on the
 roll carrying that action tag.
@@ -1923,7 +1928,7 @@ The shipped Devil's Due arcana:
 - **Trait Enhancement** — permanently raises the trait's **effective** value
   by the points taken *and* its advancement ceiling, while XP still prices
   from the un-enhanced base: Strength 3 with +2 rolls 5 dice today, can be
-  raised to base 7 later, for an eventual effective 9. `[[merits]]` shows
+  raised to base 7 later, for an eventual effective 9. `[[arcana]]` shows
   `base → effective` and the advisory ceiling.
 
 ### Backgrounds — a bag of their own
@@ -1961,19 +1966,56 @@ door, they scale the affliction tiers, and they cost nothing:
 with your rung marked, and what it grants. *Fount* ships with the book's table
 (1: hold 12, spend 2/turn … 5: hold 20, spend 6/turn).
 
-### The arcana vocabulary
+### Arcana & Taints — a category of their own
 
-Arcana and Taints go through the **same** registry and handlers as Merits and
-Flaws — one owned-power mechanism, four kinds — but they now have verbs that say
-what they are: `[[define-arcanum]]` (kind defaults to `arcanum`),
-`[[take-arcanum]]`, `[[drop-arcanum]]`, `[[arcana]]`, `[[arcanum <name>]]`,
-`[[forget-arcanum]]`. The listings filter by purse, and taking insists on the
-family:
+**An Arcanum is not a Merit.** Dark Ages: Devil's Due Arcana belong to a kind of
+creature the way Disciplines belong to vampires and Pillars to mages: something
+*only some characters have at all*. So they are not `MeritFlawDef` with a
+different `kind` — they are `ArcanumDef`, in `ArcanumRegistry`, written to
+`srd:arcana`, owned in the sheet's own `arcana` bucket, and reached by their own
+verbs: `[[define-arcanum]]`, `[[take-arcanum]]`, `[[drop-arcanum]]`,
+`[[arcana]]` (what you own), `[[arcanum <name>]]` (the definitions),
+`[[forget-arcanum]]`.
+
+|  | Merits / Flaws | Arcana / Taints | Disciplines | Pillars |
+|---|---|---|---|---|
+| who has them | **anyone**, to a degree | only the infernal-bound | vampires | mages |
+| purse | `freebie` | `arcana` (never freebies) | `discipline` | `freebie` |
+| defined in | `srd:merits-flaws` | `srd:arcana` | `rules.ts` | fellowship |
+
+Neither family can be talked into being the other, and neither list shows the
+other's contents — a regular vampire or mage typing `[[merits]]` sees **no
+Arcana**, because he has none:
 
 ```
+[[define-merit name=`Bad Idea` kind=arcanum points=3]]
+→ "arcanum" is not a merit/flaw. Arcana & Taints are a different category —
+  a different list, a different purse, and not open to every character.
+  Use [[define-arcanum name=`Bad Idea` kind=arcanum]].
+
 [[take-arcanum iron-will]]
-→ Iron Will is a merit, not an arcanum or taint. Use [[take-merit iron-will]].
+→ iron-will is a merit/flaw, not an arcanum/taint. Use [[take-merit iron-will]].
 ```
+
+**Who has the list at all** is a **capability**, not a template list, because
+the owner's ruling is that *anyone* may acquire it: "anyone can be a thrall of a
+demon — a mage, a vampire, anyone can be." The `thrall`, `demon` and `ouroboros`
+templates carry `arcana`; anybody else is told so plainly, and a chronicle that
+says otherwise grants it with one command:
+
+```
+[[arcana]]        (a vampire)
+→ Kvar (vampire) has no Arcana & Taints at all. Arcana belong to the infernal:
+  a demon has them, and so does anyone at all who has become a demon's thrall.
+  Nobody else has this list open. Add the template, [[attune arcana]] if this
+  chronicle says otherwise, or waive=true for one purchase.
+
+[[attune arcana]]                        → now a thrall, and the list opens
+[[take-arcanum trait-affinity::melee 2]] → 2 arcana points; Trait Aptitude applied
+```
+
+Sheets written before the split kept their arcana in the merits bucket; they are
+**migrated on load**, so nothing has to be re-entered.
 
 ### Setting a rating — `[[set-trait]]`
 
@@ -2127,8 +2169,10 @@ records and reports and the Storyteller decides.
 
 **Merits/Flaws**, **Arcana/Taints** (Devil's Due — a companion to *Dark Ages:
 Vampire* and *Dark Ages: Mage*) and **Disciplines** are three different
-categories. They share a storage shape and they share one behaviour, and neither
-makes them the same thing: a report must never call an arcanum a merit.
+categories, with three types, three registries and three buckets on the sheet.
+They share a *mechanism* (`OwnedPowerDef`) and one *behaviour*, and neither makes
+them the same thing: a report must never call an arcanum a merit, and
+`[[define-merit]]` cannot make one.
 
 The shared behaviour is that **taking a power turns it on**:
 

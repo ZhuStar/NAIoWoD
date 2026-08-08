@@ -25,7 +25,7 @@ export * from "./window";
 
 import { log } from "./host";
 import {
-  LorebookManager, MeritFlawRegistry, reloadAllConfigStores,
+  LorebookManager, MeritFlawRegistry, ArcanumRegistry, reloadAllConfigStores,
   ensurePath, CONFIG_GENERAL_HEADER, TABLE_GENERAL_HEADER, PostOffice,
 } from "./services";
 import { NamedRollStore, StoryClock } from "./state";
@@ -66,10 +66,13 @@ export async function init(): Promise<{ setupMessage: string | null }> {
   await ensurePath("config:success-tables", TABLE_GENERAL_HEADER);
   const recon = await reconcileLorebook();
   const merits = await MeritFlawRegistry.loadFromLorebook();
+  // A SECOND registry, because Arcana are a second category - not merits with
+  // a different `kind`. Two cards, two lists, two sets of verbs.
+  const arcana = await ArcanumRegistry.loadFromLorebook();
   const configs = await reloadAllConfigStores();
   const seededRolls = await NamedRollStore.seedDefaults();   // starter Drama rolls (create-if-missing)
   const seededClock = await StoryClock.seedDefault();        // the story clock (create-if-missing)
   const reconBit = recon.length ? `; lorebook: ${recon.join("; ")}` : "";
-  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
+  log(`[INIT] lorebook categories created: ${boot.createdCategories.length}; custom merits/flaws: ${merits}; custom arcana/taints: ${arcana}; config: ${configs.map(c => `${c.entry.replace("wod:config:", "") || "config"}=${c.count}`).join(", ")}; seeded rolls: ${seededRolls}; clock seeded: ${seededClock}${reconBit}`);
   return { setupMessage: boot.message };
 }

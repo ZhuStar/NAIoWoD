@@ -329,9 +329,32 @@ export const CAPABILITIES: Record<string, string> = {
   awakened: "works Awakened magic: may hold, harvest and spend Quintessence",
   vitae: "uses vampiric vitae as the Damned do - heal with it, boost with it",
   resolve: "channels the Resolve of the infernal - rare, in these centuries",
+  // Not a pool but a CATEGORY: what opens the Arcana list at all. See
+  // ARCANA_CAPABILITY below for why the gate lives here.
+  arcana: "bound to the infernal: may hold Arcana and Taints (Devil's Due)",
 };
 export function capabilityNote(name: string): string | undefined {
   return CAPABILITIES[StringUtil.normalize(name)];
+}
+
+// =============================================================================
+// WHO HAS AN ARCANA LIST AT ALL
+// -----------------------------------------------------------------------------
+// Merits and Flaws are open to EVERY character to some degree. Arcana are not,
+// and neither are Disciplines or Pillars: each of those belongs to a kind of
+// creature, and to no other. A regular vampire's list of Merits and Flaws must
+// contain no Arcana whatsoever - not "Arcana filed at the bottom", none.
+//
+// The gate is a capability rather than a template list, because the owner's
+// ruling is that ANY splat may acquire it: "anyone can be a thrall of a demon,
+// like a mage, a vampire, anyone can be". So a template that opens the list
+// says so (thrall, demon), a sheet may be granted it on top ([[attune arcana]],
+// for the campaign that says otherwise), and nothing else has to be edited.
+export const ARCANA_CAPABILITY = "arcana";
+// Do these capabilities open the Arcana list? Pass what the character can use
+// (template capabilities + attunements): CharacterResources.capabilities().
+export function capabilitiesOpenArcana(capabilities: string[]): boolean {
+  return capabilities.map(c => StringUtil.normalize(c)).includes(ARCANA_CAPABILITY);
 }
 
 // =============================================================================
@@ -651,7 +674,10 @@ export const TEMPLATE_THRALL = new TemplateConfig(
   ],
   MORTAL_SOAK,
   HUMANITY_MORALITY, true,
-  STANDARD_HEALTH_LEVELS, [], ["resolve"],   // the bond is what lets him channel it
+  // The bond is what lets him channel Resolve - and it is also the ONLY way an
+  // ordinary man comes by Arcana. Anyone may be a demon's thrall (a mage, a
+  // vampire, anyone), and nobody who isn't has an Arcana list at all.
+  STANDARD_HEALTH_LEVELS, [], ["resolve", ARCANA_CAPABILITY],
   { arcana: "10" }   // placeholder, like the demon's
 );
 
@@ -762,7 +788,7 @@ export const TEMPLATE_DEMON = new TemplateConfig(
   DEMON_SOAK,
   // Torment is an ASCENDING morality: sins push it up toward an unplayable 10.
   { name: "Torment", polarity: "ascending", start: 3 }, false,
-  STANDARD_HEALTH_LEVELS, [], ["resolve"],
+  STANDARD_HEALTH_LEVELS, [], ["resolve", ARCANA_CAPABILITY],
   // A PLACEHOLDER arcana allowance: the owner's number goes here (or on the
   // sheet, which overrides). The book's own formula is
   // (Resolve x permanent Torment) + temporary Torment + Willpower + Taints;
@@ -1036,8 +1062,9 @@ export const DEFAULT_TEMPLATE_DEFS: TemplateDef[] = [
     // He inherits `awakened` from the mage and adds the two nobody else has
     // both of: a revenant's vitae and a laham's Resolve. Without these he would
     // HOLD his fused pool and be unable to spend a point of it as any of the
-    // three things it is.
-    capabilities: ["vitae", "resolve"],
+    // three things it is. And `arcana`, because his Arcana are what he IS -
+    // without it the list below would be priced for a man who cannot have one.
+    capabilities: ["vitae", "resolve", ARCANA_CAPABILITY],
     budgets: {
       // The owner's ruling, and the shape the demon's formula will take when
       // permanent-vs-temporary Torment is modelled: the arcana purse is worth
@@ -1884,36 +1911,62 @@ export function disciplineDef(name: string): DisciplineDef | undefined {
 }
 
 // =============================================================================
-// MERITS & FLAWS - optional quirks with (waivable) prerequisites
+// OWNED POWERS - two CATEGORIES that share a mechanism and nothing else
 // -----------------------------------------------------------------------------
-// Defaults live in an in-code list; the lorebook is the editable database on
-// top: any entry in the "srd:merits-flaws" category whose text names definitions
-// of definitions is merged over the defaults by MeritFlawRegistry
-// .loadFromLorebook(). Prerequisites may name templates, free-form character
-// tags ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every
-// check can be waived case-by-case.
+// MERITS & FLAWS are optional quirks any character may have to some degree:
+// they trade freebie points, and every splat has a list of them.
+//
+// ARCANA & TAINTS are Devil's Due's own category, and they are NOT merits. They
+// belong to a kind of creature the way Disciplines belong to vampires and
+// Pillars to mages - a thing only some characters have at all. They trade an
+// arcana budget of their own, they are never bought with freebies, and a
+// regular vampire or mage must see NONE of them in a list of Merits and Flaws.
+//
+//   * disciplines - only some characters have them
+//   * pillars     - only some characters have them
+//   * ARCANA      - only some characters have them (ARCANA_CAPABILITY: you must
+//                   at least be a demon's thrall, and anyone may become one)
+//   * merits/flaws - ANY character, to some degree
+//
+// So they are two TYPES over two REGISTRIES writing two lorebook categories,
+// reached by two families of verbs, and stored in two buckets on the sheet.
+// What they share is a MECHANISM - parameterized instances, always-on passives,
+// per-template pricing, instance caps, passive grants - and that lives on
+// OwnedPowerDef below, which is the shared machinery and NOT a shared identity.
+//
+// Prerequisites (either category) may name templates, free-form character tags
+// ("toreador", "revenant", "inconnu", ...) and other Merits/Flaws; every check
+// can be waived case-by-case. Defaults live in in-code lists; the lorebook is
+// the editable database laid on top (srd:merits-flaws, srd:arcana).
 // =============================================================================
-// What a definition IS, which decides two things at once: which purse it draws
-// on, and which way the money flows. Merits and Flaws trade freebie points;
-// ARCANA and TAINTS trade an arcana budget of their own, which is why an
-// arcanum must never be counted as a merit - it would make a legal character
-// look overspent.
-export type MeritFlawKind = "merit" | "flaw" | "arcanum" | "taint";
-export const MERIT_FLAW_KINDS: MeritFlawKind[] = ["merit", "flaw", "arcanum", "taint"];
+export type MeritFlawKind = "merit" | "flaw";
+export type ArcanumKind = "arcanum" | "taint";
+// The union exists for the machinery only (what purse, which way the money
+// flows). Nothing that reports to a player should say "owned power".
+export type OwnedPowerKind = MeritFlawKind | ArcanumKind;
+export const MERIT_FLAW_KINDS: MeritFlawKind[] = ["merit", "flaw"];
+export const ARCANUM_KINDS: ArcanumKind[] = ["arcanum", "taint"];
+export const OWNED_POWER_KINDS: OwnedPowerKind[] = [...MERIT_FLAW_KINDS, ...ARCANUM_KINDS];
+export function isArcanumKind(kind: string): kind is ArcanumKind {
+  return (ARCANUM_KINDS as string[]).includes(kind);
+}
+export function isMeritFlawKind(kind: string): kind is MeritFlawKind {
+  return (MERIT_FLAW_KINDS as string[]).includes(kind);
+}
 
 // The purse each kind draws on, and the sign of the trade: a merit and an
 // arcanum COST, a flaw and a taint GRANT. `budget` on the def overrides the
 // purse when a chronicle invents another one.
-const KIND_BUDGET: Record<MeritFlawKind, string> = {
+const KIND_BUDGET: Record<OwnedPowerKind, string> = {
   merit: "freebie", flaw: "freebie", arcanum: "arcana", taint: "arcana",
 };
-const KIND_SPENDS: Record<MeritFlawKind, boolean> = {
+const KIND_SPENDS: Record<OwnedPowerKind, boolean> = {
   merit: true, flaw: false, arcanum: true, taint: false,
 };
-export function budgetOfKind(def: { kind: MeritFlawKind; budget?: string }): string {
+export function budgetOfKind(def: { kind: OwnedPowerKind; budget?: string }): string {
   return StringUtil.normalize(def.budget ?? KIND_BUDGET[def.kind] ?? "freebie");
 }
-export function kindSpends(kind: MeritFlawKind): boolean { return KIND_SPENDS[kind] ?? true; }
+export function kindSpends(kind: OwnedPowerKind): boolean { return KIND_SPENDS[kind] ?? true; }
 
 // How one template differs on a definition. Dark Ages arcana are printed with
 // a price per splat - "Celestial Radiance (7/5)" is 7 to a demon and 5 to a
@@ -1940,9 +1993,13 @@ export interface InstanceLimit {
   perKind?: Record<string, number>;  // and at most this many of a trait KIND
 }
 
-export interface MeritFlawDef {
+// THE SHARED MECHANISM, and nothing more. Every field here is machinery a
+// Merit and an Arcanum happen to use the same way; the two are told apart by
+// the `kind` their own interface declares, and by the registry they live in.
+// Do not add anything to this that means one category and not the other.
+export interface OwnedPowerDef {
   name: string;
-  kind: MeritFlawKind;
+  kind: OwnedPowerKind;
   points: number | number[]; // cost (merit/arcanum) / bonus granted (flaw/taint); array = variable rating
   // Which purse this trades in, when the kind's default is not right.
   budget?: string;
@@ -1981,10 +2038,16 @@ export interface MeritFlawDef {
   grants?: PassiveGrant;
 }
 
+// A Merit or a Flaw. Any character may have these.
+export interface MeritFlawDef extends OwnedPowerDef { kind: MeritFlawKind }
+// An Arcanum or a Taint (Dark Ages: Devil's Due). NOT a merit, NOT a flaw, and
+// not open to a character who is not at least a demon's thrall.
+export interface ArcanumDef extends OwnedPowerDef { kind: ArcanumKind }
+
 // What this definition costs THIS character, and whether they may take it at
 // all. The first of the character's templates with an entry wins; a def with
 // per-template prices and no entry for any of them is not open to them.
-export function meritCostFor(def: MeritFlawDef, templates: string[]): {
+export function meritCostFor(def: OwnedPowerDef, templates: string[]): {
   points: number | number[] | string; available: boolean; note?: string; from?: string;
 } {
   const mine = templates.map(t => StringUtil.normalize(t));
@@ -2004,15 +2067,19 @@ export function meritCostFor(def: MeritFlawDef, templates: string[]): {
 }
 
 // A def's cross-instance limits.
-export function instanceLimitsOf(def: MeritFlawDef): InstanceLimit[] {
+export function instanceLimitsOf(def: OwnedPowerDef): InstanceLimit[] {
   return [...(def.limits ?? [])];
 }
 
 // "trait-affinity:melee" -> its base def name + instance param. The suffix is
 // split off ONLY when the base def declares `param` (plain names with colons
 // stay whole otherwise; lookup tries the full key first).
-export function resolveMeritInstance(key: string, lookup: (name: string) => MeritFlawDef | undefined):
-  { def: MeritFlawDef; param?: string } | undefined {
+//
+// Generic in the def type on purpose: pass a MERIT registry and you get a
+// MeritFlawDef back, pass an ARCANUM registry and you get an ArcanumDef. The
+// mechanism is shared; the category never is.
+export function resolvePowerInstance<T extends OwnedPowerDef>(
+  key: string, lookup: (name: string) => T | undefined): { def: T; param?: string } | undefined {
   const full = StringUtil.normalize(key);
   const whole = lookup(full);
   if (whole) return whole.param ? undefined : { def: whole };   // a param def owned bare is malformed
@@ -2026,7 +2093,7 @@ export function resolveMeritInstance(key: string, lookup: (name: string) => Meri
 
 // An instance's passive ops, with "$<param>" substituted and amounts scaled
 // by the points taken. Pure - ownership walks live in state.ts.
-export function passiveOpsOf(def: MeritFlawDef, param: string | undefined, points: number): EffectOp[] {
+export function passiveOpsOf(def: OwnedPowerDef, param: string | undefined, points: number): EffectOp[] {
   const sub = (v: string | undefined): string | undefined =>
     def.param && v === `$${def.param}` ? param : v;
   return (def.passive ?? []).map(op => {
@@ -2144,13 +2211,16 @@ export function effectOpsFromCard(raw: CardValue | undefined): EffectOp[] {
   return asList(raw).map(effectOpFromCard).filter((op): op is EffectOp => op !== undefined);
 }
 
-// One Merit / Flaw / arcanum. Undefined when the block never says which it is -
+// One owned power, read from a card and CHECKED AGAINST THE KINDS THE CALLER
+// ACCEPTS. That check is the whole point: the merits card cannot smuggle in an
+// arcanum and the arcana card cannot smuggle in a merit. Undefined when the
+// block never says which it is, or says a kind this category does not hold -
 // the card keeps the text, the registry just doesn't take it.
-export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
-  const kind = (asText(body["kind"]) ?? "").toLowerCase() as MeritFlawKind;
-  if (!MERIT_FLAW_KINDS.includes(kind)) return undefined;
+function ownedPowerFromCard(name: string, body: CardMap, kinds: readonly string[]): OwnedPowerDef | undefined {
+  const kind = (asText(body["kind"]) ?? "").toLowerCase() as OwnedPowerKind;
+  if (!kinds.includes(kind)) return undefined;
   const rawPoints = body["points"];
-  const def: MeritFlawDef = {
+  const def: OwnedPowerDef = {
     name: name.trim(),
     kind,
     points: Array.isArray(rawPoints)
@@ -2210,6 +2280,22 @@ export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | u
   if (Object.keys(perTemplate).length) def.perTemplate = perTemplate;
   return def;
 }
+// One Merit or Flaw. An `arcanum`/`taint` block in the merits category is NOT
+// one, and is skipped (and reported) rather than quietly filed as a merit.
+export function meritFlawFromCard(name: string, body: CardMap): MeritFlawDef | undefined {
+  return ownedPowerFromCard(name, body, MERIT_FLAW_KINDS) as MeritFlawDef | undefined;
+}
+// ...and one Arcanum or Taint, from the arcana category, symmetrically.
+export function arcanumFromCard(name: string, body: CardMap): ArcanumDef | undefined {
+  return ownedPowerFromCard(name, body, ARCANUM_KINDS) as ArcanumDef | undefined;
+}
+// What kind a card block CLAIMS to be, whether or not this category holds it -
+// so a reader can say "that is an arcanum, it belongs in [[define-arcanum]]"
+// instead of the useless "no kind".
+export function kindOnCard(body: CardMap): string | undefined {
+  const kind = (asText(body["kind"]) ?? "").toLowerCase();
+  return kind || undefined;
+}
 
 // One exclusive Merit and Flaw per clan and per fellowship, so the SHAPE exists
 // and the chronicle can fill in what they actually do. They gate on the CHOICE
@@ -2241,16 +2327,23 @@ export const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
   { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
 ];
 
-export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
-  ...EXCLUSIVE_MERITS_FLAWS,
-  // Devil's Due arcana, modeled as parameterized merits with passive effects.
+// =============================================================================
+// THE ARCANA LIST - its own list, because it is its own category
+// -----------------------------------------------------------------------------
+// These four used to sit inside DEFAULT_MERITS_FLAWS with `kind: "arcanum"`,
+// which put Devil's Due Arcana in front of every vampire and mage who typed
+// [[merits]]. They are not merits and they were never open to those characters;
+// the list they belong to is this one, reached by [[arcana]], gated on
+// ARCANA_CAPABILITY, and priced from the arcana purse.
+// =============================================================================
+export const DEFAULT_ARCANA: ArcanumDef[] = [
   {
     name: "Trait Affinity", kind: "arcanum", points: [1, 2, 3], param: "trait",
     limits: [{ atRating: 3, slots: 2, perKind: { attribute: 1 } }],
     passive: [{ op: "difficulty", amount: -1, trait: "$trait" }],
     grants: { afflicts: "trait-aptitude" },
     description: "Devil's Due: -1 difficulty per point on rolls whose pool uses the trait, chosen when you take it "
-      + "([[take-merit trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
+      + "([[take-arcanum trait-affinity::melee 2]]). TWO traits may reach 3 - one Attribute and one Ability, or two "
       + "Abilities; every other trait caps at 2.",
   },
   {
@@ -2277,6 +2370,12 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
       + "(difficulty 8), +1 success per Resolve point spent; the successes buy parlor tricks, illusions and auras, "
       + "up to a battlefield-blinding flare at five (which needs Resolve 7+). Four successes need Resolve 5+.",
   },
+];
+
+// Merits and Flaws. NO ARCANA - see DEFAULT_ARCANA above; a block with
+// `kind: arcanum` in this list is a type error, which is the point.
+export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
+  ...EXCLUSIVE_MERITS_FLAWS,
   { name: "Acute Senses", kind: "merit", points: 1, description: "One sense is unusually sharp; -2 difficulty on related Perception rolls." },
   { name: "Ambidextrous", kind: "merit", points: 1, description: "No off-hand penalty." },
   { name: "Iron Will", kind: "merit", points: 3, description: "Resistant to Dominate and mental control." },
@@ -2305,7 +2404,10 @@ export const DEFAULT_MERITS_FLAWS: MeritFlawDef[] = [
 // are covered: mutually-exclusive members (exclusive) vs reserved access
 // (restricted).
 // =============================================================================
-export type ConstraintDomain = "background" | "merit" | "flaw" | "meritflaw" | "any";
+// `arcanum` covers Arcana AND Taints, the way `meritflaw` covers both of those:
+// a constraint names a LIST, and Arcana are a list of their own (§ "OWNED
+// POWERS"). `any` still searches everything a character holds.
+export type ConstraintDomain = "background" | "merit" | "flaw" | "meritflaw" | "arcanum" | "any";
 export type ConstraintRelation = "exclusive" | "restricted" | "forbidden";
 export interface ConstraintGroup {
   name: string;                  // normalized group id
@@ -2325,7 +2427,7 @@ export interface ConstraintViolation {
 // Exported so consumers (command specs, windows) reference THE vocabulary
 // instead of retyping it - a new relation/domain reaches every surface.
 export const CONSTRAINT_RELATIONS: ConstraintRelation[] = ["exclusive", "restricted", "forbidden"];
-export const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "any"];
+export const CONSTRAINT_DOMAINS: ConstraintDomain[] = ["background", "merit", "flaw", "meritflaw", "arcanum", "any"];
 
 // Fill defaults and normalize. An unknown relation falls back to "exclusive",
 // an unknown domain to "any" - a misconfigured group is still stored, never lost.
@@ -2358,6 +2460,8 @@ export interface OwnedTraits {
   backgrounds: string[];
   merits: string[];
   flaws: string[];
+  // Arcana and Taints together - their own list, never folded into merits.
+  arcana: string[];
   templates: string[];
 }
 
@@ -2367,7 +2471,8 @@ function ownedForDomain(owned: OwnedTraits, domain: ConstraintDomain): string[] 
     case "merit": return owned.merits;
     case "flaw": return owned.flaws;
     case "meritflaw": return [...owned.merits, ...owned.flaws];
-    default: return [...owned.backgrounds, ...owned.merits, ...owned.flaws];
+    case "arcanum": return owned.arcana ?? [];
+    default: return [...owned.backgrounds, ...owned.merits, ...owned.flaws, ...(owned.arcana ?? [])];
   }
 }
 
@@ -2835,7 +2940,7 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
     entries: [
       { displayName: "srd:merits-flaws:custom", text: srdEntryText(
         [
-          `Custom Merits, Flaws & arcana. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
+          `Custom Merits & Flaws. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
           "NAME followed by a colon, with its fields indented underneath. They are merged",
           "over the built-in list. The fields:",
           '  kind        - "merit" or "flaw" (required - a block without it is skipped)',
@@ -2845,6 +2950,8 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
           "                merits-flaws (all-of)",
           "  description - optional text (commas in it are just punctuation)",
           "  passive     - optional always-on effects; see [[define-merit]]",
+          "Arcana and Taints are NOT merits and do not belong here - they have their",
+          "own category (srd:arcana) and their own verbs ([[arcana]], [[define-arcanum]]).",
           "The two below are examples - edit or replace them.",
         ],
         [
@@ -2859,6 +2966,40 @@ export const SRD_CATEGORIES: SrdCategorySpec[] = [
           "  kind: flaw",
           "  points: 1",
           "  description: You cannot read or write.",
+        ]) },
+    ],
+  },
+  {
+    name: "srd:arcana",
+    blurb: "custom Arcana & Taints (Devil's Due), layered over the built-in list",
+    entries: [
+      { displayName: "srd:arcana:custom", text: srdEntryText(
+        [
+          `Custom Arcana & Taints. Below the ${SRD_HEADER_MARKER} line, write each one as its`,
+          "NAME followed by a colon, with its fields indented underneath. They are merged",
+          "over the built-in list.",
+          "",
+          "An ARCANUM IS NOT A MERIT. Arcana and Taints are Dark Ages: Devil's Due's own",
+          "category - like Disciplines for vampires and Pillars for mages, they belong to",
+          "a kind of creature and to nobody else. They are bought from the ARCANA purse,",
+          "never with freebies, and only a character bound to the infernal (a demon, or",
+          "anyone at all who has become a demon's thrall) has this list open at all.",
+          "",
+          "  kind        - \"arcanum\" or \"taint\" (required - a block without it is skipped;",
+          "                a taint GRANTS arcana points rather than costing them)",
+          "  points      - arcana cost (arcanum) / points granted (taint); one number, or",
+          "                `1, 2, 3` for a variable rating",
+          "  per-template- a price per splat, the printed \"(7/5)\" - naming any template",
+          "                means ONLY those templates may take it",
+          "  param       - an instance slot, e.g. `trait` (owned as name::value)",
+          "  requires, description, passive - as for Merits & Flaws",
+          "The one below is an example - edit or replace it.",
+        ],
+        [
+          "Whispering Blood:",
+          "  kind: arcanum",
+          "  points: 1, 2, 3",
+          "  description: The blood of the pit answers questions it was not asked.",
         ]) },
     ],
   },

@@ -81,7 +81,34 @@ Between two names, put the spaces in.
 
 ---
 
-## 5. What crosses a wire
+## 5. Categories vs mechanisms — the one that keeps being broken
+
+**Merits/Flaws** are open to any character. **Arcana/Taints**, **Disciplines**
+and **Pillars** each belong to a *kind of creature*. They are not four flavours
+of one thing:
+
+```
+MeritFlawDef  kind: merit|flaw     MeritFlawRegistry   srd:merits-flaws   char.meritsFlaws
+ArcanumDef    kind: arcanum|taint  ArcanumRegistry     srd:arcana         char.arcana
+```
+
+`OwnedPowerDef` is the **shared machinery** (parameterized instances, passive
+ops, per-template prices, instance caps, `PassiveGrant`) and nothing more.
+
+> ⚠ Arcana lived inside `DEFAULT_MERITS_FLAWS` as `kind: "arcanum"` for a long
+> time, so every vampire and mage saw Devil's Due Arcana in their Merits list.
+> A shared `kind` field is not a category. **Rules:**
+> 1. A registry answers only for its own kinds; `resolvePowerInstance` is
+>    generic so the caller must name which one.
+> 2. A REPORT walk (`ownedMeritInstances` / `ownedArcanumInstances`) sees one
+>    category. A MECHANISM walk (`ownedPowerInstances`) sees both — passive ops,
+>    purse ledgers, "which power grants this affliction".
+> 3. Whether the list exists at all is a **capability**
+>    (`ARCANA_CAPABILITY`), not a template list — anyone may become a thrall.
+
+---
+
+## 6. What crosses a wire
 
 `api.v1.messaging` **serializes**. Only plain data survives.
 
@@ -100,7 +127,7 @@ post office relays *afterwards* — a correctness choice, not a performance one.
 
 ---
 
-## 6. Performance — count awaits, not milliseconds
+## 7. Performance — count awaits, not milliseconds
 
 CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
@@ -121,7 +148,7 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
 
 ---
 
-## 7. Policies that look like bugs but are not
+## 8. Policies that look like bugs but are not
 
 - **Advisory, not enforced.** Everything creation-side reports and lets the
   Storyteller decide. `[[creation]]`, `[[budget]]`, constraints, instance caps —
@@ -134,10 +161,13 @@ CPU is not the bottleneck; **host round-trips are**. Measured (`80f1d2f`):
   does not rate is `0` — a real answer. A name nobody defines is unknown.
 - **An affliction with no orphan policy outlives its source.** Not a missing
   default; the stated one.
+- **A character who is not that kind of creature has NO list, not a short one.**
+  A vampire asking for `[[arcana]]` is told he has none at all and why — not
+  shown an empty list, and never shown them inside `[[merits]]`.
 
 ---
 
-## 8. The verification battery — run ALL of it before pushing
+## 9. The verification battery — run ALL of it before pushing
 
 ```bash
 bun run build          # dist/naiowod.ts is COMMITTED; the suite checks it is in sync
@@ -158,7 +188,7 @@ Then a live `init()` smoke reproducing whatever the change was about.
 
 ---
 
-## 9. Where to look when something is wrong
+## 10. Where to look when something is wrong
 
 | Symptom | Look at |
 |---|---|
@@ -166,5 +196,6 @@ Then a live `init()` smoke reproducing whatever the change was about.
 | A knob works but nobody can find it | It is missing from its `CommandSpec`. A knob the parser honours and the spec omits **does not exist** (`bd6bf50`). |
 | A name resolves to 0 | `::` folding, or the hyphen rule, or a bare name not reaching the extension. |
 | A duration is wildly wrong | Seconds vs milliseconds. §1. |
+| An arcanum shows up as a merit (or vice versa) | Something asked the wrong registry, or a report walk used `ownedPowerInstances`. §5. |
 | A window has no field for a knob | Windows walk the verb's `CommandSpec`. Add the param and the field appears. |
 | `docs/commands.md is in sync` fails | You added or renamed a verb. Run `bun run docs:commands`. |

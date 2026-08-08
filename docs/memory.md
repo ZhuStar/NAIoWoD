@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `0ecd2c3`** ("A command
-> reference that writes itself").
+> **Last synced with the code as of commit `70892be`** ("An arcanum is not
+> a merit: its own type, its own list, its own gate").
+> Prior: `0ecd2c3` ("A command reference that writes itself").
 > Prior: `dc271c4` ("The event does the work, and a passive you can
 > switch off").
 > Prior: `a704283` ("A power that is simply on, and the traps written
@@ -142,7 +143,7 @@ src/wizard.ts        pure: medium-agnostic wizard engine
 src/rolls.ts         pure: roll specs, modifiers, extended-roll state machine
 src/rules.ts         DATA: templates, resources, effect grammar, roads, SRD seeds
 src/command.ts       the command bus: parser, CommandSpec/describe/compose, router+hooks
-src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry, generic config stores
+src/services.ts      ScopedStorage, LorebookManager, MeritFlawRegistry + ArcanumRegistry, generic config stores
 src/state.ts         the character model + EVERY persistent store (config registries, live state)
 src/ui-text.ts       pure: THE window copy - every user-facing window string (§7.48)
 src/game.ts          the verbs: effect interpreter, wizards, handlers + spec registrations
@@ -194,7 +195,8 @@ so the release depends only on the documented API.
 
 **`init()`** (`src/index.ts`): registers the `onTextAdventureInput` hook →
 `processAdventureInput(rawInputText)`, then `LorebookManager.bootstrap()`,
-`MeritFlawRegistry.loadFromLorebook()`, `reloadAllConfigStores()` (every
+`MeritFlawRegistry.loadFromLorebook()`, `ArcanumRegistry.loadFromLorebook()`,
+`reloadAllConfigStores()` (every
 config registry in one sweep), logs a summary with per-entry counts, returns
 `{ setupMessage }` (the OOC note when SRD categories were created).
 
@@ -636,31 +638,49 @@ ending the run.
   `LiveCharacter.Roll {potence:true}`), **Fortitude** (soak dice; lets you
   soak what your template can't); the rest are dots + generic
   `bonusDiceFrom` until per-power effects exist.
-- Merits & Flaws: `MeritFlawDef {name, kind, points: n|n[], requires?
-  {templates any-of, tags all-of, meritsFlaws all-of}, description}`;
-  `DEFAULT_MERITS_FLAWS` (15 defs incl. Iron Will, Acute Senses… and the
-  Devil's Due arcana). **Owned-power pattern (§7.23)**: `MeritFlawDef` gains
-  `param?` (instance-parameter slot — owned as `name:<value>` instances,
-  typed `name::value`), `passive?: EffectOp[]` (always-on ops; amounts SCALE
-  by points taken; `"$<param>"` fields substitute the instance value) and
-  `atMostOneAt?` (advisory cross-instance cap). `EffectOp` gains the
-  **`trait` gate** (twin of the actionTag `target` gate): the op applies only
-  when the roll's POOL used that trait. Helpers: `resolveMeritInstance(key,
-  lookup)` (splits `base:param` only when the base def declares `param`;
-  param defs owned bare are malformed) and `passiveOpsOf(def, param, points)`
-  (substituted, scaled). Shipped arcana: **trait-affinity** {param: trait,
-  atMostOneAt: 3, passive difficulty −1/point} and **trait-enhancement**
-  {param: trait, passive enhance +1/point}.
+- **OWNED POWERS — two categories, one mechanism (§7.72).** `OwnedPowerDef` is
+  the SHARED MACHINERY: `{name, kind, points: n|n[], budget?, perTemplate?,
+  requires? {templates any-of, tags all-of, meritsFlaws all-of, choices},
+  description?, param?, passive?: EffectOp[], limits?, maxFromTrait?, grants?}`.
+  Two types extend it and NOTHING else does:
+  - **`MeritFlawDef {kind: "merit"|"flaw"}`** — `MERIT_FLAW_KINDS`,
+    `DEFAULT_MERITS_FLAWS`, `MeritFlawRegistry`, `srd:merits-flaws`,
+    `char.meritsFlaws`. Open to **any** character.
+  - **`ArcanumDef {kind: "arcanum"|"taint"}`** — `ARCANUM_KINDS`,
+    **`DEFAULT_ARCANA`** (Trait Affinity, Trait Enhancement, Sharpened Senses,
+    Celestial Radiance), `ArcanumRegistry`, `srd:arcana`, `char.arcana`. Open
+    only to a character with **`ARCANA_CAPABILITY`** (`thrall`, `demon`,
+    `ouroboros`, or `[[attune arcana]]`).
+
+  `budgetOfKind`/`kindSpends` read `KIND_BUDGET`/`KIND_SPENDS` over the union
+  `OwnedPowerKind` (merit/flaw→freebie, arcanum/taint→arcana; merit/arcanum
+  COST, flaw/taint GRANT). **Owned-power pattern (§7.23)**: `param?`
+  (instance-parameter slot — owned as `name:<value>`, typed `name::value`),
+  `passive?` (always-on ops; amounts SCALE by points taken; `"$<param>"` fields
+  substitute the instance value), `limits?` (advisory cross-instance caps).
+  `EffectOp` gains the **`trait` gate** (twin of the actionTag `target` gate):
+  the op applies only when the roll's POOL used that trait. Helpers:
+  **`resolvePowerInstance<T>(key, lookup)`** — GENERIC in the def type, so the
+  caller must name which registry it is asking (splits `base:param` only when
+  the base def declares `param`; param defs owned bare are malformed) — and
+  `passiveOpsOf(def, param, points)` (substituted, scaled). Card readers
+  `meritFlawFromCard` / `arcanumFromCard` wrap one `ownedPowerFromCard` and
+  each ACCEPT ONLY THEIR OWN KINDS; `kindOnCard` lets a reader say where a
+  misfiled block belongs.
 - SRD lorebook seeds: `SRD_HEADER_MARKER = "====="` — **every data entry is
   human instructions ABOVE the marker, data BELOW it** (user design: the
   tutorial lives in the entry card itself, no separate readme). `srdEntryText`
   helper; `SRD_CATEGORIES`: `srd:abilities` (entries `srd:abilities:talents`
   /`:skills`/`:knowledges` — one name per line, `#`//`//` comments),
   `srd:backgrounds` (`srd:backgrounds:all`), `srd:merits-flaws`
-  (`srd:merits-flaws:custom` — JSON array merged over defaults).
+  (`srd:merits-flaws:custom` — name-keyed defs merged over defaults),
+  **`srd:arcana`** (`srd:arcana:custom` — the same, for Arcana & Taints, which
+  are NOT merits and do not share their card).
 - **Constraint groups (pure)**: `ConstraintGroup {name, relation:
-  exclusive|restricted|forbidden, domain: background|merit|flaw|meritflaw|any,
-  members[], max?, scope?[], note?}`; `ConstraintViolation {group, relation,
+  exclusive|restricted|forbidden, domain: background|merit|flaw|meritflaw|arcanum|any,
+  members[], max?, scope?[], note?}` — plus **`arcanum`** (§7.72: Arcana and
+  Taints are a list of their own, so a `merit` constraint never catches one and
+  `any` searches everything); `ConstraintViolation {group, relation,
   detail}`; `makeConstraintGroup` (normalize + default: bad relation→exclusive,
   bad domain→any, exclusive max≥1), `describeConstraint`, and
   `checkConstraints(groups, owned: OwnedTraits{backgrounds,merits,flaws,templates})`
@@ -762,8 +782,11 @@ ending the run.
   `ALL_CONFIG_STORES`** → `reloadAllConfigStores()` (returns per-entry counts;
   used by init + the creator-mode hook) and `resetAllConfigStores()` (tests).
   Adding a registry never touches a sync point again.
-- `MeritFlawRegistry` — in-code defaults + `loadFromLorebook()` merging any
-  JSON arrays found in `srd:merits-flaws`; `get/all/register/reset` (kept
+- `OwnedPowerRegistry<T>` — the shared registry class; two instances:
+  **`MeritFlawRegistry`** (`DEFAULT_MERITS_FLAWS`, `srd:merits-flaws`) and
+  **`ArcanumRegistry`** (`DEFAULT_ARCANA`, `srd:arcana`). Each accepts ONLY its
+  own kinds; a block naming the other's kind is skipped and reported with where
+  it belongs. In-code defaults + `loadFromLorebook()`; `get/all/register/reset` (kept
   OUT of the config-store family: different shape — multi-entry category merge).
 - `LorebookParser.ParseFromApi()` — zero-dot Stat maps from the lorebook
   ability/background lists.
@@ -844,9 +867,12 @@ same way.
   (1+, hybrids legal, merge resolved later), stage: "potential"|"ready",
   attributes, abilities, backgrounds, virtues, disciplines, traits,
   poolStarts, meritsFlaws, tags[]}` — plus the optional sidecars added later:
+  **`arcana?`** (§7.72 — Arcana & Taints in a bucket of their OWN, absent on
+  the sheets that have none; `migratePowerBuckets()` moves them out of
+  `meritsFlaws` on load for sheets written before the split),
   `specialties`, `instances` (§7.43), `budgets`/`paid` (§7.50, retyped to
   `BudgetEntry` in §7.60), `capabilities` (§7.60: what this sheet may USE, on
-  top of the template's), and
+  top of the template's — including `arcana`, which opens the Arcana list), and
   `choices`/`priorities` (§7.54: the clan/fellowship picks, and which
   Attribute/Ability categories are primary/secondary/tertiary).
 - `CharacterStore` — `newPotential(name, templates)` seeds **all nine
@@ -947,11 +973,18 @@ folds in at the roll env.
 
 **Owned powers (state side)**: `PlayableCharacter` gains
 `specialties?: Record<trait, string[]>` (VERBATIM labels — display text;
-seeded `{}`). `ownedMeritInstances(char)` resolves the meritsFlaws bucket's
-keys (incl. `name:<param>` instances) through the registry (unknown keys
-skipped here, surfaced by check-constraints); `passiveOpsFor(char)` = every
-substituted+scaled passive op; `enhancementsFor(char)` = per-trait "enhance"
-totals (effective bonus + advisory advancement ceiling).
+seeded `{}`). **THREE walks, and choosing one is not a style choice (§7.72):**
+`ownedMeritInstances(char)` resolves `meritsFlaws` through `MeritFlawRegistry`
+and NEVER sees an arcanum; `ownedArcanumInstances(char)` resolves `arcana`
+through `ArcanumRegistry` and never sees a merit; **`ownedPowerInstances(char)`
+= both**, and is what MECHANISM must use (passive ops, purse ledgers,
+`passiveSourceFor`, instance-limit breaches). All three go through
+`resolvePowerInstance` (incl. `name:<param>` instances); unknown keys are
+skipped here and surfaced by check-constraints, which now names the bucket a
+stray key belongs in. `passiveOpsFor(char)` = every substituted+scaled passive
+op from BOTH categories (Trait Enhancement is an arcanum);
+`enhancementsFor(char)` = per-trait "enhance" totals (effective bonus +
+advisory advancement ceiling).
 
 **Live per-character state** (all story-scoped via ScopedStorage, keyed by
 normalized character name; all default lazily from the record/template):
@@ -1108,8 +1141,8 @@ removes the instance, applies `def.then` CARRYING BINDINGS FORWARD
 (successor's mirror fires). `cmdLift` `spend=` = the Willpower shrug-off via
 `applySpend` (requires a sheet; NPCs can be lifted but not spend). Durations
 render via `describeDuration` + "(ST-enforced)". `ownedTraitsOf(char)`
-(backgrounds/merit/flaw keys, merit-vs-flaw via MeritFlawRegistry, templates)
-feeds `checkConstraints`.
+(backgrounds/merit/flaw keys via MeritFlawRegistry, **arcana keys of their
+own**, templates) feeds `checkConstraints`.
 
 **The effect interpreter**: `applyEffectSpec(char, def, effectName, spec,
 {targetArg?, applications?, rng?, rollTags?})` →
@@ -2551,7 +2584,9 @@ and `prefill` are mocked/available but not yet written.
     purse but left them printed under `merits-flaws`, which is what he was
     looking at. `characterToCard` now writes an `arcana:` block beside
     `merits-flaws:`, and BOTH read back into the one `meritsFlaws` bucket via
-    BUCKET_SYNONYMS - so nothing migrates and the card stops lying. The Devil's
+    BUCKET_SYNONYMS - so nothing migrates and the card stops lying. **(SUPERSEDED
+    by §7.72: the `arcana:` block now reads into its OWN bucket, because one
+    bucket was the shape of the mistake.)** The Devil's
     Due powers were re-kinded with it: Trait Affinity, Trait Enhancement and
     Sharpened Senses are `arcanum`, not `merit`, and now draw on the arcana
     budget.
@@ -2627,6 +2662,12 @@ and `prefill` are mocked/available but not yet written.
     iron-will` refuses and points at `[[take-merit]]`. Wrappers rather than a
     parallel implementation - there is one owned-power mechanism and it stays
     one.
+    **SUPERSEDED BY §7.72.** "A vocabulary over one registry" was the third time
+    I answered a structural complaint with a naming one. Filtering a shared list
+    by purse still leaves the arcana IN the merits list - which is what he was
+    reading when he finally said so flatly. The wrappers are now real handlers
+    over a second registry, second card and second bucket; `wrongFamily` is
+    gone, replaced by `familyOwning()` + `PowerFamily.other()`.
 
 54. **The creation budget: pools as data, clans and fellowships as CHOICES**
     (user: "We should, by this point, create the actual budget for character
@@ -3487,6 +3528,87 @@ and `prefill` are mocked/available but not yet written.
       version escaped once for both - putting backslashes into the usage line a
       reader is meant to copy and type. Two contexts, two forms; `cell()` is now
       the only place that escapes.
+
+72. **An Arcanum is not a Merit — the structural split** (owner, having read the
+    generated command reference: *"First wrong thing I see is an arcanum being a
+    type of merit or flaw. It is not. Define merit shouldn't be able to define an
+    arcanum. I've been trying to say this, but now I can't [not say it]. ... You
+    have to create a new thing, a new thing that only some characters might
+    have. Just like: disciplines are something just some characters have /
+    pillars are something just some characters have / arcana are something that
+    just some characters have / merits and flaws are something any character can
+    have to a certain extent. ... for it to have it, it has to gain the template
+    thrall at least. Anyone can be a thrall of a demon, like a mage, vampire,
+    anyone can be. ... for the regular vampire and mage, there should be no
+    Arcana in the list of Merits and Flaws. It should be a different list."*).
+
+    He had raised this three times (§7.51, §7.52, §7.53) and each time I gave him
+    a conceptual separation - a different `kind`, a different purse, different
+    verbs - over a shared `MeritFlawDef` inside a shared `DEFAULT_MERITS_FLAWS`.
+    **A shared `kind` field is not a category.** Every vampire and mage who typed
+    `[[merits]]` was still being shown Devil's Due Arcana. This time the
+    separation is structural, and the old shape is unrepresentable.
+
+    - **TWO TYPES.** `OwnedPowerDef` is now the SHARED MECHANISM ONLY - name,
+      points, budget, `perTemplate`, `requires`, `param`, `passive`, `limits`,
+      `maxFromTrait`, `grants`. `MeritFlawDef extends OwnedPowerDef {kind:
+      "merit"|"flaw"}` and `ArcanumDef extends OwnedPowerDef {kind:
+      "arcanum"|"taint"}`. `MERIT_FLAW_KINDS` lost its two arcana kinds to the
+      new `ARCANUM_KINDS`. **An arcanum inside `DEFAULT_MERITS_FLAWS` is now a
+      type error** - which is the only kind of "must not" that holds.
+    - **TWO LISTS, TWO REGISTRIES, TWO CARDS.** `DEFAULT_ARCANA` (Trait Affinity,
+      Trait Enhancement, Sharpened Senses, Celestial Radiance) moved out of
+      `DEFAULT_MERITS_FLAWS`. `OwnedPowerRegistry<T>` is the shared class;
+      `MeritFlawRegistry` (`srd:merits-flaws`) and `ArcanumRegistry`
+      (`srd:arcana`, a new seeded SRD category) are its two instances. A block
+      in the wrong card is **skipped and REPORTED with where it belongs** -
+      the old reader filed it as a merit.
+    - **TWO BUCKETS ON THE SHEET.** `PlayableCharacter.arcana?:
+      Record<string, number>`, absent on the (vast majority of) sheets with
+      none. The card already wrote an `arcana:` block; it now reads back into
+      its own bucket. **`migratePowerBuckets()` runs in `CharacterStore.load`
+      AND `characterFromCard`**, so a sheet written before the split moves its
+      arcana across on the way out and nobody re-enters a character.
+    - **`PowerFamily<T>` in `game.ts`** is the descriptor the handlers take:
+      kinds, registry, category, card entry, bucket accessors, instance walk,
+      verb names, the capability gate, the card header, and `other()`. Every
+      verb is `defineOwnedPower(cmd, MERIT_FAMILY)` or `(cmd, ARCANUM_FAMILY)`.
+      **`[[define-merit]]` cannot define an arcanum because it is holding a
+      family whose `kinds` do not contain one** - not a check it might forget.
+      Every refusal names the other verb, so no dead end is ever reached.
+    - **THREE WALKS, and picking one is not a style choice.**
+      `ownedMeritInstances` (the Merits report - never arcana),
+      `ownedArcanumInstances` (the Arcana report - never merits),
+      `ownedPowerInstances` (MECHANISM: passive roll ops, the purse ledger,
+      `passiveSourceFor`, instance-limit breaches - a machine that must look at
+      everything the character owns). `resolveMeritInstance` became
+      **`resolvePowerInstance<T>`, generic in the def type**, so a caller cannot
+      ask a registry for something it does not hold without saying so.
+    - **WHO HAS THE LIST AT ALL is a CAPABILITY, not a template list.** His
+      ruling is that any splat may acquire it, so `ARCANA_CAPABILITY`
+      (`"arcana"`) joins `CAPABILITIES` beside `awakened`/`vitae`/`resolve`;
+      `thrall`, `demon` and `ouroboros` carry it. A character without it is told
+      **he has no Arcana at all** - not shown an empty list - and
+      `[[attune arcana]]` opens it for a chronicle that says otherwise
+      (`waive=true` for one purchase). Capabilities were built for "holding a
+      pool is not being able to spend it"; this is the same idea one level up,
+      and it needed no new mechanism.
+    - **`[[arcana]]` now means what `[[merits]]` means** - what this character
+      owns - and `[[arcanum]]` what `[[merit]]` means: the definitions. Bare
+      `[[arcana]]` on a vampire is the "you have none at all" message.
+      `[[sheet]]` grew an `Arcana/Taints:` line, shown only when there are any.
+      `PASSIVE_AFFLICTIONS`, `applyPassiveGrant` and the orphan sweep now use
+      the def's OWN kind for the source key (`arcanum:x`, `taint:x`, `flaw:x`),
+      and `dropOwnedPower` sweeps every kind its family holds.
+    - **`ConstraintDomain` gained `arcanum`** and `OwnedTraits` an `arcana`
+      list, so a constraint written over a merit cannot catch an arcanum (it
+      would have, before, because they shared a bucket) and one written over an
+      arcanum finds it. `any` still searches everything.
+    - The parallel he drew is recorded in `docs/architecture.md`'s table:
+      **Pillars are the same kind of thing** - a category belonging to mages.
+      They are not modelled as owned powers yet (they are rated traits the
+      fellowship names), and when they are, `PowerFamily` is the shape.
+
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

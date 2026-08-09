@@ -9042,6 +9042,28 @@ describe("backgrounds are held per instance", () => {
     expect(out).toContain("conferred");           // it is the def talking, not the player
   });
 
+  test("a Storyteller gift is free PER INSTANCE - the bought Mentor beside it still bills", async () => {
+    await setup();
+    await CommandRouter.route('set-trait mentor 5 note=`Velia` source=storyteller');
+    await CommandRouter.route('set-trait mentor 3 note=`Daujotas` add');   // bought
+    await CommandRouter.route("set-trait resources 2");                    // bought
+    const out = await CommandRouter.route("show-budget");
+    // 3 + 2. The gift is listed and costs nothing; `source` used to be readable
+    // only per TRAIT, which could not bill one Mentor and gift the other.
+    expect(out).toContain("background: 5/5");
+    expect(out).toContain("(storyteller, free)");
+  });
+
+  test("a Storyteller gift is uncapped - Library 8 past a max of 5 draws no complaint", async () => {
+    await setup();
+    await CommandRouter.route('set-trait library 8 note=`Library of the Unseen` source=storyteller');
+    const budget = await CommandRouter.route("show-budget");
+    expect(budget).toContain("library 8 (storyteller, free)");
+    expect(budget).not.toContain("⚠");
+    // ...and it still costs the purse nothing at all.
+    expect(budget).toContain("background: 0/5");
+  });
+
   test("a grant cycle terminates instead of hanging", async () => {
     await setup();
     await CommandRouter.route('define-background name="a-side" max=5 grants="b-side:2"');

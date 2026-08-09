@@ -7,7 +7,7 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `47d262f`** ("A man can have two
+> **Last synced with the code as of commit `4f3846e`** ("A man can have two
 > Mentors").
 > Prior: `101ec10` ("The scope was always there").
 > Prior: `096eaca` ("Eleven modules, one order").
@@ -4838,11 +4838,19 @@ and `prefill` are mocked/available but not yet written.
       it should file as a Background. Now it does.
     - (§7.92's `show-background` scope bug was the previous one in this area.)
 
-    **NOT DECIDED, and the questions were asked:** whether a Storyteller bonus
-    is merely grouped, or also exempt from the budget, or exempt from the
-    background's own max as well (Library 8 and Sanctum 8 exceed the usual
-    ceiling in the owner's sheet, which hints at the third). Built as grouping +
-    record; the mechanical exemption is one flag away once answered.
+    **DECIDED** (owner: *"ST bonuses are free and uncapped. We will revise these
+    later."*). Both halves were most of the way there already:
+
+    - **Free** — `sourceDrawsOnPurse("storyteller")` was already false, but the
+      ledger read `char.source[TRAIT]`, so it could not bill one Mentor and gift
+      the next. The purse now asks **per instance**, falling back to the
+      per-trait source, so a wholly-granted Background behaves as before.
+    - **Uncapped** — a Background's `max` is *displayed* by `show-background`
+      and **never validated anywhere**, so gifts were already uncapped by
+      omission. Now covered by a test that pins it, and any future cap check
+      must skip instances whose source does not draw on a purse.
+
+    Marked "revise later": the owner expects to revisit these mechanics.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

@@ -8,7 +8,7 @@ import { StringUtil } from "../core/traits";
 import { TraitResolver } from "../rolls";
 import { AFFINITY_SOURCES, ATTRIBUTES, BackgroundDef, BudgetDef, BudgetEntry, CLANS, COST_PURSES, CostTable, CreationBudget, DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, DEFAULT_TEMPLATE_DEFS, GRANT_SOURCES, NOT_PURCHASABLE, ROADS, ResourceDef, SOAK_TABLES, TEMPLATES, TemplateDef, TraitGrant, TraitLimit, advancementCostsFrom, affinityDisciplines, backgroundTierAt, budgetBuyable, budgetDef, budgetOfKind, categoryOpenTo, clanByName, creationBudgetFor, describeCreationGrant, fellowshipByName, grantSourceNote, kindSpends, makeBackgroundDef, makeTemplateDef, roadByName, roadRatingExpr, sourceDrawsOnPurse, supernaturalTraitOf } from "../rules";
 import { LorebookManager } from "../services";
-import { AdvancementCosts, BackgroundRegistry, COSTS_CONFIG_ENTRY, CharacterStore, DerivedValue, HeldBackground, heldBackgrounds, PlayableCharacter, ResourceOverrides, ScopeExtension, StoryClock, TemplateRegistry, characterScope, derivedValuesOf, evalOn, grantedTraitsOf, lastTemplateProblems, numericOn, ownedPowerInstances, resolveTraitFromRecord, roadOf, traitValueOf } from "../state";
+import { AdvancementCosts, BackgroundRegistry, TraitInstance, COSTS_CONFIG_ENTRY, CharacterStore, DerivedValue, HeldBackground, heldBackgrounds, PlayableCharacter, ResourceOverrides, ScopeExtension, StoryClock, TemplateRegistry, characterScope, derivedValuesOf, evalOn, grantedTraitsOf, lastTemplateProblems, numericOn, ownedPowerInstances, resolveTraitFromRecord, roadOf, traitValueOf } from "../state";
 import { resolveCharacterRef } from "./afflictions";
 import { disp, intOrUndef, noCharacter } from "./common";
 import { characterRollEnv } from "./effects";
@@ -134,14 +134,22 @@ function purseLedger(char: PlayableCharacter, resolve: TraitResolver): Record<st
   const offPurse = (key: string): boolean => !sourceDrawsOnPurse(sourceOf(key));
   for (const [name, rating] of Object.entries(char.backgrounds ?? {})) {
     if (rating <= 0) continue;
-    if (offPurse(name)) { backgrounds.items.push(`${name} ${rating} (${sourceOf(name)})`); continue; }
     const held = char.instances?.[name];
-    const each = held?.length ? held : [{ rating, paid: char.paid?.[name] }];
+    const each: TraitInstance[] = held?.length ? held : [{ rating, ...(char.paid?.[name] !== undefined ? { paid: char.paid[name] } : {}) }];
     for (const one of each) {
-      const override = (one as { paid?: string }).paid;
-      const cost = override !== undefined ? evalBudget(char, override) : one.rating;
+      if (one.rating <= 0) continue;
+      // ASKED PER INSTANCE, because the answer differs per instance: one Mentor
+      // may be the Storyteller's gift and the next one bought with the purse.
+      // The per-trait `source` still answers for anything the instance does not
+      // override, so a wholly-granted Background keeps behaving as it did.
+      const src = one.source ?? sourceOf(name);
+      if (!sourceDrawsOnPurse(src)) {
+        backgrounds.items.push(`${name} ${one.rating} (${src}, free)`);
+        continue;
+      }
+      const cost = one.paid !== undefined ? evalBudget(char, one.paid) : one.rating;
       backgrounds.spent += cost;
-      backgrounds.items.push(`${name} ${one.rating}${override !== undefined ? ` (paid ${cost})` : ""}`);
+      backgrounds.items.push(`${name} ${one.rating}${one.paid !== undefined ? ` (paid ${cost})` : ""}`);
     }
   }
   for (const [name, g] of Object.entries(conferred)) {

@@ -4900,6 +4900,74 @@ and `prefill` are mocked/available but not yet written.
     on `core/bus` + `host`, so the cut is small once the build can emit two
     files.
 
+95. **Santa: there IS a central hub** (owner, deciding it: *"I'm leaning towards
+    a hub because I'm thinking about the future"*). The original metaphor, in
+    his words: each script has its own post office; they send letters through
+    it; they "wait home" for deliveries; the post office talks to **Santa** (the
+    central event bus); *"Santa knows how to build the right gift, even if it
+    has to talk to other post offices to build it, and it delivers the gift to
+    the one who asked for it, or hands it to everyone, if that's the
+    intention."*
+
+    **THIS REVERSED THE ASSISTANT'S POSITION, AND THE ARGUMENTS THAT DID IT ARE
+    THE POINT** — a later session must not re-litigate it from the same wrong
+    premises:
+
+    - **Self-delivery is a reason FOR a hub, not against.** §7.84's measurement
+      ("only `broadcast` excludes the sender") had been read as a happy accident
+      that avoids double-dispatch. It is really an ASYMMETRY: every script sees
+      a different event stream, and every handler must reason about "did I
+      originate this?". Ask Santa, Santa broadcasts, everyone hears the same
+      stream including the asker. Uniform semantics beat a special case in every
+      handler.
+    - **The single-point-of-failure objection was simply wrong.** §7.90 already
+      forces exactly one indispensable script — if the state owner is down the
+      game is down. Consolidating bus + storage + log there adds NO new failure
+      mode. A hub-less design pays the SPOF anyway and gets none of the
+      benefits.
+    - **Latency does not survive the numbers.** Q5 measured 7ms; via Santa ~14ms,
+      against generation measured in SECONDS. At cascade depth 5, 70ms vs 35ms.
+      Imperceptible either way.
+    - **Two things only a hub can do**: know when a CASCADE HAS QUIESCED (no
+      peer can see the whole graph, and `onTextAdventureInput` must return its
+      text *after* the world has finished changing), and enforce hop limits /
+      cycle detection centrally instead of every script policing itself.
+    - **A CENTRAL LOG belongs to Santa.** Today each script logs on its own
+      (`api.v1.log`, as `scripts/probe-messaging.ts` shows with its
+      `[probe:one]` / `[probe:two]` tags). Debugging a cascade across N separate
+      logs is miserable; the hub is the only place a whole causation chain can
+      be read end to end.
+
+    **WHAT IS ALREADY BUILT FOR IT**: the per-script post office, letters
+    (`publish`), waiting home (`onMessage`), the gift for the one who asked
+    (§7.94's correlated reply), and handing it to everyone (broadcast). **Santa
+    itself is not built.** The change is a ROUTING one, not a redesign:
+    `PostOffice` stops addressing the room and starts addressing the hub —
+    `ask` currently calls `broadcast(env, channel)` and would call
+    `send(hubId, env, channel)`. The per-script code stays byte-identical across
+    artifacts, which is what "repeated" is supposed to mean.
+
+    **THE ONE RULE THAT KEEPS SANTA FROM BECOMING THE MONOLITH AGAIN**: Santa
+    composes GENERICALLY, from rules the satellites declare. A satellite's
+    manifest says what it serves and what answering needs merged; Santa routes,
+    gathers, merges, and returns **without knowing what an affliction IS**. If
+    Santa learns game rules in order to build gifts, `game.ts` reassembles
+    inside the hub with a network hop added. Domain knowledge stays with the
+    satellite that owns the domain; Santa owns routing, ordering, logging and
+    quiescence.
+
+    **AND THE RULE FOR EVENT CLASSES** (unchanged by the hub): `ask` is
+    correlated, awaited and timeout-guarded; `publish` is fire-and-forget and
+    cascades. **If the hook's returned text depends on the reaction, it must be
+    an `ask`** — an announcement still propagating when the hook returns writes
+    story text about a world that has not finished changing.
+
+    **LOREBOOK IS SHARED** (owner, settled): *"there's really only one (or zero)
+    lorebook per story in NovelAI."* So satellites read rules, definitions and
+    story cards DIRECTLY and ask the owner only for character state — satellites
+    can be fat and autonomous rather than thin clients. This is what makes the
+    split worth doing.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
@@ -5347,6 +5415,56 @@ Ordered roughly by unlock value:
       on a per-chunk path may await the host; deferred work goes on
       `onGenerationEnd` at `monitor` priority; and a satellite registers the
       fewest hooks it can.
+
+25. **THE AI AS A PARTICIPANT, NOT JUST A READER** (owner, and previously
+    UNRECORDED — he had to point that out: *"I had mentioned this, but you
+    didn't record this"*. It is the long horizon of the whole project, and the
+    reason the microservice split and the manifest format matter.)
+
+    Today the AI reads what the engine writes into context. The direction is
+    two-way: the AI ASKS the engine for things, and the engine ASKS the AI for
+    judgements.
+
+    - **A COMPACT VOCABULARY, because you cannot teach an AI 98 commands.**
+      (98 is the count as of this writing, which is already past what a prompt
+      teaches reliably.) The shape the owner sketched — *"To System: make ghoul
+      Gregorius as old monk"* — is **illustrative, not settled syntax**; he said
+      so explicitly. What matters is the PRINCIPLE: few verbs, rich typed
+      parameters, with the complexity living in DATA rather than in more verbs.
+      That is this project's own "everything is data" rule turned on the AI's
+      instruction surface.
+    - **ARCHETYPES** (owner: *"the idea of archetypes is super cool"*). An
+      archetype — "old-monk" — is **probabilities of priorities and
+      probabilities for each trait**, while a template ("ghoul") shapes the
+      sheet as a whole. Genuinely new machinery: nothing weighted or
+      distribution-shaped exists yet. One piece of luck — `core/dice.ts` takes
+      an **injectable `Rng`**, so generation can be seeded and reproducible,
+      which this engine's legality-proof culture will want ("what did it roll,
+      and can I re-roll just that one?"). Compactness for the AI must not cost
+      transparency for the player: a verb that writes a whole sheet from
+      probabilities still has to show its arithmetic and stay individually
+      overridable, like everything else here.
+    - **CAPABILITY PUBLISHING** — scripts declare what they can do, and Santa
+      assembles the vocabulary (or it is hardcoded at first; the owner is
+      explicit that publishing is a LATER option). Cheap when it comes, because
+      `CommandSpec` ALREADY carries the AI-facing description: `summary`,
+      `params` with `hint`/`example`/`desc`, and the "does this reply belong in
+      the story?" flag that already models what the AI is allowed to see. A
+      manifest should therefore be DERIVED from the registry, not hand-written.
+    - **SECRET ROLLS.** The AI asks for a roll and it is made *without the
+      player seeing it*: the result is smuggled into the AI's context only.
+      (The context-visibility machinery this needs — `markCtxSkip`,
+      `stripCtxSkip`, the in-story/not-in-story decision every command already
+      makes — is largely built; what is missing is a channel that is the
+      inverse: visible to the AI, hidden from the player.)
+    - **THE ENGINE ASKS THE AI.** Using the generation API to get judgements:
+      the DIFFICULTY of a given roll, *"which tags should go in this roll?"*,
+      and other calls that want taste rather than arithmetic.
+    - **SELF-TESTING THE TEACHING.** Also via the generation API: ask the AI to
+      write a request to the system *as taught*, check whether it got it right,
+      and **tweak the wording of the teaching until it does**. An eval loop over
+      the instruction text — the teaching becomes a tuned artifact with a
+      measurable pass rate, not prose somebody hopes is clear.
 
 ## 9. Session-restart checklist
 

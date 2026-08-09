@@ -8964,3 +8964,41 @@ describe("per-script storage, as measured", () => {
     expect(await mine.get("x")).toBe(1);
   });
 });
+
+
+// =============================================================================
+// THE SPLIT DID NOT MOVE ANYTHING THAT MATTERS
+// -----------------------------------------------------------------------------
+// src/game.ts was 7941 lines; it is now src/game/*. Two things had to survive
+// exactly: the order commands register in (it is what [[help]] lists) and the
+// public surface. Both are asserted here rather than hoped for. See §7.91.
+// =============================================================================
+describe("the game layer after the split", () => {
+  test("no deprecation was silently dropped - the failure mode that hid the reordering", () => {
+    // `deprecate` used to return false and forget when either verb was missing,
+    // so six lost deprecations produced no error at all. They are now deferred
+    // and applied on registration; anything still pending is a real mistake -
+    // a verb that never registers, i.e. a typo in a deprecation table.
+    expect(CommandRouter.pendingDeprecations()).toEqual([]);
+  });
+
+  test("[[help]] still lists `help` first, and show-* last", () => {
+    const verbs = CommandRouter.verbs();
+    expect(verbs[0]).toBe("help");
+    // The show-* block registers from the barrel precisely so it lands after
+    // afflictions.ts's 129. If module evaluation order ever leaks back into
+    // registration order, these verbs jump to the front and this fails.
+    const firstShow = verbs.findIndex(v => v.startsWith("show-"));
+    const lastPlain = verbs.map(v => !v.startsWith("show-") && !v.startsWith("win-")).lastIndexOf(true);
+    expect(firstShow).toBeGreaterThan(lastPlain);
+  });
+
+  test("a deprecated alias still routes and still points at its replacement", async () => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
+    await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
+    const out = await CommandRouter.route("merits");
+    expect(out).toContain("[[merits]] is now [[show-merit]]");
+    expect(isQuietVerb("merits")).toBe(true);         // as quiet as what replaced it
+  });
+});

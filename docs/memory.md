@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `dd81200`** ("Never silence a
-> sibling").
+> **Last synced with the code as of commit `096eaca`** ("Eleven modules, one
+> order").
+> Prior: `dd81200` ("Never silence a sibling").
 > Prior: `da7312c` ("Seven milliseconds").
 > Prior: `f04e551` ("storyStorage is not shared").
 > Prior: `7c11cdf` ("The probe was going to lie").
@@ -4687,6 +4688,66 @@ and `prefill` are mocked/available but not yet written.
 
     The probe stays installed-and-runnable: a host update can change any of
     this, and re-running it is cheaper than rediscovering it the hard way.
+
+91. **`src/game.ts` split into `src/game/*` — 7941 lines into eleven modules.**
+    Cut at the file's OWN section banners, so the boundaries are the author's
+    rather than invented: `common` (the shared prelude — wizard defs, roll
+    plumbing, `disp`/`noCharacter`), `effects`, `character`, `places`,
+    `contests`, `time`, `narration`, `powers`, `afflictions`, `show`, `context`.
+    `src/game.ts` remains as a barrel exporting **the same 19 public names, not
+    one more** — everything that had to become `export` for a sibling stays
+    internal to `src/game/`.
+
+    **THE ARTIFACT IS UNCHANGED APART FROM THREE INTENDED EDITS.** Verified by
+    diffing `dist/naiowod.ts` line-by-line against the pre-split build: 18286
+    lines, and the only non-comment differences are the three below. `MODULES`
+    lists the new files in the original source order, so the concatenation keeps
+    the exact declaration order it had as one file.
+
+    **What genuinely had to change, and why each was a real defect:**
+
+    1. **`deprecate()` failed SILENTLY.** It returned `false` the moment either
+       verb was unregistered — and returning false was all it did, so the
+       deprecation was simply lost. Six vanished when module evaluation order
+       changed, with no error and nothing failing. It now DEFERS and applies on
+       registration, and `pendingDeprecations()` exposes the leftovers; a test
+       asserts that list is empty, so a deprecation naming a verb that never
+       registers is now loud instead of invisible. **A registry has no business
+       caring what order modules loaded in.**
+    2. **`lastEmptied` was written across a module boundary**, which ESM forbids
+       (imports are read-only bindings). Now `takeLastEmptied()` — a read-and-
+       clear, which is what the single consumer already did in two statements.
+    3. **The show-* verbs had to be DEFERRED to the barrel.** All 130
+       registrations live in just two modules — 129 top-level in
+       `afflictions.ts` and one loop in `show.ts` — and in the single file the
+       loop came second. Splitting created a cycle (`show` imports
+       `afflictions`, which reaches back through `context`), and ESM breaks that
+       cycle by evaluating `show` FIRST, which moved 33 show-* verbs plus
+       `show-help` to the head of every listing. `installShowVerbs()` called
+       from the barrel restores it: module bodies all finish before the barrel's
+       own body, and the artifact concatenates the barrel last, so **both paths
+       register in one order and it is the order the file always had.**
+       `docs/commands.md` regenerates byte-identical, which is the proof.
+
+    **A LATENT BUILD BUG THIS EXPOSED.** `stripModule` handled
+    `export { A } from "./x"` and `export * from "./x"` but **not
+    `export type { T } from "./x"`** — which therefore lost only its `export `
+    and emitted `type { T } from "./x";`, not valid TypeScript. The leaked-wiring
+    guard could not see it, because that line starts with neither `import` nor
+    `export`. **The standalone type-check of the artifact is what caught it** —
+    the verification step that exists for exactly this. Both the strip and the
+    guard are fixed. (The barrel needs `export type` at all because a bare
+    `export { SomeInterface }` type-checks and then fails at RUNTIME, once the
+    types are stripped and no binding remains to re-export.)
+
+    **What was tried and abandoned:** a `mechanics.ts` holding the sixteen
+    declarations that other modules reached backwards for. It cut the back-edges
+    from 15 to 8 and no further — the extracted primitives call back into the
+    subsystems they came from, so the graph is *genuinely* cyclic and no hub
+    module fixes it. Reverted rather than shipped with a banner claiming a
+    purpose it did not achieve. Cycles are fine here anyway: 253 of the
+    declarations are hoisted `function`s and the only order-sensitive statements
+    were the 130 registrations, which are now explicit.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

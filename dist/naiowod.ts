@@ -6870,6 +6870,8 @@ class CommandRouter {
       ? spec
       : { ...spec, params: [...params, IN_STORY_PARAM] };
     CommandRouter._registry.set(verb.toLowerCase(), { handler, spec: full });
+    // A deprecation may have been declared before this verb existed. Now it does.
+    if (CommandRouter._deferredDeprecations.length) CommandRouter._drainDeprecations();
   }
   static beforeRoute(hook: () => Promise<void>): void { CommandRouter._beforeRoute.push(hook); }
   // The CURRENT vocabulary. Deprecated aliases still route; they are simply not
@@ -6884,12 +6886,42 @@ class CommandRouter {
   // being restated at forty scattered registration sites. Returns false when
   // the verb or its replacement is not registered - a typo in that table is a
   // test failure, not a silently dead pointer.
-  static deprecate(verb: string, replacedBy: string, opts: { hidden?: boolean } = {}): boolean {
-    const def = CommandRouter._registry.get(verb.toLowerCase());
-    if (!def || !CommandRouter._registry.has(replacedBy.toLowerCase())) return false;
-    def.spec.deprecated = replacedBy.toLowerCase();
-    if (opts.hidden !== undefined) def.spec.hidden = opts.hidden;
+  // ORDER-INDEPENDENT ON PURPOSE. This used to return false the instant either
+  // verb was not yet registered, and returning false is all it did - the
+  // deprecation was simply LOST, with no error and no failing anything. That was
+  // survivable while every command lived in one file and registration order was
+  // whatever the file said; splitting game.ts into src/game/* changed module
+  // evaluation order and silently dropped six deprecations, which is precisely
+  // the failure mode a silent `false` guarantees you find late.
+  //
+  // So an unapplicable deprecation is now REMEMBERED and applied the moment both
+  // verbs exist. A registry has no business caring what order modules loaded in.
+  private static _deferredDeprecations: Array<{ verb: string; replacedBy: string; hidden?: boolean }> = [];
+
+  private static _apply(d: { verb: string; replacedBy: string; hidden?: boolean }): boolean {
+    const def = CommandRouter._registry.get(d.verb.toLowerCase());
+    if (!def || !CommandRouter._registry.has(d.replacedBy.toLowerCase())) return false;
+    def.spec.deprecated = d.replacedBy.toLowerCase();
+    if (d.hidden !== undefined) def.spec.hidden = d.hidden;
     return true;
+  }
+
+  private static _drainDeprecations(): void {
+    CommandRouter._deferredDeprecations =
+      CommandRouter._deferredDeprecations.filter(d => !CommandRouter._apply(d));
+  }
+
+  /** Returns whether it applied IMMEDIATELY; a false means deferred, not dropped. */
+  static deprecate(verb: string, replacedBy: string, opts: { hidden?: boolean } = {}): boolean {
+    const d = { verb, replacedBy, ...(opts.hidden !== undefined ? { hidden: opts.hidden } : {}) };
+    if (CommandRouter._apply(d)) return true;
+    CommandRouter._deferredDeprecations.push(d);
+    return false;
+  }
+
+  /** Deprecations still waiting for one of their verbs. Empty once everything is registered. */
+  static pendingDeprecations(): Array<{ verb: string; replacedBy: string }> {
+    return CommandRouter._deferredDeprecations.map(({ verb, replacedBy }) => ({ verb, replacedBy }));
   }
   // Every verb whose spec names a replacement, with it.
   static deprecatedVerbs(): Array<{ verb: string; replacedBy: string }> {
@@ -10983,19 +11015,12 @@ class WizardSession {
 }
 //#endregion src/state.ts
 
-//#region src/game.ts
-// =============================================================================
-// GAME - the live layer's surface: effect interpreter, wizards, command handlers
-// -----------------------------------------------------------------------------
-// This module implements the verbs. It reads/writes the stores in state.ts,
-// interprets effect specs against live characters, and registers every command
-// (with its CommandSpec - the one declarative description help text and
-// windows derive from) on the CommandRouter in command.ts. The creator-mode
-// lorebook sync is a beforeRoute hook registered here: the router dispatches,
-// the game decides what must happen first.
-// =============================================================================
-// `api`, `UIPart`, `OnTextAdventureInputReturnValue` are ambient host globals
-// (types vendored in types/novelai/script-types.d.ts).
+//#region src/game/common.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
+
 
 // --- The "resources" wizard: a guided editor for ResourceOverrides -----------
 interface RwState {
@@ -11242,8 +11267,10 @@ async function cmdCreatorMode(cmd: ParsedCommand): Promise<string> {
   }
   // Leaving creator mode: capture any final lorebook edits, then switch off.
   const { synced, failed, emptied: justNow } = await syncFromCreatorEdits();
-  const emptied = justNow.length ? justNow : lastEmptied;
-  lastEmptied = [];
+  // Cleared unconditionally, exactly as before - the take happens whichever
+  // branch supplies the value, so a stale list cannot survive into a later run.
+  const remembered = takeLastEmptied();
+  const emptied = justNow.length ? justNow : remembered;
   await CreatorMode.set(false);
   const parts = [`Creator mode OFF.`];
   if (synced.length) parts.push(`Synced from lorebook: ${synced.join(", ")}.`);
@@ -11368,6 +11395,13 @@ function mergeRollExtra(into: Partial<RollModifier>, ...patches: Array<Partial<R
   }
   return into;
 }
+//#endregion src/game/common.ts
+
+//#region src/game/effects.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // THE EFFECT INTERPRETER - execute one EffectSpec for a character
@@ -12636,6 +12670,13 @@ async function cmdFellowships(cmd: ParsedCommand): Promise<string> {
   const items = entries.map(([k, f]) => `${k}: ${disp(f.foundation)} + ${Object.keys(f.pillars).map(p => disp(p)).join("/")}`).join("; ");
   return sys(`Fellowships - ${items}. Detail with [[show-fellowship <name>]].`);
 }
+//#endregion src/game/effects.ts
+
+//#region src/game/character.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // BUDGETS - what a character may spend, per purse
@@ -13597,6 +13638,13 @@ async function cmdCosts(cmd: ParsedCommand): Promise<string> {
     + `"${NOT_PURCHASABLE}" there means that purse cannot be bought from at all. `
     + `🚧 maturation is recorded here and spent by nobody: there is no downtime engine yet.`);
 }
+//#endregion src/game/character.ts
+
+//#region src/game/places.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // PLACES OF POWER - the sanctum, the library, and the cray within it
@@ -14019,6 +14067,13 @@ async function cmdGain(cmd: ParsedCommand): Promise<string> {
   const { value } = await CharacterResources.gain(char, which, amount);
   return sys(`${disp(char.name)} regains ${def.name}. Now ${value}/${resourceNumbers(char, def).max}.`);
 }
+//#endregion src/game/places.ts
+
+//#region src/game/contests.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // RESISTED / CONTESTED ROLLS - two pools, one adjudication
@@ -14312,6 +14367,13 @@ async function cmdCancelContest(cmd: ParsedCommand): Promise<string> {
   const progress = contest.sides.map(s => `${disp(s.name)} ${s.accumulated}/${contest.target}`).join(" vs ");
   return sys(`Cancelled contest${contest.label ? ` "${contest.label}"` : ""} (was ${progress}).`);
 }
+//#endregion src/game/contests.ts
+
+//#region src/game/time.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // TIME - the story clock: set when it begins, advance it, read it, bookmark &
@@ -14874,6 +14936,13 @@ async function cmdForgetScene(cmd: ParsedCommand): Promise<string> {
   if ((await SceneStore.currentName()) === key) { await SceneStore.clearCurrent(); await syncSceneToAuthorNote(undefined); }
   return (await SceneStore.remove(name)) ? sys(`Forgot scene "${key}".`) : sys(`No scene named "${key}".`);
 }
+//#endregion src/game/time.ts
+
+//#region src/game/narration.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // STORYTELLER OUTPUT - the AI's private plans (§7.31, Pass B). The AI writes
@@ -15236,6 +15305,13 @@ async function reconcileLorebook(): Promise<string[]> {
   }
   return notes;
 }
+//#endregion src/game/narration.ts
+
+//#region src/game/powers.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // CONSTRAINT GROUP COMMANDS - define/list/inspect the allow-deny rules, and
@@ -16598,6 +16674,13 @@ async function cmdAdvance(cmd: ParsedCommand): Promise<string> {
   if (r.error) return sys(`${current.def} ended, but ${def.then} could not begin: ${r.error}`);
   return sys(`${current.def} ends; ${r.lines!.join("; ")}.`);
 }
+//#endregion src/game/powers.ts
+
+//#region src/game/afflictions.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // HELD DOWN, ENDED, AND BACK - three things, three verbs
@@ -17148,7 +17231,15 @@ async function cmdSetDefault(cmd: ParsedCommand): Promise<string> {
 // The beforeRoute hook syncs BEFORE the command runs, so by the time
 // [[creator-mode set=false]] does its own sync there is nothing left to notice.
 // Whatever the last sync saw is kept here so the reply can still say it.
+// TAKEN, not read: the single consumer read this and cleared it in the same
+// breath, so the pair is the honest shape of the operation as well as the only
+// one ESM allows - an exported `let` is a read-only binding at the far end.
 let lastEmptied: string[] = [];
+function takeLastEmptied(): string[] {
+  const was = lastEmptied;
+  lastEmptied = [];
+  return was;
+}
 async function syncFromCreatorEdits(): Promise<{ synced: string[]; failed: string[]; emptied: string[] }> {
   await reconcileLorebook();   // tracked-card drift first (may open modals)
   const result = await CharacterStore.syncFromLorebook();
@@ -18039,6 +18130,13 @@ CommandRouter.register("player", cmdPlayer, {
     { key: "default", kind: "named", type: "bool", desc: "Also make it the default player" },
   ],
 });
+//#endregion src/game/afflictions.ts
+
+//#region src/game/show.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // SHOW - one way to look at anything, and none of it reaches the AI
@@ -18579,37 +18677,65 @@ function showParams(subject: ShowSubject): ParamSpec[] {
   ];
 }
 
-for (const subject of SHOW_SUBJECTS) {
-  const handler: CommandHandler = async (cmd) => {
-    const { name } = showName(cmd);
-    const scope = await resolveShowScope(cmd.named["in"] ?? cmd.named["from"], subject.scopes, subject.defaultScope);
-    if ("error" in scope) return sys(scope.error);
-    return subject.render(name, scope, cmd);
-  };
-  CommandRouter.register(subject.verb, handler, {
-    summary: subject.summary,
-    note: subject.note,
-    params: showParams(subject),
-  });
-  SHOW_SUBJECT_VERBS.push(subject.verb);
-}
+// DEFERRED ON PURPOSE - the ONE place in src/game/* where registration order is
+// not simply "wherever the module body ran". All 130 registrations live in just
+// two modules: 129 top-level ones in afflictions.ts and this loop. In the old
+// single file this loop came AFTER those 129, so [[help]] listed the show-*
+// verbs last. Splitting created a cycle (show imports afflictions, which reaches
+// back here through context), and ESM resolves that cycle by running THIS module
+// first - which silently moved 33 show-* verbs to the head of every listing.
+//
+// Calling it from the barrel instead puts it back where it was: module bodies
+// all finish before the barrel's own body runs, so afflictions' 129 are always
+// registered first. dist/naiowod.ts concatenates the barrel last, so the
+// artifact agrees - one order, both paths, and it is the order the file had.
 
 // ...and every name that used to mean it now says so. ONE table, so a rename
 // cannot leave a dangling pointer: an unregistered verb here fails the suite.
 const SHOW_DEPRECATIONS: Array<{ from: string; to: string; hidden?: boolean }> =
   SHOW_SUBJECTS.flatMap(s => (s.replaces ?? []).map(r => ({ from: r.verb, to: s.verb })));
-for (const { from, to } of SHOW_DEPRECATIONS) CommandRouter.deprecate(from, to);
+// DEFERRED ON PURPOSE - the ONE place in src/game/* where registration order is
+// not just "wherever the module body ran". All 130 registrations live in two
+// modules: 129 top-level ones in afflictions.ts, and these. In the single file
+// this loop came AFTER those 129, so [[help]] listed the show-* verbs last.
+// Splitting created a cycle (show imports afflictions, which reaches back here
+// through context) and ESM breaks that cycle by running THIS module first -
+// silently moving 33 show-* verbs to the head of every listing.
+//
+// Calling it from the barrel instead puts them back: every module body finishes
+// before the barrel's own body runs, so afflictions' 129 are always registered
+// first. dist/naiowod.ts concatenates the barrel last, so the artifact agrees.
+// One order, both paths, and it is the order the file always had.
+function installShowVerbs(): void {
+  for (const subject of SHOW_SUBJECTS) {
+    const handler: CommandHandler = async (cmd) => {
+      const { name } = showName(cmd);
+      const scope = await resolveShowScope(cmd.named["in"] ?? cmd.named["from"], subject.scopes, subject.defaultScope);
+      if ("error" in scope) return sys(scope.error);
+      return subject.render(name, scope, cmd);
+    };
+    CommandRouter.register(subject.verb, handler, {
+      summary: subject.summary,
+      note: subject.note,
+      params: showParams(subject),
+    });
+    SHOW_SUBJECT_VERBS.push(subject.verb);
+  }
+  for (const { from, to } of SHOW_DEPRECATIONS) CommandRouter.deprecate(from, to);
+  // Deferred with its siblings for the same reason: registered in the module
+  // body it would land ahead of afflictions.ts's 129 and lead every listing.
+  CommandRouter.register("show-help",
+    (cmd, ctx) => CommandRouter.route(`help ${cmd.positional.join(" ")}`.trim(), ctx), {
+      summary: "alias of [[help]], which keeps its name - it is the one command everybody already knows",
+      params: [{ key: "verb", kind: "positional", hint: "[verb]", example: "show-merit" }],
+    });
+}
 
 // HELP IS THE EXCEPTION, and it runs the other way. Everything else that only
 // reports was renamed to `show-*`, but [[help]] is what a player types before
 // they know anything at all - in this engine and in every other one - so it
 // KEEPS its name and is not deprecated. `show-help` is registered as the alias,
 // for the players who will now reasonably guess it. Both are quiet.
-CommandRouter.register("show-help",
-  (cmd, ctx) => CommandRouter.route(`help ${cmd.positional.join(" ")}`.trim(), ctx), {
-    summary: "alias of [[help]], which keeps its name - it is the one command everybody already knows",
-    params: [{ key: "verb", kind: "positional", hint: "[verb]", example: "show-merit" }],
-  });
 
 const COMMAND_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 
@@ -18662,6 +18788,13 @@ function wantsInStory(cmd: ParsedCommand): boolean {
   if (declared !== undefined) return declared;
   return !isQuietVerb(cmd.name);
 }
+//#endregion src/game/show.ts
+
+//#region src/game/context.ts
+// Split out of the former 7941-line src/game.ts (memory §7.91). The cut points
+// are the file's own section banners and SOURCE ORDER IS PRESERVED across the
+// split, so dist/naiowod.ts keeps the exact declaration order it had as one
+// file - the artifact's only diff is which //#region each line sits in.
 
 // =============================================================================
 // CONTEXT HYGIENE - keep engine noise out of the AI's context (§7.32)
@@ -18829,6 +18962,24 @@ async function processAdventureInput(rawInputText: string): Promise<OnTextAdvent
   // The host forbids newlines in inputText (it would replace them with spaces).
   return { inputText: out.replace(/\n/g, " "), stopGeneration: prose.length === 0 || anyQuiet };
 }
+//#endregion src/game/context.ts
+
+//#region src/game.ts
+// The former src/game.ts. Its 7941 lines now live in src/game/*, cut at the
+// file's own section banners. This keeps the PUBLIC SURFACE it always had -
+// the same 19 names, not one more. Everything that had to become `export` so a
+// sibling could import it stays internal to src/game/.
+//
+// Types go through `export type`: a bare `export { SomeInterface }` type-checks
+// and then fails at RUNTIME, because once types are stripped there is no
+// binding left to re-export.
+
+
+// The show-* verbs register HERE rather than in their own module body, so they
+// land after afflictions.ts's 129 - the order the single file had. See the note
+// on installShowVerbs. Everything imported above has finished evaluating by the
+// time this line runs, in both the ESM build and the concatenated artifact.
+installShowVerbs();
 //#endregion src/game.ts
 
 //#region src/ui-text.ts

@@ -339,6 +339,8 @@ export class CommandRouter {
       ? spec
       : { ...spec, params: [...params, IN_STORY_PARAM] };
     CommandRouter._registry.set(verb.toLowerCase(), { handler, spec: full });
+    // A deprecation may have been declared before this verb existed. Now it does.
+    if (CommandRouter._deferredDeprecations.length) CommandRouter._drainDeprecations();
   }
   static beforeRoute(hook: () => Promise<void>): void { CommandRouter._beforeRoute.push(hook); }
   // The CURRENT vocabulary. Deprecated aliases still route; they are simply not
@@ -353,12 +355,42 @@ export class CommandRouter {
   // being restated at forty scattered registration sites. Returns false when
   // the verb or its replacement is not registered - a typo in that table is a
   // test failure, not a silently dead pointer.
-  static deprecate(verb: string, replacedBy: string, opts: { hidden?: boolean } = {}): boolean {
-    const def = CommandRouter._registry.get(verb.toLowerCase());
-    if (!def || !CommandRouter._registry.has(replacedBy.toLowerCase())) return false;
-    def.spec.deprecated = replacedBy.toLowerCase();
-    if (opts.hidden !== undefined) def.spec.hidden = opts.hidden;
+  // ORDER-INDEPENDENT ON PURPOSE. This used to return false the instant either
+  // verb was not yet registered, and returning false is all it did - the
+  // deprecation was simply LOST, with no error and no failing anything. That was
+  // survivable while every command lived in one file and registration order was
+  // whatever the file said; splitting game.ts into src/game/* changed module
+  // evaluation order and silently dropped six deprecations, which is precisely
+  // the failure mode a silent `false` guarantees you find late.
+  //
+  // So an unapplicable deprecation is now REMEMBERED and applied the moment both
+  // verbs exist. A registry has no business caring what order modules loaded in.
+  private static _deferredDeprecations: Array<{ verb: string; replacedBy: string; hidden?: boolean }> = [];
+
+  private static _apply(d: { verb: string; replacedBy: string; hidden?: boolean }): boolean {
+    const def = CommandRouter._registry.get(d.verb.toLowerCase());
+    if (!def || !CommandRouter._registry.has(d.replacedBy.toLowerCase())) return false;
+    def.spec.deprecated = d.replacedBy.toLowerCase();
+    if (d.hidden !== undefined) def.spec.hidden = d.hidden;
     return true;
+  }
+
+  private static _drainDeprecations(): void {
+    CommandRouter._deferredDeprecations =
+      CommandRouter._deferredDeprecations.filter(d => !CommandRouter._apply(d));
+  }
+
+  /** Returns whether it applied IMMEDIATELY; a false means deferred, not dropped. */
+  static deprecate(verb: string, replacedBy: string, opts: { hidden?: boolean } = {}): boolean {
+    const d = { verb, replacedBy, ...(opts.hidden !== undefined ? { hidden: opts.hidden } : {}) };
+    if (CommandRouter._apply(d)) return true;
+    CommandRouter._deferredDeprecations.push(d);
+    return false;
+  }
+
+  /** Deprecations still waiting for one of their verbs. Empty once everything is registered. */
+  static pendingDeprecations(): Array<{ verb: string; replacedBy: string }> {
+    return CommandRouter._deferredDeprecations.map(({ verb, replacedBy }) => ({ verb, replacedBy }));
   }
   // Every verb whose spec names a replacement, with it.
   static deprecatedVerbs(): Array<{ verb: string; replacedBy: string }> {

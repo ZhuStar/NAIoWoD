@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `da7312c`** ("Seven
-> milliseconds").
+> **Last synced with the code as of commit `dd81200`** ("Never silence a
+> sibling").
+> Prior: `da7312c` ("Seven milliseconds").
 > Prior: `f04e551` ("storyStorage is not shared").
 > Prior: `7c11cdf` ("The probe was going to lie").
 > Prior: `08351c6` ("One counter, and nobody reaches past it").
@@ -4660,8 +4661,32 @@ and `prefill` are mocked/available but not yet written.
     per-script isolation of `storyStorage` holds regardless of where the script
     is installed.
 
-    **STILL UNANSWERED: H2** (does `stopFurtherScripts` really halt the chain).
-    Needs `probe-hooks stop` typed once.
+    **H2 — ANSWERED: `stopFurtherScripts` REALLY DOES HALT THE CHAIN.** Probe one
+    set it; probe two logged nothing at all afterwards, not even its own H2
+    branch. **THE PROBE IS NOW FULLY ANSWERED** — Q1–Q5, S1, S2, H1–H3.
+
+    **AND THAT MAKES A NEW INVARIANT NECESSARY.** `stopFurtherScripts` is the
+    one return value that can SILENCE A SIBLING UNIT, and this engine is heading
+    for several units that must all see the input. It sets it nowhere today —
+    `processAdventureInput` returns `{inputText, stopGeneration}` or `undefined`
+    — and `build.test.ts` now guards that, because the failure mode is
+    invisible: no error, no failing test, just another script mysteriously not
+    running. If a future change genuinely needs it, the test must be deleted
+    deliberately and the reason given.
+
+    **THE MEASURED PICTURE, whole.** Two command-distribution mechanisms now
+    exist, both confirmed rather than assumed:
+      1. **The hook chain** — ordered, synchronous, cancellable, free. Costs
+         nothing and needs no messages. But ordering is the PLAYER's modal slot
+         ordering rather than ours, and a script can only return `inputText`,
+         never `rawInputText`, so it cannot rewrite what a downstream unit
+         parses (it CAN stop it outright).
+      2. **Messaging request/reply** — 7ms, works inside an awaiting hook, and
+         the ordering is ours. This is what storage must use, since per-script
+         stores leave no alternative.
+
+    The probe stays installed-and-runnable: a host update can change any of
+    this, and re-running it is cheaper than rediscovering it the hard way.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

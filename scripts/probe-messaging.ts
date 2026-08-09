@@ -1,6 +1,17 @@
 // =============================================================================
 // PROBE: what the NovelAI host ACTUALLY guarantees
 // -----------------------------------------------------------------------------
+// *** RUN, AND FULLY ANSWERED - 2026-08-08. See docs/memory.md §7.90. ***
+// Q1 send-to-self DELIVERS. Q2 order preserved. Q3 never synchronous. Q4 spans
+// scripts, but a LOAD-TIME broadcast races - a script that has not loaded yet
+// misses it. Q5 A REPLY ARRIVES INSIDE AN AWAITING HOOK, in 7ms. S1/S2 every
+// store is PER SCRIPT, not shared - which is why one script must own the state
+// and serve the rest. H1 the chain passes modified inputText down, in slot
+// order. H2 stopFurtherScripts really does halt it. H3 hooks run in slot order.
+//
+// Kept installed-and-runnable because a host update can change any of these,
+// and re-running it is cheaper than rediscovering them the hard way.
+// -----------------------------------------------------------------------------
 // NOT part of the build, not part of the engine, not covered by `bun run
 // typecheck` (tsconfig includes src/test/types only). Paste it into a NovelAI
 // script slot and read what it prints with api.v1.log.

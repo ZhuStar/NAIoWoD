@@ -90,3 +90,22 @@ test("nothing but StorageDesk names api.v1.*Storage", async () => {
   }
   expect(offenders).toEqual([]);
 });
+
+
+// H2, measured on-host 2026-08-08: `stopFurtherScripts` REALLY DOES halt the
+// chain - probe two logged nothing at all after probe one set it. That makes it
+// the one return value that can silence a sibling unit, and this engine is
+// heading for several units that must all see the input. It sets it nowhere
+// today; this is what keeps that true, because the failure mode is invisible -
+// no error, no test failure, just another script mysteriously not running.
+// If a future change genuinely needs it, delete this test deliberately and say
+// why in the commit.
+test("the engine never halts the hook chain (it would silence sibling units)", async () => {
+  const offenders: string[] = [];
+  for (const rel of MODULES) {
+    const raw = await Bun.file(new URL(`../${rel}`, import.meta.url).pathname).text();
+    const body = raw.split("\n").map(l => l.replace(/\/\/.*$/, "")).join("\n");
+    if (body.includes("stopFurtherScripts")) offenders.push(rel);
+  }
+  expect(offenders).toEqual([]);
+});

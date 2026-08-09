@@ -5010,6 +5010,20 @@ and `prefill` are mocked/available but not yet written.
       and build cannot disagree about the term), MODULES-ordering, and
       no-hooks-in-the-satellite. Six new tests; 716 pass.
 
+    **THE SATELLITE IS INERT TODAY, AND SAFE — measured, not assumed.** Pasting
+    both scripts right now does nothing bad and nothing useful. The kernel's own
+    priority-`last` handler serves the request first and sets `served`, and the
+    relay then broadcasts that SAME object with `served: true` already on it, so
+    the satellite's handler takes its `if (req.served) return` branch and never
+    writes. No shadow copy, no divergence — the flag §7.88 added so a nearer
+    handler could win turns out to be exactly what makes the half-built state
+    harmless. It goes live when `StorageDesk.request` PREFERS a remote owner
+    instead of publishing to itself first.
+
+    **NEITHER ARTIFACT CONTAINS SANTA** (0 occurrences). The hub is decided
+    (§7.95) and unbuilt; today the two would talk peer-to-peer over broadcast,
+    which is the pre-Santa shape.
+
     **KNOWINGLY FAT, and the next step.** `StorageDesk` is 56 lines needing only
     `core/bus` + `host`, but it lives inside `services.ts`, so the closure drags
     `rules.ts` and `command.ts` along. Extracting the post office + desk into

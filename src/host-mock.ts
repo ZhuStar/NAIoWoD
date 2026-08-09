@@ -14,14 +14,34 @@
 // =============================================================================
 import { log } from "./host";
 
-// --- STORAGE MOCK (story / history / temp share one surface) -----------------
-const __mockStore = new Map<string, unknown>();
-const __mockHistoryStore = new Map<string, unknown>();
-const __mockTempStore = new Map<string, unknown>();
-// api.v1.storage - the script's OWN store, separate from the story's. It was
-// missing here entirely, which is part of why the window-field bug was
-// invisible off-host: nothing modelled the store the host actually syncs to.
-const __mockScriptStore = new Map<string, unknown>();
+// --- STORAGE MOCK (story / history / temp / script, each PER SCRIPT) ---------
+// MEASURED on-host 2026-08-08 (scripts/probe-messaging.ts, S1/S2 - memory §7.90):
+// EVERY store is per script. Two slots each wrote a key and listed storyStorage;
+// each saw only its own. The mock used to keep ONE Map per store and hand it to
+// everybody, which was accurate while the engine was a single script and quietly
+// wrong the moment it stopped being one - a two-unit test would have "proved"
+// units sharing state that the host will never let them share.
+//
+// So the bucket is keyed by (script id, store). A test that never changes
+// identity sees exactly what it saw before; a test that does gets the isolation
+// the host actually enforces.
+let __mockScriptId = "a1b2c3d4-script-uuid";
+const __mockBuckets = new Map<string, Map<string, unknown>>();
+const __bucket = (store: string, scriptId: string = __mockScriptId): Map<string, unknown> => {
+  const at = `${scriptId}::${store}`;
+  let m = __mockBuckets.get(at);
+  if (!m) { m = new Map(); __mockBuckets.set(at, m); }
+  return m;
+};
+
+/** Run the rest of the test AS another script. Returns the previous id. */
+export function __asScript(scriptId: string): string {
+  const was = __mockScriptId;
+  __mockScriptId = scriptId;
+  return was;
+}
+/** Which script the mock is currently pretending to be. */
+export function __currentScript(): string { return __mockScriptId; }
 let __mockCategories: { id: string; name?: string; enabled?: boolean; settings?: { entryHeader?: string } }[] = [];
 let __mockEntries: Record<string, unknown>[] = [];
 let __mockUuidCounter = 0;
@@ -29,11 +49,13 @@ const __mockUuid = (): string => {
   const g = globalThis as { crypto?: { randomUUID?: () => string } };
   return g.crypto?.randomUUID?.() ?? `mock-uuid-${++__mockUuidCounter}`;
 };
-const __makeMockStore = (m: Map<string, unknown>) => ({
-  get: async (key: string) => m.get(key),
-  set: async (key: string, value: unknown) => { m.set(key, value); },
-  remove: async (key: string) => { m.delete(key); },
-  list: async () => [...m.keys()],
+// Resolved PER CALL, not captured once: the identity may change between calls,
+// and a store that closed over its Map would keep answering as the old script.
+const __makeMockStore = (store: string) => ({
+  get: async (key: string) => __bucket(store).get(key),
+  set: async (key: string, value: unknown) => { __bucket(store).set(key, value); },
+  remove: async (key: string) => { __bucket(store).delete(key); },
+  list: async () => [...__bucket(store).keys()],
 });
 
 // Test/off-host helper: wipe the mock lorebook back to a fresh (empty) story.
@@ -41,7 +63,8 @@ export function __resetLorebookMock(): void { __mockCategories = []; __mockEntri
 // Test/off-host helper: wipe the mock storage stores (story, history, temp) and
 // the generation-side story fields (author's note, system prompt, prefill).
 export function __resetStorageMock(): void {
-  __mockStore.clear(); __mockHistoryStore.clear(); __mockTempStore.clear(); __mockScriptStore.clear();
+  __mockBuckets.clear();
+  __mockScriptId = "a1b2c3d4-script-uuid";      // identity resets too, or a test leaks it
   __mockAuthorNote = ""; __mockSystemPrompt = ""; __mockPrefill = ""; __mockSections = [];
 }
 
@@ -140,9 +163,9 @@ export function __uiWindows(): { kind: string; options: { content?: UIPart[] } &
 // wrote to and every test still passed. Route test input through here and that
 // mismatch fails loudly instead.
 export async function __uiTypeInto(storageKey: string, value: string): Promise<void> {
-  const [store, key] = storageKey.startsWith("story:") ? [__mockStore, storageKey.slice(6)]
-    : storageKey.startsWith("history:") ? [__mockHistoryStore, storageKey.slice(8)]
-    : [__mockScriptStore, storageKey];
+  const [store, key] = storageKey.startsWith("story:") ? [__bucket("story"), storageKey.slice(6)]
+    : storageKey.startsWith("history:") ? [__bucket("history"), storageKey.slice(8)]
+    : [__bucket("script"), storageKey];
   store.set(key, value);
 }
 
@@ -164,7 +187,7 @@ export function __uiFields(): Record<string, string> {
 // follow the player into the next chronicle), so a test asserts this is empty
 // after exercising the windows.
 export function __accountStorage(): Record<string, unknown> {
-  return Object.fromEntries(__mockScriptStore);
+  return Object.fromEntries(__bucket("script"));
 }
 
 // Read one field the way the host stores it (prefix selects the store).
@@ -172,9 +195,9 @@ export function __uiFieldValue(storageKey: string): string {
   return String(__uiReadField(storageKey) ?? "");
 }
 function __uiReadField(storageKey: string): unknown {
-  if (storageKey.startsWith("story:")) return __mockStore.get(storageKey.slice(6));
-  if (storageKey.startsWith("history:")) return __mockHistoryStore.get(storageKey.slice(8));
-  return __mockScriptStore.get(storageKey);
+  if (storageKey.startsWith("story:")) return __bucket("story").get(storageKey.slice(6));
+  if (storageKey.startsWith("history:")) return __bucket("history").get(storageKey.slice(8));
+  return __bucket("script").get(storageKey);
 }
 
 // Find a button by its text across all open windows and run its callback.
@@ -246,16 +269,18 @@ const __g = globalThis as unknown as { api?: unknown };
 if (!__g.api) {
   __g.api = {
     v1: {
-      script: { id: "a1b2c3d4-script-uuid" },
+      // A GETTER, so __asScript() actually changes who we are - a captured
+      // literal would let ScopedStorage keep prefixing with the old identity.
+      script: { get id() { return __mockScriptId; } },
       uuid: __mockUuid,
       log: (...args: unknown[]) => console.log(...args),
       error: (...args: unknown[]) => console.error(...args),
-      storage: __makeMockStore(__mockScriptStore),   // per-script (docs/storage-api.md)
-      storyStorage: __makeMockStore(__mockStore),
+      storage: __makeMockStore("script"),            // per-script (docs/storage-api.md)
+      storyStorage: __makeMockStore("story"),
       // The mock is not history-aware (no document history off-host); it just
       // gives historyStorage its own bucket with the same surface.
-      historyStorage: __makeMockStore(__mockHistoryStore),
-      tempStorage: __makeMockStore(__mockTempStore), // session-scoped; cleared when the story closes
+      historyStorage: __makeMockStore("history"),
+      tempStorage: __makeMockStore("temp"),         // session-scoped; cleared when the story closes
       lorebook: {
         entry: async (entryId: string) => __mockEntries.find(e => e["id"] === entryId) ?? null,
         categories: async () => __mockCategories,

@@ -12,7 +12,10 @@
 //   3. Reload the story and wait ~5s. Q1-Q4, S1 and S2 print by themselves.
 //   4. Type `probe-hooks` in the Text Adventure input box -> H1, H2, H3.
 //      Type `probe-hooks stop` to test stopFurtherScripts specifically.
-//   5. Type `probe-reply` in the same box -> Q5.
+//   5. Type `probe-reply` in the same box -> Q5. This one leaves no trace in
+//      the story. `probe-hooks` DELIBERATELY does write into it - passing the
+//      marked-up text down the chain IS the H1 measurement - so expect to see
+//      "You probe-hooks. <seen-by:one>" and delete it afterwards.
 //   6. Copy the whole log back.
 //
 // WHERE THE OUTPUT GOES: every line is api.v1.log, tagged `[probe:one]` or
@@ -224,7 +227,7 @@ api.v1.hooks.register("onTextAdventureInput", async (params: {
       // a responder inside a hook could not answer while the other script's
       // hook is blocked, which is the whole thing being measured.
       say(`Q5 I am the responder; my load-time subscription is what answers.`);
-      return { stopGeneration: true };
+      return { inputText: "", stopGeneration: true };
     }
     const started = Date.now();
     // ARM, THEN SUBSCRIBE, THEN ASK. onMessage is async: the question used to go
@@ -255,7 +258,11 @@ api.v1.hooks.register("onTextAdventureInput", async (params: {
     say(`Q5 verdict: ${answer === "TIMED OUT"
       ? "commands CANNOT be distributed by message - use the hook chain"
       : "commands CAN be distributed by message"}`);
-    return { stopGeneration: true };
+    // BLANK THE INPUT, not merely stopGeneration. `stopGeneration` stops the AI
+    // from replying; it does NOT stop the typed text from being written into the
+    // story, which is why `probe-reply` still printed "You probe-reply." An
+    // empty inputText is the documented way to suppress the insertion itself.
+    return { inputText: "", stopGeneration: true };
   }
 
   return {};

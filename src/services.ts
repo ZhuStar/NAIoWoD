@@ -139,13 +139,12 @@ const DIRECTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // way N scripts can ever see one game state - there is no prefix, and no shared
 // store, that would let them do it directly.
 //
-// WHAT IS STILL NOT DECIDED HERE: whether a cross-script read can answer INSIDE
-// an awaiting input hook. That is probe Q5, run but not yet reached (the run of
-// 2026-08-08 covered Q1-Q4, S1, S2 and H1; Q5 and H2 were not triggered). It
-// decides whether the remote transport can be request/reply at all, or has to
-// be each satellite keeping a local MIRROR in its own per-script storage, kept
-// fresh by write-through from the owner. Either way callers do not change,
-// which is the point of putting the counter here first.
+// AND THE TRANSPORT IS SETTLED: REQUEST/REPLY WORKS. Probe Q5, run 2026-08-08:
+// a sibling script answered a request raised inside an awaiting input hook in
+// SEVEN MILLISECONDS. So a satellite really can ask the owner for state and get
+// it before the hook returns - no local mirror, no write-through cache, no
+// answering "this turn" with last turn's data. The remote half of this counter
+// can be a straight round trip whenever a storage script exists to answer it.
 export const STORAGE_CHANNEL = "naiowod:storage";
 
 export interface StorageRequest {

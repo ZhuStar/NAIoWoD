@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `f04e551`** ("storyStorage is not
-> shared").
+> **Last synced with the code as of commit `da7312c`** ("Seven
+> milliseconds").
+> Prior: `f04e551` ("storyStorage is not shared").
 > Prior: `7c11cdf` ("The probe was going to lie").
 > Prior: `08351c6` ("One counter, and nobody reaches past it").
 > Prior: `5e584e4` ("Addresses persist, interest does not").
@@ -4624,17 +4625,43 @@ and `prefill` are mocked/available but not yet written.
     it is a constraint on any plan to have one unit pre-process commands for the
     others.
 
-    **A KNOWN FIDELITY GAP IN THE MOCK.** `src/host-mock.ts` models one
-    storyStorage, which is exactly right while the engine is one script and
-    exactly wrong the moment it is not. It needs per-script isolation (a store
-    per script id, with `__asScript(id)` or similar) before any test can
-    honestly exercise two units — otherwise the suite will keep proving that a
-    design works under an assumption the host has now been measured to break.
+    **THE MOCK NOW TELLS THE SAME TRUTH (fixed in this pass).**
+    `src/host-mock.ts` kept one Map per store and handed it to everybody —
+    accurate while the engine was one script, and quietly wrong the moment it
+    stopped being one: a two-unit test would have "proved" units sharing state
+    the host will never let them share, which is the worst kind of passing test.
+    Buckets are now keyed by (script id, store), `api.v1.script.id` is a GETTER
+    so `ScopedStorage`'s default prefix follows, and `__asScript(id)` switches
+    identity. All 694 existing tests pass untouched — the default identity is
+    unchanged, so only a test that deliberately switches sees the isolation.
+    Four new tests, including the decisive one: two scripts, THE SAME PREFIX,
+    and the key is still invisible.
 
-    **STILL UNANSWERED: Q5.** Now the question that shapes the transport, since
-    per-script storage means a satellite MUST ask the owner for state. If a
-    reply cannot arrive while a hook awaits, satellites need a local mirror in
-    their own storage, kept fresh by write-through.
+    **Q5 — ANSWERED, AND IT IS YES.** Run 2026-08-08 (second session): a sibling
+    answered a request raised inside an awaiting input hook in **7ms**.
+    `Q5 *** reply inside a hook: answered by script two (waited 7ms) ***`. So
+    request/reply is a real transport: a satellite can ask the owner for state
+    and have it before the hook returns. **No local mirror, no write-through
+    cache, no answering this turn with last turn's data** — every fallback
+    designed against this failing is unnecessary. §7.88's remote half can be a
+    straight round trip.
+
+    **A PROBE BUG THE OWNER CAUGHT: `probe-reply` polluted the story.** The Q5
+    branch returned `stopGeneration` but never blanked `inputText`, and those
+    are different things — `stopGeneration` stops the AI from replying, it does
+    not stop the typed text being written into the document. Returning an empty
+    `inputText` is the documented suppression. Fixed. `probe-hooks` still writes
+    deliberately, because passing marked-up text down the chain IS the H1
+    measurement.
+
+    **REPLICATED UNDER A DIFFERENT INSTALL.** The owner moved the scripts from
+    story-level to account-level between runs, wondering whether that had
+    skewed S1. It had not: every answer came back identical, including S1. The
+    per-script isolation of `storyStorage` holds regardless of where the script
+    is installed.
+
+    **STILL UNANSWERED: H2** (does `stopFurtherScripts` really halt the chain).
+    Needs `probe-hooks stop` typed once.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

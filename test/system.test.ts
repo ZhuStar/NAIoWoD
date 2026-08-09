@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
-import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage, __uiTypeInto, __uiFieldValue, __uiFields, __accountStorage } from "../src/host-mock";
+import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage, __uiTypeInto, __uiFieldValue, __uiFields, __accountStorage, __asScript, __currentScript } from "../src/host-mock";
 
 // What actually left this script as an EVENT. The hello handshake is directory
 // traffic - it says who wants what - so a test asking "did this reach the wire"
@@ -8902,5 +8902,65 @@ describe("the storage counter", () => {
 
   test("the account store is refused BY NAME, not merely unused", async () => {
     await expect(StorageDesk.request("get", STORE.account, "anything")).rejects.toThrow(/account store/);
+  });
+});
+
+
+// =============================================================================
+// THE MOCK MUST NOT BE MORE GENEROUS THAN THE HOST
+// -----------------------------------------------------------------------------
+// Measured on-host (§7.90): every store is PER SCRIPT. The mock used to keep one
+// Map per store and hand it to everybody - accurate while the engine was a
+// single script, and quietly wrong the moment it stopped being one. A two-unit
+// test would have "proved" units sharing state the host will never let them
+// share, which is the worst kind of passing test.
+// =============================================================================
+describe("per-script storage, as measured", () => {
+  test("one script cannot see another's keys - the finding that reversed the architecture", async () => {
+    __resetStorageMock();
+    const one = new ScopedStorage("shared-prefix");
+    await one.set("sheet", { name: "Kvar" });
+    expect(await one.get("sheet")).toEqual({ name: "Kvar" });
+
+    const was = __asScript("second-script-id");
+    const two = new ScopedStorage("shared-prefix");   // THE SAME PREFIX
+    // ...and it is still invisible. This is the whole point: no prefix bridges
+    // scripts, which is why one script has to own the state and serve the rest.
+    expect(await two.get("sheet")).toBeUndefined();
+    expect(await two.list()).toEqual([]);
+    await two.set("sheet", { name: "Someone Else" });
+
+    __asScript(was);
+    expect(await one.get("sheet")).toEqual({ name: "Kvar" });   // unclobbered
+  });
+
+  test("identity is restored by a reset, so a switch cannot leak into the next test", async () => {
+    __asScript("some-other-script");
+    __resetStorageMock();
+    expect(__currentScript()).toBe("a1b2c3d4-script-uuid");
+  });
+
+  test("every store isolates, not just storyStorage (S2 measured the same)", async () => {
+    __resetStorageMock();
+    await api.v1.storage.set("k", "account-ish");
+    await api.v1.tempStorage.set("k", "temp");
+    await api.v1.historyStorage.set("k", "history");
+    const was = __asScript("elsewhere");
+    expect(await api.v1.storage.get("k")).toBeUndefined();
+    expect(await api.v1.tempStorage.get("k")).toBeUndefined();
+    expect(await api.v1.historyStorage.get("k")).toBeUndefined();
+    __asScript(was);
+    expect(await api.v1.storage.get("k")).toBe("account-ish");
+  });
+
+  test("api.v1.script.id follows the switch, so ScopedStorage's default prefix does too", async () => {
+    __resetStorageMock();
+    const mine = new ScopedStorage();          // defaults to api.v1.script.id
+    await mine.set("x", 1);
+    const was = __asScript("a-different-script");
+    expect(new ScopedStorage().StoragePrefix).toBe("a-different-script");
+    expect(await new ScopedStorage().get("x")).toBeUndefined();
+    __asScript(was);
+    expect(await mine.get("x")).toBe(1);
   });
 });

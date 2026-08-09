@@ -1406,9 +1406,6 @@ export interface OwnedPowerInstance<T extends OwnedPowerDef = OwnedPowerDef> {
   param?: string;
   points: number;
 }
-/** @deprecated Named for merits, used for both. Prefer OwnedPowerInstance. */
-export type OwnedMeritInstance = OwnedPowerInstance;
-
 function instancesOf<T extends OwnedPowerDef>(
   bucket: Record<string, number> | undefined, lookup: (name: string) => T | undefined,
 ): Array<OwnedPowerInstance<T>> {

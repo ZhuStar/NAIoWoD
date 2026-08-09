@@ -270,24 +270,17 @@ export async function cmdPlayer(cmd: ParsedCommand): Promise<string> {
 async function cmdHelp(cmd: ParsedCommand): Promise<string> {
   const verb = cmd.positional[0]?.trim().toLowerCase();
   if (verb) {
-    // Asking about a name that MOVED is the most useful moment to say so.
-    const spec = CommandRouter.specFor(verb);
     const help = CommandRouter.helpFor(verb);
-    if (help && spec?.deprecated) {
-      return sys(`${verb} is now [[${spec.deprecated}]] - it still works. `
-        + `${spec.deprecated} - ${CommandRouter.helpFor(spec.deprecated)}`);
-    }
     return help
       ? sys(`${verb} - ${help}`)
       : sys(`No command "${verb}". [[help]] lists them all.`);
   }
-  // The CURRENT vocabulary only. Old names still route; listing them would
-  // double the wall of text a player is reading to find out what exists.
+  // THE ONLY vocabulary. The old names are gone rather than hidden (§7.92), so
+  // this listing is now the complete truth about what the engine answers to.
   const verbs = CommandRouter.verbs();
-  const older = CommandRouter.deprecatedVerbs().length;
   return sys(`${verbs.length} commands: ${verbs.join(", ")}. [[help <verb>]] for one's usage. `
     + `Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context `
-    + `(add in-story=true to keep one). ${older} older name${older === 1 ? "" : "s"} still work and say what replaced them.`);
+    + `(add in-story=true to keep one).`);
 }
 
 export async function cmdCharacters(): Promise<string> {
@@ -637,13 +630,6 @@ CommandRouter.register("play", cmdPlay, {
   summary: "switch to a character; no name selects the default",
   params: [{ key: "name", kind: "named", hint: '"<name|@alias>"' }],
 });
-CommandRouter.register("characters", cmdCharacters, {
-  summary: "list playable characters; marks current/default",
-});
-CommandRouter.register("sheet", cmdSheet, {
-  summary: "show a character's record as the engine reads it (effective values marked)",
-  params: [{ key: "character", kind: "positional", hint: '"<name|@alias>"' }],
-});
 CommandRouter.register("set-trait", cmdSetTrait, {
   summary: "set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start)",
   note: "merits use [[take-merit]]; specialties use [[specialty]]",
@@ -690,11 +676,6 @@ CommandRouter.register("name-roll", cmdNameRoll, {
     { key: "vs-difficulty", kind: "named", type: "int", desc: "Opposed: default difficulty for the opposition's roll" },
     { key: "description", kind: "named", type: "literal", desc: "Rules prose (verbatim)" }],
 });
-CommandRouter.register("list-rolls", cmdListRolls, { summary: "list the chronicle's saved rolls" });
-CommandRouter.register("roll-info", cmdRollInfo, {
-  summary: "show a saved roll's full spec, sidecars, procedure steps, and description",
-  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
-});
 CommandRouter.register("add-step", cmdAddStep, {
   summary: "append a follow-up step to a saved procedure (composes named rolls)",
   params: [
@@ -740,15 +721,10 @@ CommandRouter.register("continue-roll", cmdContinueRoll, {
     { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1)" },
   ],
 });
-CommandRouter.register("roll-status", cmdRollStatus, {
-  summary: "show an extended action's progress",
-  params: [{ key: "id", kind: "positional", hint: "[id]" }],
-});
 CommandRouter.register("cancel-roll", cmdCancelRoll, {
   summary: "cancel an extended action",
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
 });
-CommandRouter.register("resources", () => cmdResources(), { summary: "list the current character's resources" });
 CommandRouter.register("attune", cmd => cmdAttune(cmd), {
   summary: "what this character can USE (a pool he cannot use is only points)",
   params: [
@@ -779,7 +755,6 @@ CommandRouter.register("damage", cmdDamage, {
     { key: "n", kind: "positional", hint: "[n]" },
   ],
 });
-CommandRouter.register("health", () => cmdHealth(), { summary: "show the current character's health track" });
 CommandRouter.register("clear-boosts", cmdClearBoosts, { summary: "clear trait boosts (the ST calls the duration)" });
 CommandRouter.register("reset-uses", cmdResetUses, { summary: "scene/turn change: clears effect-use counters" });
 CommandRouter.register("configure-resources", cmdConfigureResources, { summary: "guided resource setup; plain replies answer it" });
@@ -830,10 +805,6 @@ CommandRouter.register("continue-contest", cmdContinueContest, {
     { key: "tags", kind: "named", hint: '"a,b"' },
   ],
 });
-CommandRouter.register("contest-status", cmdContestStatus, {
-  summary: "show an extended contest's progress",
-  params: [{ key: "id", kind: "positional", hint: "[id]" }],
-});
 CommandRouter.register("cancel-contest", cmdCancelContest, {
   summary: "cancel an extended contest",
   params: [{ key: "id", kind: "positional", hint: "[id]" }],
@@ -867,12 +838,6 @@ CommandRouter.register("magick", cmdCast, {
     { key: "spend-amount", kind: "named", type: "int", desc: "How many points to spend (default 1; a resource may cap it per use)" },
   ],
 });
-// @deprecated - the old name for [[magick]]. Kept so live stories and saved
-// rolls do not break; Sorcery and Blood Sorcery will want "cast" for themselves.
-CommandRouter.register("cast", cmdCast, {
-  summary: "@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery",
-  params: CommandRouter.specFor("magick")?.params ?? [],
-});
 CommandRouter.register("seal-spell", cmdSealSpell, {
   summary: "seal an ongoing spell: 5 Quintessence per highest-Pillar dot + 1 Willpower per 10",
   params: [
@@ -880,36 +845,12 @@ CommandRouter.register("seal-spell", cmdSealSpell, {
     { key: "pay", kind: "named", type: "bool", desc: "Spend now (else the price is quoted as a debt)" },
   ],
 });
-CommandRouter.register("creation", cmdCreation, {
-  summary: "the creation budget: every pool against what the sheet holds (advisory)",
-  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
-});
-CommandRouter.register("derived", cmdDerived, {
-  summary: "what the sheet implies rather than states: Road, Willpower, generation, and why",
-  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
-});
-CommandRouter.register("eval", cmd => cmdEval(cmd), {
-  summary: "read an expression against the current character (the reference system, exposed)",
-  params: [{ key: "expression", kind: "positional", hint: "<expression>", example: "12 - background:generation" }],
-});
 CommandRouter.register("choose", cmdChoose, {
   summary: "pick a clan, a fellowship, or the Attribute/Ability priorities",
   params: [
     { key: "what", kind: "positional", hint: "<clan|fellowship|attributes|abilities>", example: "clan" },
     { key: "value", kind: "positional", hint: "<value>", example: "tremere" },
   ],
-});
-CommandRouter.register("clans", cmdClans, {
-  summary: "the clans and their Disciplines",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "nosferatu" }],
-});
-CommandRouter.register("clan", cmdClans, {
-  summary: "one clan: its Disciplines and what it bounds",
-  params: [{ key: "name", kind: "positional", hint: "<name>", example: "nosferatu" }],
-});
-CommandRouter.register("templates", cmdTemplates, {
-  summary: "the templates this chronicle knows, and what each one is made of",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "ouroboros" }],
 });
 CommandRouter.register("extend-template", cmdExtendTemplate, {
   inStory: false,
@@ -958,13 +899,6 @@ CommandRouter.register("define-resource", cmdDefineResource, {
     { key: "description", kind: "named", hint: "<text>" },
   ],
 });
-CommandRouter.register("backgrounds", cmdBackgrounds, {
-  summary: "the backgrounds this chronicle defines, what you hold, and what they confer",
-});
-CommandRouter.register("background", cmdBackground, {
-  summary: "one background in full: ceiling, ladder, and what it grants",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "fount" }],
-});
 CommandRouter.register("define-background", cmdDefineBackground, {
   inStory: false,
   summary: "define/replace a background (a Talisman that IS a place grants that place's ratings)",
@@ -980,14 +914,6 @@ CommandRouter.register("forget-background", cmdForgetBackground, {
   inStory: false,
   summary: "remove a custom background (a built-in resurfaces)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
-});
-CommandRouter.register("supernatural", cmd => cmdSupernatural(cmd), {
-  summary: "the families of power open to this character (disciplines, magic, sorcery, blood-sorcery)",
-  params: [{ key: "category", kind: "positional", hint: "[category]", example: "blood-sorcery" }],
-});
-CommandRouter.register("budget", cmdBudget, {
-  summary: "what each purse allows, what is spent, what is left (advisory)",
-  params: [{ key: "character", kind: "positional", hint: '"[name|@alias]"' }],
 });
 CommandRouter.register("grant", cmd => cmdGrant(cmd), {
   summary: "where something came from when it wasn't bought: a template's free dot, or a Storyteller's bonus",
@@ -1009,14 +935,6 @@ CommandRouter.register("paid", cmdPaid, {
     { key: "expr", kind: "positional", hint: "[expr|listed]", example: "0" },
   ],
 });
-CommandRouter.register("costs", cmdCosts, {
-  summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)",
-  params: [{ key: "kind", kind: "positional", hint: "[kind]", example: "discipline" }],
-});
-CommandRouter.register("fellowships", cmdFellowships, {
-  summary: "the mystic fellowships' Foundation & Pillars (bare: list them)",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "order-of-hermes" }],
-});
 CommandRouter.register("flush-context", cmdFlushContext, {
   summary: "clean the story now: strip engine notes and hidden blocks (run this if things feel slow)",
 });
@@ -1032,7 +950,6 @@ CommandRouter.register("measure-door", cmdMeasureDoor, {
 CommandRouter.register("leave-library", cmdLeaveLibrary, {
   summary: "step back through the measured door",
 });
-CommandRouter.register("cray", () => cmdCray(), { summary: "the cray's points, status and how it refills" });
 CommandRouter.register("set-cray", cmdSetCray, {
   summary: "what this cray asks of you - the ritual time per point harvested",
   note: "Each cray is different: `per-point=2h` here, `1h` there. `default` hands it back to the chronicle's rule. A merit or affliction carrying a `ritual-time` op modifies it (e.g. -50% halves it).",
@@ -1061,9 +978,6 @@ CommandRouter.register("research", cmdResearch, {
     { key: "tags", kind: "named", hint: '"a,b"', desc: "Roll tags (e.g. hermetic, in the rotunda)" },
   ],
 });
-CommandRouter.register("story-date", cmdStoryDate, {
-  summary: "show the current story date and how long since it began",
-});
 CommandRouter.register("save-date", cmdSaveDate, {
   summary: "bookmark the current moment (or a given date) under a name",
   params: [
@@ -1073,13 +987,6 @@ CommandRouter.register("save-date", cmdSaveDate, {
 CommandRouter.register("forget-date", cmdForgetDate, {
   summary: "delete a saved date bookmark",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
-});
-CommandRouter.register("dates", cmdDates, { summary: "list the saved date bookmarks" });
-CommandRouter.register("time-between", cmdTimeBetween, {
-  summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)",
-  params: [
-    { key: "a", kind: "positional", required: true, hint: "<date>", example: "start" },
-    { key: "b", kind: "positional", required: true, hint: "<date>", example: "now" }],
 });
 CommandRouter.register("scene", cmdScene, {
   summary: "open a named scene at the current story time (one location; turn=<len> sets a Turn's length)",
@@ -1098,11 +1005,6 @@ CommandRouter.register("downtime", cmdDowntime, {
   summary: "close the current scene and gloss the clock forward",
   params: [{ key: "duration", kind: "positional", required: true, hint: "<duration>", example: "3d" }],
 });
-CommandRouter.register("scenes", cmdScenes, { summary: "list the chronicle's scenes" });
-CommandRouter.register("scene-info", cmdSceneInfo, {
-  summary: "show a scene in full (defaults to the open one)",
-  params: [{ key: "name", kind: "positional", hint: "[name]" }],
-});
 CommandRouter.register("forget-scene", cmdForgetScene, {
   summary: "delete a scene record",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
@@ -1113,10 +1015,6 @@ CommandRouter.register("hide", cmdHide, {
   params: [
     { key: "text", kind: "named", type: "literal", desc: "The plan text (verbatim)" },
     { key: "op", kind: "named", type: "enum", options: ["append", "overwrite"], desc: "Append (default) or overwrite the plan" }],
-});
-CommandRouter.register("tables", cmdTables, {
-  summary: "list success tables (grouped by category), or lay one out in full",
-  params: [{ key: "name", kind: "positional", hint: "<name|sub|sub::name|@alias>" }],
 });
 CommandRouter.register("define-table", cmdDefineTable, {
   inStory: false,
@@ -1171,17 +1069,11 @@ CommandRouter.register("define-constraint", cmdDefineConstraint, {
     { key: "note", kind: "named", desc: "Note (optional)" },
   ],
 });
-CommandRouter.register("constraints", cmdConstraints, { summary: "list the story's constraint groups" });
-CommandRouter.register("constraint", cmdConstraint, {
-  summary: "show one constraint group in full",
-  params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
-});
 CommandRouter.register("forget-constraint", cmdForgetConstraint, {
   inStory: false,
   summary: "remove a constraint group",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
-CommandRouter.register("check-constraints", () => cmdCheckConstraints(), { summary: "flag the current character's constraint conflicts (incl. merit-instance caps)" });
 CommandRouter.register("take-merit", cmdTakeMerit, {
   summary: "take a merit/flaw; parameterized defs take name::param instances",
   note: "Merits and Flaws only. Arcana and Taints are a different category - [[take-arcanum]]",
@@ -1195,10 +1087,6 @@ CommandRouter.register("take-merit", cmdTakeMerit, {
 CommandRouter.register("drop-merit", cmdDropMerit, {
   summary: "drop an owned merit/flaw instance",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name[::param]>" }],
-});
-CommandRouter.register("merits", () => cmdMerits(), {
-  summary: "list owned merits/flaws, enhancement totals and advisory issues",
-  note: "Never lists Arcana - they are not merits. [[show-arcanum]] is their list",
 });
 // A verb that writes a DEFINITION CARD is the player editing the chronicle's
 // rulebook, not a beat of the story: `inStory: false` keeps every "Defined
@@ -1233,30 +1121,12 @@ CommandRouter.register("define-merit", cmdDefineMerit, {
     { key: "description", kind: "named", type: "literal", hint: "`<text>`", desc: "Rules text" },
   ],
 });
-CommandRouter.register("merit", cmdMeritInfo, {
-  summary: "inspect a merit/flaw definition (bare: list them)",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "inviolate-soul" }],
-});
 CommandRouter.register("forget-merit", cmdForgetMerit, {
   inStory: false,
   summary: "delete a custom merit/flaw definition (built-ins resurface)",
   params: [{ key: "name", kind: "positional", required: true, hint: "<name>" }],
 });
 
-// --- ARCANA & TAINTS - a category of their own, not a flavour of merit -------
-// Dark Ages: Devil's Due. These verbs are the merit verbs' equals, not their
-// wrappers: their own registry, their own lorebook category, their own bucket
-// on the sheet, and a list that opens only for a character bound to the
-// infernal. A vampire who types [[show-merit]] sees no Arcana, because he has none.
-CommandRouter.register("arcana", cmd => cmdArcana(cmd), {
-  summary: "the Arcana & Taints this character owns (bare), or one in detail",
-  note: "They trade in the ARCANA purse, never freebies, and only a demon or a demon's thrall has this list at all",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
-});
-CommandRouter.register("arcanum", cmdArcanumInfo, {
-  summary: "inspect an arcanum/taint definition (bare: list them)",
-  params: [{ key: "name", kind: "positional", hint: "[name]", example: "celestial-radiance" }],
-});
 CommandRouter.register("define-arcanum", cmdDefineArcanum, {
   inStory: false,
   summary: "define an arcanum or taint (writes the srd:arcana overlay)",
@@ -1316,9 +1186,6 @@ CommandRouter.register("forget-specialty", cmdForgetSpecialty, {
     { key: "label", kind: "positional", type: "literal", hint: "[`<Label>`]" },
   ],
 });
-CommandRouter.register("specialties", () => cmdSpecialties(), {
-  summary: "list the current character's specialties",
-});
 CommandRouter.register("define-affliction", cmdDefineAffliction, {
   inStory: false,
   summary: "define/replace an affliction (overlay; may shadow a built-in)",
@@ -1343,10 +1210,6 @@ CommandRouter.register("define-affliction", cmdDefineAffliction, {
     { key: "description", kind: "named", type: "literal", desc: "Description" },
     { key: "note", kind: "named", desc: "Note (optional)" },
   ],
-});
-CommandRouter.register("affliction", cmdAfflictionInfo, {
-  summary: "list defined afflictions, or show one in full",
-  params: [{ key: "name", kind: "positional", hint: "[name]" }],
 });
 CommandRouter.register("forget-affliction", cmdForgetAffliction, {
   inStory: false,
@@ -1443,10 +1306,6 @@ CommandRouter.register("remove", cmdRemoveAffliction, {
     { key: "spend", kind: "named", hint: SPEND_HINT, desc: "Pay to be rid of it" },
     { key: "spend-amount", kind: "named", type: "int" },
   ],
-});
-CommandRouter.register("afflictions", cmdAfflictions, {
-  summary: "active afflictions; NPCs work too",
-  params: [{ key: "who", kind: "positional", hint: "<name|@alias>" }],
 });
 CommandRouter.register("alias", cmdAlias, {
   summary: "define an alias for a character",

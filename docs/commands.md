@@ -16,7 +16,7 @@ every other read-only verb was renamed `show-*`, but this is the one command
 a player types before they know anything at all. `[[show-help]]` is an alias.
 
 ```
-[SYSTEM: 131 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, cast, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, set-cray, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-moon, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one). 38 older names still work and say what replaced them.]
+[SYSTEM: 131 commands: help, creator-mode, create-playable, play, set-trait, convert-cards, set-default, roll, roll-for, name-roll, add-step, clear-steps, forget-roll, extended-roll, continue-roll, cancel-roll, attune, spend, gain, damage, clear-boosts, reset-uses, configure-resources, cancel-wizard, resist, contest, extended-contest, continue-contest, cancel-contest, story-start, advance-time, magick, seal-spell, choose, extend-template, forget-template, define-resource, define-background, forget-background, grant, forget-grant, paid, flush-context, enter-sanctum, exit-sanctum, enter-library, exit-library, measure-door, leave-library, set-cray, harvest, absorb, research, save-date, forget-date, scene, turn, end-scene, downtime, forget-scene, hide, define-table, forget-table, define-table-category, table-alias, forget-table-alias, define-constraint, forget-constraint, take-merit, drop-merit, define-merit, forget-merit, define-arcanum, take-arcanum, drop-arcanum, forget-arcanum, specialty, forget-specialty, define-affliction, forget-affliction, afflict, toggle, invoke, advance, lift, restore, remove, alias, aliases, forget-alias, player, show-character, show-template, show-clan, show-fellowship, show-cost, show-table, show-roll, show-scene, show-date, show-moon, show-time-between, show-alias, show-player, show-constraint, show-sheet, show-merit, show-arcanum, show-background, show-affliction, show-specialty, show-resource, show-capability, show-health, show-budget, show-grant, show-creation, show-derived, show-supernatural, show-cray, show-eval, show-roll-status, show-contest-status, show-help, win-constraint, win-table, win-merit, win-arcanum, win-affliction, win-afflict, win-roll. [[help <verb>]] for one's usage. Anything named show-* only LOOKS at things, and its reply is kept out of the AI's context (add in-story=true to keep one).]
 ```
 
 With a verb it prints that verb's **usage line**, which is derived from the
@@ -39,11 +39,11 @@ one reply in the story.
 | `advance-time` | move the story clock forward (s/m/h/d/w/mo/y); crossing midnights/full moons applies recovery |
 | `afflict` | apply an affliction; extra <slot>=<name\|@alias> args fill its bindings |
 | `alias` | define an alias for a character |
+| `aliases` | list every alias, grouped by scope |
 | `attune` | what this character can USE (a pool he cannot use is only points) |
 | `cancel-contest` | cancel an extended contest |
 | `cancel-roll` | cancel an extended action |
 | `cancel-wizard` | abandon the running wizard |
-| `cast` | @deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery |
 | `choose` | pick a clan, a fellowship, or the Attribute/Ability priorities |
 | `clear-boosts` | clear trait boosts (the ST calls the duration) |
 | `clear-steps` | drop all follow-up steps from a saved procedure (its entry roll stays) |
@@ -164,55 +164,6 @@ one reply in the story.
 | `win-merit` | open a window to define a merit or flaw (its passive affliction included) |
 | `win-roll` | open a window to build, roll, and save rolls |
 | `win-table` | open a window to define a success table |
-
----
-
-## 38 older names that still work
-
-Each does exactly what it always did, then says what replaced it. They are
-left out of `[[help]]` and out of the table above: the current
-vocabulary is what a player should be reading.
-
-| old name | now |
-|---|---|
-| `affliction` | `show-affliction` |
-| `afflictions` | `show-affliction` |
-| `aliases` | `show-alias` |
-| `arcana` | `show-arcanum` |
-| `arcanum` | `show-arcanum` |
-| `background` | `show-background` |
-| `backgrounds` | `show-background` |
-| `budget` | `show-budget` |
-| `characters` | `show-character` |
-| `check-constraints` | `show-constraint` |
-| `clan` | `show-clan` |
-| `clans` | `show-clan` |
-| `constraint` | `show-constraint` |
-| `constraints` | `show-constraint` |
-| `contest-status` | `show-contest-status` |
-| `costs` | `show-cost` |
-| `cray` | `show-cray` |
-| `creation` | `show-creation` |
-| `dates` | `show-date` |
-| `derived` | `show-derived` |
-| `eval` | `show-eval` |
-| `fellowships` | `show-fellowship` |
-| `health` | `show-health` |
-| `list-rolls` | `show-roll` |
-| `merit` | `show-merit` |
-| `merits` | `show-merit` |
-| `resources` | `show-resource` |
-| `roll-info` | `show-roll` |
-| `roll-status` | `show-roll-status` |
-| `scene-info` | `show-scene` |
-| `scenes` | `show-scene` |
-| `sheet` | `show-sheet` |
-| `specialties` | `show-specialty` |
-| `story-date` | `show-date` |
-| `supernatural` | `show-supernatural` |
-| `tables` | `show-table` |
-| `templates` | `show-template` |
-| `time-between` | `show-time-between` |
 
 ---
 
@@ -361,6 +312,24 @@ define an alias for a character
 [SYSTEM: alias - alias <@token> "Target Name" [in-story]  (define an alias for a character; bare @a = global; @global::a, @player::<id|storyteller|default>::a, @char::<name|default>::a pin a scope)]
 ```
 
+### `aliases`
+
+list every alias, grouped by scope
+
+```
+[[aliases [in-story]]]
+```
+
+| argument | kind | meaning |
+|---|---|---|
+| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
+
+**`[[help aliases]]`** replies:
+
+```
+[SYSTEM: aliases - aliases [in-story]  (list every alias, grouped by scope)]
+```
+
 ### `attune`
 
 what this character can USE (a pool he cannot use is only points)
@@ -435,36 +404,6 @@ abandon the running wizard
 
 ```
 [SYSTEM: cancel-wizard - cancel-wizard [in-story]  (abandon the running wizard)]
-```
-
-### `cast`
-
-@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery
-
-```
-[[cast pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended] [ongoing] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N] [in-story]  (@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery)]]
-```
-
-| argument | kind | meaning |
-|---|---|---|
-| `pillars` | named **required** | `"name:level[,name:level...]"` <br>*e.g.* `e.g. "warrior:4,chieftain:2"` |
-| `foundation` | named | Foundation trait name (default: foundation) |
-| `quintessence` | named `int` | Extra points: -1 difficulty each (min 4; 3/turn cap) |
-| `label` | named | Spell name (keys the same-scene retry ledger) |
-| `requires` | named `int` | Successes needed (extended/ongoing: the ST's total) |
-| `extended` | named `bool` | Accrue successes over intervals |
-| `ongoing` | named `bool` | Indefinite-duration spell (successes ×10; per-success fuel; seal at the end) |
-| `interval` | named | Time between extended rolls (advisory) |
-| `intervals` | named `int` | Max rolls for an extended casting |
-| `on-botch` | named `enum` | Extended botch policy (default fail: Backlash ends it) — one of `fail`, `lose-successes`, `ignore` |
-| `spend` | named | Resource to spend on the roll |
-| `spend-amount` | named `int` | How many points to spend (default 1; a resource may cap it per use) |
-| `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
-
-**`[[help cast]]`** replies:
-
-```
-[SYSTEM: cast - cast pillars="name:level[,name:level...]" [foundation=<trait>] [quintessence=N] [label=".."] [requires=N] [extended] [ongoing] [interval=".."] [intervals=N] [on-botch=fail|lose-successes|ignore] [spend=<res[:effect][!]>] [spend-amount=N] [in-story]  (@deprecated - use [[magick]] (Awakened magic); this name is wanted for Sorcery)]
 ```
 
 ### `choose`

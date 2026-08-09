@@ -2565,10 +2565,6 @@ export const PASSIVE_AFFLICTIONS: AfflictionDef[] = [
     description: "Potence is working: its rating in automatic successes on feats of Strength (ST-applied until the damage pipeline reads it)." },
   { name: "power-fortitude", aka: ["fortified"], tags: ["fortified"],
     description: "Fortitude is working: its rating in soak dice, and it soaks what nothing else can." },
-  // @deprecated The label Trait Affinity used to apply. Kept so a character
-  // afflicted with it before difficulty-modifier existed still reads; nothing
-  // grants it any more.
-  { name: "trait-aptitude", description: "@deprecated - superseded by difficulty-modifier, which does the same thing for any merit.", tags: ["trait-aptitude"] },
   { name: "trait-expansion", description: "An arcanum widens one trait: +1 dot and +1 ceiling per level; experience still prices from the un-expanded base.", tags: ["trait-expansion"] },
 ];
 

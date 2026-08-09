@@ -6,7 +6,7 @@ import { CommandHandler, CommandRouter, IN_STORY_KEY, ParamSpec, ParsedCommand, 
 import { StringUtil } from "../core/traits";
 import { CLANS, FELLOWSHIPS, OwnedPowerDef, TEMPLATES, clanFamilies, clanFamilyOf, meritCostFor } from "../rules";
 import { KEY } from "../services";
-import { BackgroundRegistry, CharacterResources, CharacterStore, PlayableCharacter, PlayerStore, SHOW_ALL_TOKEN, SceneStore, TemplateRegistry } from "../state";
+import { BackgroundRegistry, CharacterResources, CharacterAfflictions, CharacterStore, PlayableCharacter, PlayerStore, SHOW_ALL_TOKEN, SceneStore, TemplateRegistry } from "../state";
 import { cmdAfflictions, cmdAliases, cmdCharacters, cmdPlayer, cmdSheet, resolveCharacterRef } from "./afflictions";
 import { cmdBackground, cmdBackgrounds, cmdBudget, cmdClans, cmdCosts, cmdCreation, cmdDerived, cmdEval, cmdGrant, cmdSupernatural, cmdTemplates } from "./character";
 import { disp } from "./common";
@@ -64,6 +64,11 @@ export interface ResolvedScope {
 // spelled several ways on purpose: a player types what they think of first.
 const SCOPE_CAMPAIGN = ["campaign", "chronicle", "story", "world", "game"];
 const SCOPE_CURRENT = ["current", "me", "self", "mine", "here"];
+// THE OPEN SCENE, asked for by name-of-kind rather than by its title. Retiring
+// [[scene-info]] (§7.92) would otherwise have taken the only way to say "the one
+// we are in" with it, leaving show-scene's own summary - "defaults to the open
+// one" - promising something no spelling could reach.
+const SCOPE_OPEN_SCENE = ["scene", "open", "now"];
 // An explicit `kind::name` disambiguates when a name means two things. `::`
 // folds to `:` at the boundary (docs/invariants.md §2), so both spellings work.
 const SCOPE_PREFIXES: Record<string, ShowScopeKind> = {
@@ -84,6 +89,13 @@ const SCOPE_SEARCH: ShowScopeKind[] = ["character", "template", "clan", "fellows
 async function scopeKindsMatching(key: string): Promise<ShowScopeKind[]> {
   const hits: ShowScopeKind[] = [];
   if ((await CharacterStore.listNames()).includes(key)) hits.push("character");
+  // AN AFFLICTED NPC IS A CHARACTER for this purpose, even with no sheet. The
+  // retired [[afflictions <who>]] took any name at all and read its afflictions,
+  // so retiring it (§7.92) would otherwise have made every sheetless NPC
+  // unaskable - a real capability lost to an alias removal rather than to a
+  // decision. Note the NEW behaviour is stricter in the useful direction: a
+  // misspelled name is now refused instead of being answered "no afflictions".
+  else if ((await CharacterAfflictions.list(key)).length) hits.push("character");
   if (TEMPLATES[key] || TemplateRegistry.get(key)) hits.push("template");
   if (CLANS[key] || clanFamilies().some(c => c.id === key)) hits.push("clan");
   if (FELLOWSHIPS[key]) hits.push("fellowship");
@@ -127,6 +139,10 @@ export async function resolveShowScope(
   if (SCOPE_CURRENT.includes(asked)) {
     return wants("current") ? { error: wants("current")! } : finishScope("current", undefined, allowed);
   }
+  // Only where a scene IS a scope - elsewhere "scene" is just a name to look up.
+  if (SCOPE_OPEN_SCENE.includes(asked) && allowed.includes("scene")) {
+    return finishScope("scene", undefined, allowed);
+  }
 
   // A bare name: ask every place that could hold it. Two answers is a real
   // ambiguity - name both explicit forms rather than picking one silently.
@@ -162,7 +178,15 @@ async function finishScope(
     const ref = await resolveCharacterRef(key ?? "");
     if (ref.error) return { error: ref.error };
     const char = await CharacterStore.load(ref.name!);
-    if (!char) return { error: `No character named "${ref.name}". [[show-character @all]] lists them.` };
+    // A SHEETLESS SUBJECT IS STILL A SUBJECT. An NPC can carry afflictions
+    // without ever having a sheet, and [[afflict who="Grey Wolf"]] creates
+    // exactly that. Refusing here would make him unaskable - the capability the
+    // retired [[afflictions <who>]] used to provide (§7.92). `char` stays
+    // undefined, so any subject that genuinely needs a sheet still says so.
+    if (!char && !(await CharacterAfflictions.list(ref.name!)).length) {
+      return { error: `No character named "${ref.name}". [[show-character @all]] lists them.` };
+    }
+    if (!char) return { kind, key: ref.name!, label: disp(ref.name!) };
     return { kind, key: StringUtil.normalize(char.name), char, label: disp(char.name) };
   }
   return { kind, key: key ?? "", label: `${StringUtil.toTitleCase(key ?? "")} (${kind})` };
@@ -224,51 +248,43 @@ const IN_THE_BOOKS: ShowScopeKind[] = ["campaign", "template", "clan", "fellowsh
 const SHOW_SUBJECTS: ShowSubject[] = [
   // --- THE CHRONICLE'S OWN VOCABULARY ---------------------------------------
   {
-    verb: "show-character", summary: "the chronicle's playable characters (marks current/default)",
-    replaces: [{ verb: "characters" }], scopes: ["campaign"], defaultScope: "campaign",
+    verb: "show-character", summary: "the chronicle's playable characters (marks current/default)", scopes: ["campaign"], defaultScope: "campaign",
     render: async () => cmdCharacters(),
   },
   {
-    verb: "show-template", summary: "the templates this chronicle knows, and what each is made of",
-    replaces: [{ verb: "templates" }], scopes: ["campaign", "template", "current", "character"],
+    verb: "show-template", summary: "the templates this chronicle knows, and what each is made of", scopes: ["campaign", "template", "current", "character"],
     defaultScope: "campaign", nameExample: "vampire",
     render: async (name, scope, cmd) =>
       cmdTemplates(asCmd(name ?? (scope.kind === "template" ? scope.key : scope.char?.templates[0]), cmd)),
   },
   {
-    verb: "show-clan", summary: "the clans and their Disciplines",
-    replaces: [{ verb: "clans" }, { verb: "clan" }], scopes: ["campaign", "clan", "current", "character"],
+    verb: "show-clan", summary: "the clans and their Disciplines", scopes: ["campaign", "clan", "current", "character"],
     defaultScope: "campaign", nameExample: "nosferatu",
     render: async (name, scope, cmd) =>
       cmdClans(asCmd(name ?? (scope.kind === "clan" ? scope.key : scope.char?.choices?.["clan"]), cmd)),
   },
   {
-    verb: "show-fellowship", summary: "the mystic fellowships' Foundation & Pillars",
-    replaces: [{ verb: "fellowships" }], scopes: ["campaign", "fellowship", "current", "character"],
+    verb: "show-fellowship", summary: "the mystic fellowships' Foundation & Pillars", scopes: ["campaign", "fellowship", "current", "character"],
     defaultScope: "campaign", nameExample: "valdaermen",
     render: async (name, scope, cmd) =>
       cmdFellowships(asCmd(name ?? (scope.kind === "fellowship" ? scope.key : scope.char?.choices?.["fellowship"]), cmd)),
   },
   {
-    verb: "show-cost", summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)",
-    replaces: [{ verb: "costs" }], scopes: ["campaign"], defaultScope: "campaign",
+    verb: "show-cost", summary: "what a dot costs from each purse (chronicle rules, Storyteller-applied)", scopes: ["campaign"], defaultScope: "campaign",
     render: async (name, _scope, cmd) => cmdCosts(asCmd(name, cmd)),
   },
   {
-    verb: "show-table", summary: "success tables, grouped by category, or one laid out in full",
-    replaces: [{ verb: "tables" }], scopes: ["campaign"], defaultScope: "campaign",
+    verb: "show-table", summary: "success tables, grouped by category, or one laid out in full", scopes: ["campaign"], defaultScope: "campaign",
     extra: [{ key: "category", kind: "named", desc: "Only this table category" }],
     render: async (name, _scope, cmd) => cmdTables(asCmd(name, cmd)),
   },
   {
-    verb: "show-roll", summary: "the chronicle's saved rolls, or one in full",
-    replaces: [{ verb: "list-rolls" }, { verb: "roll-info" }], scopes: ["campaign"], defaultScope: "campaign",
+    verb: "show-roll", summary: "the chronicle's saved rolls, or one in full", scopes: ["campaign"], defaultScope: "campaign",
     nameExample: "sword-strike",
     render: async (name, _scope, cmd) => (name ? cmdRollInfo(asCmd(name, cmd)) : cmdListRolls()),
   },
   {
     verb: "show-scene", summary: "the chronicle's scenes, or one in full (defaults to the open one)",
-    replaces: [{ verb: "scenes" }, { verb: "scene-info", scope: "scene" }],
     scopes: ["campaign", "scene"], defaultScope: "campaign",
     render: async (name, scope, cmd) => {
       const which = name ?? (scope.kind === "scene" ? scope.key : undefined);
@@ -277,8 +293,7 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     },
   },
   {
-    verb: "show-date", summary: "the story date, and the bookmarks the chronicle keeps",
-    replaces: [{ verb: "dates" }, { verb: "story-date" }], scopes: ["campaign"], defaultScope: "campaign",
+    verb: "show-date", summary: "the story date, and the bookmarks the chronicle keeps", scopes: ["campaign"], defaultScope: "campaign",
     // Bare: where we are, and every bookmark. Named: how far that one is from now.
     render: async (name, _scope, cmd) => (name
       ? cmdTimeBetween({ ...cmd, positional: [name, "now"] })
@@ -293,8 +308,7 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     render: async (name, _scope, cmd) => cmdMoon(asCmd(name, cmd)),
   },
   {
-    verb: "show-time-between", summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)",
-    replaces: [{ verb: "time-between" }], scopes: ["campaign"], defaultScope: "campaign",
+    verb: "show-time-between", summary: "measure the span between two dates (saved name, now, start, or yyyy-mm-dd-hh)", scopes: ["campaign"], defaultScope: "campaign",
     extra: [
       { key: "from", kind: "positional", hint: "<date|name>", example: "story-start" },
       { key: "to", kind: "positional", hint: "[date|name]", example: "now" },
@@ -302,8 +316,7 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     render: async (_name, _scope, cmd) => cmdTimeBetween(cmd),
   },
   {
-    verb: "show-alias", summary: "every alias, grouped by scope",
-    replaces: [{ verb: KEY.aliases }], scopes: ["campaign", "player", "character", "current"],
+    verb: "show-alias", summary: "every alias, grouped by scope", scopes: ["campaign", "player", "character", "current"],
     defaultScope: "campaign",
     render: async () => cmdAliases(),
   },
@@ -314,7 +327,6 @@ const SHOW_SUBJECTS: ShowSubject[] = [
   },
   {
     verb: "show-constraint", summary: "the story's constraint groups, and what the character breaks",
-    replaces: [{ verb: "constraints" }, { verb: "constraint" }, { verb: "check-constraints", scope: "current" }],
     scopes: IN_THE_BOOKS, defaultScope: "campaign", nameExample: "clan-only-backgrounds",
     render: async (name, scope, cmd) => {
       if (name) return cmdConstraint(asCmd(name, cmd));
@@ -326,14 +338,12 @@ const SHOW_SUBJECTS: ShowSubject[] = [
 
   // --- WHAT A CHARACTER HAS -------------------------------------------------
   {
-    verb: "show-sheet", summary: "a character's record as the engine reads it (effective values marked)",
-    replaces: [{ verb: "sheet" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-sheet", summary: "a character's record as the engine reads it (effective values marked)", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope, cmd) => cmdSheet(asCmd(scope.key, cmd)),
   },
   {
     verb: "show-merit", summary: "merits & flaws: what a character owns, or what the chronicle defines",
     note: "in=campaign lists the definitions; a name shows one in full. NEVER lists Arcana - [[show-arcanum]] is their list",
-    replaces: [{ verb: "merits", scope: "current" }, { verb: "merit", scope: "campaign" }],
     scopes: IN_THE_BOOKS, defaultScope: "current", nameExample: "iron-will",
     // A NAME shows one; a SHEET scope shows what that character owns; anything
     // else (campaign, template, clan, fellowship) shows what is open there.
@@ -345,7 +355,6 @@ const SHOW_SUBJECTS: ShowSubject[] = [
   {
     verb: "show-arcanum", summary: "arcana & taints: what a character owns, or what the chronicle defines",
     note: "Their own category - not merits, and only a demon or a demon's thrall has this list at all",
-    replaces: [{ verb: "arcana", scope: "current" }, { verb: "arcanum", scope: "campaign" }],
     scopes: IN_THE_BOOKS, defaultScope: "current", nameExample: "celestial-radiance",
     render: async (name, scope, cmd) =>
       name ? cmdArcanumInfo(asCmd(name, cmd))
@@ -354,15 +363,13 @@ const SHOW_SUBJECTS: ShowSubject[] = [
   },
   {
     verb: "show-background", summary: "backgrounds: what a character holds and confers, or what the chronicle defines",
-    replaces: [{ verb: "backgrounds", scope: "current" }, { verb: "background", scope: "campaign" }],
     scopes: IN_THE_BOOKS, defaultScope: "current", nameExample: "fount",
     render: async (name, scope, cmd) =>
-      name ? cmdBackground(asCmd(name, cmd))
-        : scopeChar(scope) ? cmdBackgrounds() : scopedBackgroundDefs(scope),
+      name ? cmdBackground(asCmd(name, cmd), scopeChar(scope))
+        : scopeChar(scope) ? cmdBackgrounds(scopeChar(scope)) : scopedBackgroundDefs(scope),
   },
   {
     verb: "show-affliction", summary: "afflictions on a character, or the ones the chronicle defines",
-    replaces: [{ verb: "afflictions", scope: "current" }, { verb: "affliction", scope: "campaign" }],
     scopes: ["campaign", "current", "character", "scene"], defaultScope: "current",
     nameExample: "in-sanctum",
     render: async (name, scope, cmd) =>
@@ -371,13 +378,11 @@ const SHOW_SUBJECTS: ShowSubject[] = [
           : cmdAfflictions(asCmd(scope.key, cmd)),
   },
   {
-    verb: "show-specialty", summary: "a character's specialties (one applies per roll, via specialty=)",
-    replaces: [{ verb: "specialties" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-specialty", summary: "a character's specialties (one applies per roll, via specialty=)", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope) => cmdSpecialties(scopeChar(scope)),
   },
   {
-    verb: "show-resource", summary: "a character's live pools and trackers (and what they cannot use)",
-    replaces: [{ verb: "resources" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-resource", summary: "a character's live pools and trackers (and what they cannot use)", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope) => cmdResources(scopeChar(scope)),
   },
   {
@@ -386,13 +391,11 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     render: async (_name, scope, cmd) => cmdAttune({ ...cmd, positional: [], named: {} }, scopeChar(scope)),
   },
   {
-    verb: "show-health", summary: "a character's health track, penalty and what soaks what",
-    replaces: [{ verb: "health" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-health", summary: "a character's health track, penalty and what soaks what", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope) => cmdHealth(scopeChar(scope)),
   },
   {
-    verb: "show-budget", summary: "what each purse allows, what is spent, what is left (advisory)",
-    replaces: [{ verb: "budget" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-budget", summary: "what each purse allows, what is spent, what is left (advisory)", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope, cmd) => cmdBudget(asCmd(scope.key, cmd)),
   },
   {
@@ -401,29 +404,24 @@ const SHOW_SUBJECTS: ShowSubject[] = [
     render: async (_name, scope, cmd) => cmdGrant({ ...cmd, positional: [], named: {} }, scopeChar(scope)),
   },
   {
-    verb: "show-creation", summary: "the creation budget: every pool against what the sheet holds (advisory)",
-    replaces: [{ verb: "creation" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-creation", summary: "the creation budget: every pool against what the sheet holds (advisory)", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope, cmd) => cmdCreation(asCmd(scope.key, cmd)),
   },
   {
-    verb: "show-derived", summary: "what the sheet implies rather than states: Road, Willpower, generation, and why",
-    replaces: [{ verb: "derived" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-derived", summary: "what the sheet implies rather than states: Road, Willpower, generation, and why", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope, cmd) => cmdDerived(asCmd(scope.key, cmd)),
   },
   {
-    verb: "show-supernatural", summary: "the families of power open to a character (disciplines, magic, sorcery, blood-sorcery)",
-    replaces: [{ verb: "supernatural" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-supernatural", summary: "the families of power open to a character (disciplines, magic, sorcery, blood-sorcery)", scopes: ON_A_SHEET, defaultScope: "current",
     nameExample: "disciplines",
     render: async (name, scope, cmd) => cmdSupernatural(asCmd(name, cmd), scopeChar(scope)),
   },
   {
-    verb: "show-cray", summary: "the cray's points, status and how it refills",
-    replaces: [{ verb: "cray" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-cray", summary: "the cray's points, status and how it refills", scopes: ON_A_SHEET, defaultScope: "current",
     render: async (_name, scope) => cmdCray(scopeChar(scope)),
   },
   {
-    verb: "show-eval", summary: "read an expression against a character (the reference system, exposed)",
-    replaces: [{ verb: "eval" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-eval", summary: "read an expression against a character (the reference system, exposed)", scopes: ON_A_SHEET, defaultScope: "current",
     nameHint: "<expression>", nameExample: "`courage + 2`",
     render: async (_name, scope, cmd) => cmdEval(cmd, scopeChar(scope)),
   },
@@ -431,14 +429,12 @@ const SHOW_SUBJECTS: ShowSubject[] = [
   // contest to look at, and bare means "the one that is running". (Passing the
   // scope's character here read the character name as an id and found nothing.)
   {
-    verb: "show-roll-status", summary: "an extended action's progress (bare: the one that is running)",
-    replaces: [{ verb: "roll-status" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-roll-status", summary: "an extended action's progress (bare: the one that is running)", scopes: ON_A_SHEET, defaultScope: "current",
     nameHint: "[id]",
     render: async (name, _scope, cmd) => cmdRollStatus(asCmd(name, cmd)),
   },
   {
-    verb: "show-contest-status", summary: "an extended contest's progress (bare: the one that is running)",
-    replaces: [{ verb: "contest-status" }], scopes: ON_A_SHEET, defaultScope: "current",
+    verb: "show-contest-status", summary: "an extended contest's progress (bare: the one that is running)", scopes: ON_A_SHEET, defaultScope: "current",
     nameHint: "[id]",
     render: async (name, _scope, cmd) => cmdContestStatus(asCmd(name, cmd)),
   },
@@ -569,10 +565,6 @@ function showParams(subject: ShowSubject): ParamSpec[] {
 // registered first. dist/naiowod.ts concatenates the barrel last, so the
 // artifact agrees - one order, both paths, and it is the order the file had.
 
-// ...and every name that used to mean it now says so. ONE table, so a rename
-// cannot leave a dangling pointer: an unregistered verb here fails the suite.
-export const SHOW_DEPRECATIONS: Array<{ from: string; to: string; hidden?: boolean }> =
-  SHOW_SUBJECTS.flatMap(s => (s.replaces ?? []).map(r => ({ from: r.verb, to: s.verb })));
 // DEFERRED ON PURPOSE - the ONE place in src/game/* where registration order is
 // not just "wherever the module body ran". All 130 registrations live in two
 // modules: 129 top-level ones in afflictions.ts, and these. In the single file
@@ -600,7 +592,6 @@ export function installShowVerbs(): void {
     });
     SHOW_SUBJECT_VERBS.push(subject.verb);
   }
-  for (const { from, to } of SHOW_DEPRECATIONS) CommandRouter.deprecate(from, to);
   // Deferred with its siblings for the same reason: registered in the module
   // body it would land ahead of afflictions.ts's 129 and lead every listing.
   CommandRouter.register("show-help",
@@ -643,10 +634,7 @@ const QUIET_VERBS = new Set<string>([
 export function isQuietVerb(verb: string): boolean {
   const v = verb.toLowerCase();
   if (v.startsWith(SHOW_VERB_PREFIX)) return true;
-  if (QUIET_VERBS.has(v)) return true;
-  // A deprecated name is as quiet as what replaced it.
-  const replacedBy = CommandRouter.specFor(v)?.deprecated;
-  return replacedBy !== undefined && (replacedBy.startsWith(SHOW_VERB_PREFIX) || QUIET_VERBS.has(replacedBy));
+  return QUIET_VERBS.has(v);
 }
 
 // DOES THIS REPLY BELONG IN THE STORY? Three answers, in order:

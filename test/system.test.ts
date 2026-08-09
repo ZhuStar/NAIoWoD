@@ -1414,12 +1414,12 @@ describe("named rolls (@name library)", () => {
 
   test("list-rolls, forget-roll, and an unknown @name are reported", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
-    expect(await CommandRouter.route("list-rolls")).toContain("No saved rolls");
+    expect(await CommandRouter.route("show-roll")).toContain("No saved rolls");
     await CommandRouter.route("name-roll dodge dexterity+dodge");
-    expect(await CommandRouter.route("list-rolls")).toContain("dodge");
+    expect(await CommandRouter.route("show-roll")).toContain("dodge");
     expect(await CommandRouter.route("roll @ghost", { rng: seqRng([]) })).toContain('No saved roll named "ghost"');
     expect(await CommandRouter.route("forget-roll dodge")).toContain("Forgot");
-    expect(await CommandRouter.route("list-rolls")).toContain("No saved rolls");
+    expect(await CommandRouter.route("show-roll")).toContain("No saved rolls");
   });
 });
 
@@ -1528,7 +1528,7 @@ describe("extended-roll commands", () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
     await CommandRouter.route('create-playable name="Sela" templates=mortal');
     await CommandRouter.route('extended-roll strength+stamina requires=20 intervals=5 label=`Dig out`', { rng: seqRng([6, 6]) });
-    expect(await CommandRouter.route("roll-status")).toContain("Dig out");
+    expect(await CommandRouter.route("show-roll-status")).toContain("Dig out");
 
     await CommandRouter.route('play name="Sela"');
     const cont = await CommandRouter.route("continue-roll", { rng: seqRng([6, 6]) });
@@ -1536,7 +1536,7 @@ describe("extended-roll commands", () => {
     expect(cont).toContain("4/20 successes"); // 2 (Rok) + 2 (Sela)
 
     expect(await CommandRouter.route("cancel-roll")).toContain("Cancelled");
-    expect(await CommandRouter.route("roll-status")).toContain("No extended action");
+    expect(await CommandRouter.route("show-roll-status")).toContain("No extended action");
   });
 });
 
@@ -1590,9 +1590,9 @@ describe("executeRoll extra modifier", () => {
 describe("resource commands", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
 
-  test("[[resources]] lists the current character's resources", async () => {
+  test("[[show-resource]] lists the current character's resources", async () => {
     await CommandRouter.route('create-playable name="Merlin" templates=mage');
-    const r = await CommandRouter.route("resources");
+    const r = await CommandRouter.route("show-resource");
     expect(r).toContain("willpower");
     expect(r).toContain("quintessence");
   });
@@ -1603,7 +1603,7 @@ describe("resource commands", () => {
     const r = await CommandRouter.route("roll strength spend=willpower", { rng: seqRng([2]) });
     expect(r).toContain("spent 1 willpower");
     expect(r).toContain("1 success");               // 0 dice + 1 automatic
-    expect(await CommandRouter.route("resources")).toContain("willpower 2/10");
+    expect(await CommandRouter.route("show-resource")).toContain("willpower 2/10");
   });
 
   test("spending Resolve lowers difficulty by its configured amount", async () => {
@@ -1668,7 +1668,7 @@ describe("resources v2: named effects, nAgain, mandatory costs", () => {
     const r = await CommandRouter.route("roll strength spend=willpower:fuel", { rng: seqRng([2]) });
     expect(r).toContain("spent 1 willpower (fuel)");
     expect(r).toContain("Failure");                  // face 2, no auto-success from fuel
-    expect(await CommandRouter.route("resources")).toContain("willpower 1/10");
+    expect(await CommandRouter.route("show-resource")).toContain("willpower 1/10");
   });
 
   test("an unknown named effect is refused", async () => {
@@ -1741,11 +1741,11 @@ describe("attribute boosts (CharacterBoosts)", () => {
 describe("heal & boost in play", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); await LorebookManager.bootstrap(); });
 
-  test("[[damage]] -> [[health]] -> the wound penalty shrinks the next roll", async () => {
+  test("[[damage]] -> [[show-health]] -> the wound penalty shrinks the next roll", async () => {
     await CommandRouter.route('create-playable name="Vlad" templates=vampire');
     const dmg = await CommandRouter.route("damage lethal 3");
     expect(dmg).toContain("penalty -1");
-    expect(await CommandRouter.route("health")).toContain("Injured");
+    expect(await CommandRouter.route("show-health")).toContain("Injured");
     // Pool of literal 5 with -1 wound penalty -> exactly 4 dice: seqRng(4 faces)
     // would throw if a 5th die were rolled.
     const r = await CommandRouter.route("roll 5", { rng: seqRng([6, 6, 6, 6]) });
@@ -1778,7 +1778,7 @@ describe("heal & boost in play", () => {
     await CommandRouter.route('create-playable name="Vlad" templates=vampire');
     const r = await CommandRouter.route("spend blood:boost charisma 2");
     expect(r).toContain("not a boostable");
-    expect(await CommandRouter.route("resources")).toContain("blood 10/11"); // nothing spent
+    expect(await CommandRouter.route("show-resource")).toContain("blood 10/11"); // nothing spent
   });
 
   test("heal/boost effects are refused inside a roll, pointing at [[spend]]", async () => {
@@ -1888,7 +1888,7 @@ describe("[[configure-resources]] wizard (text medium)", () => {
     expect(wp.start).toBe(5);
     expect(wp.max).toBe(8);
     expect(wp.effect!.apply[0]).toEqual({ op: "uncancelable", amount: 2 });
-    expect(await CommandRouter.route("resources")).toContain("willpower 0/8"); // record's chosen start (0) still wins; max is patched
+    expect(await CommandRouter.route("show-resource")).toContain("willpower 0/8"); // record's chosen start (0) still wins; max is patched
     // The wizard released plain input.
     expect(await processAdventureInput("just walking")).toBeUndefined();
   });
@@ -1955,7 +1955,7 @@ describe("effect grammar v3 (open ops, costs, limits, ledger)", () => {
     expect(r).toContain("wits+2 roll offsets 2 cost");
     expect(r).toContain("spent 1 mana (cheap)");   // 3 - 2
     expect(r).toContain("2 successes");
-    expect(await CommandRouter.route("resources")).toContain("mana 9/20");
+    expect(await CommandRouter.route("show-resource")).toContain("mana 9/20");
   });
 
   test("`buys` prices one resource unit for several effect units", async () => {
@@ -1995,9 +1995,9 @@ describe("effect grammar v3 (open ops, costs, limits, ledger)", () => {
     await CommandRouter.route("spend mana:ward");
     const r3 = await CommandRouter.route("spend mana:ward");
     expect(r3).toContain("use 3/2 per scene - OVER LIMIT");
-    expect(await CommandRouter.route("resources")).toContain("ward (used 3)");
+    expect(await CommandRouter.route("show-resource")).toContain("ward (used 3)");
     expect(await CommandRouter.route("reset-uses")).toContain("counters reset");
-    expect(await CommandRouter.route("resources")).not.toContain("(used");
+    expect(await CommandRouter.route("show-resource")).not.toContain("(used");
   });
 
   test("an action-tag roll op applies only when the roll carries the tag", async () => {
@@ -2018,7 +2018,7 @@ describe("effect grammar v3 (open ops, costs, limits, ledger)", () => {
     const odo = (await CharacterStore.getCurrent())!;
     expect(CharacterResources.defsFor(odo).map(d => d.name)).not.toContain("willpower"); // hidden
     expect(CharacterResources.resolveDef(odo, "willpower")!.name).toBe("focus");         // redirected
-    const list = await CommandRouter.route("resources");
+    const list = await CommandRouter.route("show-resource");
     expect(list).toContain("replaces: willpower");
     const r = await CommandRouter.route("roll strength spend=willpower", { rng: seqRng([2]) });
     expect(r).toContain("spent 1 focus");
@@ -2385,11 +2385,11 @@ describe("extended contests (commands)", () => {
   test("contest-status, then cancel-contest", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     await CommandRouter.route('extended-contest 3 2 target=20 rounds=5 label=`Long haul`', { rng: seqRng([6, 6, 6, 6, 2]) });
-    const status = await CommandRouter.route("contest-status");
+    const status = await CommandRouter.route("show-contest-status");
     expect(status).toContain("Long haul");
     expect(status).toContain("recent:");
     expect(await CommandRouter.route("cancel-contest")).toContain("Cancelled contest");
-    expect(await CommandRouter.route("contest-status")).toContain("No extended contest");
+    expect(await CommandRouter.route("show-contest-status")).toContain("No extended contest");
   });
 
   test("a contest decided on its FIRST round stops being the current one", async () => {
@@ -2399,19 +2399,19 @@ describe("extended contests (commands)", () => {
     const open = await CommandRouter.route("extended-contest 3 2 target=1 rounds=3", { rng: seqRng([6, 6, 6, 2, 2]) });
     expect(open).toContain("WINS");
     expect(open).not.toContain("Continue with");
-    expect(await CommandRouter.route("contest-status")).toContain("No extended contest");
+    expect(await CommandRouter.route("show-contest-status")).toContain("No extended contest");
   });
 });
 
-describe("success tables: lorebook overlay & [[tables]]", () => {
+describe("success tables: lorebook overlay & [[show-table]]", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("[[tables]] lists the built-ins; [[tables name]] lays one out", async () => {
-    const list = await CommandRouter.route("tables");
+  test("[[show-table]] lists the built-ins; [[show-table name]] lays one out", async () => {
+    const list = await CommandRouter.route("show-table");
     expect(list).toContain("degrees");
     expect(list).toContain("damage");
     expect(list).toContain("soak");
-    const one = await CommandRouter.route("tables degrees");
+    const one = await CommandRouter.route("show-table degrees");
     expect(one).toContain("Marginal");
     expect(one).toContain("Phenomenal");
   });
@@ -2529,11 +2529,11 @@ describe("constraint commands", () => {
     await CommandRouter.route('define-constraint name="foo" relation=forbidden domain=flaw members="haunted, hunted"');
     expect(ConstraintRegistry.all().length).toBe(1);                 // replaced, not duplicated
     expect(ConstraintRegistry.get("foo")!.relation).toBe("forbidden");
-    expect(await CommandRouter.route("constraints")).toContain("foo");
-    expect(await CommandRouter.route("constraint foo")).toContain("Haunted"); // toTitleCase display
+    expect(await CommandRouter.route("show-constraint")).toContain("foo");
+    expect(await CommandRouter.route("show-constraint foo")).toContain("Haunted"); // toTitleCase display
     expect(await CommandRouter.route("forget-constraint foo")).toContain("Forgot");
     expect(ConstraintRegistry.get("foo")).toBeUndefined();
-    expect(await CommandRouter.route("constraints")).toContain("No constraint groups");
+    expect(await CommandRouter.route("show-constraint")).toContain("No constraint groups");
   });
 
   test("check-constraints flags the current character's conflicts", async () => {
@@ -2544,7 +2544,7 @@ describe("constraint commands", () => {
     c.backgrounds = { status: 2, anonymity: 1 };   // 2 of an exclusive group
     c.meritsFlaws = { "dark-secret": 1 };           // a forbidden flaw for vampires
     await CharacterStore.save(c);
-    const report = await CommandRouter.route("check-constraints");
+    const report = await CommandRouter.route("show-constraint in=current");
     expect(report).toContain("2 constraint issues");
     expect(report).toContain("statuses");
     expect(report).toContain("forbidden");
@@ -2553,7 +2553,7 @@ describe("constraint commands", () => {
   test("check-constraints is clean when nothing conflicts", async () => {
     await CommandRouter.route('define-constraint name="statuses" relation=exclusive domain=background members="status, anonymity" max=1');
     await CommandRouter.route('create-playable name="Ok" templates=mortal');
-    expect(await CommandRouter.route("check-constraints")).toContain("satisfies all");
+    expect(await CommandRouter.route("show-constraint in=current")).toContain("satisfies all");
   });
 });
 
@@ -2580,7 +2580,7 @@ describe("constraint window ([[win-constraint]] emits define-constraint)", () =>
     expect(await __uiClickButton("Create")).toBe(true);
     // The emitted command ran through the same CommandRouter -> the group exists.
     expect(ConstraintRegistry.get("vip-backgrounds")!.members).toEqual(["status", "anonymity"]);
-    expect(await CommandRouter.route("constraints")).toContain("vip-backgrounds");
+    expect(await CommandRouter.route("show-constraint")).toContain("vip-backgrounds");
   });
 
   test("Create with no name reports back in-window without defining anything", async () => {
@@ -2625,10 +2625,10 @@ describe("discoverability commands (help / characters / set-default)", () => {
     expect(await CommandRouter.route("help nope")).toContain('No command "nope"');
   });
 
-  test("[[characters]] marks current/default; [[set-default]] changes it and [[play]] returns to it", async () => {
+  test("[[show-character]] marks current/default; [[set-default]] changes it and [[play]] returns to it", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');   // default + current
     await CommandRouter.route('create-playable name="Sela" templates=mortal');
-    const list = await CommandRouter.route("characters");
+    const list = await CommandRouter.route("show-character");
     expect(list).toContain("Rok");
     expect(list).toContain("Sela");
     expect(list).toContain("current");
@@ -2658,7 +2658,7 @@ describe("expression difficulty & named-roll spend (commands)", () => {
     await CommandRouter.route("gain willpower 2");   // give Rok willpower to spend
     const saved = await CommandRouter.route("name-roll brace 2 spend=willpower");
     expect(saved).toContain("spend=willpower");
-    expect(await CommandRouter.route("list-rolls")).toContain("spend=willpower");
+    expect(await CommandRouter.route("show-roll")).toContain("spend=willpower");
     // 2 dice both fail (2,2), but the saved willpower spend grants +1 automatic
     // success -> proves the spend auto-applied without an explicit spend=.
     const r = await CommandRouter.route("roll @brace", { rng: seqRng([2, 2]) });
@@ -2879,7 +2879,7 @@ describe("afflictions: the Feral Speech flow (afflict/advance/lift, mirrors, NPC
     const r = await CommandRouter.route("afflict concentrating-on target=@prey");
     expect(r).toContain("Kvar is now concentrating-on (target: Grey Wolf)");
     expect(r).toContain("1 turn (ST-enforced)");
-    expect(await CommandRouter.route("afflictions")).toContain("concentrating-on (target: Grey Wolf)");
+    expect(await CommandRouter.route("show-affliction")).toContain("concentrating-on (target: Grey Wolf)");
   });
 
   test("advance carries bindings into the successor and fires its mirror on the NPC", async () => {
@@ -2889,7 +2889,7 @@ describe("afflictions: the Feral Speech flow (afflict/advance/lift, mirrors, NPC
     expect(adv).toContain("concentrating-on ends");
     expect(adv).toContain("Kvar is now feral-whispers (target: Grey Wolf)");
     expect(adv).toContain("Grey Wolf is now feral-whispers (target: Kvar)"); // the mirror, on a sheetless NPC
-    expect(await CommandRouter.route('afflictions "Grey Wolf"')).toContain("feral-whispers (target: Kvar)");
+    expect(await CommandRouter.route('show-affliction in="Grey Wolf"')).toContain("feral-whispers (target: Kvar)");
   });
 
   test("remove takes both sides of a mirrored affliction; spend= is the shrug-off", async () => {
@@ -2900,8 +2900,10 @@ describe("afflictions: the Feral Speech flow (afflict/advance/lift, mirrors, NPC
     expect(lifted).toContain("is free of feral-whispers");
     expect(lifted).toContain("spent 1 willpower");
     expect(lifted).toContain("feral-whispers lifted from Grey Wolf");
-    expect(await CommandRouter.route("afflictions")).toContain("no afflictions");
-    expect(await CommandRouter.route('afflictions "Grey Wolf"')).toContain("no afflictions");
+    expect(await CommandRouter.route("show-affliction")).toContain("no afflictions");
+    // Cleared and sheetless, the NPC leaves nothing to find - so this is the
+    // refusal, which is also what a misspelled name now gets (§7.92).
+    expect(await CommandRouter.route('show-affliction in="Grey Wolf"')).toContain(`Nothing named "grey-wolf"`);
   });
 
   test("advance with no successor and lifting an absent affliction report cleanly", async () => {
@@ -3055,7 +3057,7 @@ describe("command router: beforeRoute hooks (creator-mode live sync)", () => {
     const entry = ["hand edit", "=====",
       "dazed:", "  description: New words", "  tags: off-hand"].join("\n");
     await LorebookManager.updateEntryText(CONFIG_CATEGORY, AFFLICTIONS_ENTRY, entry);
-    expect(await CommandRouter.route("affliction dazed")).toContain("New words");   // the hook re-loaded it
+    expect(await CommandRouter.route("show-affliction in=campaign dazed")).toContain("New words");   // the hook re-loaded it
     await CommandRouter.route("creator-mode set=false");
     expect(AfflictionRegistry.get("dazed")!.tags).toEqual(["off-hand"]);            // off-path synced too
     expect(await CreatorMode.enabled()).toBe(false);
@@ -3146,7 +3148,7 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
     expect(effectiveTraitOf(char, "library")).toBe(5);
     // And the places they open actually work.
     expect(await CommandRouter.route("measure-door")).toContain("Library of the Unseen");
-    expect(await CommandRouter.route("afflictions")).toContain("sanctum 5");
+    expect(await CommandRouter.route("show-affliction")).toContain("sanctum 5");
   });
 
   test("his five Background dots: what he was given costs nothing, what he bought costs what it rates", async () => {
@@ -3158,7 +3160,7 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
     await CommandRouter.route("set-trait mentor 5 note=`Velia` paid=0");
     await CommandRouter.route("set-trait mentor 3 add=true note=`Daujotas` paid=3");
     await CommandRouter.route("set-trait resources 2");
-    const report = await CommandRouter.route("budget");
+    const report = await CommandRouter.route("show-budget");
     expect(report).toContain("background: 5/5, 0 left");         // 3 + 2, against the creation budget
     expect(report).toContain("fount 5 (paid 0)");
     expect(report).toContain("sanctum 5 (from talisman, free)"); // conferred, never bought
@@ -3167,7 +3169,7 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
   test("Fount reads as a ladder, and says where the Ouroboros' 30/6 pool comes from", async () => {
     await CommandRouter.route('create-playable name="Visvaldas" templates=ouroboros');
     await CommandRouter.route("set-trait fount 5");
-    const one = await CommandRouter.route("background fount");
+    const one = await CommandRouter.route("show-background in=campaign fount");
     expect(one).toContain("• 5: hold 20, 6/turn");               // the rung he is on
     expect(one).toContain("1: hold 12, 2/turn");
     expect(one).toContain("plus ten dots of vitae is the 30/6 pool");
@@ -3187,14 +3189,14 @@ describe("backgrounds: definitions, grants, and dots that are not cost", () => {
 describe("arcana verbs: take/drop/define/list, and they insist on the family", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
-  test("[[arcanum]] lists only arcana and taints - merits stay out of it", async () => {
-    const listed = await CommandRouter.route("arcanum");
+  test("[[show-arcanum]] lists only arcana and taints - merits stay out of it", async () => {
+    const listed = await CommandRouter.route("show-arcanum in=campaign");
     expect(listed).toContain("celestial-radiance");
     expect(listed).toContain("trait-affinity");
     expect(listed).not.toContain("iron-will");                   // a merit
     // ...and the merit list never mentions an arcanum. This is the whole point:
     // a regular vampire's Merits & Flaws contains no Devil's Due Arcana.
-    const merits = await CommandRouter.route("merit");
+    const merits = await CommandRouter.route("show-merit in=campaign");
     expect(merits).toContain("iron-will");
     expect(merits).not.toContain("celestial-radiance");
     expect(merits).not.toContain("trait-affinity");
@@ -3223,16 +3225,16 @@ describe("arcana verbs: take/drop/define/list, and they insist on the family", (
     const char = (await CharacterStore.load("Azazel"))!;
     expect(char.arcana).toEqual({ "trait-affinity:melee": 2 });
     expect(char.meritsFlaws).toEqual({ "iron-will": 3 });
-    // [[merits]] shows the merit and NOT the arcanum; [[arcana]] the reverse.
-    expect(await CommandRouter.route("merits")).toContain("iron-will");
-    expect(await CommandRouter.route("merits")).not.toContain("trait-affinity");
-    expect(await CommandRouter.route("arcana")).toContain("trait-affinity");
-    expect(await CommandRouter.route("arcana")).not.toContain("iron-will");
+    // [[show-merit]] shows the merit and NOT the arcanum; [[show-arcanum]] the reverse.
+    expect(await CommandRouter.route("show-merit")).toContain("iron-will");
+    expect(await CommandRouter.route("show-merit")).not.toContain("trait-affinity");
+    expect(await CommandRouter.route("show-arcanum")).toContain("trait-affinity");
+    expect(await CommandRouter.route("show-arcanum")).not.toContain("iron-will");
   });
 
   test("a vampire has no Arcana list at all - not an empty one, none", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    const listed = await CommandRouter.route("arcana");
+    const listed = await CommandRouter.route("show-arcanum");
     expect(listed).toContain("has no Arcana & Taints at all");
     expect(listed).toContain("demon's thrall");
     const refused = await CommandRouter.route("take-arcanum trait-affinity::melee 2");
@@ -3251,7 +3253,7 @@ describe("arcana verbs: take/drop/define/list, and they insist on the family", (
     expect(MeritFlawRegistry.get("borrowed-sight")).toBeUndefined();   // NOT a merit
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     await CommandRouter.route("take-arcanum borrowed-sight 3");
-    expect(await CommandRouter.route("budget")).toContain("arcana: 3/25");
+    expect(await CommandRouter.route("show-budget")).toContain("arcana: 3/25");
   });
 
   test("a sheet written before the split migrates: arcana move to their own bucket", async () => {
@@ -3268,7 +3270,7 @@ describe("arcana verbs: take/drop/define/list, and they insist on the family", (
 });
 
 // =============================================================================
-// SET-TRAIT - the writing counterpart of [[sheet]]
+// SET-TRAIT - the writing counterpart of [[show-sheet]]
 // =============================================================================
 describe("set-trait: putting ratings back without hand-editing the card", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); MeritFlawRegistry.reset(); ArcanumRegistry.reset(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
@@ -3324,23 +3326,23 @@ describe("supernatural categories: disciplines, magic, sorcery, blood-sorcery", 
     await CommandRouter.route("set-trait thaumaturgy 3 group=discipline");
     await CommandRouter.route("set-trait rego-vitae 2");
     await CommandRouter.route("set-trait koldunic-sorcery 1");
-    const held = await CommandRouter.route("supernatural");
+    const held = await CommandRouter.route("show-supernatural");
     expect(held).toContain("Blood Sorcery: Rego Vitae 2, Koldunic Sorcery 1");
     expect(held).not.toContain("needs Thaumaturgy");
     // Lose the parent Discipline and the path is flagged - Koldunic never is.
     await CommandRouter.route("set-trait thaumaturgy 0 group=discipline");
-    const orphaned = await CommandRouter.route("supernatural");
+    const orphaned = await CommandRouter.route("show-supernatural");
     expect(orphaned).toContain("Rego Vitae needs Thaumaturgy");
     expect(orphaned).not.toContain("Koldunic Sorcery needs");
   });
 
   test("a category names who may have it at all", async () => {
     await CommandRouter.route('create-playable name="Aldous" templates=mage');
-    const listed = await CommandRouter.route("supernatural");
+    const listed = await CommandRouter.route("show-supernatural");
     expect(listed).toContain("Awakened magic");
     expect(listed).not.toContain("Blood Sorcery");          // not open to a mage
-    expect(await CommandRouter.route("supernatural blood-sorcery")).toContain("NOT open to mage");
-    expect(await CommandRouter.route("supernatural sorcery")).toContain("(anyone)");
+    expect(await CommandRouter.route("show-supernatural blood-sorcery")).toContain("NOT open to mage");
+    expect(await CommandRouter.route("show-supernatural sorcery")).toContain("(anyone)");
   });
 });
 
@@ -3379,7 +3381,7 @@ describe("arcana budgets: their own purse, priced per template", () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     await CommandRouter.route("take-arcanum celestial-radiance");
     await CommandRouter.route("take-merit iron-will");           // a MERIT, 3 freebie
-    const report = await CommandRouter.route("budget");
+    const report = await CommandRouter.route("show-budget");
     expect(report).toContain("arcana: 7/25");
     expect(report).toContain("celestial-radiance 7");
     expect(report).toContain("freebie: 3/15");                    // counted apart
@@ -3389,31 +3391,31 @@ describe("arcana budgets: their own purse, priced per template", () => {
   test("a flaw GRANTS rather than costs, and the sheet may override the template's budget", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     await CommandRouter.route("take-merit dark-secret");           // a flaw, 1 point
-    expect(await CommandRouter.route("budget")).toContain("freebie: -1/15, 16 left");
+    expect(await CommandRouter.route("show-budget")).toContain("freebie: -1/15, 16 left");
     const char = (await CharacterStore.load("Azazel"))!;
     char.budgets = { arcana: "10" };
     await CharacterStore.save(char);
-    expect(await CommandRouter.route("budget")).toContain("arcana: 0/10");
+    expect(await CommandRouter.route("show-budget")).toContain("arcana: 0/10");
   });
 
   test("price paid is not price listed: [[paid]] records what the Storyteller granted", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     await CommandRouter.route("take-arcanum celestial-radiance");
-    expect(await CommandRouter.route("budget")).toContain("arcana: 7/25");
+    expect(await CommandRouter.route("show-budget")).toContain("arcana: 7/25");
     // The Storyteller says he was MADE with it.
     expect(await CommandRouter.route("paid celestial-radiance")).toContain("granted, not bought");
-    const after = await CommandRouter.route("budget");
+    const after = await CommandRouter.route("show-budget");
     expect(after).toContain("arcana: 0/25");
     expect(after).toContain("(set)");
     // And it can be put back.
     expect(await CommandRouter.route("paid celestial-radiance listed")).toContain("pays the listed price again");
-    expect(await CommandRouter.route("budget")).toContain("arcana: 7/25");
+    expect(await CommandRouter.route("show-budget")).toContain("arcana: 7/25");
   });
 
   test("take-merit can set the price on the spot", async () => {
     await CommandRouter.route('create-playable name="Azazel" templates=demon');
     expect(await CommandRouter.route("take-arcanum celestial-radiance paid=0")).toContain("paid 0");
-    expect(await CommandRouter.route("budget")).toContain("arcana: 0/25");
+    expect(await CommandRouter.route("show-budget")).toContain("arcana: 0/25");
   });
 
   test("two Mentors, one granted and one bought, survive the card", async () => {
@@ -3431,7 +3433,7 @@ describe("arcana budgets: their own purse, priced per template", () => {
     expect(text).toContain("Daujotas, his Hermetic Master");
     const back = characterFromCard(parseCardText(text))!;
     expect(back.instances!.mentor.map(i => i.paid)).toEqual(["0", "3"]);
-    expect(await CommandRouter.route("sheet")).toContain("[paid 0]");
+    expect(await CommandRouter.route("show-sheet")).toContain("[paid 0]");
   });
 });
 
@@ -3706,17 +3708,17 @@ describe("[[convert-cards]]: migrating a story written before the readable forma
 // =============================================================================
 // ADVANCEMENT COSTS - chronicle rules, not character data
 // =============================================================================
-describe("[[costs]]: what a dot costs, and where that lives", () => {
+describe("[[show-cost]]: what a dot costs, and where that lives", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("the shipped table lists every purse; the card overrides one price at a time", async () => {
-    expect(await CommandRouter.route("costs")).toContain("experience current x 4");
-    expect(await CommandRouter.route("costs discipline")).toContain("out of clan");
+    expect(await CommandRouter.route("show-cost")).toContain("experience current x 4");
+    expect(await CommandRouter.route("show-cost discipline")).toContain("out of clan");
     await AdvancementCosts.save({ attribute: { experience: "current x 5" } });
     const table = advancementCostsFrom(AdvancementCosts.current());
     expect(table.attribute.experience).toBe("current x 5");
     expect(table.attribute.freebie).toBe("5");            // untouched prices survive
-    expect((await CommandRouter.route("costs")).includes("current x 5")).toBe(true);
+    expect((await CommandRouter.route("show-cost")).includes("current x 5")).toBe(true);
   });
 
   test("the costs card is card text a player can read", async () => {
@@ -3838,14 +3840,14 @@ describe("table subcategories: paths, cards, aliases, modals", () => {
     expect(await CommandRouter.route('define-table name="fear" rows=`1:Uneasy`')).toContain("shadows this name");
   });
 
-  test("[[tables]] groups by category; a subcategory can be listed and its tables detailed", async () => {
+  test("[[show-table]] groups by category; a subcategory can be listed and its tables detailed", async () => {
     await CommandRouter.route('define-table-category name="combat"');
     await CommandRouter.route('define-table name="combat::quick-kill" value-per-success=1');
-    const all = await CommandRouter.route("tables");
+    const all = await CommandRouter.route("show-table");
     expect(all).toContain("general:");
     expect(all).toContain("combat: quick-kill");
-    expect(await CommandRouter.route("tables combat")).toContain('Tables in "combat": quick-kill');
-    expect(await CommandRouter.route("tables combat::quick-kill")).toContain("1/success");
+    expect(await CommandRouter.route("show-table combat")).toContain('Tables in "combat": quick-kill');
+    expect(await CommandRouter.route("show-table combat::quick-kill")).toContain("1/success");
     expect(await CommandRouter.route('define-table name="a::b::c"')).toContain("one level deep");
   });
 
@@ -3857,7 +3859,7 @@ describe("table subcategories: paths, cards, aliases, modals", () => {
     const r = await CommandRouter.route("roll 5 table=@qk", { rng: seqRng([6, 2, 2, 2, 2]) });
     expect(r).toContain("Dead");
     expect(await CommandRouter.route("table-alias")).toContain("@qk -> combat:quick-kill");
-    expect(await CommandRouter.route("tables")).toContain("@qk -> combat:quick-kill");
+    expect(await CommandRouter.route("show-table")).toContain("@qk -> combat:quick-kill");
     expect(await CommandRouter.route('forget-table combat::quick-kill')).toContain("Forgot table");
     expect(await CommandRouter.route("forget-table-alias @qk")).toContain("Forgot table alias @qk");
     const gone = await CommandRouter.route("roll 5 table=@qk", { rng: seqRng([6, 2, 2, 2, 2]) });
@@ -3948,7 +3950,7 @@ describe("affliction windows: picker modal, win-affliction, win-afflict", () => 
     expect(texts().some(t => t === "Binding: target")).toBe(true);                   // the def drove the form
     await __uiTypeInto("story:win:afflict:bind:target", "grey wolf");
     expect(await __uiClickButton("Afflict")).toBe(true);
-    expect(await CommandRouter.route("afflictions")).toContain("concentrating-on (target: Grey Wolf)");
+    expect(await CommandRouter.route("show-affliction")).toContain("concentrating-on (target: Grey Wolf)");
   });
 
   test("win-afflict refusals surface in-window: no affliction picked; missing binding via the handler", async () => {
@@ -3987,7 +3989,7 @@ describe("roll window: win-roll + the table sidecar", () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     const saved = await CommandRouter.route("name-roll bite strength+brawl 6 table=degrees");
     expect(saved).toContain("table=degrees");
-    expect(await CommandRouter.route("list-rolls")).toContain("table=degrees");
+    expect(await CommandRouter.route("show-roll")).toContain("table=degrees");
     const hit = await CommandRouter.route("roll @bite", { rng: seqRng([6, 6]) });
     expect(hit).toContain("degrees:");                                               // the sidecar read the outcome
     const overridden = await CommandRouter.route("roll @bite table=nope", { rng: seqRng([6, 6]) });
@@ -4018,7 +4020,7 @@ describe("roll window: win-roll + the table sidecar", () => {
     await set("pool", "strength+brawl");
     expect(await __uiClickButton("Roll")).toBe(true);
     expect(texts().some(t => t.includes("Erik") && t.includes("vs diff"))).toBe(true);
-    expect((await CommandRouter.route("characters"))).toContain("Kvar (current");    // still Kvar's seat
+    expect((await CommandRouter.route("show-character"))).toContain("Kvar (current");    // still Kvar's seat
   });
 
   test("Save refuses without a name, then stores pool + knobs + table sidecar via [[name-roll]]", async () => {
@@ -4238,12 +4240,12 @@ describe("named procedures: extended saved rolls, table + description, defaults"
 
   test("roll-info shows the extended shape + description and is quiet; list-rolls marks [extended]", async () => {
     await NamedRollStore.seedDefaults();
-    const info = await CommandRouter.route("roll-info climbing");
+    const info = await CommandRouter.route("show-roll climbing");
     expect(info).toContain("extended");
     expect(info).toContain("Scaling vertical surfaces");
     expect(info).toContain("requires=<target>");
-    expect(await CommandRouter.route("list-rolls")).toContain("[extended");
-    const q = await processAdventureInput("Hmm. [[roll-info climbing]] Right.");
+    expect(await CommandRouter.route("show-roll")).toContain("[extended");
+    const q = await processAdventureInput("Hmm. [[show-roll climbing]] Right.");
     expect(q!.stopGeneration).toBe(true);   // a query stops generation
   });
 });
@@ -4283,7 +4285,7 @@ describe("contested saved rolls + multi-stage procedures", () => {
     await CommandRouter.route("name-roll grab-ledge dexterity+athletics 6");        // the on-fail follow-up
     const add = await CommandRouter.route("add-step jump when=on-fail roll=@grab-ledge note=`grab a ledge to avoid injury`");
     expect(add).toContain("1-step procedure");
-    const info = await CommandRouter.route("roll-info jump");
+    const info = await CommandRouter.route("show-roll jump");
     expect(info).toContain("Steps:");
     expect(info).toContain("on-fail");
     expect(info).toContain("@grab-ledge");
@@ -4295,7 +4297,7 @@ describe("contested saved rolls + multi-stage procedures", () => {
     expect(okRoll).not.toContain("Next:");
     // clear-steps drops the follow-ups; the entry roll stays.
     expect(await CommandRouter.route("clear-steps jump")).toContain("Cleared 1 step");
-    expect(await CommandRouter.route("roll-info jump")).not.toContain("Steps:");
+    expect(await CommandRouter.route("show-roll jump")).not.toContain("Steps:");
   });
 
   test("add-step refuses when the procedure's entry roll doesn't exist yet", async () => {
@@ -4349,11 +4351,11 @@ describe("time commands: story clock, advance, bookmarks, spans", () => {
   beforeEach(async () => { __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores(); await LorebookManager.bootstrap(); });
 
   test("story-start sets the clock; advance-time moves it; story-date reports the span", async () => {
-    expect(await CommandRouter.route("story-date")).toContain("No story clock yet");   // unset (init not called)
+    expect(await CommandRouter.route("show-date")).toContain("No story clock yet");   // unset (init not called)
     await CommandRouter.route("story-start 1197-03-15-08");
-    expect(await CommandRouter.route("story-date")).toContain("the story has just begun");
+    expect(await CommandRouter.route("show-date")).toContain("the story has just begun");
     expect(await CommandRouter.route("advance-time 2d 6h")).toContain("1197-03-17 14:00");
-    expect(await CommandRouter.route("story-date")).toContain("2 days, 6 hours since it began");
+    expect(await CommandRouter.route("show-date")).toContain("2 days, 6 hours since it began");
   });
 
   test("save-date / dates / forget-date bookmark moments; time-between measures any two", async () => {
@@ -4361,14 +4363,14 @@ describe("time commands: story clock, advance, bookmarks, spans", () => {
     await CommandRouter.route("advance-time 1mo");
     await CommandRouter.route("save-date siege-began");                 // saves current (now)
     await CommandRouter.route("save-date yuletide 1197-12-25-00");      // saves an explicit date
-    expect(await CommandRouter.route("dates")).toContain("siege-began");
-    expect(await CommandRouter.route("time-between start now")).toContain("1 month");
-    expect(await CommandRouter.route("time-between siege-began yuletide")).toContain("after siege-began");
-    expect(await CommandRouter.route("time-between now 1197-01-01-00")).toContain("before");   // ad-hoc earlier date
+    expect(await CommandRouter.route("show-date")).toContain("siege-began");
+    expect(await CommandRouter.route("show-time-between start now")).toContain("1 month");
+    expect(await CommandRouter.route("show-time-between siege-began yuletide")).toContain("after siege-began");
+    expect(await CommandRouter.route("show-time-between now 1197-01-01-00")).toContain("before");   // ad-hoc earlier date
     expect(await CommandRouter.route("forget-date siege-began")).toContain("Forgot date");
-    expect(await CommandRouter.route("dates")).not.toContain("siege-began");
+    expect(await CommandRouter.route("show-date")).not.toContain("siege-began");
     // A query stops generation for the turn.
-    expect((await processAdventureInput("Later. [[story-date]] Onward."))!.stopGeneration).toBe(true);
+    expect((await processAdventureInput("Later. [[show-date]] Onward."))!.stopGeneration).toBe(true);
   });
 
   test("StoryClock.seedDefault creates the clock once with the Dark Ages default, never clobbering", async () => {
@@ -4386,7 +4388,7 @@ describe("time commands: story clock, advance, bookmarks, spans", () => {
     await CommandRouter.route("story-start 1197-03-15-08");
     expect(await CommandRouter.route("advance-time 5x")).toContain("Unknown time unit");
     expect(await CommandRouter.route("story-start 1197-99-99")).toContain("Month must be 1-12");
-    expect(await CommandRouter.route("time-between now nope")).toContain("not a saved date");
+    expect(await CommandRouter.route("show-time-between now nope")).toContain("not a saved date");
   });
 });
 
@@ -4399,11 +4401,11 @@ describe("scenes: named units of play on the story clock", () => {
     expect(await CommandRouter.route('scene "The Parapet" location=`Buda ramparts` turn=3s')).toContain("opens at Buda ramparts");
     await CommandRouter.route("turn");
     expect(await CommandRouter.route("turn 3")).toContain("turn 4");
-    expect(await CommandRouter.route("story-date")).toContain("20:00:12");   // 4 x 3s marched the clock
+    expect(await CommandRouter.route("show-date")).toContain("20:00:12");   // 4 x 3s marched the clock
     // A freeform scene (no turn=) doesn't move the clock.
     await CommandRouter.route('scene "Council" ');
     expect(await CommandRouter.route("turn")).toContain("no clock move");
-    expect(await CommandRouter.route("story-date")).toContain("20:00:12");   // unchanged by freeform turns
+    expect(await CommandRouter.route("show-date")).toContain("20:00:12");   // unchanged by freeform turns
   });
 
   test("opening a scene auto-closes the previous; downtime closes + glosses the clock; scenes/scene-info report", async () => {
@@ -4411,20 +4413,20 @@ describe("scenes: named units of play on the story clock", () => {
     await CommandRouter.route('scene "The Parapet" turn=3s');
     await CommandRouter.route("turn 2");
     expect(await CommandRouter.route('scene "Council" ')).toContain(`closed "the-parapet"`);
-    expect(await CommandRouter.route("scenes")).toContain("Council (open)");
+    expect(await CommandRouter.route("show-scene")).toContain("Council (open)");
     expect(await CommandRouter.route("downtime 2d")).toContain(`closed "council"`);
-    expect(await CommandRouter.route("story-date")).toContain("1230-06-03");   // glossed forward 2 days
+    expect(await CommandRouter.route("show-date")).toContain("1230-06-03");   // glossed forward 2 days
     expect(await CommandRouter.route("end-scene")).toContain("No open scene");
-    expect(await CommandRouter.route("scene-info the-parapet")).toContain("[closed]");
-    expect((await processAdventureInput("Hm. [[scenes]] Right."))!.stopGeneration).toBe(true);   // a query stops generation
+    expect(await CommandRouter.route("show-scene in=scene the-parapet")).toContain("[closed]");
+    expect((await processAdventureInput("Hm. [[show-scene]] Right."))!.stopGeneration).toBe(true);   // a query stops generation
   });
 
   test("forget-scene removes a record and clears the current pointer", async () => {
     await CommandRouter.route("story-start 1230-06-01-20");
     await CommandRouter.route('scene "The Parapet" ');
     expect(await CommandRouter.route("forget-scene the-parapet")).toContain("Forgot scene");
-    expect(await CommandRouter.route("scenes")).toContain("No scenes yet");
-    expect(await CommandRouter.route("scene-info")).toContain("No open scene");
+    expect(await CommandRouter.route("show-scene")).toContain("No scenes yet");
+    expect(await CommandRouter.route("show-scene in=scene")).toContain("No open scene");
   });
 });
 
@@ -4452,7 +4454,7 @@ describe("storyteller output: <hide> -> scene plan -> Author's Note", () => {
     expect(out![0]).not.toContain("<hide");
     expect(out![0]).toContain("Cold eyes");
     expect(out![0]).toContain(`Baron: "Late."`);
-    expect(await CommandRouter.route("scene-info")).toContain("The baron is a spy");   // recorded on the scene
+    expect(await CommandRouter.route("show-scene in=scene")).toContain("The baron is a spy");   // recorded on the scene
     expect(__authorNote()).toContain("The baron is a spy");                            // and mirrored to the AN
     expect(__authorNote()).toContain("[Scene: The Parapet]");
     // overwrite replaces; text with no <hide> passes through untouched (undefined).
@@ -4562,7 +4564,7 @@ describe("document cleanup: streaming-hide backstop + noise age-out (onGeneratio
     expect(texts).toContain("ST: A line. and more.");               // ...its section cleaned (gap collapsed)
     expect(texts.some(t => t.includes("old help"))).toBe(false);    // old noise deleted from the story
     expect(texts.some(t => t.includes("recent"))).toBe(true);       // fresh noise still there
-    expect(await CommandRouter.route("scene-info")).toContain("a split-survived plan");   // hide reached the plan
+    expect(await CommandRouter.route("show-scene in=scene")).toContain("a split-survived plan");   // hide reached the plan
   });
 
   test("onGenerationEnd on an empty document is a harmless no-op", async () => {
@@ -4580,7 +4582,7 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
 
   test("sheet shows the seeded record; enhancements mark effective values", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    const s = await CommandRouter.route("sheet");
+    const s = await CommandRouter.route("show-sheet");
     expect(s).toContain("Kvar [vampire, potential]");
     expect(s).toContain("strength 1");
     expect(s).toContain("Abilities (nonzero) - none");
@@ -4591,7 +4593,7 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
     expect(s).not.toContain("Arcana/Taints");            // a vampire has none
     await CommandRouter.route("attune arcana");          // ...until he is a thrall
     await CommandRouter.route("take-arcanum trait-enhancement::strength 2");
-    const after = await CommandRouter.route("sheet");
+    const after = await CommandRouter.route("show-sheet");
     expect(after).toContain("strength 1 (3 eff)");
     expect(after).toContain("Arcana/Taints: trait-enhancement:strength 2");
     expect(after).not.toContain("Merits/Flaws");
@@ -4624,7 +4626,7 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
     const lines = text.split("\n");
     const mi = lines.findIndex(l => l.trim() === SRD_HEADER_MARKER);
     await api.v1.lorebook.updateEntry(entry.id, { text: [...lines.slice(0, mi + 1), ...written].join("\n") });
-    const s = await CommandRouter.route("sheet");            // beforeRoute synced the edit in
+    const s = await CommandRouter.route("show-sheet");            // beforeRoute synced the edit in
     expect(s).toContain("dexterity 4");
     expect(s).toContain("melee 3");
     expect(s).toContain("willpower 5");
@@ -4638,8 +4640,10 @@ describe("sheet: engine view of the record + creator-mode manual fill", () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route('create-playable name="Sela" templates=mortal');
     await CommandRouter.route('play name="Kvar"');
-    expect(await CommandRouter.route("sheet sela")).toContain("Sela [mortal, potential]");
-    expect(await CommandRouter.route("sheet nope")).toContain("No character named");
+    expect(await CommandRouter.route("show-sheet in=sela")).toContain("Sela [mortal, potential]");
+    // An unknown name is refused by the SCOPE resolver now rather than by the
+    // sheet handler, so the refusal names every scope it could have been.
+    expect(await CommandRouter.route("show-sheet in=nope")).toContain(`Nothing named "nope"`);
   });
 });
 
@@ -4677,7 +4681,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect((await CharacterStore.load("Aldous"))!.arcana?.["sharpened-senses"]).toBeUndefined();
     expect(await CommandRouter.route("take-arcanum sharpened-senses 5 waive=true")).toContain("5 arcana points");
     // A ceiling that MOVES strands the purchases above it - reported, never trimmed.
-    expect(await CommandRouter.route("check-constraints")).toContain("sharpened-senses is at 5 but resolve is only 3");
+    expect(await CommandRouter.route("show-constraint in=current")).toContain("sharpened-senses is at 5 but resolve is only 3");
   });
 
   test("a mage has no Resolve at all, so the arcanum is not open to him", async () => {
@@ -4788,14 +4792,14 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     expect(await CommandRouter.route("take-arcanum trait-affinity::melee 3")).toContain("3 arcana points");
     expect(await CommandRouter.route("take-arcanum trait-affinity::brawl 3")).toContain("3 arcana points");
     await CommandRouter.route('define-constraint name="noop" relation=exclusive domain=background members="status"');
-    expect(await CommandRouter.route("check-constraints")).toContain("satisfies all 1 constraint group");
+    expect(await CommandRouter.route("show-constraint in=current")).toContain("satisfies all 1 constraint group");
     // A third one is over the ration - refused at the door...
     const refused = await CommandRouter.route("take-arcanum trait-affinity::stealth 3");
     expect(refused).toContain("allows 2 traits at 3");
     expect((await CharacterStore.load("Kvar"))!.arcana?.["trait-affinity:stealth"]).toBeUndefined();
     // ...and reported if it gets in anyway (a waiver, or a hand-edited sheet).
     await CommandRouter.route("take-arcanum trait-affinity::stealth 3 waive=true");
-    const report = await CommandRouter.route("check-constraints");
+    const report = await CommandRouter.route("show-constraint in=current");
     expect(report).toContain("allows 2 traits at 3");
     expect(report).toContain("melee");
     expect(report).toContain("stealth");
@@ -4818,13 +4822,13 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
   test("merit findings surface even with zero constraint groups defined", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
     await CommandRouter.route("attune arcana");
-    const clean = await CommandRouter.route("check-constraints");
+    const clean = await CommandRouter.route("show-constraint in=current");
     expect(clean).toContain("No constraint groups defined");
     expect(clean).toContain("check out");
     await CommandRouter.route("take-arcanum trait-affinity::melee 3");
     await CommandRouter.route("take-arcanum trait-affinity::brawl 3");
     await CommandRouter.route("take-arcanum trait-affinity::stealth 3 waive=true");
-    const report = await CommandRouter.route("check-constraints");
+    const report = await CommandRouter.route("show-constraint in=current");
     expect(report).toContain("allows 2 traits at 3");
   });
 
@@ -4837,12 +4841,12 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     await CommandRouter.route("take-arcanum trait-enhancement::strength 2");
     const r = await CommandRouter.route("roll strength", { rng: seqRng([6, 6, 6, 6, 6]) });   // exactly 5 dice
     expect(r).toContain("(5)");
-    // The enhancement is an ARCANUM, so it is [[arcana]] that lists it - and the
+    // The enhancement is an ARCANUM, so it is [[show-arcanum]] that lists it - and the
     // enhancement total, which is about the whole sheet, rides along.
-    const m = await CommandRouter.route("arcana");
+    const m = await CommandRouter.route("show-arcanum");
     expect(m).toContain("trait-enhancement:strength");
     expect(m).toContain("strength: base 3 -> effective 5 (ceiling +2, advisory)");
-    expect(await CommandRouter.route("merits")).not.toContain("trait-enhancement");
+    expect(await CommandRouter.route("show-merit")).not.toContain("trait-enhancement");
   });
 
   test("take-merit validates points and prerequisites (waive overrides)", async () => {
@@ -4862,7 +4866,7 @@ describe("owned powers: Trait Affinity, Trait Enhancement, Specialties", () => {
     c.attributes["dexterity"] = 2;
     await CharacterStore.save(c);
     await CommandRouter.route("specialty melee `Swords`");
-    expect(await CommandRouter.route("specialties")).toContain("melee: Swords");
+    expect(await CommandRouter.route("show-specialty")).toContain("melee: Swords");
     const r = await CommandRouter.route("roll dexterity+melee specialty=melee", { rng: seqRng([6, 6, 6, 6, 6]) });   // 4 + 1 die
     expect(r).toContain("(5)");
     expect(r).toContain("specialty: Swords (+1 die)");
@@ -5001,7 +5005,7 @@ describe("Living Resolve: the unique template and its fused-substance spends", (
     for (const hidden of ["blood", "willpower", "quintessence"]) expect(names).not.toContain(hidden);
     expect(CharacterResources.resolveDef(char, "willpower")!.name).toBe("living-resolve");
     expect(CharacterResources.resolveDef(char, "magic-fuel")!.name).toBe("living-resolve");
-    const listing = await CommandRouter.route("resources");
+    const listing = await CommandRouter.route("show-resource");
     expect(listing).toContain("living-resolve 30/30");
     expect(listing).toContain("6/turn (ST)");
     expect(listing).toContain("recovers 1/day, 1/day if in-umbra, 1/day if full-rested+in-sanctum, 20/full-moon");
@@ -5251,7 +5255,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
 
   test("a simple spell within the Foundation: diff 4 + required level, no stabilization", async () => {
     await ladislav();
-    const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity', { rng: allTens });
     expect(r).toContain("simple spell: diff 4+2 = 6");
     expect(r).toContain("Sensitivity + Trickster (7)");   // Foundation 3 + Pillar 4 dice
     expect(r).toContain("vs diff 6");
@@ -5261,7 +5265,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
 
   test("required level above the Foundation forces the stabilizing point (no difficulty break)", async () => {
     const c = await ladislav();
-    const r = await CommandRouter.route('cast pillars="trickster:4" foundation=sensitivity', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="trickster:4" foundation=sensitivity', { rng: allTens });
     expect(r).toContain("vs diff 8");                                     // 4+4, undiscounted
     expect(r).toContain("1 to stabilize (Trickster 4 > Sensitivity 3)");
     expect(await CharacterResources.current(c, CharacterResources.resolveDef(c, "quintessence")!)).toBe(4);
@@ -5272,21 +5276,21 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     expect(dryChar.name).toBe("dry");
     dryChar.traits = { sensitivity: 3, trickster: 4 };
     await CharacterStore.save(dryChar);
-    const dry = await CommandRouter.route('cast pillars="trickster:4" foundation=sensitivity');
+    const dry = await CommandRouter.route('magick pillars="trickster:4" foundation=sensitivity');
     expect(dry).toContain("REQUIRES 1 quintessence");
   });
 
   test("the caster cannot exceed their own Pillar; unknown Foundations refuse with guidance", async () => {
     await ladislav();
-    expect(await CommandRouter.route('cast pillars="chieftain:3" foundation=sensitivity')).toContain("has Chieftain 2 - the effect needs 3");
+    expect(await CommandRouter.route('magick pillars="chieftain:3" foundation=sensitivity')).toContain("has Chieftain 2 - the effect needs 3");
     // Sensitivity IS his Foundation now that the Spirit-Talkers are defined, so
     // the refusal needs a Foundation nobody's fellowship names.
-    expect(await CommandRouter.route('cast pillars="trickster:2" foundation=geometry')).toContain("has no Geometry rating");
+    expect(await CommandRouter.route('magick pillars="trickster:2" foundation=geometry')).toContain("has no Geometry rating");
   });
 
   test("the battle-fury: complex pool, highest-required primary, mandatory + extra Quintessence", async () => {
     const c = await ladislav();
-    const r = await CommandRouter.route('cast pillars="warrior:4,chieftain:2" foundation=sensitivity quintessence=2', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="warrior:4,chieftain:2" foundation=sensitivity quintessence=2', { rng: allTens });
     expect(r).toContain("complex spell: diff 5+4+1 = 10");
     expect(r).toContain("Sensitivity + Warrior + 1 (8)");                 // 8 dice, the book's sum
     expect(r).toContain("1 to stabilize (Warrior 4 > Sensitivity 3)");
@@ -5299,14 +5303,14 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
   test("the book's cap-9 knob restores the surcharge (one config edit)", async () => {
     await ladislav();
     await MagicRulesConfig.save({ "difficulty-cap": 9 });
-    const r = await CommandRouter.route('cast pillars="warrior:4,chieftain:2" foundation=sensitivity', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="warrior:4,chieftain:2" foundation=sensitivity', { rng: allTens });
     expect(r).toContain("difficulty 10 > 9");
     expect(r).toContain("requirement (2)");                               // +1 required success
   });
 
   test("Quintessence cannot push the difficulty below 4", async () => {
     await ladislav();
-    const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity quintessence=3', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity quintessence=3', { rng: allTens });
     expect(r).toContain("vs diff 4");
     expect(r).toContain("only 2 of 3 points could be spent (min diff 4");
   });
@@ -5314,39 +5318,39 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
   test("same-scene retries: +1 per failure, +2 per attempt after a botch, cleared by success or a new scene", async () => {
     await ladislav();
     // A botch: every die a 1.
-    const botch = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: () => 0.05 });
+    const botch = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity label=veil', { rng: () => 0.05 });
     expect(botch).toContain("BACKLASH");
     // Retrying now carries +2 per prior attempt.
-    const retry = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
+    const retry = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
     expect(retry).toContain("retry this scene: +2 difficulty (1 prior attempt, one botched)");
     // That cast SUCCEEDED (all tens) - the ledger clears.
-    const clean = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
+    const clean = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
     expect(clean).not.toContain("retry this scene");
     // A plain failure charges +1 - and a scene change wipes the slate.
-    const fail = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil requires=8', { rng: seqRng([7, 7, 7, 7, 7, 7, 7]) });
+    const fail = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity label=veil requires=8', { rng: seqRng([7, 7, 7, 7, 7, 7, 7]) });
     expect(fail).toContain("short of requirement");
-    const after = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
+    const after = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity label=veil', { rng: allTens });
     expect(after).toContain("retry this scene: +1 difficulty");
     await CommandRouter.route("story-start 1197-03-15-08");
     await CommandRouter.route('scene "Elsewhere"');
-    const fresh = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity label=veil requires=8', { rng: seqRng([7, 7, 7, 7, 7, 7, 7]) });
+    const fresh = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity label=veil requires=8', { rng: seqRng([7, 7, 7, 7, 7, 7, 7]) });
     expect(fresh).not.toContain("retry this scene");
   });
 
   test("extended casting: ST-set successes accrue; a botch is Backlash and ends it", async () => {
     await ladislav();
-    expect(await CommandRouter.route('cast pillars="warrior:4" foundation=sensitivity extended=true')).toContain("needs requires=N");
-    const r = await CommandRouter.route('cast pillars="warrior:4" foundation=sensitivity requires=6 extended=true interval="one hour"', { rng: allTens });
+    expect(await CommandRouter.route('magick pillars="warrior:4" foundation=sensitivity extended=true')).toContain("needs requires=N");
+    const r = await CommandRouter.route('magick pillars="warrior:4" foundation=sensitivity requires=6 extended=true interval="one hour"', { rng: allTens });
     expect(r).toContain("starts extended");
     expect(r).toContain("/6");                                            // the target rides the action
-    const botched = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity requires=6 extended=true', { rng: () => 0.05 });
+    const botched = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity requires=6 extended=true', { rng: () => 0.05 });
     expect(botched).toContain("failed");                                  // onBotch "fail": the casting ends
     expect(botched).toContain("Backlash");
   });
 
   test("ongoing spells: ×10 successes, per-success fuel, and the seal", async () => {
     await ladislav();
-    const r = await CommandRouter.route('cast pillars="trickster:2" foundation=sensitivity requires=2 ongoing=true', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="trickster:2" foundation=sensitivity requires=2 ongoing=true', { rng: allTens });
     expect(r).toContain("2×10 = 20 successes");
     expect(r).toContain("1 magic-fuel per success");
     expect(r).toContain("seal with [[seal-spell pillar=2]]");
@@ -5371,7 +5375,7 @@ describe("cast: the Dark Ages: Mage spellcasting procedure", () => {
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { vis: 2, incantation: 3 };
     await CharacterStore.save(c);
-    const r = await CommandRouter.route('cast pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="incantation:3" foundation=vis quintessence=1', { rng: allTens });
     expect(r).toContain("living-resolve: 1 to stabilize (Incantation 3 > Vis 2) + 1 more");
     // The mandatory point pays too - it is the same substance, not a fee taken
     // off the top - so BOTH points break the difficulty, once each.
@@ -5443,14 +5447,14 @@ describe("fellowships: the Order of Hermes, and finding a caster's Foundation", 
     expect(hermes.pillars.vires).toBe("forces");
   });
 
-  test("[[fellowships]] lists and details them (and is quiet)", async () => {
-    expect(await CommandRouter.route("fellowships")).toContain("order-of-hermes");
-    const detail = await CommandRouter.route("fellowships order-of-hermes");
+  test("[[show-fellowship]] lists and details them (and is quiet)", async () => {
+    expect(await CommandRouter.route("show-fellowship")).toContain("order-of-hermes");
+    const detail = await CommandRouter.route("show-fellowship order-of-hermes");
     expect(detail).toContain("Foundation: Modus");
     expect(detail).toContain("Ouroboros");
     expect(detail).toContain("Anima (life)");
-    expect(await CommandRouter.route("fellowships nope")).toContain('No fellowship "nope"');
-    expect((await processAdventureInput("[[fellowships]]"))!.stopGeneration).toBe(true);
+    expect(await CommandRouter.route("show-fellowship nope")).toContain('No fellowship "nope"');
+    expect((await processAdventureInput("[[show-fellowship]]"))!.stopGeneration).toBe(true);
   });
 
   test("cast finds Modus without being told, and says which Foundations it knows when it can't", async () => {
@@ -5459,7 +5463,7 @@ describe("fellowships: the Order of Hermes, and finding a caster's Foundation", 
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 3, anima: 2, corona: 4, primus: 3, vires: 2 };
     await CharacterStore.save(c);
-    const r = await CommandRouter.route('cast pillars="corona:4,vires:2"', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="corona:4,vires:2"', { rng: allTens });
     expect(r).toContain("Modus + Corona + 1 (8)");                    // auto-detected Foundation
     expect(r).toContain("complex spell: diff 5+4+1 = 10");
     expect(r).toContain("1 to stabilize (Corona 4 > Modus 3)");       // the fused pool pays
@@ -5471,7 +5475,7 @@ describe("fellowships: the Order of Hermes, and finding a caster's Foundation", 
     const lostChar = (await CharacterStore.getCurrent())!;
     lostChar.traits = { anima: 2 };
     await CharacterStore.save(lostChar);
-    const lost = await CommandRouter.route('cast pillars="anima:1"');
+    const lost = await CommandRouter.route('magick pillars="anima:1"');
     expect(lost).toContain("has no Foundation rating");
     expect(lost).toContain("Modus (Order of Hermes)");
   });
@@ -5539,7 +5543,7 @@ describe("the sanctum in play: what a rating actually does to a roll", () => {
 
   test("Sanctum 3 lowers magic by 2 and leaves everything else alone", async () => {
     await mageWithSanctum(3);
-    const spell = await CommandRouter.route('cast pillars="corona:2"', { rng: allTens });
+    const spell = await CommandRouter.route('magick pillars="corona:2"', { rng: allTens });
     expect(spell).toContain("vs diff 4");                       // 4+2 = 6, sanctum -2
     expect(spell).toContain("in-sanctum 3: difficulty -1");
     const punch = await CommandRouter.route("roll strength+brawl", { rng: allTens });
@@ -5548,7 +5552,7 @@ describe("the sanctum in play: what a rating actually does to a roll", () => {
 
   test("Sanctum 8 widens both benefits to EVERY roll (-2 and +1 auto), not double on magic", async () => {
     await mageWithSanctum(8);
-    const spell = await CommandRouter.route('cast pillars="corona:2"', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    const spell = await CommandRouter.route('magick pillars="corona:2"', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
     expect(spell).toContain("vs diff 4");                       // 6 - 2, NOT 6 - 4
     expect(spell).toContain("+1 auto");
     const punch = await CommandRouter.route("roll strength+brawl", { rng: seqRng([2, 2, 2, 2, 2]) });
@@ -5570,21 +5574,21 @@ describe("the sanctum in play: what a rating actually does to a roll", () => {
     await CharacterStore.save(c);
     await CommandRouter.route("afflict in-sanctum");
     expect(await CommandRouter.route("roll strength", { rng: allTens })).toContain("vs diff 6");
-    expect(await CommandRouter.route("afflictions")).toContain("benefits need the Awakened");
+    expect(await CommandRouter.route("show-affliction")).toContain("benefits need the Awakened");
   });
 
   test("in their sanctum a botched casting draws NO Backlash", async () => {
     await mageWithSanctum(2);
-    const botch = await CommandRouter.route('cast pillars="corona:2"', { rng: () => 0.05 });
+    const botch = await CommandRouter.route('magick pillars="corona:2"', { rng: () => 0.05 });
     expect(botch).toContain("this is their sanctum: NO Backlash");
     expect(botch).not.toContain("⚡");
     await CommandRouter.route("remove in-sanctum");
-    expect(await CommandRouter.route('cast pillars="corona:2"', { rng: () => 0.05 })).toContain("⚡ BACKLASH");
+    expect(await CommandRouter.route('magick pillars="corona:2"', { rng: () => 0.05 })).toContain("⚡ BACKLASH");
   });
 
-  test("[[afflictions]] reports what the place is granting right now", async () => {
+  test("[[show-affliction]] reports what the place is granting right now", async () => {
     await mageWithSanctum(8);
-    const line = await CommandRouter.route("afflictions");
+    const line = await CommandRouter.route("show-affliction");
     expect(line).toContain("sanctum 8");
     expect(line).toContain("difficulty -2");
     expect(line).toContain("immune to Backlash");
@@ -5645,7 +5649,7 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
   test("harvesting draws points into Living Resolve and taps the site for the day", async () => {
     const c = await marius();
     await CharacterResources.spend(c, "living-resolve", 10);      // 30 -> 20
-    expect(await CommandRouter.route("cray")).toContain("cray 5 (25/25 points)");
+    expect(await CommandRouter.route("show-cray")).toContain("cray 5 (25/25 points)");
     const h = await CommandRouter.route("harvest 4");
     expect(h).toContain("+4 living-resolve -> 24/30");
     expect(h).toContain("cray 5 (21/25 points)");
@@ -5676,7 +5680,7 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
     expect(greedy).toContain("drops to 4 dots");
     expect(greedy).toContain("survives, depleted");
     expect((await CharacterStore.load("Marius"))!.backgrounds.cray).toBe(4);
-    expect((await CommandRouter.route("cray"))).toContain("cray 4 (0/20 points)");
+    expect((await CommandRouter.route("show-cray"))).toContain("cray 4 (0/20 points)");
   });
 
   test("a cray asks its OWN time per point, and harvesting spends it automatically", async () => {
@@ -5744,7 +5748,7 @@ describe("the Library of the Unseen: the door, the shelves, and the cray", () =>
     await marius();
     const dormant = await CommandRouter.route("harvest 26", { rng: seqRng([2, 2, 2, 2]) });
     expect(dormant).toContain("falls DORMANT");
-    expect(await CommandRouter.route("cray")).toContain("1 point per YEAR");
+    expect(await CommandRouter.route("show-cray")).toContain("1 point per YEAR");
     // A dormant cray creeps back a point a year, not a day.
     expect(await CommandRouter.route("advance-time 10d")).not.toContain("cray +");
     expect(await CommandRouter.route("advance-time 1y")).toContain("cray +1");
@@ -5784,16 +5788,16 @@ describe("certainty scales with Foundation: how many successes 1s can never touc
     expect(two).toContain("1 sure only (stacking Willpower is a casting rule)");
     expect(two).not.toContain("BOTCH");
     // A SPELL: the mage may pour it in, up to what Modus 5 holds.
-    const spell = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    const spell = await CommandRouter.route('magick pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
     expect(spell).toContain("+2 auto +2 sure");
     // Three points still only buy two - Modus 5 is the ceiling.
-    const three = await CommandRouter.route('cast pillars="primus:1" quintessence=3 label=other', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    const three = await CommandRouter.route('magick pillars="primus:1" quintessence=3 label=other', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
     expect(three).toContain("+3 auto +2 sure");
     expect(three).toContain("capped at 2");
     // A lesser Foundation caps at one.
     c.traits = { modus: 3, corona: 3, primus: 1 };
     await CharacterStore.save(c);
-    expect(await CommandRouter.route('cast pillars="primus:1" quintessence=2 label=third', { rng: seqRng([2, 2, 2, 2]) })).toContain("+1 sure");
+    expect(await CommandRouter.route('magick pillars="primus:1" quintessence=2 label=third', { rng: seqRng([2, 2, 2, 2]) })).toContain("+1 sure");
   });
 
   test("an ordinary character spends Willpower explicitly for the same certainty", async () => {
@@ -5860,11 +5864,11 @@ describe("defining merits, flaws & arcana from a command", () => {
     expect(def.passive![1].requiresResource).toEqual({ resource: "living-resolve", atLeast: 1 });
 
     expect(await CommandRouter.route("take-merit inviolate-soul")).toContain("Inviolate Soul");
-    expect(await CommandRouter.route("merits")).toContain("inviolate-soul");
-    const info = await CommandRouter.route("merit inviolate-soul");
+    expect(await CommandRouter.route("show-merit")).toContain("inviolate-soul");
+    const info = await CommandRouter.route("show-merit in=campaign inviolate-soul");
     expect(info).toContain("natal Investiture");
     expect(info).toContain("no interpreter for are recorded and surfaced");
-    expect(await CommandRouter.route("merit")).toContain("inviolate-soul");
+    expect(await CommandRouter.route("show-merit in=campaign")).toContain("inviolate-soul");
   });
 
   test("a resource-gated passive fires only while the pool holds enough", async () => {
@@ -5906,13 +5910,13 @@ describe("Living Resolve IS the other four: no phantom Willpower, and Resolve's 
     expect((await CharacterStore.load("Odo"))!.poolStarts).toEqual({ willpower: 0 });
   });
 
-  test("[[sheet]] flags a leftover pool start for a resource the character lacks", async () => {
+  test("[[show-sheet]] flags a leftover pool start for a resource the character lacks", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.getCurrent())!;
     c.poolStarts = { willpower: 10 };                            // the stale hand-edit
     await CharacterStore.save(c);
-    const sheet = await CommandRouter.route("sheet");
+    const sheet = await CommandRouter.route("show-sheet");
     expect(sheet).toContain("⚠️ pool start for willpower");
     expect(sheet).toContain("Delete the line in creator mode");
   });
@@ -5955,14 +5959,14 @@ describe("stale sheets: a lorebook edit that never synced", () => {
       `edited by hand\n=====\n${formatCardText(characterToCard(edited))}`);
 
     // Creator mode off: the edit is invisible, and the refusal points at why.
-    const cold = await CommandRouter.route('cast pillars="primus:1"');
+    const cold = await CommandRouter.route('magick pillars="primus:1"');
     expect(cold).toContain("has Primus 0");
     expect(cold).toContain("has NOT synced yet");
     expect(cold).toContain("creator-mode set=true");
 
     // Creator mode on: the very next command pulls the edit in.
     await CommandRouter.route("creator-mode set=true");
-    const warm = await CommandRouter.route('cast pillars="primus:1"', { rng: allTens });
+    const warm = await CommandRouter.route('magick pillars="primus:1"', { rng: allTens });
     expect(warm).toContain("Modus + Primus");
     expect(warm).not.toContain("has NOT synced yet");
   });
@@ -6010,7 +6014,7 @@ describe("the Resolve component pays in FULL, not just its difficulty break", ()
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
-    const r = await CommandRouter.route('cast pillars="primus:1" quintessence=1', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    const r = await CommandRouter.route('magick pillars="primus:1" quintessence=1', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
     expect(r).toContain("simple spell: diff 4+1 = 5");
     expect(r).toContain("spend as Quintessence AND Willpower AND Resolve at once");
     expect(r).toContain("+1 automatic success");                         // the Resolve, in full
@@ -6031,7 +6035,7 @@ describe("a fused point is never wasted at the difficulty floor", () => {
     const c = (await CharacterStore.getCurrent())!;
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
-    const r = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
+    const r = await CommandRouter.route('magick pillars="primus:1" quintessence=2', { rng: seqRng([2, 2, 2, 2, 2, 2]) });
     // Both points are spent: the Quintessence floor cannot waste a point that
     // is also a Willpower and a Resolve.
     expect(r).toContain("living-resolve: 2 more");
@@ -6050,7 +6054,7 @@ describe("a fused point is never wasted at the difficulty floor", () => {
     c.traits = { modus: 5, primus: 1 };
     await CharacterStore.save(c);
     await CharacterResources.gain(c, "quintessence", 10);
-    const r = await CommandRouter.route('cast pillars="primus:1" quintessence=2', { rng: allTens });
+    const r = await CommandRouter.route('magick pillars="primus:1" quintessence=2', { rng: allTens });
     expect(r).toContain("1 for -1 difficulty");
     expect(r).not.toContain("past the difficulty floor");
     expect(r).toContain("min diff 4");
@@ -6096,10 +6100,10 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     expect(creationBudgetFor([])).toEqual(BASE_CREATION);
   });
 
-  test("[[creation]] reports each pool against the sheet, once the priorities are set", async () => {
+  test("[[show-creation]] reports each pool against the sheet, once the priorities are set", async () => {
     await CommandRouter.route('create-playable name="Nos" templates=vampire');
     // With no priorities it cannot know which pool is which, and says so.
-    const blind = await CommandRouter.route("creation");
+    const blind = await CommandRouter.route("show-creation");
     expect(blind).toContain("attributes: 7/5/3 to spend - [[choose attributes physical,social,mental]] first");
     expect(blind).toContain("abilities: 13/9/5 to spend - [[choose abilities talents,skills,knowledges]] first");
 
@@ -6109,18 +6113,18 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     await CommandRouter.route("set-trait dexterity 3");        // 2 more
     await CommandRouter.route("set-trait brawl 3");            // a Talent
     await CommandRouter.route("set-trait occult 2");           // a Knowledge
-    const r = await CommandRouter.route("creation");
+    const r = await CommandRouter.route("show-creation");
     expect(r).toContain("attributes: primary Physical 5/7, secondary Social 0/5, tertiary Mental 0/3");
     // Abilities land in the category the CHRONICLE's own lists put them in.
     expect(r).toContain("abilities: primary Talents 3/13, secondary Skills 0/9, tertiary Knowledges 2/5");
     expect(r).toContain("backgrounds: 0/5");
     expect(r).toContain("freebies: 15 to spend");
     expect(r).toContain("Advisory: nothing is enforced.");
-    // ...and [[budget]] draws its Background and freebie purses from the SAME
+    // ...and [[show-budget]] draws its Background and freebie purses from the SAME
     // numbers, so the two reports can never disagree.
     await CommandRouter.route("set-trait herd 2");
-    expect(await CommandRouter.route("creation")).toContain("backgrounds: 2/5");
-    expect(await CommandRouter.route("budget")).toContain("background: 2/5, 3 left");
+    expect(await CommandRouter.route("show-creation")).toContain("backgrounds: 2/5");
+    expect(await CommandRouter.route("show-budget")).toContain("background: 2/5, 3 left");
   });
 
   test("a Nosferatu's Appearance is 0 and stays 0, and the free dot it never had is not spent", async () => {
@@ -6128,10 +6132,10 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
       start: 0, max: 0, note: "A Nosferatu has no Appearance and never will.",
     });
     await CommandRouter.route('create-playable name="Nos" templates=vampire');
-    expect(await CommandRouter.route("clan nosferatu")).toContain("Appearance 0-0");
+    expect(await CommandRouter.route("show-clan nosferatu")).toContain("Appearance 0-0");
     expect(await CommandRouter.route("choose clan nosferatu")).toContain("no Appearance and never will");
     await CommandRouter.route("choose attributes social,physical,mental");
-    const r = await CommandRouter.route("creation");
+    const r = await CommandRouter.route("show-creation");
     expect(r).toContain("ceilings: attributes 1-5, abilities 0-5, disciplines 0-5, Appearance 0-0");
     // The factory hands every Attribute the free dot; a Nosferatu may not keep
     // that one, so the report says the sheet is over its own ceiling...
@@ -6139,7 +6143,7 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     // ...and counts it, because a dot above their start IS a dot spent.
     expect(r).toContain("primary Social 1/7");
     await CommandRouter.route("set-trait appearance 0");
-    const fixed = await CommandRouter.route("creation");
+    const fixed = await CommandRouter.route("show-creation");
     expect(fixed).not.toContain("⚠ over");
     expect(fixed).toContain("primary Social 0/7");
   });
@@ -6149,13 +6153,13 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     await CommandRouter.route("choose clan nosferatu");
     await CommandRouter.route("set-trait obfuscate 2 group=discipline");
     await CommandRouter.route("set-trait celerity 1 group=discipline");
-    const r = await CommandRouter.route("creation");
+    const r = await CommandRouter.route("show-creation");
     expect(r).toContain("disciplines: 3/4 (Nosferatu: Animalism, Obfuscate, Potence)");
     expect(r).toContain("out of affinity: Celerity");
     // Without a clan it has nothing to compare against, and asks.
     await CommandRouter.route('create-playable name="Anon" templates=vampire');
     await CommandRouter.route('play name="Anon"');
-    expect(await CommandRouter.route("creation")).toContain("disciplines: 0/4 - nothing names his Disciplines yet");
+    expect(await CommandRouter.route("show-creation")).toContain("disciplines: 0/4 - nothing names his Disciplines yet");
   });
 
   test("dots no priority category claims are reported rather than silently dropped", async () => {
@@ -6163,7 +6167,7 @@ describe("creation: the pools, the picks, and what the sheet has actually taken"
     await CommandRouter.route("choose attributes physical,social,mental");
     await CommandRouter.route("choose abilities talents,skills,knowledges");
     await CommandRouter.route("set-trait haggling 3 group=ability");   // in nobody's SRD list
-    expect(await CommandRouter.route("creation")).toContain("⚠ uncounted: Haggling");
+    expect(await CommandRouter.route("show-creation")).toContain("⚠ uncounted: Haggling");
   });
 
   test("[[choose]] insists on categories that exist, and remembers what was picked", async () => {
@@ -6231,7 +6235,7 @@ describe("clans & fellowships: thirteen and six, with exclusives gated on the pi
     expect(fellowshipByName("aedun")!.foundation).toBe("spontaneity");
     expect(fellowshipByName("hermetic")!.id).toBe("order-of-hermes");
     expect(fellowshipByName("messianics")!.theme).toBe("Archangels");
-    expect(await CommandRouter.route("fellowships spirit-talkers")).toContain("Foundation: Sensitivity");
+    expect(await CommandRouter.route("show-fellowship spirit-talkers")).toContain("Foundation: Sensitivity");
   });
 
   test("the chosen fellowship IS the caster's Foundation, whatever else they can roll", async () => {
@@ -6240,13 +6244,13 @@ describe("clans & fellowships: thirteen and six, with exclusives gated on the pi
     // She has a rating in Modus, which would otherwise be auto-detected first.
     c.traits = { modus: 4, blot: 3, galdrar: 2 };
     await CharacterStore.save(c);
-    expect(await CommandRouter.route('cast pillars="galdrar:2"', { rng: allTens })).toContain("Modus + Galdrar");
+    expect(await CommandRouter.route('magick pillars="galdrar:2"', { rng: allTens })).toContain("Modus + Galdrar");
     await CommandRouter.route("choose fellowship valdaermen");
-    expect(await CommandRouter.route('cast pillars="galdrar:2"', { rng: allTens })).toContain("Blot + Galdrar");
+    expect(await CommandRouter.route('magick pillars="galdrar:2"', { rng: allTens })).toContain("Blot + Galdrar");
   });
 
   test("the freebie table prices a Foundation, a Pillar and a Specialty", async () => {
-    const costs = await CommandRouter.route("costs");
+    const costs = await CommandRouter.route("show-cost");
     expect(costs).toContain("Foundation: experience current x 8, freebie 5");
     expect(costs).toContain("Pillar: experience current x 7, freebie 3");
     expect(costs).toContain("Specialty: experience -, freebie 1, maturation -");
@@ -6256,7 +6260,7 @@ describe("clans & fellowships: thirteen and six, with exclusives gated on the pi
 
   test("the creation-side listings are queries: they stop the turn and stay out of context", async () => {
     await CommandRouter.route('create-playable name="Nos" templates=vampire');
-    for (const verb of ["creation", "clans", "budget", "costs", "backgrounds", "arcana"]) {
+    for (const verb of ["show-creation", "show-clan", "show-budget", "show-cost", "show-background", "show-arcanum"]) {
       const r = await processAdventureInput(`Hm. [[${verb}]] Right.`);
       expect(r!.stopGeneration).toBe(true);
       expect(stripCtxSkip(r!.inputText!)).not.toContain("[SYSTEM:");   // never reaches the AI
@@ -6370,24 +6374,24 @@ describe("derived values: Generation, Road, Willpower, and the ceilings they mov
     const wp = derivedValuesOf(bought).find(d => d.trait === "willpower")!;
     expect(wp.overridden).toBe(6);
     expect(wp.value).toBe(3);
-    expect(await CommandRouter.route("derived")).toContain("Willpower 6 (sheet 6, would start at 3)");
+    expect(await CommandRouter.route("show-derived")).toContain("Willpower 6 (sheet 6, would start at 3)");
   });
 
   test("Generation 5 makes him 7th, and every ceiling rises to 6", async () => {
     await CommandRouter.route('create-playable name="Sasha" templates=vampire');
     await CommandRouter.route("choose attributes physical,social,mental");
-    expect(await CommandRouter.route("creation")).toContain("ceilings: attributes 1-5, abilities 0-5, disciplines 0-5");
+    expect(await CommandRouter.route("show-creation")).toContain("ceilings: attributes 1-5, abilities 0-5, disciplines 0-5");
 
     await CommandRouter.route("set-trait generation 5");
     const char = (await CharacterStore.load("Sasha"))!;
     expect(char.backgrounds.generation).toBe(5);       // the Background: five dots
     expect(traitValueOf(char, "generation")).toBe(7);  // the derived fact: 7th
-    const report = await CommandRouter.route("creation");
+    const report = await CommandRouter.route("show-creation");
     expect(report).toContain("ceilings: attributes 1-6, abilities 0-6, disciplines 0-6");
     expect(report).toContain("Generation 7 (12 - background:generation 5)");
     // ...and a Strength 6 is legal now, where it would have been flagged before.
     await CommandRouter.route("set-trait strength 6");
-    expect(await CommandRouter.route("creation")).not.toContain("⚠ over");
+    expect(await CommandRouter.route("show-creation")).not.toContain("⚠ over");
   });
 
   test("an 'always' identity ignores the sheet; a Background nobody rated is 0, not a typo", async () => {
@@ -6415,18 +6419,18 @@ describe("derived values: Generation, Road, Willpower, and the ceilings they mov
     expect(traitValueOf((await CharacterStore.load("Sasha"))!, "blood-pool-max")).toBe(20);   // 7th
   });
 
-  test("[[eval]] is the reference system, exposed - including the purses", async () => {
+  test("[[show-eval]] is the reference system, exposed - including the purses", async () => {
     await CommandRouter.route('create-playable name="Sasha" templates=vampire');
     await CommandRouter.route("set-trait courage 3");
     await CommandRouter.route("set-trait herd 2");
-    expect(await CommandRouter.route("eval courage + 1")).toContain("= 4 = courage 3 + 1");
-    expect(await CommandRouter.route("eval derived:willpower")).toContain("derived:willpower = 3");
-    expect(await CommandRouter.route("eval budget:background")).toContain("= 5");
-    expect(await CommandRouter.route("eval spent:background")).toContain("= 2");
-    expect(await CommandRouter.route("eval left:background")).toContain("= 3");
-    expect(await CommandRouter.route("eval strength + nonesuch")).toContain("⚠ nothing answers to nonesuch");
-    expect(await CommandRouter.route("eval ((")).toContain("Cannot read");
-    expect(await CommandRouter.route("eval")).toContain("Mind the hyphen");
+    expect(await CommandRouter.route("show-eval courage + 1")).toContain("= 4 = courage 3 + 1");
+    expect(await CommandRouter.route("show-eval derived:willpower")).toContain("derived:willpower = 3");
+    expect(await CommandRouter.route("show-eval budget:background")).toContain("= 5");
+    expect(await CommandRouter.route("show-eval spent:background")).toContain("= 2");
+    expect(await CommandRouter.route("show-eval left:background")).toContain("= 3");
+    expect(await CommandRouter.route("show-eval strength + nonesuch")).toContain("⚠ nothing answers to nonesuch");
+    expect(await CommandRouter.route("show-eval ((")).toContain("Cannot read");
+    expect(await CommandRouter.route("show-eval")).toContain("Mind the hyphen");
   });
 
   test("a derivation that defines itself in a circle is reported, not a stack overflow", () => {
@@ -6465,14 +6469,14 @@ describe("one definition, one behaviour: what the cleanup pass consolidated", ()
     expect(traitValueOf((await CharacterStore.load("Sasha"))!, "road")).toBe(3);
   });
 
-  test("[[creation]] and [[budget]] price a Background through the SAME ledger", async () => {
+  test("[[show-creation]] and [[show-budget]] price a Background through the SAME ledger", async () => {
     await CommandRouter.route('create-playable name="Sasha" templates=vampire');
     await CommandRouter.route("set-trait courage 3");
     // A price written as an EXPRESSION: the creation report used to parseInt this
     // to 0 while the budget report evaluated it to 3.
     await CommandRouter.route("set-trait herd 4 paid=courage");
-    expect(await CommandRouter.route("budget")).toContain("background: 3/5");
-    expect(await CommandRouter.route("creation")).toContain("backgrounds: 3/5");
+    expect(await CommandRouter.route("show-budget")).toContain("background: 3/5");
+    expect(await CommandRouter.route("show-creation")).toContain("backgrounds: 3/5");
   });
 
   test("every roll op moves exactly one modifier field, from one table", async () => {
@@ -6482,7 +6486,7 @@ describe("one definition, one behaviour: what the cleanup pass consolidated", ()
     const def = ArcanumRegistry.get("everything")!;
     expect(def.passive!.length).toBe(6);
     expect(MeritFlawRegistry.get("everything")).toBeUndefined();   // its own list
-    expect(await CommandRouter.route("arcanum everything")).toContain("seduction");
+    expect(await CommandRouter.route("show-arcanum in=campaign everything")).toContain("seduction");
   });
 });
 
@@ -6524,11 +6528,11 @@ describe("successes= and uncancelable=: granted successes, by hand", () => {
     expect(sure).not.toContain("BOTCH");
   });
 
-  test("a named roll bakes them in, and [[roll-info]] says so", async () => {
+  test("a named roll bakes them in, and [[show-roll]] says so", async () => {
     await CommandRouter.route('create-playable name="Rok" templates=mortal');
     await CommandRouter.route("set-trait strength 3");
     await CommandRouter.route("name-roll potence-punch strength successes=2 uncancelable=1");
-    expect(await CommandRouter.route("roll-info potence-punch")).toContain("+2 auto, +1 sure");
+    expect(await CommandRouter.route("show-roll potence-punch")).toContain("+2 auto, +1 sure");
     const rolled = await CommandRouter.route("roll @potence-punch", { rng: seqRng([2, 2, 2]) });
     expect(rolled).toContain("+2 auto +1 sure");
     expect(rolled).toContain("3 successes");                       // every die failed
@@ -6621,7 +6625,7 @@ describe("templates: extending one, from a def or a command", () => {
   });
 
   test("a whole fused-pool creature, built from commands and then played", async () => {
-    expect(await CommandRouter.route("templates")).toContain("ouroboros*");   // * = data
+    expect(await CommandRouter.route("show-template")).toContain("ouroboros*");   // * = data
 
     await CommandRouter.route("define-resource name=`Ash Tally` kind=pool start=20 max=20 "
       + "roles=`blood,willpower,magic-fuel` replaces=`blood,willpower,quintessence` per-turn=4");
@@ -6638,7 +6642,7 @@ describe("templates: extending one, from a def or a command", () => {
     expect(CharacterResources.defsFor(char).map(d => d.name)).toEqual(["ash-tally"]);
     await CommandRouter.route("set-trait modus 4");
     await CommandRouter.route("set-trait primus 2");
-    expect(await CommandRouter.route('cast pillars="primus:2"', { rng: allTens })).toContain("Modus + Primus");
+    expect(await CommandRouter.route('magick pillars="primus:2"', { rng: allTens })).toContain("Modus + Primus");
     expect(await CommandRouter.route("spend ash-tally 2")).toContain("Now 18/20");
   });
 
@@ -6684,7 +6688,7 @@ describe("resource capacity as an expression: the Fount ladder, and fusing two p
       expect(quintessence(char).max).toBe(max);
       expect(quintessence(char).perTurn).toBe(perTurn);
     }
-    expect(await CommandRouter.route("resources")).toContain("quintessence 0/20");
+    expect(await CommandRouter.route("show-resource")).toContain("quintessence 0/20");
   });
 
   test("Living Resolve IS the two it fuses: Quintessence's capacity plus a revenant's ten", async () => {
@@ -6708,12 +6712,12 @@ describe("resource capacity as an expression: the Fount ladder, and fusing two p
   test("`resource:` reads a def's numbers, and a self-reference cannot spin", async () => {
     await CommandRouter.route('create-playable name="Vis" templates=ouroboros');
     await CommandRouter.route("set-trait fount 3");
-    expect(await CommandRouter.route("eval resource:quintessence:max")).toContain("= 16");
-    expect(await CommandRouter.route("eval resource:blood:max")).toContain("= 10");
-    expect(await CommandRouter.route("eval resource:quintessence:per-turn")).toContain("= 4");
-    expect(await CommandRouter.route("eval resource:living-resolve:max")).toContain("= 26");
+    expect(await CommandRouter.route("show-eval resource:quintessence:max")).toContain("= 16");
+    expect(await CommandRouter.route("show-eval resource:blood:max")).toContain("= 10");
+    expect(await CommandRouter.route("show-eval resource:quintessence:per-turn")).toContain("= 4");
+    expect(await CommandRouter.route("show-eval resource:living-resolve:max")).toContain("= 26");
     // A pool nobody defines is unknown, not zero-in-silence.
-    expect(await CommandRouter.route("eval resource:nonesuch:max")).toContain("⚠ nothing answers");
+    expect(await CommandRouter.route("show-eval resource:nonesuch:max")).toContain("⚠ nothing answers");
     // A resource defined in terms of ITSELF terminates with a finite answer
     // rather than blowing the stack: the guard bites on the first re-entry, so
     // the outermost evaluation still completes.
@@ -6728,12 +6732,12 @@ describe("resource capacity as an expression: the Fount ladder, and fusing two p
     await CommandRouter.route('create-playable name="Vis" templates=ouroboros');
     await CommandRouter.route("set-trait fount 5 paid=0");
     const c = (await CharacterStore.load("Vis"))!;
-    expect(await CommandRouter.route("resources")).toContain("living-resolve 30/30");
+    expect(await CommandRouter.route("show-resource")).toContain("living-resolve 30/30");
     expect(await CommandRouter.route("spend living-resolve 5")).toContain("living-resolve now 25/30");
     expect(await CommandRouter.route("gain living-resolve 99")).toContain("30/30");   // clamped at the ceiling
     // Drop the Fount and the ceiling drops with it - the pool is not a number.
     await CommandRouter.route("set-trait fount 1");
-    expect(await CommandRouter.route("resources")).toContain("/22");
+    expect(await CommandRouter.route("show-resource")).toContain("/22");
   });
 });
 
@@ -6764,26 +6768,26 @@ describe("budgets that carry prices, and templates that override any part of one
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     await CommandRouter.route("set-trait fount 5 paid=0");
     // "Willpower, or whatever replaces it" - the role, not the hidden tracker.
-    expect(await CommandRouter.route("eval role:willpower")).toContain("= 30");
-    expect(await CommandRouter.route("eval resource:willpower:max")).toContain("= 10");
-    const r = await CommandRouter.route("budget");
+    expect(await CommandRouter.route("show-eval role:willpower")).toContain("= 30");
+    expect(await CommandRouter.route("show-eval resource:willpower:max")).toContain("= 10");
+    const r = await CommandRouter.route("show-budget");
     expect(r).toContain("arcana: 0/30 (role:willpower)");
     expect(r).toContain("not bought with freebies, not bought with experience");
     // Backgrounds keep the chronicle's own prices, unstated by any template.
     expect(r).toContain("background: 0/5, 5 left - freebie 1, experience current x 2");
   });
 
-  test("Discipline dots are a purse, and [[budget]] and [[creation]] agree on them", async () => {
+  test("Discipline dots are a purse, and [[show-budget]] and [[show-creation]] agree on them", async () => {
     await CommandRouter.route('create-playable name="Nos" templates=vampire');
     await CommandRouter.route("choose clan nosferatu");
     await CommandRouter.route("set-trait obfuscate 3 group=discipline");
-    const budget = await CommandRouter.route("budget");
+    const budget = await CommandRouter.route("show-budget");
     expect(budget).toContain("discipline: 3/4");
     expect(budget).toContain("freebie 7");                       // a Discipline dot's price
-    expect(await CommandRouter.route("creation")).toContain("disciplines: 3/4");
+    expect(await CommandRouter.route("show-creation")).toContain("disciplines: 3/4");
     // A dot the Storyteller granted costs the purse nothing.
     await CommandRouter.route("paid obfuscate 0");
-    expect(await CommandRouter.route("budget")).toContain("discipline: 0/4");
+    expect(await CommandRouter.route("show-budget")).toContain("discipline: 0/4");
   });
 
   test("extend-template changes any part of a budget, and edits rather than replaces", async () => {
@@ -6807,7 +6811,7 @@ describe("budgets that carry prices, and templates that override any part of one
     const char = (await CharacterStore.load("Marius"))!;
     char.budgets = { arcana: { allows: "7", freebie: "3" } };
     await CharacterStore.save(char);
-    const r = await CommandRouter.route("budget");
+    const r = await CommandRouter.route("show-budget");
     expect(r).toContain("arcana: 0/7");
     expect(r).toContain("freebie 3");
     // ... and survives the round trip through the card.
@@ -6856,14 +6860,14 @@ describe("spending more than one point, and saying so briefly", () => {
     expect(r).not.toContain("Quintessence break");
     expect(r).not.toContain("spellcasting may stack");
     expect(r.length).toBeLessThan(220);
-    // It is still one [[resources]] away for anyone who wants it.
-    expect(await CommandRouter.route("resources")).toContain("Quintessence break");
+    // It is still one [[show-resource]] away for anyone who wants it.
+    expect(await CommandRouter.route("show-resource")).toContain("Quintessence break");
   });
 
   test("a saved roll can bake in the amount, and the command still overrides it", async () => {
     await CommandRouter.route('create-playable name="Duke" templates=demon');
     await CommandRouter.route("name-roll surge 3 spend=resolve spend-amount=2");
-    expect(await CommandRouter.route("roll-info surge")).toContain("spend=resolve x2");
+    expect(await CommandRouter.route("show-roll surge")).toContain("spend=resolve x2");
     expect(await CommandRouter.route("roll @surge")).toContain("spent 2 resolve");
     expect(await CommandRouter.route("roll @surge spend-amount=1")).toContain("spent 1 resolve");
     // ...and it survives the card round trip.
@@ -6907,10 +6911,10 @@ describe("capabilities: holding a pool is not being able to spend it", () => {
     await CommandRouter.route("define-resource name=`stolen-vitae` kind=pool start=10 max=10 roles=`blood` requires=`vitae`");
     await CommandRouter.route("extend-template name=`Blood-Marked` extends=mage resources=`stolen-vitae`");
     await CommandRouter.route('create-playable name="Sleeper" templates=blood-marked');
-    expect(await CommandRouter.route("resources")).toContain("stolen-vitae 10/10 ⚠ held but UNUSABLE (needs vitae");
+    expect(await CommandRouter.route("show-resource")).toContain("stolen-vitae 10/10 ⚠ held but UNUSABLE (needs vitae");
     const refused = await CommandRouter.route("spend stolen-vitae 1");
     expect(refused).toContain("holds stolen-vitae but cannot use it");
-    expect(await CommandRouter.route("resources")).toContain("stolen-vitae 10/10");   // nothing left the pool
+    expect(await CommandRouter.route("show-resource")).toContain("stolen-vitae 10/10");   // nothing left the pool
     // Something teaches him the trick of it.
     expect(await CommandRouter.route("attune vitae")).toContain("can now spend stolen-vitae");
     expect(await CommandRouter.route("spend stolen-vitae 1")).toContain("Now 9/10");
@@ -6971,12 +6975,12 @@ describe("whose Disciplines these are: clan, family, or the creature's own", () 
   test("the Ouroboros' Disciplines are his own, named by a command", async () => {
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     // Nothing names them yet - said, not guessed at.
-    expect(await CommandRouter.route("creation")).toContain("nothing names his Disciplines yet");
+    expect(await CommandRouter.route("show-creation")).toContain("nothing names his Disciplines yet");
     await CommandRouter.route("extend-template name=`Ouroboros` disciplines=`=celerity,potence`");
     expect(TEMPLATES["ouroboros"].Affinity.disciplines).toEqual(["celerity", "potence"]);
-    expect(await CommandRouter.route("templates ouroboros")).toContain("Disciplines: Celerity, Potence (and no family's)");
+    expect(await CommandRouter.route("show-template ouroboros")).toContain("Disciplines: Celerity, Potence (and no family's)");
     await CommandRouter.route("set-trait obfuscate 2 group=discipline");
-    const r = await CommandRouter.route("creation");
+    const r = await CommandRouter.route("show-creation");
     expect(r).toContain("(the template (only these): Celerity, Potence)");
     expect(r).toContain("⚠ out of affinity: Obfuscate");
   });
@@ -6992,12 +6996,12 @@ describe("a vampire's blood pool is what generation allows", () => {
   test("the Generation Background moves the capacity and the per-turn limit", async () => {
     await CommandRouter.route('create-playable name="Elder" templates=vampire');
     // 12th generation by default: eleven points, one a turn.
-    expect(await CommandRouter.route("resources")).toContain("blood 10/11");
-    expect(await CommandRouter.route("eval resource:blood:max")).toContain("= 11");
+    expect(await CommandRouter.route("show-resource")).toContain("blood 10/11");
+    expect(await CommandRouter.route("show-eval resource:blood:max")).toContain("= 11");
     // Five dots of the Background make him 7th: twenty points, five a turn.
     await CommandRouter.route("set-trait generation 5 paid=0");
-    expect(await CommandRouter.route("derived")).toContain("Generation 7");
-    const r = await CommandRouter.route("resources");
+    expect(await CommandRouter.route("show-derived")).toContain("Generation 7");
+    const r = await CommandRouter.route("show-resource");
     expect(r).toContain("blood 10/20");
     expect(r).toContain("5/turn");
     expect(await CommandRouter.route("gain blood 99")).toContain("Now 20/20");
@@ -7335,11 +7339,11 @@ describe("a command on the wire: the formalized envelope", () => {
     await LorebookManager.bootstrap();
     await CommandRouter.route('create-playable name="Marius" templates=ouroboros');
     // What would arrive over the wire...
-    const env = commandEnvelope(CommandParser.parse("templates ouroboros"), { id: "x" });
+    const env = commandEnvelope(CommandParser.parse("show-template ouroboros"), { id: "x" });
     const wire = JSON.parse(JSON.stringify(env)) as typeof env;
     // ...routed with no special path: same verbs, same handlers, same reply.
     const back = envelopeToCommand(wire);
-    const direct = await CommandRouter.route("templates ouroboros");
+    const direct = await CommandRouter.route("show-template ouroboros");
     const viaWire = await CommandRouter.route(back.raw);
     expect(viaWire).toBe(direct);
   });
@@ -7397,35 +7401,35 @@ describe("an affliction that runs out", () => {
 
   test("a charge is spent per MATCHING roll, and the affliction ends on the last one", async () => {
     await CommandRouter.route("afflict blessed rolls=2");
-    expect(await CommandRouter.route("afflictions")).toContain("2 more rolls");
+    expect(await CommandRouter.route("show-affliction")).toContain("2 more rolls");
     const first = await CommandRouter.route("roll strength+melee");
     expect(first).toContain("Blessed: 1 roll left");
     const second = await CommandRouter.route("roll strength+melee");
     expect(second).toContain("Blessed ends");
-    expect(await CommandRouter.route("afflictions")).not.toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("blessed");
   });
 
   test("a filtered charge is spent only by the rolls it names", async () => {
     await CommandRouter.route("afflict blessed rolls=1 using=melee");
     // Not a melee roll: the charge is untouched.
     await CommandRouter.route("roll strength");
-    expect(await CommandRouter.route("afflictions")).toContain("1 more roll");
+    expect(await CommandRouter.route("show-affliction")).toContain("1 more roll");
     // This one matches, and it is the last.
     expect(await CommandRouter.route("roll strength+melee")).toContain("Blessed ends");
   });
 
   test("the clock ends it too, on whoever is carrying it", async () => {
     await CommandRouter.route("afflict blessed for=`1 hour`");
-    const shown = await CommandRouter.route("afflictions");
+    const shown = await CommandRouter.route("show-affliction");
     expect(shown).toContain("until");
     expect(await CommandRouter.route("advance-time 30 minutes")).not.toContain("Blessed ends");
     expect(await CommandRouter.route("advance-time 45 minutes")).toContain("Blessed ends");
-    expect(await CommandRouter.route("afflictions")).not.toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("blessed");
   });
 
   test("rolls and a clock together: whichever runs out first wins", async () => {
     await CommandRouter.route("afflict blessed rolls=5 for=`1 hour`");
-    expect(await CommandRouter.route("afflictions")).toContain("whichever first");
+    expect(await CommandRouter.route("show-affliction")).toContain("whichever first");
     // Four of five charges left, but the hour is up.
     await CommandRouter.route("roll strength");
     expect(await CommandRouter.route("advance-time 2 hours")).toContain("Blessed ends");
@@ -7435,7 +7439,7 @@ describe("an affliction that runs out", () => {
     await CommandRouter.route("afflict blessed");
     await CommandRouter.route("roll strength+melee");
     await CommandRouter.route("advance-time 3 days");
-    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).toContain("blessed");
   });
 });
 
@@ -7454,7 +7458,7 @@ describe("places, renamed verbs, and flushing the story", () => {
     expect(entered).toContain("Sanctum 8");
     expect(entered).toContain("in-sanctum");
     // What the place GRANTS is the affliction's data, not the verb's code.
-    expect(await CommandRouter.route("afflictions")).toContain("in-sanctum");
+    expect(await CommandRouter.route("show-affliction")).toContain("in-sanctum");
     expect(await CommandRouter.route("exit-sanctum")).toContain("leaves his Sanctum");
     expect(await CommandRouter.route("exit-sanctum")).toContain("is not in his Sanctum");
   });
@@ -7464,23 +7468,15 @@ describe("places, renamed verbs, and flushing the story", () => {
     await CommandRouter.route("set-trait sanctum 4");
     await CommandRouter.route("enter-library");
     await CommandRouter.route("enter-sanctum");
-    const both = await CommandRouter.route("afflictions");
+    const both = await CommandRouter.route("show-affliction");
     expect(both).toContain("in-library");
     expect(both).toContain("in-sanctum");
     await CommandRouter.route("exit-library");
-    const after = await CommandRouter.route("afflictions");
+    const after = await CommandRouter.route("show-affliction");
     expect(after).not.toContain("in-library");
     expect(after).toContain("in-sanctum");
   });
 
-  test("magick is the Awakened verb; cast survives as a deprecated alias", async () => {
-    expect(CommandRouter.verbs()).toContain("magick");
-    expect(CommandRouter.specFor("magick")?.summary).toContain("Awakened magick");
-    expect(CommandRouter.specFor("cast")?.summary).toContain("@deprecated");
-    // Same grammar, so an old command still parses and still works.
-    expect(CommandRouter.specFor("cast")?.params?.map(p => p.key))
-      .toEqual(CommandRouter.specFor("magick")?.params?.map(p => p.key));
-  });
 
   test("flush-context cleans the story on demand and reports what it did", async () => {
     __seedDocument(["Plain prose.", "<!--wod:ctx-skip:0-->[SYSTEM: noise]<!--/wod:ctx-skip-->", "More prose."]);
@@ -7540,9 +7536,9 @@ describe("every way an affliction can end", () => {
   test("turns count down, and the scene counts its own", async () => {
     await CommandRouter.route('scene "The Hall" turn=3s');
     await CommandRouter.route("afflict blessed turns=2");
-    expect(await CommandRouter.route("afflictions")).toContain("2 more turns");
+    expect(await CommandRouter.route("show-affliction")).toContain("2 more turns");
     await CommandRouter.route("turn");
-    expect(await CommandRouter.route("afflictions")).toContain("1 more turn");
+    expect(await CommandRouter.route("show-affliction")).toContain("1 more turn");
     expect(await CommandRouter.route("turn")).toContain("Blessed ends");
   });
 
@@ -7554,9 +7550,9 @@ describe("every way an affliction can end", () => {
 
   test("until X is a condition the engine decides: the next full moon", async () => {
     await CommandRouter.route("afflict blessed until=`full-moons >= 1`");
-    expect(await CommandRouter.route("afflictions")).toContain("until full-moons >= 1");
+    expect(await CommandRouter.route("show-affliction")).toContain("until full-moons >= 1");
     await CommandRouter.route("advance-time 3 days");
-    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).toContain("blessed");
     // A full moon passes.
     expect(await CommandRouter.route("advance-time 40 days")).toContain("Blessed ends");
   });
@@ -7565,34 +7561,34 @@ describe("every way an affliction can end", () => {
     await CommandRouter.route("set-trait courage 3");
     await CommandRouter.route("afflict blessed until=`courage >= 5`");
     await CommandRouter.route("advance-time 1 hour");
-    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).toContain("blessed");
     await CommandRouter.route("set-trait courage 5");
     expect(await CommandRouter.route("advance-time 1 hour")).toContain("Blessed ends");
   });
 
   test("until Y is ADVISORY - nothing but [[lift]] ends it, and it says so", async () => {
     await CommandRouter.route("afflict blessed until-event=`you next attend the voivode`");
-    const shown = await CommandRouter.route("afflictions");
+    const shown = await CommandRouter.route("show-affliction");
     expect(shown).toContain("until you next attend the voivode");
     expect(shown).toContain("advisory");
     expect(expiryIsAdvisoryOnly({ untilEvent: "x" })).toBe(true);
     expect(expiryIsAdvisoryOnly({ untilEvent: "x", rolls: 2 })).toBe(false);
     // Time does not touch it.
     await CommandRouter.route("advance-time 100 days");
-    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).toContain("blessed");
     expect(await CommandRouter.route("remove blessed")).toContain("blessed");
   });
 
   test("an affliction records what inflicted it", async () => {
     await CommandRouter.route("afflict blessed from=`arcanum:sharpened-senses` scenes=1");
-    expect(await CommandRouter.route("afflictions")).toContain("from arcanum:sharpened-senses");
+    expect(await CommandRouter.route("show-affliction")).toContain("from arcanum:sharpened-senses");
     expect(AFFLICTION_MODES).toEqual(["passive", "togglable", "temporary"]);
   });
 
   test("measures compose: whichever runs out first ends it", async () => {
     await CommandRouter.route('scene "The Hall"');
     await CommandRouter.route("afflict blessed turns=9 scenes=9 until=`full-moons >= 99` for=`1 hour`");
-    const shown = await CommandRouter.route("afflictions");
+    const shown = await CommandRouter.route("show-affliction");
     expect(shown).toContain("9 more turns");
     expect(shown).toContain("whichever first");
     // The hour is the shortest measure, and it is the one that ends it.
@@ -7613,7 +7609,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
   test("the time namespace answers the long form, the short form, and saved dates", async () => {
     await CommandRouter.route("afflict blessed until=`system::time::full-moons >= 1`");
     await CommandRouter.route("advance-time 3 days");
-    expect(await CommandRouter.route("afflictions")).toContain("blessed");
+    expect(await CommandRouter.route("show-affliction")).toContain("blessed");
     expect(await CommandRouter.route("advance-time 40 days")).toContain("Blessed ends");
   });
 
@@ -7628,7 +7624,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
     expect(r).toMatch(/= [1-9]/);
     // days-since is the same shape.
     expect(await CommandRouter.route(
-      "eval `system::time::days-since(system::time::date:the-wedding, system::time::now)`")).toContain("= 40");
+      "show-eval `system::time::days-since(system::time::date:the-wedding, system::time::now)`")).toContain("= 40");
   });
 
   test("a cooldown blocks re-application, and says how long is left", async () => {
@@ -7638,7 +7634,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
     expect(refused).toContain("cannot take blessed again yet");
     expect(refused).toContain("until");
     // It shows on the same listing that shows afflictions.
-    expect(await CommandRouter.route("afflictions")).toContain("cooling");
+    expect(await CommandRouter.route("show-affliction")).toContain("cooling");
     // waive=true overrides, as everywhere else in this engine.
     expect(await CommandRouter.route("afflict blessed waive=true")).toContain("is now");
   });
@@ -7648,7 +7644,7 @@ describe("system::time, and cooldowns as the same shape reversed", () => {
     await CommandRouter.route("remove blessed");
     expect(await CommandRouter.route("afflict blessed")).toContain("cannot take");
     await CommandRouter.route("advance-time 3 days");
-    expect(await CommandRouter.route("afflictions")).not.toContain("cooling");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("cooling");
     expect(await CommandRouter.route("afflict blessed")).toContain("is now");
   });
 
@@ -7683,28 +7679,28 @@ describe("grants: the template's free dot and the Storyteller's bonus", () => {
     expect(Object.keys(GRANT_SOURCES)).toContain("maturation");
   });
 
-  test("a ghoul's free dot is the TEMPLATE's, and [[creation]] says which it may be", async () => {
+  test("a ghoul's free dot is the TEMPLATE's, and [[show-creation]] says which it may be", async () => {
     const grants = TEMPLATE_GHOUL.Creation.grants ?? [];
     expect(describeCreationGrant(grants[0])).toContain("Potence or Fortitude");
-    const before = await CommandRouter.route("creation");
+    const before = await CommandRouter.route("show-creation");
     expect(before).toContain("free: 1 free dot of Potence or Fortitude");
     expect(before).toContain("not on the sheet yet");
     // Taking it, and saying where it came from.
     await CommandRouter.route("set-trait potence 1 group=discipline");
-    expect(await CommandRouter.route("creation")).toContain("✓");
+    expect(await CommandRouter.route("show-creation")).toContain("✓");
     // Until it is marked, it looks like a purchase.
-    expect(await CommandRouter.route("budget")).toContain("discipline: 1/2");
+    expect(await CommandRouter.route("show-budget")).toContain("discipline: 1/2");
     expect(await CommandRouter.route("grant potence source=template")).toContain("is template");
-    const after = await CommandRouter.route("budget");
+    const after = await CommandRouter.route("show-budget");
     expect(after).toContain("discipline: 0/2");
     expect(after).toContain("potence 1 (template)");
   });
 
   test("a Storyteller's bonus ADDS to a purse, and carries its reason", async () => {
-    expect(await CommandRouter.route("budget")).toContain("freebie: 0/15");
+    expect(await CommandRouter.route("show-budget")).toContain("freebie: 0/15");
     const g = await CommandRouter.route("grant freebie 3 source=storyteller note=`everyone here is Suspect`");
     expect(g).toContain("freebie purse +3");
-    const b = await CommandRouter.route("budget");
+    const b = await CommandRouter.route("show-budget");
     expect(b).toContain("freebie: 0/18");
     expect(b).toContain("+3 from storyteller: everyone here is Suspect");
     // It survives the round trip through the sheet card.
@@ -7712,8 +7708,8 @@ describe("grants: the template's free dot and the Storyteller's bonus", () => {
     expect(again.purseGrants).toEqual([{ purse: "freebie", points: 3, source: "storyteller", note: "everyone here is Suspect" }]);
   });
 
-  test("the flaw ceiling is data, and [[creation]] states it", async () => {
-    expect(await CommandRouter.route("creation")).toContain("Flaws pay up to 7");
+  test("the flaw ceiling is data, and [[show-creation]] states it", async () => {
+    expect(await CommandRouter.route("show-creation")).toContain("Flaws pay up to 7");
   });
 
   test("[[grant]] lists what is granted, refuses an unknown source, and forgets", async () => {
@@ -7723,7 +7719,7 @@ describe("grants: the template's free dot and the Storyteller's bonus", () => {
     await CommandRouter.route("grant potence source=template");
     expect(await CommandRouter.route("grant")).toContain("potence: template");
     expect(await CommandRouter.route("forget-grant potence")).toContain("back to being bought normally");
-    expect(await CommandRouter.route("budget")).toContain("discipline: 1/2");
+    expect(await CommandRouter.route("show-budget")).toContain("discipline: 1/2");
   });
 });
 
@@ -7754,10 +7750,10 @@ describe("losing the arcanum that granted it", () => {
   test("(1) it ends immediately when its source goes", async () => {
     await CommandRouter.route("take-arcanum trait-affinity::melee 2");
     await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` orphan=immediately");
-    expect(await CommandRouter.route("afflictions")).toContain("ends at once");
+    expect(await CommandRouter.route("show-affliction")).toContain("ends at once");
     const dropped = await CommandRouter.route("drop-arcanum trait-affinity::melee");
     expect(dropped).toContain("Keen ends with");
-    expect(await CommandRouter.route("afflictions")).not.toContain("keen");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("keen");
   });
 
   test("(2) it ends in T time - and the clock finishes it", async () => {
@@ -7773,7 +7769,7 @@ describe("losing the arcanum that granted it", () => {
     await CommandRouter.route("take-arcanum trait-affinity::melee 2");
     await CommandRouter.route("afflict keen from=`arcanum:trait-affinity::melee` for=`2 hours`");
     expect(await CommandRouter.route("drop-arcanum trait-affinity::melee")).toContain("outlives");
-    expect(await CommandRouter.route("afflictions")).toContain("keen");
+    expect(await CommandRouter.route("show-affliction")).toContain("keen");
     // ...and still ends on its own schedule.
     expect(await CommandRouter.route("advance-time 3 hours")).toContain("Keen ends");
   });
@@ -7828,7 +7824,7 @@ describe("passive powers apply themselves", () => {
     expect(disciplineDef("fortitude")!.grants?.afflicts).toBe("power-fortitude");
     expect(PASSIVE_AFFLICTIONS.map(a => a.name))
       .toEqual(["modifier-difficulty", "emitting-majesty", "under-majesty",
-        "power-potence", "power-fortitude", "trait-aptitude", "trait-expansion"]);
+        "power-potence", "power-fortitude", "trait-expansion"]);
     // Every name is ROLE FIRST, so an alphabetical list groups by KIND.
     for (const a of PASSIVE_AFFLICTIONS) {
       if (a.name.startsWith("trait-")) continue;            // deprecated leftovers
@@ -7841,13 +7837,13 @@ describe("passive powers apply themselves", () => {
     const r = await CommandRouter.route("set-trait potence 2 group=discipline");
     expect(r).toContain("Power Potence is now applied");
     expect(r).toContain("from discipline:potence");
-    const shown = await CommandRouter.route("afflictions");
+    const shown = await CommandRouter.route("show-affliction");
     expect(shown).toContain("power-potence");
     expect(shown).toContain("ends at once");           // the default orphan policy
     // Dropping it to 0 takes the passive away again.
     const gone = await CommandRouter.route("set-trait potence 0 group=discipline");
     expect(gone).toContain("Power Potence ends with discipline:potence");
-    expect(await CommandRouter.route("afflictions")).not.toContain("power-potence");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("power-potence");
   });
 
   test("taking an arcanum applies its passive; dropping it takes it back", async () => {
@@ -7880,10 +7876,10 @@ describe("passive powers apply themselves", () => {
     const all: string[] = [];
     const mine: string[] = [];
     const a = PostOffice.subscribe(COMMAND_CHANNEL, (e) => { all.push((e.data as { verb: string }).verb); });
-    const b = PostOffice.subscribe(commandChannel("health"), (e) => { mine.push((e.data as { verb: string }).verb); });
-    await processAdventureInput("[[health]] and then [[resources]]");
-    expect(all).toEqual(["health", "resources"]);
-    expect(mine).toEqual(["health"]);          // the verb's own channel heard only its own
+    const b = PostOffice.subscribe(commandChannel("show-health"), (e) => { mine.push((e.data as { verb: string }).verb); });
+    await processAdventureInput("[[show-health]] and then [[show-resource]]");
+    expect(all).toEqual(["show-health", "show-resource"]);
+    expect(mine).toEqual(["show-health"]);      // the verb's own channel heard only its own
     PostOffice.unsubscribe(a); PostOffice.unsubscribe(b);
   });
 });
@@ -7924,7 +7920,7 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
     const ids = Bus.listeners(SYSTEM.powerTaken).map(l => l.id);
     for (const id of ids) Bus.off(id);
     await CommandRouter.route("set-trait potence 1 group=discipline");
-    expect(await CommandRouter.route("afflictions")).not.toContain("power-potence");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("power-potence");
     // Put it back the way the module does - registration is a function, and an
     // idempotent one, precisely so this is possible.
     registerSystemHandlers();
@@ -7932,7 +7928,7 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
     // A DIFFERENT power, since the passive fires on 0 -> rated and Potence is
     // already rated by the failed attempt above.
     await CommandRouter.route("set-trait fortitude 1 group=discipline");
-    expect(await CommandRouter.route("afflictions")).toContain("power-fortitude");
+    expect(await CommandRouter.route("show-affliction")).toContain("power-fortitude");
   });
 
   test("a handler may do async work, and the publisher waits for it", async () => {
@@ -7977,10 +7973,10 @@ describe("the event CAUSES it: system channels, toggling, invoking", () => {
     reg.grants = { afflicts: "veil", mode: "offered" };
     const took = await CommandRouter.route("take-merit shroud 2");
     expect(took).toContain("Veil is now available");
-    expect(await CommandRouter.route("afflictions")).not.toContain("veil");
+    expect(await CommandRouter.route("show-affliction")).not.toContain("veil");
     const used = await CommandRouter.route("invoke veil");
     expect(used).toContain("invokes Veil");
-    expect(await CommandRouter.route("afflictions")).toContain("veil");
+    expect(await CommandRouter.route("show-affliction")).toContain("veil");
   });
 
   test("invoke refuses what nobody offers", async () => {
@@ -8015,7 +8011,7 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
       expect([verb, p?.type]).toEqual([verb, "bool"]);
     }
     const registered = new Set(CommandRouter.verbs({ includeHidden: true }));
-    for (const { verb, replacedBy } of CommandRouter.deprecatedVerbs()) {
+    for (const { verb, replacedBy } of [] as Array<{ verb: string; replacedBy: string }>) {
       expect([verb, registered.has(replacedBy)]).toEqual([verb, true]);
     }
   });
@@ -8035,14 +8031,6 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
     expect(kept!.stopGeneration).toBe(true);
   });
 
-  test("quiet is the NAME, not a register: a deprecated alias is as quiet as what replaced it", async () => {
-    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    expect(isQuietVerb("show-anything-at-all")).toBe(true);
-    expect(isQuietVerb("merits")).toBe(true);          // deprecated -> show-merit
-    expect(isQuietVerb("roll")).toBe(false);           // an ACTION generates
-    expect((await processAdventureInput("[[merits]]"))!.inputText!).toContain("wod:ctx-skip");
-    expect((await processAdventureInput("[[merits in-story=true]]"))!.inputText!).not.toContain("wod:ctx-skip");
-  });
 
   test("a flag with no value can only mean one thing: [[... in-story]] is in-story=true", async () => {
     await CommandRouter.route('create-playable name="Kvar" templates=vampire');
@@ -8157,27 +8145,25 @@ describe("show-*: the read-only surface, its scopes, and the context marker", ()
     await CommandRouter.route("take-merit iron-will 3");
     const owned = await CommandRouter.route("show-merit");
     const defined = await CommandRouter.route("show-merit @all in=campaign");
-    expect(owned).toContain("iron-will (3)");                 // what [[merits]] said
-    expect(defined).toContain("Defined Merits & Flaws");      // what [[merit]] said
+    expect(owned).toContain("iron-will (3)");                 // what [[show-merit]] said
+    expect(defined).toContain("Defined Merits & Flaws");      // what [[show-merit]] said
     expect(owned).not.toContain("Defined Merits & Flaws");
-    // An old name still routes, and says where it went.
-    const old = await CommandRouter.route("merits");
-    expect(old).toContain("iron-will (3)");
-    expect(old).toContain("[[merits]] is now [[show-merit]]");
   });
 
-  test("[[help]] keeps its name, lists the current vocabulary, and hides the old ones", async () => {
+  test("[[help]] keeps its name and lists the ONLY vocabulary there is", async () => {
     const help = await CommandRouter.route("help");
     expect(help).toContain("show-merit");
-    expect(help).not.toContain(", merits,");                  // deprecated: not listed
-    expect(help).toContain("older names still work");
+    // The old names are GONE, not hidden (§7.92) - so this listing is now the
+    // whole truth about what the engine answers to, and nothing trails it
+    // promising that older names still work.
+    expect(help).not.toContain("older names");
+    expect(help).not.toContain(", merits,");
     // help is NOT one of the renamed verbs: it is what everybody already knows.
-    expect(CommandRouter.specFor("help")!.deprecated).toBeUndefined();
     expect(CommandRouter.verbs()).toContain("help");
     // ...and show-help is the alias, for players who now reasonably guess it.
     expect(await CommandRouter.route("show-help")).toContain("show-merit");
-    expect(await CommandRouter.route("show-help merits")).toContain("merits is now [[show-merit]]");
-    expect(await CommandRouter.route("help merits")).toContain("merits is now [[show-merit]]");
+    // A retired name is now simply not a command.
+    expect(await CommandRouter.route("help merits")).toContain(`No command "merits"`);
   });
 });
 
@@ -8974,13 +8960,6 @@ describe("per-script storage, as measured", () => {
 // public surface. Both are asserted here rather than hoped for. See §7.91.
 // =============================================================================
 describe("the game layer after the split", () => {
-  test("no deprecation was silently dropped - the failure mode that hid the reordering", () => {
-    // `deprecate` used to return false and forget when either verb was missing,
-    // so six lost deprecations produced no error at all. They are now deferred
-    // and applied on registration; anything still pending is a real mistake -
-    // a verb that never registers, i.e. a typo in a deprecation table.
-    expect(CommandRouter.pendingDeprecations()).toEqual([]);
-  });
 
   test("[[help]] still lists `help` first, and show-* last", () => {
     const verbs = CommandRouter.verbs();
@@ -8993,12 +8972,4 @@ describe("the game layer after the split", () => {
     expect(firstShow).toBeGreaterThan(lastPlain);
   });
 
-  test("a deprecated alias still routes and still points at its replacement", async () => {
-    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
-    await LorebookManager.bootstrap();
-    await CommandRouter.route('create-playable name="Kvar" templates=vampire');
-    const out = await CommandRouter.route("merits");
-    expect(out).toContain("[[merits]] is now [[show-merit]]");
-    expect(isQuietVerb("merits")).toBe(true);         // as quiet as what replaced it
-  });
 });

@@ -831,8 +831,13 @@ export async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
 }
 
 // backgrounds / background <name> - the bag Backgrounds never had.
-export async function cmdBackgrounds(): Promise<string> {
-  const char = await CharacterStore.getCurrent();
+// THE SCOPE IS AN ARGUMENT, like every other sheet-bound subject takes one.
+// Both of these used to read getCurrent() unconditionally while show-background
+// accepted `in=` and quietly threw it away, so `show-background sanctum in=Kvar`
+// answered with MIRA's rating under Kvar's question - a confident wrong number
+// attributed to the wrong character, which is worse than an error.
+export async function cmdBackgrounds(forChar?: PlayableCharacter): Promise<string> {
+  const char = forChar ?? await CharacterStore.getCurrent();
   const defs = BackgroundRegistry.all();
   const held = char?.backgrounds ?? {};
   const granted = char ? grantedTraitsOf(char) : {};
@@ -846,12 +851,12 @@ export async function cmdBackgrounds(): Promise<string> {
     + `[[define-background]] adds one.`);
 }
 
-export async function cmdBackground(cmd: ParsedCommand): Promise<string> {
+export async function cmdBackground(cmd: ParsedCommand, forChar?: PlayableCharacter): Promise<string> {
   const raw = cmd.positional[0]?.trim();
-  if (!raw) return cmdBackgrounds();
+  if (!raw) return cmdBackgrounds(forChar);
   const def = BackgroundRegistry.get(StringUtil.normalize(raw));
   if (!def) return sys(`No background "${raw}". [[show-background]] lists them.`);
-  const char = await CharacterStore.getCurrent();
+  const char = forChar ?? await CharacterStore.getCurrent();
   const rating = char ? char.backgrounds?.[StringUtil.normalize(def.name)] ?? 0 : 0;
   const bits = [`background "${disp(def.name)}"`, `max ${def.max ?? 5}`];
   if (def.templates?.length) bits.push(`only ${def.templates.join("/")}`);

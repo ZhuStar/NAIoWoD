@@ -11,7 +11,7 @@ export { RESOURCES_WIZARD } from "./game/common";
 export { processAdventureInput, processContextBuilt, processGenerationEnd, stripAgedCtxSkip, stripCtxSkip } from "./game/context";
 export { extractHideBlocks, processGeneratedText, reconcileLorebook } from "./game/narration";
 export { registerSystemHandlers } from "./game/powers";
-export { SHOW_DEPRECATIONS, SHOW_SUBJECT_VERBS, SHOW_VERB_PREFIX, isQuietVerb, resolveShowScope, wantsInStory } from "./game/show";
+export { SHOW_SUBJECT_VERBS, SHOW_VERB_PREFIX, isQuietVerb, resolveShowScope, wantsInStory } from "./game/show";
 export type { HideDirective } from "./game/narration";
 export type { ResolvedScope, ShowScopeKind } from "./game/show";
 

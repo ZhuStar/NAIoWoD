@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `096eaca`** ("Eleven modules, one
-> order").
+> **Last synced with the code as of commit `101ec10`** ("The scope was
+> always there").
+> Prior: `096eaca` ("Eleven modules, one order").
 > Prior: `dd81200` ("Never silence a sibling").
 > Prior: `da7312c` ("Seven milliseconds").
 > Prior: `f04e551` ("storyStorage is not shared").
@@ -4748,6 +4749,54 @@ and `prefill` are mocked/available but not yet written.
     purpose it did not achieve. Cycles are fine here anyway: 253 of the
     declarations are hoisted `function`s and the only order-sensitive statements
     were the 130 registrations, which are now explicit.
+
+92. **`show-background` ignored its own scope; and every deprecated thing is
+    GONE** (owner: *"this is a good time to get rid of everything that was
+    deprecated in the previous design... accounting for deprecated things at
+    this point would hinder us"*).
+
+    **THE BUG.** `show-background` accepted `in=` and threw it away: both entry
+    points read `getCurrent()` unconditionally, so `show-background sanctum
+    in=Kvar` answered **"Mira has 5"** — the current character's number under
+    another character's question. A confident wrong answer attributed to the
+    wrong person, which is worse than an error. `cmdBackgrounds`/`cmdBackground`
+    now take the character the way every other sheet-bound subject already did
+    (`forChar ?? getCurrent()`); the render passes `scopeChar(scope)`.
+
+    **THE REMOVAL — 38 verbs, 2 shims, and the whole deprecation tier.** The 37
+    `show-*` aliases plus `cast`, their `replaces:` tables, `SHOW_DEPRECATIONS`,
+    `CommandSpec.deprecated`, `CommandRouter.deprecate`/`deprecatedVerbs`, the
+    ⚠-pointer branch in `route`, the help special-case, the docs section, and
+    the `@deprecated` `trait-aptitude` affliction and `OwnedMeritInstance` alias.
+    **`specHidden` no longer infers anything** — a hidden verb says so.
+    **The visible vocabulary is unchanged at 131**, which is the point: those
+    names were already hidden, so removing them cost a player nothing.
+
+    This also deleted the deferred-deprecation machinery added in §7.91 hours
+    earlier. It existed only to serve deprecated verbs; keeping it would have
+    been keeping my own work rather than the engine's.
+
+    **TWO CAPABILITIES THE ALIASES WERE MASKING**, found because the tests that
+    used them started failing — both fixed rather than papered over:
+
+    - **The open scene became unaskable.** `show-scene`'s summary promised
+      "defaults to the open one", but bare `show-scene` LISTS, and the open one
+      was reachable only through `[[scene-info]]`. Added `in=scene|open|now`,
+      which makes the summary true for the first time.
+    - **A sheetless NPC became unaskable.** `[[afflictions "Grey Wolf"]]` read
+      any name at all; `show-affliction` resolves a SCOPE, and an NPC with no
+      sheet resolved to nothing — so retiring the alias would have made every
+      afflicted NPC invisible. `scopeKindsMatching` now counts anyone carrying
+      afflictions as a character, and `finishScope` returns a sheetless scope
+      (`char` undefined) instead of refusing. **The new behaviour is stricter in
+      the useful direction:** a misspelled name is refused, where the old alias
+      cheerfully answered "no afflictions" to any typo.
+
+    **Test migration:** 284 references rewrote old verb → new, scope-aware
+    (`check-constraints` → `show-constraint in=current`, and five more that
+    carried a scope). The first attempt did it in two passes and could no longer
+    tell which bare `show-constraint` had come from which alias — reverted and
+    redone as one pass off the original file.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

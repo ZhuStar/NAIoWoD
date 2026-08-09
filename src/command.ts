@@ -208,15 +208,7 @@ export interface CommandSpec {
   params?: ParamSpec[];
   openNamed?: boolean;               // accepts arbitrary extra named args (afflict's slots)
   note?: string;                     // extra help remark, appended to the summary
-  // A NAME THAT STILL WORKS BUT IS NOT THE NAME ANY MORE - the verb that
-  // replaced it. A deprecated verb routes exactly as before (nothing a player
-  // typed last week breaks) but is kept OUT of [[help]]'s listing and filed in
-  // its own section of docs/commands.md, so the visible surface is the current
-  // one. `hidden: false` keeps it listed anyway - [[help]] itself is deprecated
-  // in favour of [[show-help]] and must still be findable by a player who knows
-  // nothing else.
-  deprecated?: string;
-  hidden?: boolean;                  // default: whatever `deprecated` implies
+  hidden?: boolean;                  // kept out of [[help]]'s listing
   // DOES THIS REPLY BELONG IN THE STORY? Every command answers this, and the
   // player overrides it per call with the universal `in-story` flag. Absent
   // means "work it out": a reply that is for the PLAYER (every show-* verb,
@@ -236,10 +228,10 @@ export const IN_STORY_PARAM: ParamSpec = {
   key: IN_STORY_KEY, kind: "named", type: "bool",
   desc: "Keep this reply in the story for the AI to read (in-story=false hides one that normally stays)",
 };
-// Is this verb kept out of the listings? Deprecated implies hidden unless the
-// spec says otherwise.
+// Is this verb kept out of the listings? Nothing implies it any more - the
+// deprecation tier that used to is gone (§7.92), so a hidden verb says so.
 export function specHidden(spec: CommandSpec): boolean {
-  return spec.hidden ?? spec.deprecated !== undefined;
+  return spec.hidden ?? false;
 }
 
 // A FLAG WITH NO VALUE CAN ONLY MEAN ONE THING. `[[show-sheet in-story]]` is
@@ -339,8 +331,6 @@ export class CommandRouter {
       ? spec
       : { ...spec, params: [...params, IN_STORY_PARAM] };
     CommandRouter._registry.set(verb.toLowerCase(), { handler, spec: full });
-    // A deprecation may have been declared before this verb existed. Now it does.
-    if (CommandRouter._deferredDeprecations.length) CommandRouter._drainDeprecations();
   }
   static beforeRoute(hook: () => Promise<void>): void { CommandRouter._beforeRoute.push(hook); }
   // The CURRENT vocabulary. Deprecated aliases still route; they are simply not
@@ -355,49 +345,6 @@ export class CommandRouter {
   // being restated at forty scattered registration sites. Returns false when
   // the verb or its replacement is not registered - a typo in that table is a
   // test failure, not a silently dead pointer.
-  // ORDER-INDEPENDENT ON PURPOSE. This used to return false the instant either
-  // verb was not yet registered, and returning false is all it did - the
-  // deprecation was simply LOST, with no error and no failing anything. That was
-  // survivable while every command lived in one file and registration order was
-  // whatever the file said; splitting game.ts into src/game/* changed module
-  // evaluation order and silently dropped six deprecations, which is precisely
-  // the failure mode a silent `false` guarantees you find late.
-  //
-  // So an unapplicable deprecation is now REMEMBERED and applied the moment both
-  // verbs exist. A registry has no business caring what order modules loaded in.
-  private static _deferredDeprecations: Array<{ verb: string; replacedBy: string; hidden?: boolean }> = [];
-
-  private static _apply(d: { verb: string; replacedBy: string; hidden?: boolean }): boolean {
-    const def = CommandRouter._registry.get(d.verb.toLowerCase());
-    if (!def || !CommandRouter._registry.has(d.replacedBy.toLowerCase())) return false;
-    def.spec.deprecated = d.replacedBy.toLowerCase();
-    if (d.hidden !== undefined) def.spec.hidden = d.hidden;
-    return true;
-  }
-
-  private static _drainDeprecations(): void {
-    CommandRouter._deferredDeprecations =
-      CommandRouter._deferredDeprecations.filter(d => !CommandRouter._apply(d));
-  }
-
-  /** Returns whether it applied IMMEDIATELY; a false means deferred, not dropped. */
-  static deprecate(verb: string, replacedBy: string, opts: { hidden?: boolean } = {}): boolean {
-    const d = { verb, replacedBy, ...(opts.hidden !== undefined ? { hidden: opts.hidden } : {}) };
-    if (CommandRouter._apply(d)) return true;
-    CommandRouter._deferredDeprecations.push(d);
-    return false;
-  }
-
-  /** Deprecations still waiting for one of their verbs. Empty once everything is registered. */
-  static pendingDeprecations(): Array<{ verb: string; replacedBy: string }> {
-    return CommandRouter._deferredDeprecations.map(({ verb, replacedBy }) => ({ verb, replacedBy }));
-  }
-  // Every verb whose spec names a replacement, with it.
-  static deprecatedVerbs(): Array<{ verb: string; replacedBy: string }> {
-    return [...CommandRouter._registry.entries()]
-      .filter(([, def]) => def.spec.deprecated !== undefined)
-      .map(([verb, def]) => ({ verb, replacedBy: def.spec.deprecated! }));
-  }
   static specFor(verb: string): CommandSpec | undefined { return CommandRouter._registry.get(verb.toLowerCase())?.spec; }
   // Registered verb -> its one-line usage, derived from the spec (drives [[help]]).
   static helpFor(verb: string): string | undefined {
@@ -428,10 +375,6 @@ export class CommandRouter {
     const def = CommandRouter._registry.get(cmd.name);
     if (!def) return sys(`Unknown command "${cmd.name}". Available: ${CommandRouter.verbs().join(", ")}.`);
     const reply = await def.handler(cmd, ctx);
-    // A deprecated verb still does its job and then says what it is called now.
-    // Done HERE so a deprecation can never be declared without the pointer.
-    return def.spec.deprecated
-      ? sysNote(reply, `⚠ [[${cmd.name}]] is now [[${def.spec.deprecated}]].`)
-      : reply;
+    return reply;
   }
 }

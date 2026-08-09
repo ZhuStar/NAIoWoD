@@ -147,6 +147,20 @@ const DIRECTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // can be a straight round trip whenever a storage script exists to answer it.
 export const STORAGE_CHANNEL = "naiowod:storage";
 
+// THE REPLY HALF OF THE WIRE. `publish` broadcasts and returns: a remote handler
+// mutating its own copy of the payload can never be seen here, which is why a
+// satellite could not answer anything until now. `ask` is the other shape -
+// send a question, wait for THAT question's answer - and it is the probe's own
+// Q5 pattern lifted into the post office: arm the waiter, subscribe, ask, race a
+// timeout. Q5 measured a sibling answering inside an awaiting input hook in 7ms,
+// so this is a straight round trip and needs no local mirror.
+export const REPLY_CHANNEL = "naiowod:reply";
+
+/** A question on the wire. `data` is the caller's payload, untouched. */
+interface AskEnvelope { __ask: string; data: unknown }
+/** Its answer, carrying the payload back AS THE SERVER LEFT IT. */
+interface ReplyEnvelope { __ask: string; data?: unknown; error?: string }
+
 export interface StorageRequest {
   op: "get" | "set" | "delete" | "has" | "list";
   store: StoreName;
@@ -918,6 +932,9 @@ export class PostOffice {
   private static _wired: number | undefined;
   // scriptId -> the channels that script says it listens on.
   private static _remote = new Map<string, Set<string>>();
+  // Questions this script is waiting on, by their correlation id.
+  private static _waiting = new Map<string, (r: ReplyEnvelope) => void>();
+  private static _askSeq = 0;
   // WHAT our last announcement described, not WHEN. It used to be the Bus
   // version, which meant any new subscription re-announced - including one on a
   // channel we deliberately never announce (`local:`, hello, storage), so the
@@ -1039,6 +1056,22 @@ export class PostOffice {
         if (m.fromScriptId) void PostOffice.remember(m.fromScriptId);
         return;
       }
+      // AN ANSWER to something we asked. It belongs to one waiting caller, not
+      // to the bus - putting it there would announce every storage read twice.
+      if (busChannel(m.channel) === REPLY_CHANNEL) {
+        const env = (m.data ?? {}) as ReplyEnvelope;
+        const waiter = PostOffice._waiting.get(env.__ask ?? "");
+        if (waiter) { PostOffice._waiting.delete(env.__ask); waiter(env); }
+        return;
+      }
+      // A QUESTION rather than an announcement: serve it and write back. The
+      // asker is blocked on this, so it is answered even if no handler claims
+      // it - an empty answer beats a hung hook.
+      const asked = (m.data ?? {}) as Partial<AskEnvelope>;
+      if (typeof asked.__ask === "string" && m.fromScriptId) {
+        void PostOffice._serve(m.channel, asked as AskEnvelope, m.fromScriptId);
+        return;
+      }
       // Arrived from outside, so it is announced with `from` set - and it is
       // NOT relayed onward: this script is a subscriber, not a repeater.
       Bus.emit(m.channel, m.data, { from: m.fromScriptId, at: m.timestamp });
@@ -1104,6 +1137,82 @@ export class PostOffice {
     try { await messaging?.broadcast?.(event.data, event.channel); }
     catch (err) { event.errors.push(`relay: ${err instanceof Error ? err.message : String(err)}`); }
     return event;
+  }
+
+  // ASK, AND WAIT FOR THE ANSWER. `publish` tells the room something; this asks
+  // one question and returns what came back. The answer is the payload as the
+  // SERVER left it - handlers mutate the request in place (StorageDesk sets
+  // `result` and `served` on it), so returning the object returns the answer.
+  //
+  // A TIMEOUT IS NOT OPTIONAL. A satellite that has been deleted, disabled or
+  // wedged must not hang an input hook forever; the caller gets a rejection it
+  // can fall back from. Hosts differ on which timer exists, so both are tried
+  // and neither being present means no timeout - documented rather than faked.
+  static async ask<T>(channel: string, data: T, timeoutMs = 2000): Promise<T> {
+    const messaging = (api as { v1?: { messaging?: {
+      broadcast?: (data: unknown, channel?: string) => Promise<void>;
+    } } }).v1?.messaging;
+    if (!messaging?.broadcast) throw new Error(`ask: no messaging to ask ${channel} on`);
+    const id = `${api.v1.script.id}:${++PostOffice._askSeq}:${Date.now()}`;
+    let settle: ((r: ReplyEnvelope) => void) | undefined;
+    const answered = new Promise<ReplyEnvelope>((resolve) => { settle = resolve; });
+    PostOffice._waiting.set(id, settle!);
+    // ARM, THEN ASK - the probe printed the opposite of the truth once by
+    // sending while its own subscription was still being registered.
+    const env: AskEnvelope = { __ask: id, data };
+    try {
+      await messaging.broadcast(env, channel);
+    } catch (err) {
+      PostOffice._waiting.delete(id);
+      throw new Error(`ask: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const timer = PostOffice._afterMs(timeoutMs, () => {
+      const waiter = PostOffice._waiting.get(id);
+      if (waiter) { PostOffice._waiting.delete(id); waiter({ __ask: id, error: `timed out after ${timeoutMs}ms` }); }
+    });
+    const reply = await answered;
+    timer?.();
+    if (reply.error) throw new Error(`ask ${channel}: ${reply.error}`);
+    return reply.data as T;
+  }
+
+  /** Best-effort timer; returns a canceller, or undefined when the host has none. */
+  private static _afterMs(ms: number, fn: () => void): (() => void) | undefined {
+    const timers = (api as { v1?: { timers?: {
+      setTimeout?: (f: () => void, ms: number) => Promise<number>;
+      clearTimeout?: (id: number) => Promise<void>;
+    } } }).v1?.timers;
+    if (timers?.setTimeout) {
+      const p = timers.setTimeout(fn, ms);
+      return () => { void p.then(id => timers.clearTimeout?.(id)).catch(() => { /* already fired */ }); };
+    }
+    const g = (globalThis as { setTimeout?: (f: () => void, ms: number) => unknown; clearTimeout?: (h: unknown) => void });
+    if (g.setTimeout) { const h = g.setTimeout(fn, ms); return () => g.clearTimeout?.(h); }
+    return undefined;   // no timer on this host: the caller waits on the answer alone
+  }
+
+  // Serve a question that arrived from outside, then answer the asker directly.
+  // Local handlers run exactly as they would for a publish - this script is the
+  // owner of that channel, and being asked is how it finds out.
+  private static async _serve(channel: string, env: AskEnvelope, from: string): Promise<void> {
+    const messaging = (api as { v1?: { messaging?: {
+      send?: (to: string, data: unknown, channel?: string) => Promise<void>;
+    } } }).v1?.messaging;
+    const reply: ReplyEnvelope = { __ask: env.__ask };
+    try {
+      const event = Bus.emit(channel, env.data, { from });
+      if (event.pending.length) {
+        const settled = await Promise.allSettled(event.pending);
+        const bad = settled.find(r => r.status === "rejected");
+        if (bad && bad.status === "rejected") throw new Error(String(bad.reason));
+      }
+      if (event.errors.length) throw new Error(event.errors.join("; "));
+      reply.data = env.data;                 // handlers answered ON the payload
+    } catch (err) {
+      reply.error = err instanceof Error ? err.message : String(err);
+    }
+    try { await messaging?.send?.(from, reply, REPLY_CHANNEL); }
+    catch { /* the asker will time out, which is the honest outcome */ }
   }
 
   // A bare priority still works and still means the `on` phase; pass

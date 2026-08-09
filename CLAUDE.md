@@ -29,9 +29,15 @@ bun run build       # regenerate dist/naiowod.ts (REQUIRED after any src/ change
 
 ## Non-negotiables (details & rationale in docs/memory.md §2–3)
 
-- `dist/naiowod.ts` is a committed, readable, paste-ready single-file build;
-  `bun run build` before pushing or the suite fails. It must start with `//`
-  comments — never `/*---` frontmatter.
+- `dist/naiowod.ts` is a committed, readable, paste-ready build; `bun run build`
+  before pushing or the suite fails. It must start with `//` comments — never
+  `/*---` frontmatter.
+- **SINGLE-FILE IS NOT THE GOAL — it is where we started.** The direction is
+  "NovelAI scripts as microservices" (owner, 2026-08-08): N paste-ready
+  artifacts, a kernel plus satellites, talking over the post office. Any rule
+  here that reads as "one file forever" is a leftover from when pasting one
+  script was the whole delivery model, and must not be quoted back as a reason
+  not to split. See memory §7.94 for the phase state.
 - Verification before every push: build → test → typecheck → standalone
   type-check of the artifact → import-purity check (`import ./src/index.ts`
   prints nothing) → a live `init()` e2e.

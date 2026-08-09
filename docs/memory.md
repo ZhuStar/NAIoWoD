@@ -4852,6 +4852,54 @@ and `prefill` are mocked/available but not yet written.
 
     Marked "revise later": the owner expects to revisit these mechanics.
 
+94. **The post office learns to ask** (Phase 4 groundwork; owner: *"when are we
+    going to move to the 'scripts as microservices' design?"*, and — correctly —
+    *"you might have misunderstood me because of things in CLAUDE.md ... that
+    prohibit this goal"*). CLAUDE.md's "paste-ready **single-file** build" was
+    written when pasting one script WAS the delivery model; it is now amended so
+    it can never be quoted as a reason not to split.
+
+    **THE BLOCKER NOBODY HAD NAMED.** Every piece of the satellite design was in
+    place — §7.84's lazy relay, §7.88's storage-through-the-post-office with its
+    priority-`last` local fallback and `served`-as-a-flag, the announced
+    `naiowod:storage` channel, probe Q5 proving a 7ms round trip inside an
+    awaiting hook — except one: **`PostOffice.publish` is broadcast-only.** It
+    calls `messaging.broadcast` and returns. A remote handler setting
+    `req.served` on its own deserialized copy can never be seen by the asker, so
+    *no satellite could answer anything*. The storage script was unbuildable and
+    the reason was one missing verb.
+
+    - **`PostOffice.ask(channel, data, timeoutMs)`** is that verb, and it is the
+      probe's own Q5 shape lifted into the engine: arm the waiter, ask, race a
+      timeout. The answer is the payload **as the server left it**, which is
+      exactly how `StorageDesk`'s handlers already work (they mutate `result`
+      and `served` in place), so nothing about the storage contract changes.
+    - **`REPLY_CHANNEL` (`naiowod:reply`) never reaches the bus.** A reply
+      belongs to one waiting caller; announcing it would put every storage read
+      on the bus twice.
+    - **An arriving question is served and answered even if no handler claims
+      it** — the asker is blocked on it, and an empty answer beats a hung hook.
+      A handler that throws answers with the REASON, so a refusal is not
+      flattened into silence (the same distinction §7.88 drew for `served`).
+    - **The timeout is not optional and not faked.** A deleted or wedged
+      satellite must not hang an input hook. Hosts differ on which timer exists,
+      so `api.v1.timers` is tried, then a global, and neither being present
+      means no timeout — documented rather than pretended.
+
+    **WHAT THE OFF-HOST TESTS CANNOT DO, stated plainly:** `PostOffice` is a
+    static singleton and the mock's subscription list is global, so **two
+    independent post offices cannot coexist in one process** — a real two-script
+    round trip is not simulable off-host. Each half is tested against its
+    contract instead (what goes on the wire; what happens to what arrives).
+    Probe Q5 remains the only real measurement of the round trip.
+
+    **STILL TO DO for the storage unit:** the unit manifest + per-unit
+    dependency closure + N-artifact emit (`MODULES` is still one flat list
+    producing one file), and `StorageDesk.request` preferring a remote owner
+    over its local fallback. `StorageDesk` itself is 56 lines and depends only
+    on `core/bus` + `host`, so the cut is small once the build can emit two
+    files.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:

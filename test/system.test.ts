@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 // Installs the off-host mock onto globalThis.api (side effect) and provides the
 // test hooks. `api` itself is the ambient global (types/novelai/script-types.d.ts).
 import { __resetLorebookMock, __resetStorageMock, __resetUiMock, __uiWindows, __uiClickButton, __fireOnResponse, __authorNote, __fireOnContextBuilt, __seedDocument, __document, __fireOnGenerationEnd, __resetMessagingMock, __sentMessages, __deliverMessage, __uiTypeInto, __uiFieldValue, __uiFields, __accountStorage, __asScript, __currentScript } from "../src/host-mock";
@@ -48,7 +48,7 @@ import {
   countDayBoundaries, countFullMoons, nextFullMoon, type PlayableCharacter,
   WEEKDAYS, weekdayOf, weekdayName, formatStoryDay, MOON_PHASES, moonAt, nextMoonPhase,
   foldAfflictionTiers, isAwakened, CrayStore, uncancelableCap,
-  EventBus, PostOffice, Bus, isLocalChannel, busChannel, BUS_PRIORITIES, BUS_PHASES, LOCAL_PREFIX,
+  EventBus, PostOffice, REPLY_CHANNEL, Bus, BusEvent, isLocalChannel, busChannel, BUS_PRIORITIES, BUS_PHASES, LOCAL_PREFIX,
   HELLO_CHANNEL, INTEREST_ALL,
   commandEnvelope, envelopeToCommand, commandChannel, COMMAND_CHANNEL, COMMAND_RESULT_CHANNEL,
   rollSpendsCharge, expiryElapsed, makeAfflictionExpiry, describeExpiry,
@@ -9072,5 +9072,100 @@ describe("backgrounds are held per instance", () => {
     const out = await CommandRouter.route("show-background");
     expect(out).toContain("A Side 3");           // disp() spaces the hyphen
     expect(out).toContain("B Side 2");           // conferred once, then it stops
+  });
+});
+
+
+// =============================================================================
+// THE POST OFFICE LEARNS TO ASK
+// -----------------------------------------------------------------------------
+// `publish` broadcasts and returns, so a remote handler mutating its own copy of
+// the payload was invisible here - which is why no satellite could answer
+// anything. `ask` is the other half: one question, that question's answer.
+//
+// NOTE ON WHAT THESE TESTS CAN AND CANNOT PROVE. PostOffice is a static
+// singleton and the mock's subscription list is global, so two independent post
+// offices cannot coexist in one process - a real two-script round trip is NOT
+// simulable off-host. Each half is therefore tested against its contract: what
+// goes on the wire, and what happens to what arrives. Probe Q5 is what measured
+// the round trip for real (7ms, inside an awaiting hook).
+// =============================================================================
+describe("PostOffice.ask - the reply half of the wire", () => {
+  beforeEach(async () => {
+    __resetStorageMock(); __resetMessagingMock();
+    await PostOffice.close();
+    await PostOffice.open();
+  });
+  afterEach(async () => { await PostOffice.close(); });
+
+  test("a question goes out wrapped, and its answer comes back to the caller", async () => {
+    const pending = PostOffice.ask("naiowod:storage", { op: "get", key: "sheet" }, 2000);
+    // What actually crossed: the payload, wrapped with a correlation id.
+    const sent = __sentMessages().find(m => m.channel === "naiowod:storage");
+    expect(sent).toBeDefined();
+    const env = sent!.data as { __ask: string; data: unknown };
+    expect(typeof env.__ask).toBe("string");
+    expect(env.data).toEqual({ op: "get", key: "sheet" });
+
+    // The satellite answers ON the payload - which is how StorageDesk's
+    // handlers already work, setting `result` and `served` in place.
+    await __deliverMessage({
+      fromScriptId: "storage-script", channel: REPLY_CHANNEL,
+      data: { __ask: env.__ask, data: { op: "get", key: "sheet", result: { name: "Marius" }, served: true } },
+    });
+    expect(await pending).toEqual({ op: "get", key: "sheet", result: { name: "Marius" }, served: true });
+  });
+
+  test("an answer to a question nobody asked is dropped, not put on the bus", async () => {
+    let sawOnBus = 0;
+    const sub = Bus.on(REPLY_CHANNEL, () => { sawOnBus++; });
+    await __deliverMessage({
+      fromScriptId: "storage-script", channel: REPLY_CHANNEL,
+      data: { __ask: "no-such-question", data: { whatever: true } },
+    });
+    Bus.off(sub);
+    // Announcing every reply would put every storage read on the bus twice.
+    expect(sawOnBus).toBe(0);
+  });
+
+  test("a question that arrives is served locally and answered to the asker", async () => {
+    const seen: unknown[] = [];
+    const sub = Bus.on("naiowod:storage", (e: BusEvent<unknown>) => {
+      seen.push(e.data);
+      // Answer ON the payload, exactly as StorageDesk's own handler does.
+      (e.data as { result?: unknown; served?: boolean }).result = "the answer";
+      (e.data as { served?: boolean }).served = true;
+    });
+    await __deliverMessage({
+      fromScriptId: "kernel-script", channel: "naiowod:storage",
+      data: { __ask: "q-1", data: { op: "get", key: "sheet" } },
+    });
+    Bus.off(sub);
+    expect(seen).toHaveLength(1);
+    // ...and the answer was posted back to the ASKER, not broadcast.
+    const reply = __sentMessages().find(m => m.channel === REPLY_CHANNEL);
+    expect(reply?.toScriptId).toBe("kernel-script");
+    expect(reply!.data).toMatchObject({ __ask: "q-1", data: { result: "the answer", served: true } });
+  });
+
+  test("a handler that throws answers with the REASON, so the asker is not left hanging", async () => {
+    const sub = Bus.on("naiowod:storage", (e: BusEvent<unknown>) => {
+      e.pending.push(Promise.reject(new Error("quota exceeded")));
+    });
+    await __deliverMessage({
+      fromScriptId: "kernel-script", channel: "naiowod:storage",
+      data: { __ask: "q-2", data: { op: "set" } },
+    });
+    // `_serve` is deliberately fire-and-forget - the asker waits on its own
+    // timeout, not on us - so a handler with pending work replies a tick later.
+    await new Promise(r => setTimeout(r, 0));
+    Bus.off(sub);
+    const reply = __sentMessages().find(m => m.channel === REPLY_CHANNEL);
+    // A blocked asker gets a rejection it can fall back from, never silence.
+    expect(String((reply!.data as { error?: string }).error)).toContain("quota exceeded");
+  });
+
+  test("a satellite that never answers times out rather than hanging the hook", async () => {
+    await expect(PostOffice.ask("naiowod:storage", { op: "get" }, 30)).rejects.toThrow(/timed out/);
   });
 });

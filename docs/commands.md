@@ -2000,7 +2000,7 @@ change the default character
 set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start)
 
 ```
-[[set-trait <trait> <n> [group=".."] [note=".."] [paid=".."] [add] [in-story]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]]
+[[set-trait <trait> <n> [group=".."] [note=".."] [from=".."] [source=".."] [paid=".."] [add] [in-story]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]]
 ```
 
 > merits use [[take-merit]]; specialties use [[specialty]]
@@ -2011,6 +2011,8 @@ set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pill
 | `rating` | positional **required** | `<n>` <br>*e.g.* `8` |
 | `group` | named | Which group it belongs to (inferred when the trait is already known) <br>*e.g.* `background` |
 | `note` | named `literal` | Whose/which one this is - keeps it as a separate instance |
+| `from` | named | What confers this one - nests it beneath that on the sheet <br>*e.g.* `talisman` |
+| `source` | named | Where it came from outside the ledger (groups it on the sheet) <br>*e.g.* `storyteller` |
 | `paid` | named | What it really cost (0 = the Storyteller granted it) |
 | `add` | named `bool` | Hold ANOTHER of the same trait rather than replacing |
 | `in-story` | named `bool` | Keep this reply in the story for the AI to read (in-story=false hides one that normally stays) |
@@ -2018,7 +2020,7 @@ set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pill
 **`[[help set-trait]]`** replies:
 
 ```
-[SYSTEM: set-trait - set-trait <trait> <n> [group=".."] [note=".."] [paid=".."] [add] [in-story]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]
+[SYSTEM: set-trait - set-trait <trait> <n> [group=".."] [note=".."] [from=".."] [source=".."] [paid=".."] [add] [in-story]  (set any rating the sheet holds (Attribute, Ability, Background, Discipline, Pillar, pool start); merits use [[take-merit]]; specialties use [[specialty]])]
 ```
 
 ### `show-affliction`

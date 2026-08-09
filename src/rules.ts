@@ -1743,7 +1743,13 @@ export const DEFAULT_BACKGROUNDS: BackgroundDef[] = [
 ];
 
 // Every trait a character's Backgrounds CONFER, by name -> {rating, from}.
-// Highest wins when two backgrounds grant the same thing.
+//
+// HIGHEST WINS HERE, AND ONLY HERE. This answers "what rating does he have in
+// the conferred trait", which is one number by definition - two Libraries do not
+// make a deeper one. It is NOT the answer to "what does he hold": a character
+// with two Mentors has two Mentors, and collapsing them was the bug in §7.93.
+// `heldBackgrounds()` in state.ts is what enumerates instances; this stays a map
+// because a trait lookup wants a number.
 export function grantsFromBackgrounds(
   backgrounds: Record<string, number>, defs: BackgroundDef[],
 ): Record<string, { rating: number; from: string }> {

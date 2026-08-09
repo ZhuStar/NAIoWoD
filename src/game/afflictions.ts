@@ -9,7 +9,7 @@ import { formatStoryDate, parseDuration } from "../core/time";
 import { StringUtil } from "../core/traits";
 import { ABILITY_CATEGORIES, ALL_TRAIT_CATEGORIES, ATTRIBUTE_CATEGORIES, CAPABILITIES, CONSTRAINT_DOMAINS, CONSTRAINT_RELATIONS, GRANT_SOURCES, LIFT_POLICIES, SOAK_TABLES, describeExpiry, describeLift, disciplineDef, liftPolicyOf } from "../rules";
 import { ArcanumRegistry, KEY, LorebookManager, MeritFlawRegistry, PostOffice, TrackedLorebook, namedDefsToCard, reloadAllConfigStores } from "../services";
-import { AliasRef, AliasRegistry, AliasScope, CharacterAfflictions, CharacterCooldowns, CharacterResources, CharacterStore, CreatorMode, PLAYER_CHARACTERS_CATEGORY, PlayableCharacter, PlayerStore, StoryClock, TraitInstance, characterToCard, parseAliasToken, resolveAffliction, traitInCategory, traitKindOf } from "../state";
+import { BackgroundRegistry, AliasRef, AliasRegistry, AliasScope, CharacterAfflictions, CharacterCooldowns, CharacterResources, CharacterStore, CreatorMode, PLAYER_CHARACTERS_CATEGORY, PlayableCharacter, PlayerStore, StoryClock, TraitInstance, characterToCard, parseAliasToken, resolveAffliction, traitInCategory, traitKindOf } from "../state";
 import { CREATION_FIELDS, cmdBackground, cmdBackgrounds, cmdBudget, cmdChoose, cmdClans, cmdCosts, cmdCreation, cmdDefineBackground, cmdDefineResource, cmdDerived, cmdEval, cmdExtendTemplate, cmdForgetBackground, cmdForgetTemplate, cmdGrant, cmdPaid, cmdSupernatural, cmdTemplates, cmdUngrant } from "./character";
 import { cmdCreatePlayable, cmdCreatorMode, cmdPlay, disp, intOrUndef, noCharacter } from "./common";
 import { cmdCancelContest, cmdContest, cmdContestStatus, cmdContinueContest, cmdExtendedContest, cmdResist } from "./contests";
@@ -321,6 +321,12 @@ const TRAIT_GROUPS: Record<string, keyof PlayableCharacter> = {
 async function srdGroupOf(trait: string): Promise<string | undefined> {
   const key = StringUtil.normalize(trait);
   const has = (list: string[]): boolean => list.some(n => StringUtil.normalize(n) === key);
+  // THE REGISTRY FIRST. `define-background` writes there, and every display
+  // reads there, but this only ever asked the lorebook list - so a background
+  // you had just defined fell through to the free `traits` bucket and vanished
+  // from [[show-background]], contradicting the comment right below about a
+  // Background nobody has rated yet still filing as a Background.
+  if (BackgroundRegistry.get(key)) return "background";
   if (has(await LorebookManager.allBackgrounds())) return "background";
   for (const list of [LorebookManager.allTalents, LorebookManager.allSkills, LorebookManager.allKnowledges]) {
     if (has(await list())) return "ability";
@@ -354,8 +360,14 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
 
   const note = cmd.named["note"]?.trim();
   const paid = cmd.named["paid"]?.trim();
+  // What confers this one, and whether it came from outside the ledger. Both
+  // live on the INSTANCE because both are per-instance facts: one Mentor may be
+  // the ST's gift and the other bought (§7.93).
+  const from = cmd.named["from"]?.trim();
+  const source = cmd.named["source"]?.trim();
   const add = flagOf(cmd, "add") === true;
-  if (add || note !== undefined || (char.instances?.[trait]?.length ?? 0) > 1) {
+  if (add || note !== undefined || from !== undefined || source !== undefined
+      || (char.instances?.[trait]?.length ?? 0) > 1) {
     // More than one of the same Background: keep them as instances, each with
     // its own note and its own price.
     const list = add ? [...(char.instances?.[trait] ?? [])] : [];
@@ -363,6 +375,8 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
     const inst: TraitInstance = { rating };
     if (note) inst.note = note;
     if (paid !== undefined) inst.paid = paid;
+    if (from) inst.from = from;
+    if (source) inst.source = source;
     list.push(inst);
     char.instances = { ...(char.instances ?? {}), [trait]: list };
     bucket[trait] = Math.max(...list.map(i => i.rating));
@@ -638,6 +652,8 @@ CommandRouter.register("set-trait", cmdSetTrait, {
     { key: "rating", kind: "positional", required: true, hint: "<n>", example: "8" },
     { key: "group", kind: "named", desc: "Which group it belongs to (inferred when the trait is already known)", example: "background" },
     { key: "note", kind: "named", type: "literal", desc: "Whose/which one this is - keeps it as a separate instance" },
+    { key: "from", kind: "named", desc: "What confers this one - nests it beneath that on the sheet", example: "talisman" },
+    { key: "source", kind: "named", desc: "Where it came from outside the ledger (groups it on the sheet)", example: "storyteller" },
     { key: "paid", kind: "named", desc: "What it really cost (0 = the Storyteller granted it)" },
     { key: "add", kind: "named", type: "bool", desc: "Hold ANOTHER of the same trait rather than replacing" },
   ],

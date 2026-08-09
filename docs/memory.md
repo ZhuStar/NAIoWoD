@@ -7,8 +7,9 @@
 > lists everything not yet built. **Keep it current: any commit that changes
 > behavior, architecture, commands, data shapes, or the roadmap must update
 > this file in the same commit.** Docs-only commits don't require a re-sync.
-> **Last synced with the code as of commit `101ec10`** ("The scope was
-> always there").
+> **Last synced with the code as of commit `47d262f`** ("A man can have two
+> Mentors").
+> Prior: `101ec10` ("The scope was always there").
 > Prior: `096eaca` ("Eleven modules, one order").
 > Prior: `dd81200` ("Never silence a sibling").
 > Prior: `da7312c` ("Seven milliseconds").
@@ -4797,6 +4798,51 @@ and `prefill` are mocked/available but not yet written.
     carried a scope). The first attempt did it in two passes and could no longer
     tell which bare `show-constraint` had come from which alias — reverted and
     redone as one pass off the original file.
+
+93. **A man can have two Mentors** (owner: *"the 'higher instance wins' is wrong
+    for backgrounds. You can have multiple mentors, which is the case of my
+    character"*, with a sheet showing nested grants and a Storyteller-bonus
+    grouping).
+
+    **THE DATA WAS ALREADY RIGHT; EVERY READER WAS WRONG.** `set-trait ... add`
+    has always stored `char.instances[trait]` as a list of
+    `{rating, note, paid}` — but it also writes
+    `backgrounds[trait] = Math.max(...)`, and **every display read that bucket**.
+    So a character with Mentor 5 (Velia) and Mentor 3 (Daujotas) showed
+    "Mentor 5" and nothing else, while the definition itself says *"More than one
+    may be held"*. Nothing needed migrating; the readers needed fixing.
+
+    - **`heldBackgrounds(char)`** (state.ts) enumerates one node per INSTANCE and
+      returns a tree. `grantsFromBackgrounds` keeps collapsing to the highest and
+      that stays correct — it answers "what rating does he have in the conferred
+      trait", which is one number by definition. Two Libraries do not make a
+      deeper one; two Mentors are two Mentors. The bug was using the second
+      answer for the first question.
+    - **`TraitInstance.from`** links an instance to the one that confers it.
+      This has to live on the instance because the label and rating are the
+      PLAYER's, not the definition's: "Library of the Unseen" at 8 is not
+      something a Talisman def could know. Nesting is recursive and
+      cycle-guarded.
+    - **`TraitInstance.source`** groups a heading ("Storyteller bonuses:").
+      Recorded and displayed; whether it escapes the creation budget is
+      **(ST-enforced)** — §3's rule, since the budget subsystem is not told.
+    - **`show-background <name>`** now counts instances instead of picking one.
+
+    **TWO BUGS FOUND ON THE WAY, both older than this change:**
+
+    - **A background you had just DEFINED did not file as one.** `srdGroupOf`
+      asked the lorebook list and never `BackgroundRegistry` — which is what
+      `define-background` writes to and what every display reads — so
+      `define-background` then `set-trait` put it in the free `traits` bucket
+      and it vanished from `show-background`. The comment directly beneath said
+      it should file as a Background. Now it does.
+    - (§7.92's `show-background` scope bug was the previous one in this area.)
+
+    **NOT DECIDED, and the questions were asked:** whether a Storyteller bonus
+    is merely grouped, or also exempt from the budget, or exempt from the
+    background's own max as well (Library 8 and Sanctum 8 exceed the usual
+    ceiling in the owner's sheet, which hints at the third). Built as grouping +
+    record; the mechanical exemption is one flag away once answered.
 
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 

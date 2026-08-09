@@ -572,7 +572,36 @@ export interface PlayableCharacter {
   priorities?: Record<string, string>;
 }
 // One of several things of the same name (two Mentors), with what THIS one cost.
-export interface TraitInstance { rating: number; note?: string; paid?: string }
+//
+// `from` is what makes a SHEET rather than a list. A Talisman that is a place
+// confers a Library, and that Library confers a Cray and a Sanctum - but their
+// names and ratings ("Library of the Unseen", 8) are the PLAYER's, not the
+// definition's, so the link has to live on the instance. Naming the granter here
+// is what lets the sheet print the nesting instead of a flat pile of dots.
+//
+// `source` is where it came from OUTSIDE the ledger - "storyteller" for a
+// bonus the ST simply gave. Recorded and shown; whether it escapes the creation
+// budget is ST-enforced for now (the budget subsystem is not told about it).
+export interface TraitInstance {
+  rating: number;
+  note?: string;                    // the label: "Velia, the Rafastio Matriarch"
+  paid?: string;
+  from?: string;                    // the instance that confers this one
+  source?: string;                  // "storyteller" - outside what was bought
+}
+
+// A background AS HELD: one node per instance, carrying whatever hangs beneath
+// it. The old shape could not say this at all - `backgrounds` keeps ONE number
+// per name (§7.93), so a character with two Mentors showed only the higher.
+export interface HeldBackground {
+  trait: string;
+  rating: number;
+  note?: string;
+  source?: string;
+  /** True when a definition confers this and the player has not named it. */
+  implied?: boolean;
+  granted: HeldBackground[];
+}
 
 export class CharacterStore {
   private static _storage = new ScopedStorage();
@@ -1365,6 +1394,71 @@ export function traitKindsOf(char: PlayableCharacter, name: string): string[] {
 // can say where a rating came from.
 export function grantedTraitsOf(char: PlayableCharacter): Record<string, { rating: number; from: string }> {
   return grantsFromBackgrounds(char.backgrounds ?? {}, BackgroundRegistry.all());
+}
+
+// EVERY instance a character holds, as a tree. `backgrounds` keeps one number
+// per name, so it can only ever answer "his best Mentor"; the instances beside
+// it hold the rest, and until now nothing read them (§7.93). A character with
+// Mentor 5 (Velia) and Mentor 3 (Daujotas) has TWO mentors, and both are here.
+//
+// Nesting comes from two places, and the player's wins:
+//   * an instance naming its granter in `from` hangs under that instance;
+//   * a definition's own `grants` still show, marked `implied`, so a Talisman
+//     says what it would confer even before the player has named the Library.
+export function heldBackgrounds(char: PlayableCharacter): HeldBackground[] {
+  const defs = BackgroundRegistry.all();
+  const defOf = (t: string): BackgroundDef | undefined =>
+    defs.find(d => StringUtil.normalize(d.name) === t);
+
+  // Flatten the character's holdings into one node per instance.
+  const nodes: Array<HeldBackground & { key: string; from?: string }> = [];
+  for (const [rawName, rating] of Object.entries(char.backgrounds ?? {})) {
+    const trait = StringUtil.normalize(rawName);
+    const list = char.instances?.[trait]?.length ? char.instances[trait] : [{ rating }];
+    for (const inst of list) {
+      if (inst.rating <= 0) continue;
+      nodes.push({
+        key: `${trait}::${StringUtil.normalize(inst.note ?? "")}`, trait, rating: inst.rating,
+        ...(inst.note ? { note: inst.note } : {}), ...(inst.source ? { source: inst.source } : {}),
+        ...(inst.from ? { from: StringUtil.normalize(inst.from) } : {}), granted: [],
+      });
+    }
+  }
+  // A `from` may name the bare background ("talisman") or one instance of it
+  // ("talisman::cosmos-within-the-measure"); both have to find their parent.
+  const parentOf = (from: string): HeldBackground | undefined =>
+    nodes.find(n => n.key === from) ?? nodes.find(n => n.trait === from);
+
+  const roots: HeldBackground[] = [];
+  for (const n of nodes) {
+    const parent = n.from ? parentOf(n.from) : undefined;
+    if (parent && parent !== n) parent.granted.push(n); else roots.push(n);
+  }
+
+  // What the DEFINITIONS say each one confers, for anything the player has not
+  // named. Recursive - a Library conferred by a Talisman confers in its turn -
+  // and cycle-guarded, because a definition may point back up its own chain.
+  const implied = (trait: string, rating: number, seen: Set<string>): HeldBackground[] => {
+    const def = defOf(trait);
+    if (!def || seen.has(trait)) return [];
+    const next = new Set(seen).add(trait);
+    const out: HeldBackground[] = [];
+    for (const g of def.grants ?? []) {
+      if (rating < (g.atLeast ?? 1)) continue;
+      const key = StringUtil.normalize(g.trait);
+      // The player naming their own beats the definition describing one.
+      if (nodes.some(n => n.trait === key)) continue;
+      out.push({ trait: key, rating: g.rating, ...(g.note ? { note: g.note } : {}),
+        implied: true, granted: implied(key, g.rating, next) });
+    }
+    return out;
+  };
+  const fill = (n: HeldBackground, seen: Set<string>): void => {
+    for (const child of n.granted) fill(child, new Set(seen).add(n.trait));
+    n.granted.push(...implied(n.trait, n.rating, seen));
+  };
+  for (const r of roots) fill(r, new Set());
+  return roots;
 }
 
 // A trait as the engine should READ it: the sheet's own rating, or a granted

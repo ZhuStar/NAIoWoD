@@ -8973,3 +8973,82 @@ describe("the game layer after the split", () => {
   });
 
 });
+
+
+// =============================================================================
+// A MAN CAN HAVE TWO MENTORS
+// -----------------------------------------------------------------------------
+// `backgrounds` keeps ONE number per name, so every reader answered with the
+// higher of two instances and said nothing about the other - even though the
+// instances were already stored and the definition itself says "More than one
+// may be held". §7.93.
+// =============================================================================
+describe("backgrounds are held per instance", () => {
+  const setup = async (): Promise<void> => {
+    __resetStorageMock(); __resetLorebookMock(); resetAllConfigStores();
+    await LorebookManager.bootstrap();
+    await CommandRouter.route('create-playable name="Marius" templates=mage');
+  };
+
+  test("two Mentors are two Mentors - the listing shows both, not the better one", async () => {
+    await setup();
+    await CommandRouter.route('set-trait mentor 5 note=`Velia, the Rafastio Matriarch`');
+    await CommandRouter.route('set-trait mentor 3 note=`Daujotas, the Ash Shepherd` add');
+    const out = await CommandRouter.route("show-background");
+    expect(out).toContain("Mentor 5 (Velia, the Rafastio Matriarch)");
+    expect(out).toContain("Mentor 3 (Daujotas, the Ash Shepherd)");
+    // ...and asking about the background itself counts them rather than picking.
+    const one = await CommandRouter.route("show-background mentor");
+    expect(one).toContain("has 2:");
+    expect(one).toContain("3 (Daujotas, the Ash Shepherd)");
+  });
+
+  test("`from` nests an instance under what confers it, recursively", async () => {
+    await setup();
+    await CommandRouter.route('set-trait talisman 5 note=`Cosmos Within the Measure`');
+    await CommandRouter.route('set-trait library 8 note=`Library of the Unseen` from=talisman add');
+    await CommandRouter.route('set-trait sanctum 8 note=`the rotunda workshop` from=library add');
+    const out = await CommandRouter.route("show-background");
+    const lines = out.split("\n");
+    const at = (frag: string): number => lines.findIndex(l => l.includes(frag));
+    const indent = (i: number): number => lines[i].search(/\S/);
+    // Each one sits deeper than the thing that grants it - the sheet's shape IS
+    // the claim, so indentation is what the test checks.
+    expect(indent(at("Library of the Unseen"))).toBeGreaterThan(indent(at("Cosmos Within the Measure")));
+    expect(indent(at("the rotunda workshop"))).toBeGreaterThan(indent(at("Library of the Unseen")));
+    expect(out).toContain("grants:");
+  });
+
+  test("a `source` groups instances under their own heading, per instance", async () => {
+    await setup();
+    await CommandRouter.route('set-trait mentor 5 note=`Velia` source=storyteller');
+    await CommandRouter.route('set-trait mentor 3 note=`Daujotas` add');
+    const out = await CommandRouter.route("show-background");
+    const lines = out.split("\n");
+    const heading = lines.findIndex(l => l.includes("Storyteller bonuses:"));
+    expect(heading).toBeGreaterThanOrEqual(0);
+    // The gift is under the heading; the bought one is NOT - one Mentor each way.
+    expect(lines[heading + 1]).toContain("Velia");
+    expect(lines.slice(heading + 1).find(l => l.includes("Daujotas"))!.search(/\S/))
+      .toBeLessThan(lines[heading + 1].search(/\S/));
+  });
+
+  test("a definition's own grants still show, marked, until the player names one", async () => {
+    await setup();
+    await CommandRouter.route('define-background name="estate" max=5 grants="library:3"');
+    await CommandRouter.route('set-trait estate 4 note=`the old house`');
+    const out = await CommandRouter.route("show-background");
+    expect(out).toContain("Library 3");
+    expect(out).toContain("conferred");           // it is the def talking, not the player
+  });
+
+  test("a grant cycle terminates instead of hanging", async () => {
+    await setup();
+    await CommandRouter.route('define-background name="a-side" max=5 grants="b-side:2"');
+    await CommandRouter.route('define-background name="b-side" max=5 grants="a-side:2"');
+    await CommandRouter.route('set-trait a-side 3');
+    const out = await CommandRouter.route("show-background");
+    expect(out).toContain("A Side 3");           // disp() spaces the hyphen
+    expect(out).toContain("B Side 2");           // conferred once, then it stops
+  });
+});

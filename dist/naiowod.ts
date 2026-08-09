@@ -4910,7 +4910,13 @@ const DEFAULT_BACKGROUNDS: BackgroundDef[] = [
 ];
 
 // Every trait a character's Backgrounds CONFER, by name -> {rating, from}.
-// Highest wins when two backgrounds grant the same thing.
+//
+// HIGHEST WINS HERE, AND ONLY HERE. This answers "what rating does he have in
+// the conferred trait", which is one number by definition - two Libraries do not
+// make a deeper one. It is NOT the answer to "what does he hold": a character
+// with two Mentors has two Mentors, and collapsing them was the bug in §7.93.
+// `heldBackgrounds()` in state.ts is what enumerates instances; this stays a map
+// because a trait lookup wants a number.
 function grantsFromBackgrounds(
   backgrounds: Record<string, number>, defs: BackgroundDef[],
 ): Record<string, { rating: number; from: string }> {
@@ -8548,7 +8554,36 @@ interface PlayableCharacter {
   priorities?: Record<string, string>;
 }
 // One of several things of the same name (two Mentors), with what THIS one cost.
-interface TraitInstance { rating: number; note?: string; paid?: string }
+//
+// `from` is what makes a SHEET rather than a list. A Talisman that is a place
+// confers a Library, and that Library confers a Cray and a Sanctum - but their
+// names and ratings ("Library of the Unseen", 8) are the PLAYER's, not the
+// definition's, so the link has to live on the instance. Naming the granter here
+// is what lets the sheet print the nesting instead of a flat pile of dots.
+//
+// `source` is where it came from OUTSIDE the ledger - "storyteller" for a
+// bonus the ST simply gave. Recorded and shown; whether it escapes the creation
+// budget is ST-enforced for now (the budget subsystem is not told about it).
+interface TraitInstance {
+  rating: number;
+  note?: string;                    // the label: "Velia, the Rafastio Matriarch"
+  paid?: string;
+  from?: string;                    // the instance that confers this one
+  source?: string;                  // "storyteller" - outside what was bought
+}
+
+// A background AS HELD: one node per instance, carrying whatever hangs beneath
+// it. The old shape could not say this at all - `backgrounds` keeps ONE number
+// per name (§7.93), so a character with two Mentors showed only the higher.
+interface HeldBackground {
+  trait: string;
+  rating: number;
+  note?: string;
+  source?: string;
+  /** True when a definition confers this and the player has not named it. */
+  implied?: boolean;
+  granted: HeldBackground[];
+}
 
 class CharacterStore {
   private static _storage = new ScopedStorage();
@@ -9341,6 +9376,71 @@ function traitKindsOf(char: PlayableCharacter, name: string): string[] {
 // can say where a rating came from.
 function grantedTraitsOf(char: PlayableCharacter): Record<string, { rating: number; from: string }> {
   return grantsFromBackgrounds(char.backgrounds ?? {}, BackgroundRegistry.all());
+}
+
+// EVERY instance a character holds, as a tree. `backgrounds` keeps one number
+// per name, so it can only ever answer "his best Mentor"; the instances beside
+// it hold the rest, and until now nothing read them (§7.93). A character with
+// Mentor 5 (Velia) and Mentor 3 (Daujotas) has TWO mentors, and both are here.
+//
+// Nesting comes from two places, and the player's wins:
+//   * an instance naming its granter in `from` hangs under that instance;
+//   * a definition's own `grants` still show, marked `implied`, so a Talisman
+//     says what it would confer even before the player has named the Library.
+function heldBackgrounds(char: PlayableCharacter): HeldBackground[] {
+  const defs = BackgroundRegistry.all();
+  const defOf = (t: string): BackgroundDef | undefined =>
+    defs.find(d => StringUtil.normalize(d.name) === t);
+
+  // Flatten the character's holdings into one node per instance.
+  const nodes: Array<HeldBackground & { key: string; from?: string }> = [];
+  for (const [rawName, rating] of Object.entries(char.backgrounds ?? {})) {
+    const trait = StringUtil.normalize(rawName);
+    const list = char.instances?.[trait]?.length ? char.instances[trait] : [{ rating }];
+    for (const inst of list) {
+      if (inst.rating <= 0) continue;
+      nodes.push({
+        key: `${trait}::${StringUtil.normalize(inst.note ?? "")}`, trait, rating: inst.rating,
+        ...(inst.note ? { note: inst.note } : {}), ...(inst.source ? { source: inst.source } : {}),
+        ...(inst.from ? { from: StringUtil.normalize(inst.from) } : {}), granted: [],
+      });
+    }
+  }
+  // A `from` may name the bare background ("talisman") or one instance of it
+  // ("talisman::cosmos-within-the-measure"); both have to find their parent.
+  const parentOf = (from: string): HeldBackground | undefined =>
+    nodes.find(n => n.key === from) ?? nodes.find(n => n.trait === from);
+
+  const roots: HeldBackground[] = [];
+  for (const n of nodes) {
+    const parent = n.from ? parentOf(n.from) : undefined;
+    if (parent && parent !== n) parent.granted.push(n); else roots.push(n);
+  }
+
+  // What the DEFINITIONS say each one confers, for anything the player has not
+  // named. Recursive - a Library conferred by a Talisman confers in its turn -
+  // and cycle-guarded, because a definition may point back up its own chain.
+  const implied = (trait: string, rating: number, seen: Set<string>): HeldBackground[] => {
+    const def = defOf(trait);
+    if (!def || seen.has(trait)) return [];
+    const next = new Set(seen).add(trait);
+    const out: HeldBackground[] = [];
+    for (const g of def.grants ?? []) {
+      if (rating < (g.atLeast ?? 1)) continue;
+      const key = StringUtil.normalize(g.trait);
+      // The player naming their own beats the definition describing one.
+      if (nodes.some(n => n.trait === key)) continue;
+      out.push({ trait: key, rating: g.rating, ...(g.note ? { note: g.note } : {}),
+        implied: true, granted: implied(key, g.rating, next) });
+    }
+    return out;
+  };
+  const fill = (n: HeldBackground, seen: Set<string>): void => {
+    for (const child of n.granted) fill(child, new Set(seen).add(n.trait));
+    n.granted.push(...implied(n.trait, n.rating, seen));
+  };
+  for (const r of roots) fill(r, new Set());
+  return roots;
 }
 
 // A trait as the engine should READ it: the sheet's own rating, or a granted
@@ -13436,16 +13536,60 @@ async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
 // accepted `in=` and quietly threw it away, so `show-background sanctum in=Kvar`
 // answered with MIRA's rating under Kvar's question - a confident wrong number
 // attributed to the wrong character, which is worse than an error.
+// EVERY name in a tree, so a grant is not printed twice - once nested and once
+// in the flat "Conferred" tail.
+function flatTraits(nodes: HeldBackground[]): string[] {
+  return nodes.flatMap(n => [n.trait, ...flatTraits(n.granted)]);
+}
+
+// The sheet's shape, not a sentence: one instance per line, its own label beside
+// it, and whatever it confers indented beneath. A character with two Mentors has
+// two Mentor lines - which is the whole point (§7.93).
+//
+// The ST's gifts are grouped first and marked, because "what I was given" and
+// "what I bought" are different questions and a player asks them separately.
+function renderBackgroundTree(nodes: HeldBackground[], char: PlayableCharacter, depth = 0): string {
+  const pad = "  ".repeat(depth + 1);
+  const line = (n: HeldBackground): string => {
+    const bits = [`${disp(n.trait)} ${n.rating}`];
+    if (n.note) bits.push(`(${n.note})`);
+    const paid = depth === 0 ? char.paid?.[n.trait] : undefined;
+    if (paid !== undefined) bits.push(`[paid ${paid}]`);
+    if (n.implied) bits.push("- conferred");
+    const head = `${pad}${bits.join(" ")}`;
+    return n.granted.length ? `${head}\n${pad}  grants:\n${renderBackgroundTree(n.granted, char, depth + 2)}` : head;
+  };
+  if (depth > 0) return nodes.map(line).join("\n");
+  const gifted = nodes.filter(n => n.source);
+  const bought = nodes.filter(n => !n.source);
+  const out: string[] = [];
+  if (gifted.length) {
+    // One heading per distinct source, so "storyteller" and anything else the
+    // chronicle invents both read the same way without the engine naming them.
+    for (const src of [...new Set(gifted.map(n => n.source!))]) {
+      out.push(`${pad}${disp(src)} bonuses:`);
+      out.push(renderBackgroundTree(gifted.filter(n => n.source === src), char, depth + 1));
+    }
+  }
+  out.push(...bought.map(line));
+  return out.join("\n");
+}
+
 async function cmdBackgrounds(forChar?: PlayableCharacter): Promise<string> {
   const char = forChar ?? await CharacterStore.getCurrent();
   const defs = BackgroundRegistry.all();
   const held = char?.backgrounds ?? {};
   const granted = char ? grantedTraitsOf(char) : {};
-  const mine = Object.entries(held).filter(([, v]) => v > 0)
-    .map(([n, v]) => `${disp(n)} ${v}${char?.paid?.[n] !== undefined ? ` (paid ${char.paid![n]})` : ""}`);
-  const conferred = Object.entries(granted).map(([n, g]) => `${disp(n)} ${g.rating} (from ${disp(g.from)})`);
   const parts = [`Defined: ${defs.map(d => d.name).join(", ")}`];
-  if (mine.length) parts.push(`${disp(char!.name)} holds: ${mine.join(", ")}`);
+  if (char) {
+    const tree = heldBackgrounds(char);
+    if (tree.length) parts.push(`${disp(char.name)} holds:\n${renderBackgroundTree(tree, char)}`);
+  }
+  // Grants the tree does not already account for - anything conferred on a name
+  // the character also holds outright shows on its own line rather than twice.
+  const shown = new Set(char ? flatTraits(heldBackgrounds(char)) : []);
+  const conferred = Object.entries(granted).filter(([n]) => !shown.has(n))
+    .map(([n, g]) => `${disp(n)} ${g.rating} (from ${disp(g.from)})`);
   if (conferred.length) parts.push(`Conferred: ${conferred.join(", ")}`);
   return sys(`${parts.join(". ")}. [[show-background <name>]] for one; [[set-trait <name> <n>]] rates one; `
     + `[[define-background]] adds one.`);
@@ -13457,10 +13601,24 @@ async function cmdBackground(cmd: ParsedCommand, forChar?: PlayableCharacter): P
   const def = BackgroundRegistry.get(StringUtil.normalize(raw));
   if (!def) return sys(`No background "${raw}". [[show-background]] lists them.`);
   const char = forChar ?? await CharacterStore.getCurrent();
-  const rating = char ? char.backgrounds?.[StringUtil.normalize(def.name)] ?? 0 : 0;
+  const key = StringUtil.normalize(def.name);
+  const rating = char ? char.backgrounds?.[key] ?? 0 : 0;
   const bits = [`background "${disp(def.name)}"`, `max ${def.max ?? 5}`];
   if (def.templates?.length) bits.push(`only ${def.templates.join("/")}`);
-  if (char) bits.push(`${disp(char.name)} has ${rating}`);
+  if (char) {
+    // EVERY one he holds, not the highest. `backgrounds` keeps a single number
+    // per name, so asking it about a man with two Mentors used to answer with
+    // his better one and say nothing about the other (§7.93).
+    const mine = char.instances?.[key]?.filter(i => i.rating > 0) ?? [];
+    if (mine.length > 1) {
+      bits.push(`${disp(char.name)} has ${mine.length}: `
+        + mine.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(", "));
+    } else if (mine.length === 1) {
+      bits.push(`${disp(char.name)} has ${mine[0].rating}${mine[0].note ? ` (${mine[0].note})` : ""}`);
+    } else {
+      bits.push(`${disp(char.name)} has ${rating}`);
+    }
+  }
   const tier = backgroundTierAt(def, rating);
   for (const t of def.tiers ?? []) {
     const marks = [t.max !== undefined ? `hold ${t.max}` : "", t.perTurn !== undefined ? `${t.perTurn}/turn` : "", t.note ?? ""].filter(Boolean);
@@ -16924,6 +17082,12 @@ const TRAIT_GROUPS: Record<string, keyof PlayableCharacter> = {
 async function srdGroupOf(trait: string): Promise<string | undefined> {
   const key = StringUtil.normalize(trait);
   const has = (list: string[]): boolean => list.some(n => StringUtil.normalize(n) === key);
+  // THE REGISTRY FIRST. `define-background` writes there, and every display
+  // reads there, but this only ever asked the lorebook list - so a background
+  // you had just defined fell through to the free `traits` bucket and vanished
+  // from [[show-background]], contradicting the comment right below about a
+  // Background nobody has rated yet still filing as a Background.
+  if (BackgroundRegistry.get(key)) return "background";
   if (has(await LorebookManager.allBackgrounds())) return "background";
   for (const list of [LorebookManager.allTalents, LorebookManager.allSkills, LorebookManager.allKnowledges]) {
     if (has(await list())) return "ability";
@@ -16957,8 +17121,14 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
 
   const note = cmd.named["note"]?.trim();
   const paid = cmd.named["paid"]?.trim();
+  // What confers this one, and whether it came from outside the ledger. Both
+  // live on the INSTANCE because both are per-instance facts: one Mentor may be
+  // the ST's gift and the other bought (§7.93).
+  const from = cmd.named["from"]?.trim();
+  const source = cmd.named["source"]?.trim();
   const add = flagOf(cmd, "add") === true;
-  if (add || note !== undefined || (char.instances?.[trait]?.length ?? 0) > 1) {
+  if (add || note !== undefined || from !== undefined || source !== undefined
+      || (char.instances?.[trait]?.length ?? 0) > 1) {
     // More than one of the same Background: keep them as instances, each with
     // its own note and its own price.
     const list = add ? [...(char.instances?.[trait] ?? [])] : [];
@@ -16966,6 +17136,8 @@ async function cmdSetTrait(cmd: ParsedCommand): Promise<string> {
     const inst: TraitInstance = { rating };
     if (note) inst.note = note;
     if (paid !== undefined) inst.paid = paid;
+    if (from) inst.from = from;
+    if (source) inst.source = source;
     list.push(inst);
     char.instances = { ...(char.instances ?? {}), [trait]: list };
     bucket[trait] = Math.max(...list.map(i => i.rating));
@@ -17241,6 +17413,8 @@ CommandRouter.register("set-trait", cmdSetTrait, {
     { key: "rating", kind: "positional", required: true, hint: "<n>", example: "8" },
     { key: "group", kind: "named", desc: "Which group it belongs to (inferred when the trait is already known)", example: "background" },
     { key: "note", kind: "named", type: "literal", desc: "Whose/which one this is - keeps it as a separate instance" },
+    { key: "from", kind: "named", desc: "What confers this one - nests it beneath that on the sheet", example: "talisman" },
+    { key: "source", kind: "named", desc: "Where it came from outside the ledger (groups it on the sheet)", example: "storyteller" },
     { key: "paid", kind: "named", desc: "What it really cost (0 = the Storyteller granted it)" },
     { key: "add", kind: "named", type: "bool", desc: "Hold ANOTHER of the same trait rather than replacing" },
   ],

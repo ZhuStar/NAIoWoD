@@ -8,7 +8,7 @@ import { StringUtil } from "../core/traits";
 import { TraitResolver } from "../rolls";
 import { AFFINITY_SOURCES, ATTRIBUTES, BackgroundDef, BudgetDef, BudgetEntry, CLANS, COST_PURSES, CostTable, CreationBudget, DEFAULT_SUPERNATURAL_CATEGORIES, DEFAULT_SUPERNATURAL_TRAITS, DEFAULT_TEMPLATE_DEFS, GRANT_SOURCES, NOT_PURCHASABLE, ROADS, ResourceDef, SOAK_TABLES, TEMPLATES, TemplateDef, TraitGrant, TraitLimit, advancementCostsFrom, affinityDisciplines, backgroundTierAt, budgetBuyable, budgetDef, budgetOfKind, categoryOpenTo, clanByName, creationBudgetFor, describeCreationGrant, fellowshipByName, grantSourceNote, kindSpends, makeBackgroundDef, makeTemplateDef, roadByName, roadRatingExpr, sourceDrawsOnPurse, supernaturalTraitOf } from "../rules";
 import { LorebookManager } from "../services";
-import { AdvancementCosts, BackgroundRegistry, COSTS_CONFIG_ENTRY, CharacterStore, DerivedValue, PlayableCharacter, ResourceOverrides, ScopeExtension, StoryClock, TemplateRegistry, characterScope, derivedValuesOf, evalOn, grantedTraitsOf, lastTemplateProblems, numericOn, ownedPowerInstances, resolveTraitFromRecord, roadOf, traitValueOf } from "../state";
+import { AdvancementCosts, BackgroundRegistry, COSTS_CONFIG_ENTRY, CharacterStore, DerivedValue, HeldBackground, heldBackgrounds, PlayableCharacter, ResourceOverrides, ScopeExtension, StoryClock, TemplateRegistry, characterScope, derivedValuesOf, evalOn, grantedTraitsOf, lastTemplateProblems, numericOn, ownedPowerInstances, resolveTraitFromRecord, roadOf, traitValueOf } from "../state";
 import { resolveCharacterRef } from "./afflictions";
 import { disp, intOrUndef, noCharacter } from "./common";
 import { characterRollEnv } from "./effects";
@@ -836,16 +836,60 @@ export async function cmdDefineResource(cmd: ParsedCommand): Promise<string> {
 // accepted `in=` and quietly threw it away, so `show-background sanctum in=Kvar`
 // answered with MIRA's rating under Kvar's question - a confident wrong number
 // attributed to the wrong character, which is worse than an error.
+// EVERY name in a tree, so a grant is not printed twice - once nested and once
+// in the flat "Conferred" tail.
+function flatTraits(nodes: HeldBackground[]): string[] {
+  return nodes.flatMap(n => [n.trait, ...flatTraits(n.granted)]);
+}
+
+// The sheet's shape, not a sentence: one instance per line, its own label beside
+// it, and whatever it confers indented beneath. A character with two Mentors has
+// two Mentor lines - which is the whole point (§7.93).
+//
+// The ST's gifts are grouped first and marked, because "what I was given" and
+// "what I bought" are different questions and a player asks them separately.
+export function renderBackgroundTree(nodes: HeldBackground[], char: PlayableCharacter, depth = 0): string {
+  const pad = "  ".repeat(depth + 1);
+  const line = (n: HeldBackground): string => {
+    const bits = [`${disp(n.trait)} ${n.rating}`];
+    if (n.note) bits.push(`(${n.note})`);
+    const paid = depth === 0 ? char.paid?.[n.trait] : undefined;
+    if (paid !== undefined) bits.push(`[paid ${paid}]`);
+    if (n.implied) bits.push("- conferred");
+    const head = `${pad}${bits.join(" ")}`;
+    return n.granted.length ? `${head}\n${pad}  grants:\n${renderBackgroundTree(n.granted, char, depth + 2)}` : head;
+  };
+  if (depth > 0) return nodes.map(line).join("\n");
+  const gifted = nodes.filter(n => n.source);
+  const bought = nodes.filter(n => !n.source);
+  const out: string[] = [];
+  if (gifted.length) {
+    // One heading per distinct source, so "storyteller" and anything else the
+    // chronicle invents both read the same way without the engine naming them.
+    for (const src of [...new Set(gifted.map(n => n.source!))]) {
+      out.push(`${pad}${disp(src)} bonuses:`);
+      out.push(renderBackgroundTree(gifted.filter(n => n.source === src), char, depth + 1));
+    }
+  }
+  out.push(...bought.map(line));
+  return out.join("\n");
+}
+
 export async function cmdBackgrounds(forChar?: PlayableCharacter): Promise<string> {
   const char = forChar ?? await CharacterStore.getCurrent();
   const defs = BackgroundRegistry.all();
   const held = char?.backgrounds ?? {};
   const granted = char ? grantedTraitsOf(char) : {};
-  const mine = Object.entries(held).filter(([, v]) => v > 0)
-    .map(([n, v]) => `${disp(n)} ${v}${char?.paid?.[n] !== undefined ? ` (paid ${char.paid![n]})` : ""}`);
-  const conferred = Object.entries(granted).map(([n, g]) => `${disp(n)} ${g.rating} (from ${disp(g.from)})`);
   const parts = [`Defined: ${defs.map(d => d.name).join(", ")}`];
-  if (mine.length) parts.push(`${disp(char!.name)} holds: ${mine.join(", ")}`);
+  if (char) {
+    const tree = heldBackgrounds(char);
+    if (tree.length) parts.push(`${disp(char.name)} holds:\n${renderBackgroundTree(tree, char)}`);
+  }
+  // Grants the tree does not already account for - anything conferred on a name
+  // the character also holds outright shows on its own line rather than twice.
+  const shown = new Set(char ? flatTraits(heldBackgrounds(char)) : []);
+  const conferred = Object.entries(granted).filter(([n]) => !shown.has(n))
+    .map(([n, g]) => `${disp(n)} ${g.rating} (from ${disp(g.from)})`);
   if (conferred.length) parts.push(`Conferred: ${conferred.join(", ")}`);
   return sys(`${parts.join(". ")}. [[show-background <name>]] for one; [[set-trait <name> <n>]] rates one; `
     + `[[define-background]] adds one.`);
@@ -857,10 +901,24 @@ export async function cmdBackground(cmd: ParsedCommand, forChar?: PlayableCharac
   const def = BackgroundRegistry.get(StringUtil.normalize(raw));
   if (!def) return sys(`No background "${raw}". [[show-background]] lists them.`);
   const char = forChar ?? await CharacterStore.getCurrent();
-  const rating = char ? char.backgrounds?.[StringUtil.normalize(def.name)] ?? 0 : 0;
+  const key = StringUtil.normalize(def.name);
+  const rating = char ? char.backgrounds?.[key] ?? 0 : 0;
   const bits = [`background "${disp(def.name)}"`, `max ${def.max ?? 5}`];
   if (def.templates?.length) bits.push(`only ${def.templates.join("/")}`);
-  if (char) bits.push(`${disp(char.name)} has ${rating}`);
+  if (char) {
+    // EVERY one he holds, not the highest. `backgrounds` keeps a single number
+    // per name, so asking it about a man with two Mentors used to answer with
+    // his better one and say nothing about the other (§7.93).
+    const mine = char.instances?.[key]?.filter(i => i.rating > 0) ?? [];
+    if (mine.length > 1) {
+      bits.push(`${disp(char.name)} has ${mine.length}: `
+        + mine.map(i => `${i.rating}${i.note ? ` (${i.note})` : ""}`).join(", "));
+    } else if (mine.length === 1) {
+      bits.push(`${disp(char.name)} has ${mine[0].rating}${mine[0].note ? ` (${mine[0].note})` : ""}`);
+    } else {
+      bits.push(`${disp(char.name)} has ${rating}`);
+    }
+  }
   const tier = backgroundTierAt(def, rating);
   for (const t of def.tiers ?? []) {
     const marks = [t.max !== undefined ? `hold ${t.max}` : "", t.perTurn !== undefined ? `${t.perTurn}/turn` : "", t.note ?? ""].filter(Boolean);

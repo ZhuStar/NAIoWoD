@@ -7863,10 +7863,28 @@ class PostOffice {
     return false;
   }
 
-  // What we tell the others: every channel we listen on that could ever cross.
+  // Channels this SCRIPT declares it serves for everyone else. Empty in the
+  // kernel; the storage satellite's bootstrap puts STORAGE_CHANNEL here.
+  //
+  // THIS IS HOW A UNIT SPECIALIZES - by CONFIG, not by forked code. Every
+  // artifact carries the same PostOffice, byte for byte; what differs is what
+  // its bootstrap declares. A PostOffice that varied per script would be N
+  // copies to keep in sync, and the "repeated runtime" would stop being
+  // repeated (§7.95).
+  private static _declared = new Set<string>();
+  static declareService(channel: string): void { PostOffice._declared.add(busChannel(channel)); }
+  static declaredServices(): string[] { return [...PostOffice._declared]; }
+
+  // What we tell the others: every channel we listen on that could ever cross,
+  // plus anything we have declared we SERVE.
   private static ourChannels(): string[] {
-    return Bus.channels().filter(c =>
+    // Storage is excluded by default because we serve it for OURSELVES, and
+    // announcing it would invite other scripts to route their reads through us
+    // - which is the storage script's job, not the kernel's. The storage script
+    // gets it back by DECLARING it.
+    const listening = Bus.channels().filter(c =>
       !isLocalChannel(c) && c !== HELLO_CHANNEL && c !== STORAGE_CHANNEL);
+    return [...new Set([...listening, ...PostOffice._declared])];
   }
 
   // Say hello. `to` targets one script, `isReply` marks it as the answer that

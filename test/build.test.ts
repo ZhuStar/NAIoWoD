@@ -3,13 +3,64 @@
 // forget to rebuild, this test fails - so the readable single file can never
 // silently drift from the modules it is generated from.
 import { test, expect } from "bun:test";
-import { buildSingleFile, OUTPUT_PATH, MODULES } from "../scripts/build-single";
+import { buildSingleFile, OUTPUT_PATH, MODULES, buildUnit, assertPasteReady } from "../scripts/build-single";
+import { UNITS, modulesFor, unitById, outputPathFor } from "../scripts/units";
 import { renderCommandReference, COMMANDS_DOC_PATH } from "../scripts/command-reference";
 
 test("dist/naiowod.ts is in sync with src/ (run `bun run build`)", async () => {
   const committed = await Bun.file(OUTPUT_PATH).text();
   const fresh = await buildSingleFile();
   expect(committed).toBe(fresh);
+});
+
+// =============================================================================
+// N ARTIFACTS. The kernel is no longer the only thing built, so every guard that
+// protected it has to protect all of them - a satellite shipping leaked wiring
+// is just as broken, and less likely to be noticed.
+// =============================================================================
+test("EVERY unit's committed artifact is in sync with src/ (run `bun run build`)", async () => {
+  for (const unit of UNITS) {
+    const committed = await Bun.file(outputPathFor(unit)).text();
+    expect(await buildUnit(unit)).toBe(committed);
+  }
+});
+
+test("every unit is paste-ready: a comment header and no leaked wiring", async () => {
+  for (const unit of UNITS) {
+    // The same assertion the build itself makes, so the guard and the build can
+    // never disagree about what "paste-ready" means.
+    expect(() => assertPasteReady(unit.id, "")).toThrow();      // it really checks
+    assertPasteReady(unit.id, await buildUnit(unit));
+  }
+});
+
+test("the kernel's closure is every module reachable from main.ts, in MODULES order", async () => {
+  const kernel = await modulesFor(unitById("kernel"));
+  // Unit entry points are in MODULES for ordering but are NOT part of the
+  // kernel - that is what keeps dist/naiowod.ts byte-identical.
+  const entries = UNITS.flatMap(u => u.entries).filter(e => e !== "src/main.ts");
+  expect(kernel).toEqual(MODULES.filter(m => !entries.includes(m)));
+});
+
+test("a unit's modules come out in MODULES order, whatever order they were found", async () => {
+  for (const unit of UNITS) {
+    const mods = await modulesFor(unit);
+    const positions = mods.map(m => (MODULES as readonly string[]).indexOf(m));
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  }
+});
+
+test("the storage satellite registers NO hooks - it never sees the story", async () => {
+  const storage = await buildUnit(unitById("storage"));
+  expect(storage).not.toContain("hooks.register");
+  // ...and it says on the wire that serving storage is its job, which the
+  // kernel deliberately does not (ourChannels excludes it by default).
+  expect(storage).toContain("declareService(STORAGE_CHANNEL)");
+  expect(await buildUnit(unitById("kernel"))).toContain("hooks.register");
+});
+
+test("an unknown unit is refused by name rather than silently building nothing", () => {
+  expect(() => unitById("no-such-unit")).toThrow(/no unit/);
 });
 
 test("the single file is plain import-free TypeScript (no naiscript frontmatter)", async () => {

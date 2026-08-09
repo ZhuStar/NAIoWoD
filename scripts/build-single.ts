@@ -12,6 +12,8 @@
 // YAML frontmatter is only for exporting/importing scripts, which embeds a
 // script id; pasting plain TypeScript does not need it.)
 
+import { UnitDef, UNITS, modulesFor, unitById, outputPathFor } from "./units";
+
 // Modules in dependency order: each references only names declared above it.
 // (host -> core -> rules -> command -> services -> state -> game ->
 //  window -> index/init -> main/bootstrap.)
@@ -48,6 +50,10 @@ export const MODULES = [
   "src/window.ts",
   "src/index.ts",
   "src/main.ts",
+  // Unit entry points. NOT reachable from src/main.ts, so the kernel's closure
+  // is unchanged and dist/naiowod.ts stays byte-identical; they are listed here
+  // because MODULES is the measured TOTAL order every unit filters.
+  "src/units/storage-main.ts",
 ] as const;
 
 const ROOT = new URL("../", import.meta.url);
@@ -96,7 +102,48 @@ export async function buildSingleFile(): Promise<string> {
   ].join("\n");
 
   const sections = [header];
-  for (const rel of MODULES) {
+  // THE KERNEL'S OWN MODULE LIST, not MODULES wholesale. Today the two are the
+  // same file-for-file - everything in MODULES is reachable from src/main.ts -
+  // so this file is byte-identical to the one that has always been committed.
+  // Going through the manifest is what lets a SECOND artifact exist at all.
+  for (const rel of await modulesFor(unitById("kernel"))) {
+    const body = stripModule(await Bun.file(new URL(rel, ROOT)).text());
+    sections.push(`//#region ${rel}\n${body}\n//#endregion ${rel}`);
+  }
+  return sections.join("\n\n") + "\n";
+}
+
+// Every artifact, guarded the same way. A second unit must not be allowed to
+// ship with leaked wiring or a frontmatter header just because the first one is
+// the file everybody looks at.
+export function assertPasteReady(id: string, out: string): void {
+  if (!out.startsWith("//")) throw new Error(`${id}: generated header comment missing`);
+  if (out.startsWith("/*---")) throw new Error(`${id}: naiscript frontmatter should not be emitted`);
+  const leaked = out.split("\n").filter((l) =>
+    /^(import|export)\b/.test(l) || /^type\s*\{/.test(l) || /^\s*\}\s*from\s*['"]/.test(l));
+  if (leaked.length) {
+    throw new Error(`${id}: inter-module wiring leaked:\n  ${leaked.slice(0, 5).join("\n  ")}`);
+  }
+}
+
+/** Concatenate one unit into its paste-ready artifact. */
+export async function buildUnit(unit: UnitDef): Promise<string> {
+  if (unit.id === "kernel") return buildSingleFile();   // its header is the historical one
+  const modules = await modulesFor(unit);
+  const header = [
+    `// NAIoWoD - ${unit.summary}.`,
+    "// GENERATED - do not edit by hand. One of several paste-ready artifacts;",
+    "// `bun run build` regenerates them all and test/build.test.ts fails if any",
+    "// committed file drifts from src/. Edit the modules under src/.",
+    "//",
+    unit.serves?.length
+      ? `// Serves on the wire: ${unit.serves.join(", ")}.`
+      : "// Serves nothing on the wire.",
+    "//",
+    `// Modules (${modules.length}, in dependency order): ${modules.join(", ")}`,
+  ].join("\n");
+  const sections = [header];
+  for (const rel of modules) {
     const body = stripModule(await Bun.file(new URL(rel, ROOT)).text());
     sections.push(`//#region ${rel}\n${body}\n//#endregion ${rel}`);
   }
@@ -104,20 +151,11 @@ export async function buildSingleFile(): Promise<string> {
 }
 
 if (import.meta.main) {
-  const out = await buildSingleFile();
-
-  // Guardrails: starts with the generated comment (NOT naiscript frontmatter),
-  // and no inter-module wiring survived (no line may start with import/export).
-  if (!out.startsWith("//")) throw new Error("generated header comment missing");
-  if (out.startsWith("/*---")) throw new Error("naiscript frontmatter should not be emitted");
-  // `type {` and `from "` catch the re-export forms that survive with their
-  // leading keyword removed - the shape that shipped a broken artifact once.
-  const leaked = out.split("\n").filter((l) =>
-    /^(import|export)\b/.test(l) || /^type\s*\{/.test(l) || /^\s*\}\s*from\s*['"]/.test(l));
-  if (leaked.length) {
-    throw new Error(`inter-module wiring leaked:\n  ${leaked.slice(0, 5).join("\n  ")}`);
+  for (const unit of UNITS) {
+    const text = await buildUnit(unit);
+    assertPasteReady(unit.id, text);
+    const path = outputPathFor(unit);
+    await Bun.write(path, text);
+    console.log(`${path.split("/").slice(-2).join("/")} written (${(text.length / 1024).toFixed(1)} KB, unit "${unit.id}")`);
   }
-
-  await Bun.write(OUTPUT_PATH, out);
-  console.log(`dist/naiowod.ts written (${(out.length / 1024).toFixed(1)} KB)`);
 }

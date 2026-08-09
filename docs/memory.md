@@ -4968,6 +4968,55 @@ and `prefill` are mocked/available but not yet written.
     can be fat and autonomous rather than thin clients. This is what makes the
     split worth doing.
 
+96. **Two artifacts** (Phase 4's first real cut; owner: *"start with whatever is
+    easier/not explicitly in memory"*).
+
+    **`scripts/units.ts` is the manifest, with three consumers and one
+    declaration**: the BUILD (which modules concatenate into which file), SANTA
+    (which channels a unit serves, and what its bootstrap announces), and
+    eventually THE AI (§8.25's vocabulary — the field is RESERVED and populated
+    by nothing, because reserving it now is what stops it being a breaking
+    change later).
+
+    - **ORDER IS NOT COMPUTED, and that is the whole trick.** `MODULES` stays
+      the MEASURED total order, and a unit is that list **filtered to its
+      dependency closure**. Any subset therefore comes out correctly ordered by
+      construction, and `dist/naiowod.ts` stays byte-identical to the file that
+      has always been committed — verified: the closure from `src/main.ts`
+      reproduces all 30 entries, and the only diff after the pass was the
+      `declareService` change made on purpose. A topological sort would
+      re-derive an order somebody already measured and could pick a different
+      valid one, rewriting the artifact for nothing.
+    - **`dist/naiowod-storage.ts` exists and boots**: 7,011 lines against the
+      kernel's 19,752, type-checks standalone, registers **zero hooks** (the
+      kernel registers four), and a live boot announces exactly
+      `["naiowod:storage"]`. It never sees the story — it waits home, serves,
+      answers.
+    - **A UNIT SPECIALIZES BY CONFIG, NOT BY FORKED CODE.** `PostOffice` is
+      byte-for-byte identical in both artifacts; the single difference is the
+      satellite's `PostOffice.declareService(STORAGE_CHANNEL)` call.
+      `ourChannels()` still excludes storage BY DEFAULT — a script serving its
+      own storage must not invite others to route reads through it — and the
+      storage unit gets it back by declaring it. This is the rule that keeps the
+      "repeated runtime" actually repeated (§7.95).
+    - **Ordering bug avoided by writing the reason down**: the bootstrap
+      declares BEFORE it opens, because `open()` announces, and an announcement
+      that did not yet know we serve storage would describe a script nobody has
+      reason to write to — the kernel would fall through to its own local
+      handler and quietly own the state, which looks exactly like everything
+      working.
+    - **Every guard now covers every unit**, not just the kernel: in-sync,
+      paste-ready (the test calls the build's OWN `assertPasteReady`, so guard
+      and build cannot disagree about the term), MODULES-ordering, and
+      no-hooks-in-the-satellite. Six new tests; 716 pass.
+
+    **KNOWINGLY FAT, and the next step.** `StorageDesk` is 56 lines needing only
+    `core/bus` + `host`, but it lives inside `services.ts`, so the closure drags
+    `rules.ts` and `command.ts` along. Extracting the post office + desk into
+    their own module shrinks the satellite by ~90% and is a **pure refactor** —
+    done in this order deliberately, so that refactor can be verified against a
+    known-good artifact instead of having to be right the first time.
+
 ## 8. Roadmap — NOT yet implemented (with the user's requirements)
 
 Ordered roughly by unlock value:
